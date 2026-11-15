@@ -8,3 +8,4 @@ Resolved items are struck through with the resolution and a link.
 - [setup] Once the CI issue (#3, FP-002) merges, add its jobs as required status checks in the `main` branch protection rule (PROCESS.md P6 step 5).
 - ~~[PR #47] SRS REQ-NFR-009 says "wave gate"; rename it to "phase gate".~~ Resolved: REQ-NFR-009 now says "phase gate (PROCESS.md P5)"; DECISIONS.md "Architecture" entry updated to match (owner-approved SRS edit).
 - [setup] Add these CI jobs as required status checks on main (REQ-NFR-011, PROCESS.md P6 step 5): fmt (ubuntu-latest), fmt (windows-latest), fmt (macos-latest), clippy (ubuntu-latest), clippy (windows-latest), clippy (macos-latest), test (ubuntu-latest), test (windows-latest), test (macos-latest). Names are documented in docs/DEVELOPMENT.md "CI".
+- [#6 FP-005] Runner image, C compiler and exact browser builds observed in the first Spikes run are in that run's logs; DECISIONS.md lists only the pinned versions.
