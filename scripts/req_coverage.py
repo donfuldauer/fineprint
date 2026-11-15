@@ -103,23 +103,28 @@ def main() -> int:
         planned, source = ids_in(pathlib.Path(args.plan_file)), args.plan_file
     else:
         planned, source = ids_in_issues(args.repo, args.milestone), "work-unit issues"
+    # Unknown IDs are an error in every mode, including a milestone-scoped run.
+    unknown = sorted(planned - ids_in(srs))
     if args.milestone:
         # A milestone covers a subset; only report what it does trace.
         print(f"{source} in {args.milestone!r}: {len(planned & required)} IDs traced")
     else:
         missing = sorted(required - planned)
-        unknown = sorted(planned - ids_in(srs))
         print(f"{source}: {len(required) - len(missing)}/{len(required)} traced")
         for rid in missing:
             print(f"  MISSING in plan: {rid}")
-        for rid in unknown:
-            print(f"  UNKNOWN in plan (not in SRS): {rid}")
-        failed |= bool(missing or unknown)
+        failed |= bool(missing)
+    for rid in unknown:
+        print(f"  UNKNOWN in plan (not in SRS): {rid}")
+    failed |= bool(unknown)
 
     if args.tests is not None:
         tested = ids_in_tree(args.tests or ["tests"])
-        missing = sorted(required - tested)
-        print(f"tests: {len(required) - len(missing)}/{len(required)} referenced")
+        # With --milestone, compare only the IDs that milestone traces.
+        scope = (planned & required) if args.milestone else required
+        label = f"tests (milestone {args.milestone!r})" if args.milestone else "tests"
+        missing = sorted(scope - tested)
+        print(f"{label}: {len(scope) - len(missing)}/{len(scope)} referenced")
         for rid in missing:
             print(f"  MISSING in tests: {rid}")
         failed |= bool(missing)
