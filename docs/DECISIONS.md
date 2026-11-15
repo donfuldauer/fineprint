@@ -549,3 +549,19 @@ few lines in the same prefix parser.
 
 **Alternatives:** UNC only (rejected: small extra code covers verbatim); `std::fs::canonicalize`
 (rejected: filesystem access, resolves symlinks and yields `\\?\` paths that differ from the report).
+
+## FP-003 (#4) — spikes/libs is measured against the non-rules coverage floor
+
+**Decision:** `crate_of_rooted` maps `spikes/libs/<more>` (leading root-relative components
+`spikes`, `libs`, then at least one more) to `fineprint-spike-libs`, and `FLOORS` gains
+`("fineprint-spike-libs", 75)` after `xtask`. `spikes/bindings/**` and any other `spikes/` path stay
+unmapped.
+
+**Rationale:** The #5 entry "FP-004 — spikes/ directory handling by repo guards" requires the
+REQ-NFR-008 75% non-rules floor on all of `spikes/libs/**` (`src`, `examples`, `tests`) with no
+exemption. Without the mapping the spike's ~474 lines were silently unmeasured. The existing
+nested-directory protection is unchanged: only the leading components are examined.
+
+**Alternatives:** Exempting `examples/bench.rs` (rejected: needs an approved SRS change first);
+mapping all of `spikes/**` (rejected: `spikes/bindings` is not a Rust workspace member measured by
+llvm-cov); deleting the spike (rejected: only allowed once replacement golden-value tests exist).

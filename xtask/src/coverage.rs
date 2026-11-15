@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 /// Crate to minimum line-coverage percentage. The order is the order of the printed table.
 /// Mirror any change in `docs/DEVELOPMENT.md` "Coverage floors".
-pub const FLOORS: [(&str, u64); 9] = [
+pub const FLOORS: [(&str, u64); 10] = [
     ("fineprint-base", 90),
     ("fineprint-dsl", 90),
     ("fineprint-core", 90),
@@ -23,6 +23,7 @@ pub const FLOORS: [(&str, u64); 9] = [
     ("fineprint-bot", 75),
     ("fineprint-cli", 75),
     ("xtask", 75),
+    ("fineprint-spike-libs", 75),
 ];
 
 /// Maximum JSON nesting depth the reader accepts.
@@ -192,8 +193,10 @@ pub fn under_root(root: &str, path: &str) -> bool {
 /// Both arguments are normalised (`\` to `/`, trailing `/` of the root dropped). The path must
 /// lie below the root; only the first components of the path relative to the root are examined:
 /// `crates/<dir>/<more>` is `<dir>`, `clients/cli/<more>` is `fineprint-cli`, `xtask/<more>` is
-/// `xtask`. Everything else (registry, toolchain sources, paths outside the root, nested
-/// `xtask`/`crates`/`clients` directories deeper in a crate) is `None`. Never panics.
+/// `xtask`, `spikes/libs/<more>` is `fineprint-spike-libs` (the #5 library spike: non-rules
+/// floor, no exemption, see FP-003 in `docs/DECISIONS.md`). Everything else (registry, toolchain
+/// sources, paths outside the root, nested `xtask`/`crates`/`clients` directories deeper in a
+/// crate, `spikes/bindings`) is `None`. Never panics.
 pub fn crate_of_rooted(root: &str, path: &str) -> Option<String> {
     let rel = rel_to_root(root, path)?;
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
@@ -201,6 +204,7 @@ pub fn crate_of_rooted(root: &str, path: &str) -> Option<String> {
         ["crates", dir, _, ..] => Some((*dir).to_string()),
         ["clients", "cli", _, ..] => Some("fineprint-cli".to_string()),
         ["xtask", _, ..] => Some("xtask".to_string()),
+        ["spikes", "libs", _, ..] => Some("fineprint-spike-libs".to_string()),
         _ => None,
     }
 }
@@ -819,6 +823,7 @@ fineprint-wasm | n/a | n/a | n/a | 75% | PASS
 fineprint-bot | n/a | n/a | n/a | 75% | PASS
 fineprint-cli | 20 | 20 | 100.00% | 75% | PASS
 xtask | 40 | 30 | 75.00% | 75% | PASS
+fineprint-spike-libs | n/a | n/a | n/a | 75% | PASS
 ";
         assert_eq!(report.render(), expected);
         assert!(!report.passed());
@@ -834,6 +839,8 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert!(pass("xtask", 100, 75));
         assert!(!pass("fineprint-core", 100, 89));
         assert!(!pass("xtask", 100, 74));
+        assert!(pass("fineprint-spike-libs", 100, 75));
+        assert!(!pass("fineprint-spike-libs", 100, 74));
         assert!(!pass("fineprint-core", 1000, 899));
         assert!(pass("fineprint-core", 1000, 900));
     }
@@ -1005,6 +1012,87 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert_eq!(crate_of_rooted("/w", "/w"), None);
         assert_eq!(crate_of_rooted("/w", "/w/"), None);
         assert_eq!(crate_of_rooted("/", "/"), None);
+    }
+
+    /// REQ-NFR-008: `spikes/libs/**` maps to the spike crate; other `spikes/` paths and nested
+    /// look-alikes do not.
+    #[test]
+    fn req_nfr_008_crate_of_spike_libs() {
+        let spike = Some("fineprint-spike-libs".to_string());
+        let r = |p: &str| crate_of_rooted("/w", p);
+        assert_eq!(r("/w/spikes/libs/src/prng.rs"), spike);
+        assert_eq!(r("/w/spikes/libs/tests/jcs.rs"), spike);
+        assert_eq!(r("/w/spikes/libs/examples/bench.rs"), spike);
+        assert_eq!(
+            crate_of_rooted("C:\\w", "C:\\w\\spikes\\libs\\src\\prng.rs"),
+            spike
+        );
+        assert_eq!(r("/w/spikes/bindings/c/main.c"), None);
+        assert_eq!(r("/w/spikes/libs"), None);
+        assert_eq!(r("/w/spikes/libs/"), None);
+        assert_eq!(r("/w/spikes/other/x.rs"), None);
+        assert_eq!(r("/w/spikes/x.rs"), None);
+        assert_eq!(
+            r("/w/crates/fineprint-core/src/spikes/libs/a.rs"),
+            Some("fineprint-core".to_string())
+        );
+        assert_eq!(
+            r("/w/xtask/src/spikes/libs/a.rs"),
+            Some("xtask".to_string())
+        );
+        assert_eq!(r("/w/other/spikes/libs/a.rs"), None);
+    }
+
+    /// REQ-NFR-008: spike files are measured against the 75% floor, via the parser and `run`.
+    #[test]
+    fn req_nfr_008_spike_libs_measured_and_gated() {
+        let good = doc(&[
+            file("/w/spikes/libs/src/prng.rs", "300", "296"),
+            file("/w/spikes/libs/tests/jcs.rs", "100", "100"),
+            file("/w/spikes/libs/examples/bench.rs", "74", "71"),
+            file("/w/spikes/bindings/c/main.c", "50", "0"),
+        ]);
+        let parsed = parse_summary(&good, "/w").expect("parses");
+        assert_eq!(parsed, vec![("fineprint-spike-libs".to_string(), 474, 467)]);
+        let crates: Vec<CrateCoverage> = parsed.into_iter().map(|(n, l, c)| cc(&n, l, c)).collect();
+        let report = check(&crates);
+        assert!(report.passed());
+        let row = report
+            .rows
+            .iter()
+            .find(|r| r.name == "fineprint-spike-libs")
+            .expect("row");
+        assert_eq!((row.lines, row.covered), (Some(474), 467));
+        assert_eq!(row.status, Status::Pass);
+        assert!(
+            report
+                .render()
+                .ends_with("fineprint-spike-libs | 474 | 467 | 98.52% | 75% | PASS\n")
+        );
+
+        let bad = doc(&[file("/w/spikes/libs/src/prng.rs", "100", "70")]);
+        let parsed = parse_summary(&bad, "/w").expect("parses");
+        let crates: Vec<CrateCoverage> = parsed.into_iter().map(|(n, l, c)| cc(&n, l, c)).collect();
+        let report = check(&crates);
+        assert!(!report.passed());
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].starts_with("fineprint-spike-libs"));
+
+        let dir = std::env::temp_dir().join(format!("xtask-cov-spike-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let args = |name: &str, body: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write");
+            vec![
+                "--input".to_string(),
+                p.display().to_string(),
+                "--root".to_string(),
+                "/w".to_string(),
+            ]
+        };
+        assert_eq!(run(&args("good.json", good)), 0);
+        assert_eq!(run(&args("bad.json", bad)), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// REQ-NFR-008: malformed input is an error, never a panic.
