@@ -10,3 +10,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 00-repository | #2 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy, build, test clean; header, forbid and metadata checks pass | FP-001 workspace skeleton; classifier brief T1, no Fable (allowance unknown) |
 | 00-repository | #3 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy, test clean locally; Actions runs pending | FP-002 CI workflow; classifier brief T1, no Fable (allowance unknown) |
 | 00-repository | #5 | Implementer | Opus 5.5 | 1 | done | fmt, clippy, test --locked clean locally; Windows/macOS/wasm32/coverage pending CI | FP-004 crate spike; classifier brief T2, no Fable (allowance unknown) |
+| 00-repository | PR #146 r1 | Fixer | Opus 5.5 | 1 | done | fmt, clippy, test --locked clean locally | CodeRabbit round 1: 3 findings (2 docs, JCS duplicate-key rejection); classifier T2 |
