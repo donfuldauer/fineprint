@@ -484,9 +484,29 @@ fn read_input(input: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Paths that never count as workspace sources: registry/git dependencies, the rustup toolchain
+/// and the std sources. Replaces cargo-llvm-cov's default filter, which would also drop workspace
+/// `tests/`, `examples/` and `benches/` files (REQ-NFR-008).
+pub const IGNORE_FILENAME_REGEX: &str = r"(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)";
+
+/// Arguments of the `cargo llvm-cov` run that feeds the floors (REQ-NFR-008). The CI `coverage`
+/// job runs the same flags (plus `--locked` and `--output-path`); keep them identical.
+pub fn llvm_cov_args() -> Vec<&'static str> {
+    vec![
+        "llvm-cov",
+        "--workspace",
+        "--all-targets",
+        "--no-default-ignore-filename-regex",
+        "--ignore-filename-regex",
+        IGNORE_FILENAME_REGEX,
+        "--json",
+        "--summary-only",
+    ]
+}
+
 fn run_llvm_cov() -> Result<String, String> {
     let out = std::process::Command::new("cargo")
-        .args(["llvm-cov", "--workspace", "--json", "--summary-only"])
+        .args(llvm_cov_args())
         .output()
         .map_err(|e| format!("cannot run cargo llvm-cov: {e}"))?;
     if !out.status.success() {
@@ -1567,5 +1587,31 @@ fineprint-spike-libs | n/a | n/a | n/a | 75% | PASS
         let mixed = write("mixed.json", mixed_doc);
         assert_eq!(run(&args(&mixed, "/work/repo")), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REQ-NFR-008: the llvm-cov argument list measures tests/examples/benches and still excludes
+    /// third-party and toolchain sources.
+    #[test]
+    fn req_nfr_008_llvm_cov_args_measure_all_targets() {
+        let a = llvm_cov_args();
+        assert_eq!(a[0], "llvm-cov");
+        for flag in [
+            "--workspace",
+            "--all-targets",
+            "--no-default-ignore-filename-regex",
+            "--ignore-filename-regex",
+            "--json",
+            "--summary-only",
+        ] {
+            assert!(a.contains(&flag), "missing {flag}");
+        }
+        let at = a
+            .iter()
+            .position(|x| *x == "--ignore-filename-regex")
+            .expect("flag");
+        assert_eq!(a.get(at + 1), Some(&IGNORE_FILENAME_REGEX));
+        for part in [r"/\.cargo/(registry|git)/", r"/\.rustup/", "/rustc/"] {
+            assert!(IGNORE_FILENAME_REGEX.contains(part), "{part}");
+        }
     }
 }

@@ -565,3 +565,23 @@ nested-directory protection is unchanged: only the leading components are examin
 **Alternatives:** Exempting `examples/bench.rs` (rejected: needs an approved SRS change first);
 mapping all of `spikes/**` (rejected: `spikes/bindings` is not a Rust workspace member measured by
 llvm-cov); deleting the spike (rejected: only allowed once replacement golden-value tests exist).
+
+## FP-003 (#4) — Coverage measures tests/examples/benches of workspace crates
+
+**Decision.** `cargo xtask coverage` and the CI `coverage` job run `cargo llvm-cov --workspace
+--all-targets --no-default-ignore-filename-regex --ignore-filename-regex
+'(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only` (CI adds `--locked` and
+`--output-path`). Workspace `tests/`, `examples/` and `benches/` files are therefore measured.
+
+**Rationale.** cargo-llvm-cov 0.9.1 drops those files by default, which left
+`spikes/libs/examples/bench.rs` and `spikes/libs/tests/*.rs` out of the report although
+FP-004 requires the floor on all of `spikes/libs/**`. Measured with the new flags:
+`fineprint-spike-libs` 1105 lines, 916 covered, 82.89% (floor 75%); `xtask` 2026/1937, 95.60%;
+no other crate regressed (all others n/a). `spikes/libs/examples/bench.rs` is measured at 0/181
+(the example is only built, not run); tests/*.rs are 97-100%; src files 94-100%. Plain
+`--workspace` without `--all-targets` omits bench.rs even with the filter off, so `--all-targets`
+is part of the flag set. The two producers (`llvm_cov_args` and the CI step) must stay identical;
+a unit test pins the argument list.
+
+**Alternatives.** Leave the default filter (rejected: contradicts FP-004); exempt bench.rs
+(rejected: needs an SRS-approved exemption); add a bench smoke test (not needed: floor met).
