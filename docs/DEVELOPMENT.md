@@ -113,6 +113,7 @@ cargo fmt --all --check          # apply with: cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask coverage                 # runs cargo llvm-cov, prints the per-crate table, checks floors
 cargo xtask coverage --input <file>  # same, from `cargo llvm-cov --json --summary-only` output
+cargo xtask coverage --root <dir>    # workspace root for path-to-crate mapping (default: git toplevel, else cwd)
 cargo xtask guard headers            # MPL-2.0 header in every source file
 cargo xtask guard card-data          # no committed card data or rules text
 cargo xtask guard card-branch        # no card-name/id literal comparisons in fineprint-core
