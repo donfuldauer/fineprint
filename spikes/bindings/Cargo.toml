@@ -1,0 +1,30 @@
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+
+# FP-005 (#6) binding-toolchain spike (REQ-NFR-002, REQ-NFR-003).
+# This directory is its own workspace root: the `[workspace]` table below keeps it out of the
+# root workspace, so the root fmt/clippy/test gates never see it. It has its own Cargo.lock.
+# Nothing here is published; the names carry "spike" so they are never confused with the real
+# fineprint-ffi / FinePrint.Core / fineprint.wasm artifacts (REQ-ARCH-003).
+
+[workspace]
+resolver = "3"
+
+[package]
+name = "fineprint-spike-bindings"
+description = "Toolchain spike: SHA-256 through cbindgen, P/Invoke and wasm-bindgen."
+version = "0.0.0"
+license = "MPL-2.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sha2 = { version = "=0.11.1", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.130"
