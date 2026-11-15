@@ -11,3 +11,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 00-repository | #3 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy, test clean locally; Actions runs pending | FP-002 CI workflow; classifier brief T1, no Fable (allowance unknown) |
 | 00-repository | #4 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy, test clean; xtask coverage 92.27%; guard all passes; 3 scratch violations rejected | FP-003 coverage gates and guards; classifier brief T1, no Fable (allowance unknown) |
 | 00-repository | #4 (PR #145 review round 1) | Fixer | Sonnet 5.5 | 1 | done | 7 CodeRabbit findings fixed with tests; xtask coverage 95.00%; guard all passes | T1 fix batch; classifier brief, no Fable (allowance unknown) |
+| 00-repository | #4 (PR #145 review round 2) | Fixer | Sonnet 5.5 | 1 | done | 1 CodeRabbit finding fixed with test; xtask coverage 95.02%; guard all passes | T1 fast-path (triage) fix of crate_of xtask arm |
