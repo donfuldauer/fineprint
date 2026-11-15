@@ -113,7 +113,7 @@ model: haiku | sonnet | opus | fable
 fable check: not considered | wanted, allowance <value>, routed to T2 | granted (<1>, <2>, allowance sufficient)
 rules questions: <for needs-rules: numbered questions> | none
 human queue line: <text or none>
-run log line: <Wave | id | role | model | attempt | routed | — | tier + one-line reason>
+run log line: <Phase | id | role | model | attempt | routed | — | tier + one-line reason>
 --- BRIEF ---
 <the full delegation brief>
 ```

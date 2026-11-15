@@ -98,8 +98,11 @@ fixtures → hardening and release → later milestones.
 ## 4. Create the issues
 
 0. List the existing `work-unit` issues (open and closed) and match each drafted unit to one by
-   its `Plan ID`. Leave unchanged units alone. Edit changed units in place (body, labels,
-   blocked-by links). Create only units with no match, using the next free `FP-NNN` numbers.
+   its `Plan ID`. Leave unaffected units alone. Edit a changed unit in place (body, labels,
+   blocked-by links) only while it is open. Never edit a closed (completed) unit to carry new
+   work: `work-issue` stops on a closed issue. When an SRS change affects a completed unit,
+   create a new follow-up unit instead (next free `FP-NNN`) that depends on the completed one
+   and references it. Create only units with no match, using the next free `FP-NNN` numbers.
    Close units dropped from the breakdown as "not planned", with a comment naming what replaced
    them.
 1. Ensure the labels and milestones exist.
@@ -107,7 +110,9 @@ fixtures → hardening and release → later milestones.
    number. Pace the calls (about one per second) to stay under GitHub's content-creation limits.
 3. Link each dependency with GitHub's "blocked by" API
    (`POST /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` with the blocker's numeric
-   `issue_id`). Label units with no open dependencies `ready`, the rest `blocked`.
+   `issue_id`). Label a unit `ready` only when every dependency is complete under the merged-PR rule
+   (PROCESS.md P6 step 5, `work-issue` §1 step 2); label the rest `blocked`. An open
+   dependency, or one closed as not planned without a qualifying replacement, is not complete.
 4. Run `python3 scripts/req_coverage.py` and fix any gap with an issue edit.
 5. Nothing is committed for the plan itself. Record any decisions made while planning in
    `docs/DECISIONS.md` through a normal PR. Then: "Start work on issue X" (`work-issue`) or
