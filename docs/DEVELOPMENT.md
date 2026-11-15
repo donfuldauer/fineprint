@@ -196,6 +196,7 @@ in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here:
 | `fineprint-bot` | 75% |
 | `fineprint-cli` | 75% |
 | `xtask` | 75% |
+| `fineprint-spike-libs` | 75% |
 
 - Percent per crate is the sum of covered lines over the sum of measured lines of all that
   crate's files (not an average of per-file percentages), judged with integer arithmetic:
@@ -203,7 +204,10 @@ in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here:
 - A crate with zero measured lines, or absent from the JSON, prints `n/a` and passes (the
   stub crates have no code yet); the row is still printed.
 - A workspace crate found in the JSON but missing from the table fails the check: add it to
-  `FLOORS` in `xtask/src/coverage.rs` and to the table above in the same change.
+  `FLOORS` in `xtask/src/coverage.rs` and to the table above in the same change; a new crate
+  directory outside `crates/<dir>`, `clients/cli`, `xtask` and `spikes/libs` also needs an arm in
+  `crate_of_rooted`. `spikes/libs/**` (`src`, `examples`, `tests`) is measured as
+  `fineprint-spike-libs` with no exemption.
 - CI installs `llvm-tools` and `cargo-llvm-cov` itself (not in `rust-toolchain.toml`).
 
 ## Repository guards (REQ-NFR-012, REQ-NFR-004, REQ-ARCH-001, REQ-DSL-013)
