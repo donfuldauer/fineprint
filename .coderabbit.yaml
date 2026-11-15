@@ -37,7 +37,8 @@ reviews:
         hash-ordered containers where order can affect results, no clock/I/O/global state, all
         randomness from the state's PRNG. R4: no branch on a cardDefId or card name in engine
         code. R5: no card names or Oracle text in engine source. R6: rules procedures cite the
-        CR rule they implement. Flag any path where a redacted player view or determinized fork
+        CR rule they implement. Every source file starts with the MPL-2.0 Exhibit A header
+        (REQ-NFR-012). Flag any path where a redacted player view or determinized fork
         could expose hidden information (REQ-CORE-004, REQ-API-004).
     - path: "**/*.pzl"
       instructions: >-

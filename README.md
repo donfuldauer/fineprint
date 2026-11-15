@@ -76,9 +76,9 @@ Development is run by Claude Code agents under [`docs/PROCESS.md`](docs/PROCESS.
 
 ## License
 
-Fine Print is free software under the [GNU General Public License v3.0 or later](LICENSE)
-(`GPL-3.0-or-later`). You may use, modify and redistribute it; distributed modifications must stay
-open source under the same license and keep the original attribution.
+Fine Print is licensed under the [Mozilla Public License 2.0](LICENSE) (`MPL-2.0`). You may use,
+modify and redistribute it, and embed it in applications under any license. Distributed changes to
+Fine Print's own files must stay available under MPL-2.0 with the original notices kept.
 
 ## Legal
 
