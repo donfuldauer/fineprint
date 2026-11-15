@@ -45,25 +45,24 @@ def withdrawn_in(path: pathlib.Path) -> set:
 
 def ids_in_issues(repo: str, milestone) -> set:
     """REQ IDs in the bodies of all work-unit issues (open and closed)."""
-    out = subprocess.run(
-        ["gh", "api", "--paginate",
-         f"repos/{repo}/issues?state=all&labels=work-unit&per_page=100"],
-        check=True, capture_output=True, text=True).stdout
     found = set()
-    # --paginate concatenates JSON arrays; split them apart.
-    decoder, i = json.JSONDecoder(), 0
-    while i < len(out):
-        while i < len(out) and out[i].isspace():
-            i += 1
-        if i >= len(out):
-            break
-        page, i = decoder.raw_decode(out, i)
-        for issue in page:
+    page = 1
+    while True:
+        # Explicit pages: `gh api --paginate` follows numeric-ID links that some proxies block.
+        out = subprocess.run(
+            ["gh", "api",
+             f"repos/{repo}/issues?state=all&labels=work-unit&per_page=100&page={page}"],
+            check=True, capture_output=True, text=True).stdout
+        issues = json.loads(out)
+        for issue in issues:
             if "pull_request" in issue:
                 continue
             if milestone and (issue.get("milestone") or {}).get("title") != milestone:
                 continue
             found |= set(REQ.findall(issue.get("body") or ""))
+        if len(issues) < 100:
+            break
+        page += 1
     return found
 
 
