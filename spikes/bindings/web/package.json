@@ -1,0 +1,16 @@
+{
+  "name": "fineprint-spike-bindings-web",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "type": "module",
+  "scripts": {
+    "node": "node node.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "typescript": "7.0.2"
+  }
+}
