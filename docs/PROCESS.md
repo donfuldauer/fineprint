@@ -21,9 +21,9 @@ Section numbers below (P1–P8) are what agents, briefs and replies cite.
 | `docs/PROCESS.md` | This file. | A person, or a reviewed PR the person asked for. |
 | `docs/DECISIONS.md` | Every ambiguity an agent resolved, with rationale. | Any agent (rule R8). |
 | `docs/HUMAN_QUEUE.md` | Judgement calls a person should see later. Never a request to close a review thread. | Any agent. |
-| `docs/RUN_LOG.md` | One row per unit-of-work attempt, plus wave gates and merges. | The Orchestrator. |
+| `docs/RUN_LOG.md` | One row per unit-of-work attempt, plus phase gates and merges. | The Orchestrator. |
 | `contracts/CHANGE_REQUESTS.md` | Requests to change a contract (P3) after its owning unit merged. | Any agent. |
-| `docs/briefs/` | Delegation briefs, when they are worth keeping (wave-wide `COMMON.md`, long briefs). | Work-classifier output, saved by the Orchestrator. |
+| `docs/briefs/` | Delegation briefs, when they are worth keeping (phase-wide `COMMON.md`, long briefs). | Work-classifier output, saved by the Orchestrator. |
 
 When the SRS and an issue disagree, the SRS wins and the disagreement goes to
 `docs/HUMAN_QUEUE.md`. When the SRS and the Comprehensive Rules (CR) of the SRS's rules baseline
@@ -35,12 +35,12 @@ disagree, the CR wins, the work follows the CR, and the SRS erratum goes to `doc
 These apply to every change, by every agent. Briefs inline them in full.
 
 1. **R1 — Module boundaries.** An agent edits only the paths its brief lists as OWNED PATHS. If
-   two units share a module in one wave, each owns a sub-directory and the earlier unit
+   two units share a module in one phase, each owns a sub-directory and the earlier unit
    pre-stubs the module declarations.
 2. **R2 — Contract-change protocol.** The contracts (P3) are written freely only by the unit
    that owns them. Any later change is appended to `contracts/CHANGE_REQUESTS.md` and lands as a
    separate contract-only PR. Additive changes merge immediately; breaking changes merge only
-   between waves.
+   between phases.
 3. **R3 — Determinism (REQ-CORE-001, REQ-CORE-006).** Rules code, card ASTs and native effects
    read and write nothing outside the state `S_t`: no wall clock, no global mutable state, no I/O,
    no environment variables, no threads that affect results. No floating point in rules paths
@@ -207,10 +207,10 @@ in `docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] 
    `contracts/CHANGE_REQUESTS.md`.
 9. The work-verifier reports `pass`. The unit is done only when its PR merges under P6.
 
-**Wave gate.** Full test suite on every platform in REQ-NFR-003; golden replay hashes identical
-across platforms and bindings; every earlier wave's tests still pass; benchmarks have not
-regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
-`wave-N-green`.
+**Phase gate.** Full test suite on every platform in REQ-NFR-003; golden replay hashes identical
+across platforms and bindings; every earlier phase's tests still pass; benchmarks have not
+regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagged
+`phase-<NN>-green`.
 
 ## P6. Pull request, review and merge
 

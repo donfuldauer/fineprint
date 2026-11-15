@@ -70,7 +70,7 @@ If the session may push only to an assigned branch, use it and note that in the 
 
 ## 4. Log and verify
 
-First add the run-log row(s) for this issue to `docs/RUN_LOG.md` (wave = the issue's phase, work
+First add the run-log row(s) for this issue to `docs/RUN_LOG.md` (phase = the issue's `phase:` label, work
 item = `#<N>`) and commit, so the verified commit is the one the PR opens on. Any later fix
 commit updates the row and is verified again.
 

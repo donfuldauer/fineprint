@@ -32,8 +32,9 @@ Report `requirements: 0/0`; `pass` if both hold.
    (the issue must say it needs a person or special hardware). Docs-only requirements are
    `met` on file:line evidence.
 2. **REQ-ID trace.** Every `REQ-*` ID the brief claims appears in at least one passing test's name,
-   doc comment or `.pzl` header. For a whole-milestone check run `python3 scripts/req_coverage.py --tests`
-   and report missing IDs.
+   doc comment or `.pzl` header. For a whole-milestone check run
+   `python3 scripts/req_coverage.py --milestone "<milestone title>" --tests`; for a global check
+   (every required SRS ID) run `python3 scripts/req_coverage.py --tests`. Report missing IDs.
 3. **Format and lint.** The format and lint commands in `docs/DEVELOPMENT.md`, warnings as errors, on every touched
    module and binding.
 4. **Tests.** Every applicable suite: touched modules' unit and integration tests, the unit's

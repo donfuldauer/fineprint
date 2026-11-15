@@ -12,7 +12,8 @@ Usage (from the repository root):
   python3 scripts/req_coverage.py                      # SRS vs work-unit issues
   python3 scripts/req_coverage.py --milestone "M1 — Two-player engine"
   python3 scripts/req_coverage.py --allow REQ-FMT-004 REQ-FMT-005
-  python3 scripts/req_coverage.py --tests crates tests  # also require each ID in some test file
+  python3 scripts/req_coverage.py --tests crates tests  # global check: also require each ID in some test file
+  python3 scripts/req_coverage.py --milestone "M1 — Two-player engine" --tests crates tests  # whole-milestone check
   python3 scripts/req_coverage.py --plan-file units.md  # check a local draft instead of issues
 
 Exit status is 1 when any ID is missing, so CI can use it as a gate.
