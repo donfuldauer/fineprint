@@ -1425,7 +1425,8 @@ These requirements record the architecture and platform decisions that the imple
 * Every change reaches `main` through a pull request reviewed by CodeRabbit, under the repository's `docs/PROCESS.md`.
 
 **REQ-NFR-012 — Licensing.**
-* Fine Print's code SHALL be licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`): modified versions that are distributed must remain open source under the same license and keep the original copyright and attribution notices. The full text is the repository's `LICENSE` file, and every package (crates, NuGet, npm) SHALL declare the SPDX identifier.
+* Fine Print's code SHALL be licensed under the **Mozilla Public License 2.0** (`MPL-2.0`). Distributed modifications to Fine Print's files must remain available under MPL-2.0 with the original notices kept; applications may embed or link Fine Print, statically or dynamically, without being open-sourced themselves. The full text is the repository's `LICENSE` file, and every package (crates, NuGet, npm) SHALL declare the SPDX identifier.
+* Every source file SHALL carry the MPL-2.0 Exhibit A header: "This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/."
 * The README, package metadata and any client-facing documentation that names the supported game SHALL carry the Fan Content Policy disclaimer (§1.3, REQ-ARCH-003).
 
 ---
