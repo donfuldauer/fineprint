@@ -8,7 +8,7 @@ once the workspace issue has merged.
 
 **Starting work:** each issue is one unit of work with its dependencies. When the user says
 "Start work on issue X", use the `work-issue` skill: it checks the issue's dependencies are
-closed, drives the work through the agents below, opens a PR that closes the issue, resolves the
+merged, drives the work through the agents below, opens a PR that closes the issue, resolves the
 CodeRabbit review and merges. The `run-plan` skill loops over
 every ready issue in plan order.
 

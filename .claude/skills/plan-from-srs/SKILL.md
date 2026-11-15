@@ -97,8 +97,13 @@ fixtures → hardening and release → later milestones.
 
 ## 4. Create the issues
 
-1. Create the labels and milestones.
-2. Create one issue per unit in plan order, so every "Depends on" entry names an existing issue
+0. List the existing `work-unit` issues (open and closed) and match each drafted unit to one by
+   its `Plan ID`. Leave unchanged units alone. Edit changed units in place (body, labels,
+   blocked-by links). Create only units with no match, using the next free `FP-NNN` numbers.
+   Close units dropped from the breakdown as "not planned", with a comment naming what replaced
+   them.
+1. Ensure the labels and milestones exist.
+2. Open the new issues in plan order, so every "Depends on" entry names an existing issue
    number. Pace the calls (about one per second) to stay under GitHub's content-creation limits.
 3. Link each dependency with GitHub's "blocked by" API
    (`POST /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` with the blocker's numeric
