@@ -448,6 +448,14 @@ pub fn run(args: &[String]) -> u8 {
         );
         return 1;
     }
+    // Files under the root but none attributed to a workspace crate (e.g. the root is an ancestor
+    // of the workspace) would also leave every crate n/a (REQ-NFR-008).
+    if total > 0 && parsed.is_empty() {
+        eprintln!(
+            "coverage: none of the {total} files in the coverage report maps to a workspace crate under the root {root} (the root may be an ancestor of the workspace); pass --root <dir> with the workspace root"
+        );
+        return 1;
+    }
     let crates: Vec<CrateCoverage> = parsed
         .into_iter()
         .map(|(name, lines, covered)| CrateCoverage {
@@ -1504,9 +1512,9 @@ fineprint-spike-libs | n/a | n/a | n/a | 75% | PASS
         let empty = write("empty.json", doc(&[]));
         assert_eq!(run(&args(empty.clone(), "/w")), 0);
         assert_eq!(run(&args(empty, "/nonexistent")), 0);
-        // all files under the root but unmapped (e.g. vendored sources): pass
+        // all files under the root but unmapped (e.g. vendored sources): failure (vacuous PASS)
         let unmapped = write("unmapped.json", doc(&[file("/w/vendor/x/a.rs", "5", "0")]));
-        assert_eq!(run(&args(unmapped, "/w")), 0);
+        assert_eq!(run(&args(unmapped, "/w")), 1);
         // mixed: one file under the root, one outside; only the mapped crate is measured
         let mixed_doc = doc(&[
             file("/w/xtask/src/a.rs", "10", "10"),
@@ -1517,6 +1525,47 @@ fineprint-spike-libs | n/a | n/a | n/a | 75% | PASS
         assert_eq!((total, inside), (2, 1));
         let mixed = write("mixed.json", mixed_doc);
         assert_eq!(run(&args(mixed, "/w")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REQ-NFR-008: an ancestor root (files under it, none attributed to a crate) fails; the
+    /// workspace root passes; a mixed report keeps only the attributed measurement.
+    #[test]
+    fn req_nfr_008_ancestor_root_is_failure() {
+        let dir = std::env::temp_dir().join(format!("xtask-cov-anc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let write = |name: &str, body: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write");
+            p.display().to_string()
+        };
+        let args = |input: &str, root: &str| {
+            vec![
+                "--input".to_string(),
+                input.to_string(),
+                "--root".to_string(),
+                root.to_string(),
+            ]
+        };
+        let report = write(
+            "anc.json",
+            doc(&[
+                file("/work/repo/xtask/src/main.rs", "10", "10"),
+                file("/work/repo/crates/fineprint-core/src/lib.rs", "10", "10"),
+            ]),
+        );
+        assert_eq!(run(&args(&report, "/work")), 1);
+        assert_eq!(run(&args(&report, "/work/repo")), 0);
+        let mixed_doc = doc(&[
+            file("/work/repo/xtask/src/main.rs", "10", "10"),
+            file("/work/repo/vendor/x/a.rs", "5", "0"),
+        ]);
+        let (parsed, total, inside) =
+            parse_summary_counted(&mixed_doc, "/work/repo").expect("parses");
+        assert_eq!(parsed, vec![("xtask".to_string(), 10, 10)]);
+        assert_eq!((total, inside), (2, 2));
+        let mixed = write("mixed.json", mixed_doc);
+        assert_eq!(run(&args(&mixed, "/work/repo")), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
