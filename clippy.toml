@@ -1,0 +1,6 @@
+disallowed-types = [
+  { path = "f32", reason = "REQ-CORE-006: no floating point in rules paths" },
+  { path = "f64", reason = "REQ-CORE-006: no floating point in rules paths" },
+  { path = "std::collections::HashMap", reason = "REQ-CORE-006: hash iteration order is forbidden; use an ordered container" },
+  { path = "std::collections::HashSet", reason = "REQ-CORE-006: hash iteration order is forbidden; use an ordered container" },
+]

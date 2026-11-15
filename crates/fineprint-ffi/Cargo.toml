@@ -1,0 +1,16 @@
+[package]
+name = "fineprint-ffi"
+description = "C ABI bindings for the Fine Print rules engine."
+license = "MPL-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# TODO: cdylib/staticlib arrive in the C ABI issue.
+crate-type = ["rlib"]
+
+[dependencies]
+fineprint-core.workspace = true

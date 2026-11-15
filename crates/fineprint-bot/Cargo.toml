@@ -1,0 +1,12 @@
+[package]
+name = "fineprint-bot"
+description = "Reference bot players for the Fine Print rules engine."
+license = "MPL-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+fineprint-core.workspace = true
