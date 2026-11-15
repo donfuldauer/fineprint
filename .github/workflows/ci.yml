@@ -110,3 +110,83 @@ jobs:
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-test-
       - name: cargo test
         run: cargo test --workspace --locked
+
+  coverage:
+    name: coverage (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-coverage-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-coverage-
+      # cargo-llvm-cov 0.9.1: newest release at the time of writing; its minimum Rust is 1.87,
+      # below the pinned 1.97.0. Bump deliberately (docs/DECISIONS.md FP-003).
+      - name: Cache cargo-llvm-cov binary
+        id: llvm-cov-cache
+        uses: actions/cache@v4.2.0
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-llvm-cov-0.9.1
+      - name: Add llvm-tools component
+        run: rustup component add llvm-tools
+      - name: Install cargo-llvm-cov
+        if: steps.llvm-cov-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-llvm-cov --locked --version 0.9.1
+      - name: Measure line coverage
+        run: >-
+          cargo llvm-cov --workspace --locked --all-targets
+          --no-default-ignore-filename-regex
+          --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)'
+          --json --summary-only --output-path target/llvm-cov-summary.json
+      - name: Check per-crate floors
+        run: cargo xtask coverage --input target/llvm-cov-summary.json
+
+  guards:
+    name: guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Repository guards (headers, card data, card branches)
+        run: cargo xtask guard all
+
+  req-coverage:
+    name: req-coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Every SRS requirement is traced by a work-unit issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/req_coverage.py
