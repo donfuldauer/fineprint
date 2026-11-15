@@ -63,6 +63,6 @@ failure becomes a new issue against the owning area; never pause for a person.
 
 ## 6. When to stop
 
-Stop when no issue is ready and no PR is open, or when every remaining issue is blocked. End with
-a short account: phases completed, PRs merged, blocked issues and why, `[Fable wanted]` lines, the
+Stop when no issue is ready, no issue is `in-progress`, and no PR is open, or when every remaining
+issue is blocked. End with a short account: phases completed, PRs merged, blocked issues and why, `[Fable wanted]` lines, the
 aggregate parser coverage, and the human-queue items a person should look at first.
