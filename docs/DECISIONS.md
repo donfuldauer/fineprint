@@ -354,12 +354,16 @@ avoid both; f64 appears only in `tests/jcs.rs` under the documented crate-level 
 apply the REQ-NFR-008 75 % non-rules line-coverage floor to all of `spikes/libs/**` (`src`,
 `examples` and `tests`, as the coverage tool measures them) with no exemption; any exemption
 (for example of `examples/bench.rs`) needs an approved SRS change first. Alternatively #4 may
-delete `spikes/libs` once the production crates adopt the pins, which removes the question.
+delete `spikes/libs`, but only after the production crates carry replacement golden-value tests
+(equivalent PRNG, canonical-JSON, MessagePack and Merkle-hash vectors) that run in CI on Linux,
+Windows and macOS; adopting the pins alone is not enough.
 **Rationale:** The spike is evidence, not product, but REQ-NFR-008 has no benchmark
 exemption. The practical consequence for #4: if the benchmark printer
 (`examples/bench.rs`) cannot reach the floor, cover it with a smoke test that runs it with tiny
-iteration counts, or delete the spike once production crates adopt the pins. Keeping it in the workspace makes CI run its golden-value tests on all three
-platforms, which is the cross-platform acceptance criterion of #5.
+iteration counts, or delete the spike once production crates carry replacement golden-value tests
+that run in CI on Linux, Windows and macOS (adopting the pins alone is not enough). Keeping it in
+the workspace makes CI run its golden-value tests on all three platforms, which is the
+cross-platform acceptance criterion of #5.
 **Alternatives:** a separate workspace under `spikes/` (rejected: CI would not run it without
 editing `.github/`, which #5 does not own); deleting the spike in #5 (rejected: the tests are
 the cross-platform evidence until production crates carry them).
