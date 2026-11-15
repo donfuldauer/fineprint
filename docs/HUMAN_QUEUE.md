@@ -8,4 +8,4 @@ Resolved items are struck through with the resolution and a link.
 - [setup] Once the CI issue (#3, FP-002) merges, add its jobs as required status checks in the `main` branch protection rule (PROCESS.md P6 step 5).
 - [planning] Confirm the client interpretation: one demonstration client per binding (DECISIONS.md "Planning — One demonstration client per binding").
 - [setup] Install the CodeRabbit GitHub app on this repository and enable branch protection on `main` with required checks (PROCESS.md P6).
-- [PR #47] SRS REQ-NFR-009 says "wave gate"; the process now calls it the "phase gate" (tag `phase-<NN>-green`). Rename it in the SRS when convenient (SRS changes are a person's change, PROCESS.md P8).
+- ~~[PR #47] SRS REQ-NFR-009 says "wave gate"; rename it to "phase gate".~~ Resolved: REQ-NFR-009 now says "phase gate (PROCESS.md P5)"; DECISIONS.md "Architecture" entry updated to match (owner-approved SRS edit).
