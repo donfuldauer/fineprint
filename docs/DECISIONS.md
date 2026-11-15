@@ -135,3 +135,25 @@ one-line [WITHDRAWN] entries. Appendix A keeps the old errata as a checklist of 
 misreadings.
 **Rationale:** Maintainer's decision; the repository already version-controls the document.
 **Alternatives:** semantic versioning of the SRS inside the document.
+
+## Repository — The plan is GitHub issues
+
+**Decision:** The implementation plan is the set of GitHub issues labelled `work-unit`, one per
+reviewable PR, with "blocked by" dependency links, `ready`/`blocked` labels and milestones M1–M3.
+Nothing in the repository holds the work breakdown; `docs/DEVELOPMENT.md` (created by the
+workspace issue) holds only the layout, commands, gates and contracts. "Start work on issue X"
+runs the `work-issue` skill.
+**Rationale:** Maintainer's decision: work units belong in the issue tracker, where each one maps
+to one PR and can be picked up by any session.
+**Alternatives:** a generated `docs/PLAN.md` mirroring the issues (rejected: duplicate source of
+truth in the repository).
+
+## Planning — One demonstration client per binding
+
+**Decision:** The "test client for each targeted platform" is four clients, one per binding, each
+run by CI on every platform that binding targets: a Rust terminal client and a C demo and a .NET
+demo (Linux, Windows, macOS), and a web client (Chromium, Firefox, WebKit). They are work units
+only; the SRS is unchanged.
+**Rationale:** A client per binding exercises every shipped API on every platform in REQ-NFR-003
+without building three near-identical desktop apps.
+**Alternatives:** one native GUI client per operating system.
