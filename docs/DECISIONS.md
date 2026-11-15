@@ -336,3 +336,17 @@ plus a copy of the native library to the output directory. Rejected: it does not
 Rejected: the program would be a Rust binary rather than a C one. Use `wasm-pack`. Rejected:
 it adds a tool whose wasm-bindgen pin is indirect. Use a third-party MSVC setup action.
 Rejected: `vswhere` + `Enter-VsDevShell` needs no third-party code.
+
+## FP-003 (#4) — Relative --root is resolved against the current directory
+**Decision:** `cargo xtask coverage --root <dir>` resolves a relative `<dir>` against the current
+working directory with a purely lexical normalisation (`.` and empty components dropped, `..`
+pops, never above the filesystem root, no trailing separator) before comparing it with the
+absolute filenames in the llvm-cov report. Absolute roots (leading `/` or `\`, or a drive prefix
+such as `C:\`) and the auto-detected root are used unchanged. If the current directory cannot be
+read and the root is relative, the command exits 2 with a message.
+**Rationale:** Since a root matching no file is a failure, `--root .` made every valid report
+fail. Lexical resolution is deterministic and does not touch the filesystem, so it cannot
+disagree with the paths llvm-cov recorded the way a symlink-resolving `canonicalize` could.
+**Alternatives:** `std::fs::canonicalize`. Rejected: resolves symlinks and needs the path to
+exist, so it may mismatch the report. Reject relative roots with an error. Rejected: `.` and `..`
+are the natural spellings when running from the workspace or from `xtask/`.

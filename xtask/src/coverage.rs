@@ -312,6 +312,51 @@ fn detect_root() -> Result<String, String> {
         })
 }
 
+/// True for a root starting with `/` or `\`, or a Windows drive prefix (`C:` then `/` or `\`).
+fn is_absolute_root(root: &str) -> bool {
+    let b = root.as_bytes();
+    matches!(b.first(), Some(b'/' | b'\\'))
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
+}
+
+/// Resolve `root` against `cwd` (REQ-NFR-008). An absolute `root` is returned unchanged. A
+/// relative one is joined to `cwd` and normalised lexically (no filesystem access, so symlinks are
+/// not resolved and the result matches the paths in the llvm-cov report): `.` and empty components
+/// are dropped, `..` pops the previous component and never goes above the root. The separator is
+/// `\` when `cwd` uses only backslashes, else `/`. There is no trailing separator, except that the
+/// filesystem root itself is returned as `/` (or `C:\`); the result is never empty. Never panics.
+pub fn resolve_root(cwd: &str, root: &str) -> String {
+    if is_absolute_root(root) {
+        return root.to_string();
+    }
+    let sep = if cwd.contains('\\') && !cwd.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let b = cwd.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    let (prefix, rest) = if drive {
+        (format!("{}{sep}", &cwd[..2]), &cwd[2..])
+    } else {
+        (sep.to_string(), cwd)
+    };
+    let mut comps: Vec<&str> = Vec::new();
+    for c in rest.split(['/', '\\']).chain(root.split(['/', '\\'])) {
+        match c {
+            "" | "." => {}
+            ".." => {
+                comps.pop();
+            }
+            c => comps.push(c),
+        }
+    }
+    format!("{prefix}{}", comps.join(&sep.to_string()))
+}
+
 /// Entry point for `cargo xtask coverage [--input <file>] [--root <dir>]`. Returns the process
 /// exit code.
 pub fn run(args: &[String]) -> u8 {
@@ -323,7 +368,14 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
     let root = match opts.root {
-        Some(r) => r,
+        Some(r) if is_absolute_root(&r) => r,
+        Some(r) => match std::env::current_dir() {
+            Ok(cwd) => resolve_root(&cwd.display().to_string(), &r),
+            Err(e) => {
+                eprintln!("coverage: cannot resolve the relative --root {r}: {e}");
+                return 2;
+            }
+        },
         None => match detect_root() {
             Ok(r) => r,
             Err(e) => {
@@ -974,6 +1026,56 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
             }
             let _ = parse_json(&text);
             let _ = parse_summary(&text, "/w");
+        }
+    }
+
+    /// REQ-NFR-008: a relative `--root` is resolved lexically against the current directory.
+    #[test]
+    fn req_nfr_008_resolve_root() {
+        let r = resolve_root;
+        assert_eq!(r("/w", "."), "/w");
+        assert_eq!(r("/w", ""), "/w");
+        assert_eq!(r("/w", "./xtask/.."), "/w");
+        assert_eq!(r("/w/xtask", ".."), "/w");
+        // never above the filesystem root; the root itself is `/`, never empty
+        assert_eq!(r("/w", "../.."), "/");
+        assert_eq!(r("/", ".."), "/");
+        assert_eq!(r("/w", "sub/dir"), "/w/sub/dir");
+        assert_eq!(r("/w/", "sub//dir/"), "/w/sub/dir");
+        assert_eq!(r("/w", "./a/./b/../c"), "/w/a/c");
+        // absolute roots are unchanged
+        assert_eq!(r("/w", "/abs/root"), "/abs/root");
+        assert_eq!(r("/w", "/abs/root/"), "/abs/root/");
+        assert_eq!(r("/w", "C:\\w\\root"), "C:\\w\\root");
+        assert_eq!(r("/w", "\\w"), "\\w");
+        // Windows cwd keeps its separator style
+        assert_eq!(r("C:\\w", "."), "C:\\w");
+        assert_eq!(r("C:\\w", "sub\\dir"), "C:\\w\\sub\\dir");
+        assert_eq!(r("C:\\w\\xtask", ".."), "C:\\w");
+        assert_eq!(r("C:\\w", "..\\.."), "C:\\");
+        assert_eq!(r("C:\\w\\", "."), "C:\\w");
+        // a resolved root classifies files as the absolute one does
+        assert!(under_root(&r("/w", "."), "/w/a.rs"));
+        assert!(under_root(&r("/w/xtask", ".."), "/w/a.rs"));
+        // fixed-seed fuzz: arbitrary strings never panic or yield an empty string
+        let alphabet: Vec<char> = "/\\.:aC \u{e9}".chars().collect();
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            let mut t = String::new();
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            for _ in 0..(s % 12) {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                t.push(alphabet[(s % alphabet.len() as u64) as usize]);
+            }
+            t
+        };
+        for _ in 0..2000 {
+            let (cwd, root) = (next(), next());
+            assert!(!resolve_root(&cwd, &root).is_empty());
         }
     }
 
