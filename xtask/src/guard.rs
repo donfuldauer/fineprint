@@ -9,23 +9,24 @@
 //!
 //! # headers (REQ-NFR-012)
 //!
-//! Every tracked file with extension `.rs .cs .c .h .ts .js .py` must contain the MPL-2.0
+//! Every tracked file with extension `.rs .cs .c .cpp .h .ts .js .py` must contain the MPL-2.0
 //! header sentence within its first 20 lines (after an optional `#!` shebang line). Each line is
 //! stripped of a leading comment marker (`//`, `///`, `//!`, `#`, `/*`, `*`, `<!--`) and
 //! surrounding whitespace, the lines are joined with single spaces and whitespace is collapsed;
 //! the result must contain [`HEADER_SENTENCE`] (case-sensitive containment). Skipped: paths
-//! with a `target/`, `node_modules/` or `dist/` directory component, and files whose first five
-//! lines contain `@generated`.
+//! with a `target/`, `node_modules/` or `dist/` directory component. Generated files need the
+//! header too.
 //!
 //! # card-data (REQ-NFR-004, REQ-ARCH-001, REQ-NFR-007)
 //!
-//! Everything under `docs/` and `.github/ISSUE_TEMPLATE` is exempt. Elsewhere a tracked file is
-//! rejected when: it ends in `.fpdb` or `.cr.txt`; its name matches a bulk-data shape
-//! (case-insensitive, see `BULK_NAMES`); it is a `.json` file with an `oracle_text` or
-//! `oracleText` key; or it has five or more lines that start with a rules-number shape
-//! (three digits, a dot, digits, optional letter, optional dot, a space) followed by prose of
-//! at least three words. Content scans only apply to valid UTF-8 files under 5 MiB. A comment
-//! such as `// CR 613.8b` does not match.
+//! File-name checks apply to every path: a tracked file is rejected when it ends in `.fpdb` or
+//! `.cr.txt`, or its name matches a bulk-data shape (case-insensitive, see `BULK_NAMES`).
+//! Content checks are skipped under `docs/` and `.github/ISSUE_TEMPLATE`; elsewhere a file is
+//! rejected when it is a `.json` file with an `oracle_text` or `oracleText` key, or has five or
+//! more lines that start with a rules-number shape (three digits, a dot, digits, optional
+//! letter, optional dot, a space) followed by prose of at least three words. Content scans
+//! apply to valid UTF-8 files; a file of 5 MiB or more outside the exempt directories is an
+//! explicit "scan incomplete" violation. A comment such as `// CR 613.8b` does not match.
 //!
 //! # card-branch (REQ-DSL-013, REQ-ARCH-001)
 //!
@@ -53,7 +54,7 @@ use std::process::Command;
 pub const HEADER_SENTENCE: &str = "This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.";
 
 /// Extensions that need the header.
-const HEADER_EXTS: [&str; 7] = ["rs", "cs", "c", "h", "ts", "js", "py"];
+const HEADER_EXTS: [&str; 8] = ["rs", "cs", "c", "cpp", "h", "ts", "js", "py"];
 
 /// Directory components whose files are skipped by the header guard.
 const HEADER_SKIP_DIRS: [&str; 3] = ["target", "node_modules", "dist"];
@@ -209,9 +210,6 @@ pub fn check_headers(path: &str, content: &str) -> Vec<Violation> {
     if !ext.is_some_and(|e| HEADER_EXTS.contains(&e)) {
         return Vec::new();
     }
-    if content.lines().take(5).any(|l| l.contains("@generated")) {
-        return Vec::new();
-    }
     if normalised_head(content).contains(HEADER_SENTENCE) {
         Vec::new()
     } else {
@@ -231,11 +229,8 @@ fn card_data_exempt(path: &str) -> bool {
     CARD_DATA_EXEMPT.iter().any(|p| path.starts_with(p))
 }
 
-/// REQ-NFR-004: path-only card-data checks (always apply, whatever the content).
+/// REQ-NFR-004: path-only card-data checks (apply to every path, including exempt directories).
 pub fn check_card_data_path(path: &str) -> Vec<Violation> {
-    if card_data_exempt(path) {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     if path.ends_with(".fpdb") {
         out.push(violation(
@@ -378,15 +373,23 @@ fn lex_lines(content: &str) -> Vec<String> {
                 i += 1;
             }
         } else if ch == '/' && at(i + 1) == '*' {
+            // block comments nest; blank until the depth returns to zero
             out.push_str("  ");
             i += 2;
-            while i < c.len() && !(at(i) == '*' && at(i + 1) == '/') {
-                out.push(blank(at(i)));
-                i += 1;
-            }
-            if i < c.len() {
-                out.push_str("  ");
-                i += 2;
+            let mut depth = 1usize;
+            while i < c.len() && depth > 0 {
+                if at(i) == '/' && at(i + 1) == '*' {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if at(i) == '*' && at(i + 1) == '/' {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else {
+                    out.push(blank(at(i)));
+                    i += 1;
+                }
             }
         } else if ch == 'r' && !prev_ident && (at(i + 1) == '"' || at(i + 1) == '#') {
             let mut hashes = 0;
@@ -710,10 +713,18 @@ pub fn scan(guard: Guard, files: &[SourceFile]) -> Vec<Violation> {
             }
             Guard::CardData => {
                 out.extend(check_card_data_path(&f.path));
-                let text = if f.bytes.len() < MAX_SCAN_BYTES {
-                    std::str::from_utf8(&f.bytes).ok()
-                } else {
+                let too_large = f.bytes.len() >= MAX_SCAN_BYTES;
+                if too_large && !card_data_exempt(&f.path) {
+                    out.push(violation(
+                        &f.path,
+                        None,
+                        "file too large for the card-data content scan (limit 5 MiB): scan incomplete",
+                    ));
+                }
+                let text = if too_large {
                     None
+                } else {
+                    std::str::from_utf8(&f.bytes).ok()
                 };
                 out.extend(check_card_data_content(&f.path, text));
             }
@@ -873,7 +884,7 @@ mod tests {
     fn req_nfr_012_headers_filter_and_skips() {
         assert!(headers_ok("README.md", "text"));
         assert!(headers_ok("Cargo.toml", "x = 1"));
-        for ext in ["rs", "cs", "c", "h", "ts", "js", "py"] {
+        for ext in ["rs", "cs", "c", "cpp", "h", "ts", "js", "py"] {
             assert_eq!(
                 check_headers(&format!("d/f.{ext}"), "x\n").len(),
                 1,
@@ -883,8 +894,22 @@ mod tests {
         assert!(headers_ok("target/x.rs", "x"));
         assert!(headers_ok("a/node_modules/x.js", "x"));
         assert!(headers_ok("clients/dist/x.js", "x"));
-        assert!(headers_ok("x.rs", "// @generated by tool\nfn x() {}\n"));
+        // generated files need the header too (no `@generated` exemption)
+        assert_eq!(
+            check_headers("x.rs", "// @generated by tool\nfn x() {}\n").len(),
+            1
+        );
+        let generated = format!("// @generated by tool\n{}fn x() {{}}\n", prefixed("//"));
+        assert!(headers_ok("x.rs", &generated));
         assert_eq!(check_headers("x.rs", "\n\n\n\n\n// @generated\n").len(), 1);
+    }
+
+    /// REQ-NFR-012: `.cpp` files are header-checked.
+    #[test]
+    fn req_nfr_012_headers_cpp() {
+        assert_eq!(check_headers("example.cpp", "int main() {}\n").len(), 1);
+        let with = format!("{}int main() {{}}\n", prefixed("//"));
+        assert!(headers_ok("example.cpp", &with));
     }
 
     fn cr_lines(n: usize) -> String {
@@ -943,11 +968,22 @@ mod tests {
             0
         );
         assert_eq!(data_violations("notes.txt", &cr_lines(4)), 0);
-        assert_eq!(data_violations("docs/a.fpdb", &cr_lines(9)), 0);
+        // exempt directories skip content checks only; file-name checks still apply
+        assert_eq!(data_violations("docs/a.fpdb", &cr_lines(9)), 1);
+        assert_eq!(data_violations("docs/cards.fpdb", ""), 1);
         assert_eq!(
-            data_violations("docs/x/scryfall-1.json", &format!("{{{key}: 1}}")),
+            check_card_data_path("docs/scryfall-default-cards.json").len(),
+            1
+        );
+        assert_eq!(check_card_data_path("docs/x.cr.txt").len(), 1);
+        assert_eq!(check_card_data_path("docs/cards.fpdb").len(), 1);
+        assert!(check_card_data_path("docs/notes.md").is_empty());
+        assert!(check_card_data_path("docs/SRS.md").is_empty());
+        assert_eq!(
+            data_violations("docs/x/data.json", &format!("{{{key}: 1}}")),
             0
         );
+        assert_eq!(data_violations("docs/notes.txt", &cr_lines(9)), 0);
         assert_eq!(
             data_violations(".github/ISSUE_TEMPLATE/x.json", &format!("{{{key}: 1}}")),
             0
@@ -967,11 +1003,39 @@ mod tests {
         let big = format!("{{{key}: 1}}{}", " ".repeat(MAX_SCAN_BYTES));
         let mut bad = format!("{{{key}: 1}}").into_bytes();
         bad.push(0xff);
-        let files = vec![
-            SourceFile {
-                path: "big.json".to_string(),
+        // oversized outside exempt dirs: exactly one explicit incomplete-scan violation
+        let v = scan(
+            Guard::CardData,
+            &[SourceFile {
+                path: "data/cards.json".to_string(),
+                bytes: big.clone().into_bytes(),
+            }],
+        );
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("scan incomplete"), "{}", v[0]);
+        // same content under docs/: no violation
+        let v = scan(
+            Guard::CardData,
+            &[SourceFile {
+                path: "docs/cards.json".to_string(),
                 bytes: big.into_bytes(),
-            },
+            }],
+        );
+        assert!(v.is_empty());
+        // one byte under the limit is still content-scanned
+        let pad = MAX_SCAN_BYTES - 1 - format!("{{{key}: 1}}").len();
+        let near = format!("{{{key}: 1}}{}", " ".repeat(pad));
+        assert_eq!(near.len(), MAX_SCAN_BYTES - 1);
+        let v = scan(
+            Guard::CardData,
+            &[SourceFile {
+                path: "data/cards.json".to_string(),
+                bytes: near.into_bytes(),
+            }],
+        );
+        assert_eq!(v.len(), 1);
+        assert!(v[0].message.contains("Oracle text key"), "{}", v[0]);
+        let files = vec![
             SourceFile {
                 path: "bin.json".to_string(),
                 bytes: bad,
@@ -1027,6 +1091,26 @@ mod tests {
             v[0].to_string(),
             "crates/fineprint-core/src/y.rs:2: card-specific branch: if def.card_def_id == \"test.alpha\" {"
         );
+    }
+
+    /// REQ-DSL-013: block comments nest in the lexical pass.
+    #[test]
+    fn req_dsl_013_card_branch_nested_block_comments() {
+        let cmp = format!("if def.card_def_id {} \"test.alpha\" {{}}", "==");
+        let inside = format!("/* outer /* inner */ {cmp} */\nfn f() {{}}\n");
+        assert_eq!(branch(&inside), 0);
+        let after = format!("/* outer /* inner */ */ {cmp}\n");
+        assert_eq!(branch(&after), 1);
+        // unterminated nested comment runs to end of file
+        let open = format!("/* a /* b */\n{cmp}\n");
+        assert_eq!(branch(&open), 0);
+    }
+
+    /// REQ-NFR-008: `tracked_files` lists repository files (run from the xtask directory).
+    #[test]
+    fn req_nfr_008_tracked_files_lists_repository_files() {
+        let files = tracked_files().expect("git repository");
+        assert!(files.iter().any(|f| f.path == "xtask/src/guard.rs"));
     }
 
     /// REQ-DSL-013: card-branch clean samples and exemptions.

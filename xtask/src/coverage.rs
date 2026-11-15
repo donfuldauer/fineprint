@@ -177,7 +177,8 @@ pub fn crate_of(path: &str) -> Option<String> {
         return None;
     }
     let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
-    for (i, part) in parts.iter().enumerate() {
+    // Innermost match wins: a checkout may itself live under a `crates/` directory.
+    for (i, part) in parts.iter().enumerate().rev() {
         let next = parts.get(i + 1);
         let after = parts.get(i + 2);
         match (*part, next, after) {
@@ -679,6 +680,28 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert_eq!(crate_of("/w/xtask/src/a.rs"), Some("xtask".to_string()));
         assert_eq!(crate_of("/w/other/a.rs"), None);
         assert_eq!(crate_of("/h/.cargo/registry/src/i/c/crates/y/a.rs"), None);
+    }
+
+    #[test]
+    fn req_nfr_008_crate_of_outer_crates_dir() {
+        assert_eq!(
+            crate_of("/home/dev/crates/fineprint/crates/fineprint-core/src/lib.rs"),
+            Some("fineprint-core".to_string())
+        );
+        assert_eq!(
+            crate_of("C:\\dev\\crates\\fineprint\\crates\\fineprint-core\\src\\lib.rs"),
+            Some("fineprint-core".to_string())
+        );
+        assert_eq!(
+            crate_of("/home/dev/crates/fineprint/clients/cli/src/main.rs"),
+            Some("fineprint-cli".to_string())
+        );
+        assert_eq!(
+            crate_of("/home/dev/crates/fineprint/xtask/src/main.rs"),
+            Some("xtask".to_string())
+        );
+        // no inner workspace component and no file below the outer directory
+        assert_eq!(crate_of("/home/dev/crates/fineprint"), None);
     }
 
     /// REQ-NFR-008: malformed input is an error, never a panic.
