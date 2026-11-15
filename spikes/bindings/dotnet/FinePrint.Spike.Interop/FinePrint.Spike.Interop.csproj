@@ -1,0 +1,49 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+   - If a copy of the MPL was not distributed with this file, You can obtain one at
+   - https://mozilla.org/MPL/2.0/. -->
+<!--
+  FP-005 (#6) spike (REQ-NFR-002, REQ-NFR-003): the shape of the future FinePrint.Core package.
+  A managed P/Invoke wrapper plus the Rust cdylib packaged per runtime identifier at
+  runtimes/<rid>/native/<lib>, so a consumer resolves the native library through the NuGet
+  runtime-asset rules (deps.json) with no PATH or LD_LIBRARY_PATH changes.
+
+  Each CI job builds the cdylib for its own OS and packs only that RID; the pack fails if no
+  native library was found. Never published (IsPackable only for the local spike feed).
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PackageId>FinePrint.Spike.Interop</PackageId>
+    <Version>0.0.0-spike</Version>
+    <Authors>Fine Print contributors</Authors>
+    <Description>FP-005 toolchain spike. Not for publication.</Description>
+    <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
+    <IsPackable>true</IsPackable>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)../../dist/nuget</PackageOutputPath>
+    <!-- Cargo release output directory of the spike crate (spikes/bindings/target/release). -->
+    <SpikeNativeDir>$(MSBuildThisFileDirectory)../../target/release/</SpikeNativeDir>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <SpikeLinuxLib>$(SpikeNativeDir)libfineprint_spike_bindings.so</SpikeLinuxLib>
+    <SpikeWindowsLib>$(SpikeNativeDir)fineprint_spike_bindings.dll</SpikeWindowsLib>
+    <SpikeMacLib>$(SpikeNativeDir)libfineprint_spike_bindings.dylib</SpikeMacLib>
+  </PropertyGroup>
+
+  <!-- RID layout of the native asset (REQ-NFR-002): runtimes/<rid>/native/<lib>. -->
+  <ItemGroup>
+    <None Include="$(SpikeLinuxLib)" Condition="Exists('$(SpikeLinuxLib)')" Pack="true" PackagePath="runtimes/linux-x64/native/" Visible="false" />
+    <None Include="$(SpikeWindowsLib)" Condition="Exists('$(SpikeWindowsLib)')" Pack="true" PackagePath="runtimes/win-x64/native/" Visible="false" />
+    <None Include="$(SpikeMacLib)" Condition="Exists('$(SpikeMacLib)')" Pack="true" PackagePath="runtimes/osx-arm64/native/" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="SpikeRequireNativeLibrary" BeforeTargets="GenerateNuspec">
+    <Error Condition="!Exists('$(SpikeLinuxLib)') And !Exists('$(SpikeWindowsLib)') And !Exists('$(SpikeMacLib)')" Text="No spike native library under $(SpikeNativeDir); build the spike crate in release mode first (spikes/bindings/target/release)." />
+  </Target>
+
+</Project>
