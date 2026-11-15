@@ -10,6 +10,7 @@ members = [
   "crates/fineprint-bot",
   "clients/cli",
   "xtask",
+  "spikes/libs",
 ]
 
 [workspace.package]
@@ -28,3 +29,15 @@ fineprint-ingest = { path = "crates/fineprint-ingest" }
 fineprint-ffi = { path = "crates/fineprint-ffi" }
 fineprint-wasm = { path = "crates/fineprint-wasm" }
 fineprint-bot = { path = "crates/fineprint-bot" }
+
+# Third-party pins chosen by the FP-004 dependency spike (docs/DECISIONS.md, "FP-004 —"
+# entries). Exact versions; changing one is a recorded decision. The PRNG (PCG64-DXSM) is
+# in-house code and needs no crate. pest and pest_derive are for fineprint-ingest only (offline
+# toolchain); they must not enter the rules crates.
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.154", default-features = false, features = ["std", "float_roundtrip"] }
+serde_json_canonicalizer = { version = "=0.4.1", default-features = false }
+rmp-serde = { version = "=1.3.1", default-features = false }
+sha2 = { version = "=0.11.1", default-features = false }
+pest = { version = "=2.9.6", default-features = false }
+pest_derive = { version = "=2.9.6", default-features = false }
