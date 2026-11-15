@@ -16,10 +16,17 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <IsPackable>false</IsPackable>
-    <!-- Keep restored packages out of the user-wide cache so a rebuilt 0.0.0-spike package is
-         never shadowed by a stale copy. dist/ is git-ignored. -->
+    <!-- Keep restored packages out of the user-wide cache (the target below clears the spike
+         package from this folder before each restore). dist/ is git-ignored. -->
     <RestorePackagesPath>$(MSBuildThisFileDirectory)../../dist/nuget-packages</RestorePackagesPath>
   </PropertyGroup>
+
+  <!-- A repacked 0.0.0-spike keeps the same id and version, so NuGet would reuse the copy already
+       extracted under RestorePackagesPath. Delete that extracted folder (NuGet uses the lowercase
+       package id) before every restore so the package in dist/nuget is always the one restored. -->
+  <Target Name="FpDropStaleSpikePackage" BeforeTargets="Restore">
+    <RemoveDir Directories="$(RestorePackagesPath)/fineprint.spike.interop" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="FinePrint.Spike.Interop" Version="0.0.0-spike" />

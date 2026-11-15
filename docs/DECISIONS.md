@@ -202,12 +202,13 @@ the expected digests. `parity` recomputes those digests with `sha256sum` on ever
   exactly the nine members, and the root fmt, clippy and test gates are unchanged and green. The
   crate inherits the root `rust-toolchain.toml` (1.97.0), `rustfmt.toml` and `clippy.toml`,
   because both tools search upward. `disallowed-types` does not trip, so no allow attribute is
-  needed. The root llvm-cov gate (#4) does not cover the spike. The 75% floor (REQ-NFR-008) is
-  met by the crate's own 12 unit tests, which cover every branch of `fp_spike_sha256`: null
-  `out`, `len > isize::MAX`, `len == 0` with null or non-null `data`, null `data` with
-  `len > 0`, and success. A bounded 0..=300-length run checks the function against sha2's
-  incremental API. No coverage number was measured, because the tooling lands with #4. `unsafe`
-  is confined to the one FFI function, which documents its safety contract.
+  needed. The spike is outside the root llvm-cov gate (#4). The crate's own 12 unit tests
+  exercise every branch of `fp_spike_sha256`: null `out`, `len > isize::MAX`, `len == 0` with
+  null or non-null `data`, null `data` with `len > 0`, and success. A bounded 0..=300-length run
+  checks the function against sha2's incremental API. Line coverage was NOT measured, so the 75%
+  floor (REQ-NFR-008) is not claimed as met: it is an open gate item deferred to #4 (FP-003,
+  coverage gates and repository guards), which owns the coverage tooling. `unsafe` is confined
+  to the one FFI function, which documents its safety contract.
 - *Pinned versions used.* rustc/cargo 1.97.0 (root pin). The wasm32 target is added in CI with
   `rustup target add wasm32-unknown-unknown`; the pin file is unchanged. Rust crates: `sha2 =0.11.1`
   (default features off) and `wasm-bindgen =0.2.130`, a wasm32-only dependency. CLIs:
@@ -263,9 +264,12 @@ the expected digests. `parity` recomputes those digests with `sha256sum` on ever
   4. `[LibraryImport]` needs `AllowUnsafeBlocks`. `fixed` on an empty span yields a null
      pointer, so the C ABI must accept `data == NULL` with `len == 0`. XML comments in csproj
      files cannot contain `--` (MSB4025). File-based apps default to `PublishAot=true`, which
-     restores ILCompiler, so the check script sets `#:property PublishAot=false`. Restoring the
-     consumer into `dist/nuget-packages` (`RestorePackagesPath`) prevents a stale
-     `0.0.0-spike` package in the global cache from shadowing a rebuilt one. The local feed
+     restores ILCompiler, so the check script sets `#:property PublishAot=false`. The console
+     restores into `dist/nuget-packages` (`RestorePackagesPath`), which keeps the global cache
+     out of play but does not by itself refresh an already-extracted `0.0.0-spike` after a
+     repack. So the csproj has a target before `Restore` that removes
+     `dist/nuget-packages/fineprint.spike.interop` (lowercase package id), forcing every restore
+     to re-extract the package currently in `dist/nuget`. The local feed
      directory must exist before any restore that reads `nuget.config`.
   5. wasm-bindgen: the CLI version must equal the crate version exactly, so pin both and check
      them against each other in CI. `--target nodejs` emits CommonJS, which the ESM caller loads
