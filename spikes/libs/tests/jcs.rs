@@ -273,8 +273,8 @@ fn req_nfr_006_rejects_duplicate_keys_unescaped() {
 /// the same name are duplicates.
 #[test]
 fn req_nfr_006_rejects_duplicate_keys_escaped() {
-    assert!(canonicalize(br#"{"a":1,"a":2}"#).is_err());
-    assert!(canonicalize(br#"{"a":1,"a":2}"#).is_err());
+    assert!(canonicalize(br#"{"\u0061":1,"a":2}"#).is_err());
+    assert!(canonicalize(br#"{"a":1,"\u0061":2}"#).is_err());
     assert!(canonicalize(br#"{"/":1,"\/":2}"#).is_err());
     assert!(canonicalize("{\"\u{1F602}\":1,\"\\ud83d\\ude02\":2}".as_bytes()).is_err());
     assert!(canonicalize("{\"\\ud83d\\ude02\":1,\"\u{1F602}\":2}".as_bytes()).is_err());
