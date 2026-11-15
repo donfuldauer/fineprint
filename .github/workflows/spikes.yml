@@ -1,0 +1,426 @@
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+
+# FP-005 (#6) binding-toolchain spike (REQ-NFR-002, REQ-NFR-003); see docs/DECISIONS.md
+# "FP-005 (#6)". Proves cbindgen + C, .NET 10 P/Invoke with RID-packaged native assets, and
+# wasm-bindgen in Node.js and headless Chromium/Firefox/WebKit on a toy SHA-256 function, and that
+# every caller prints byte-identical digests (job `parity`).
+#
+# Everything runs from the isolated spike workspace spikes/bindings (own [workspace] and
+# Cargo.lock); nothing here touches the root workspace gates. Job names are distinct from the
+# nine required checks in ci.yml, so branch protection is unaffected.
+#
+# Actions: first-party only, pinned to exact tags: actions/checkout v4.2.2, actions/cache v4.2.0,
+# actions/setup-dotnet v4.3.1, actions/setup-node v4.4.0, actions/upload-artifact v4.6.2,
+# actions/download-artifact v4.3.0.
+name: Spikes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # Must equal the cbindgen used to generate include/fineprint_spike.h.
+  CBINDGEN_VERSION: 0.29.4
+  # Must equal the wasm-bindgen crate version in spikes/bindings/Cargo.lock (checked below).
+  WASM_BINDGEN_VERSION: 0.2.130
+  NODE_VERSION: 22.23.4
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+concurrency:
+  group: spikes-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c-abi:
+    name: c-abi (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and spike target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            spikes/bindings/target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-c-abi-${{ hashFiles('spikes/bindings/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-c-abi-
+      - name: cargo fmt (spike)
+        shell: bash
+        working-directory: spikes/bindings
+        run: cargo fmt --check
+      - name: cargo clippy (spike)
+        shell: bash
+        working-directory: spikes/bindings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test (spike)
+        shell: bash
+        working-directory: spikes/bindings
+        run: cargo test --locked
+      - name: Build the cdylib
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          cargo build --locked --release
+          ls -l target/release
+      - name: Cache cbindgen
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4.2.0
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cbindgen-${{ env.CBINDGEN_VERSION }}
+      - name: Header drift check (cbindgen)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          if ! command -v cbindgen >/dev/null; then
+            cargo install --locked --version "$CBINDGEN_VERSION" cbindgen
+          fi
+          test "$(cbindgen --version)" = "cbindgen $CBINDGEN_VERSION"
+          cbindgen --config cbindgen.toml --crate fineprint-spike-bindings --output include/fineprint_spike.h
+          git diff --exit-code -- include/fineprint_spike.h
+      - name: Show exported symbols
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            nm -gU target/release/libfineprint_spike_bindings.dylib
+            otool -L target/release/libfineprint_spike_bindings.dylib
+          else
+            nm -D --defined-only target/release/libfineprint_spike_bindings.so
+          fi
+      - name: Build the C caller (gcc/clang)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          mkdir -p dist/c
+          cc --version
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Iinclude c/main.c \
+            -Ltarget/release -lfineprint_spike_bindings \
+            -Wl,-rpath,"$PWD/target/release" -o dist/c/spike_c
+      - name: Build the C caller (MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: spikes/bindings
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC x64 tools not found' }
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          New-Item -ItemType Directory -Force dist\c | Out-Null
+          cl /nologo /W4 /WX /std:c11 /I include c\main.c /Fo:dist\c\ /Fe:dist\c\spike_c.exe /link target\release\fineprint_spike_bindings.dll.lib
+          if ($LASTEXITCODE -ne 0) { throw "cl failed: $LASTEXITCODE" }
+      - name: Run the C caller
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          mkdir -p dist/results
+          # Windows: the DLL is found on PATH (the import library only links).
+          PATH="$PWD/target/release:$PATH" ./dist/c/spike_c vectors.txt > "dist/results/c-abi-${{ matrix.os }}.txt"
+          cat "dist/results/c-abi-${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-output-c-abi-${{ matrix.os }}
+          path: spikes/bindings/dist/results/c-abi-${{ matrix.os }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  dotnet:
+    name: dotnet (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            lib: libfineprint_spike_bindings.so
+          - os: windows-latest
+            rid: win-x64
+            lib: fineprint_spike_bindings.dll
+          - os: macos-latest
+            rid: osx-arm64
+            lib: libfineprint_spike_bindings.dylib
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and spike target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            spikes/bindings/target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-dotnet-${{ hashFiles('spikes/bindings/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-dotnet-
+      - name: Build the cdylib
+        shell: bash
+        working-directory: spikes/bindings
+        run: cargo build --locked --release
+      - uses: actions/setup-dotnet@v4.3.1
+        with:
+          global-json-file: spikes/bindings/global.json
+      - name: Show .NET SDK
+        shell: bash
+        working-directory: spikes/bindings
+        run: dotnet --info
+      - name: Pack FinePrint.Spike.Interop (native library per RID)
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          mkdir -p dist/nuget
+          dotnet pack dotnet/FinePrint.Spike.Interop -c Release
+      - name: Build the console app (package consumer)
+        shell: bash
+        working-directory: spikes/bindings
+        run: dotnet build dotnet/FinePrint.Spike.Console -c Release
+      - name: Run through dotnet run
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          mkdir -p dist/results
+          dotnet run --no-build --project dotnet/FinePrint.Spike.Console -c Release -- vectors.txt \
+            > "dist/results/dotnet-run-${{ matrix.os }}.txt"
+          cat "dist/results/dotnet-run-${{ matrix.os }}.txt"
+      - name: Publish and run the published output
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          dotnet publish dotnet/FinePrint.Spike.Console -c Release -o dist/dotnet-publish
+          dotnet dist/dotnet-publish/FinePrint.Spike.Console.dll vectors.txt \
+            > "dist/results/dotnet-publish-${{ matrix.os }}.txt"
+          cat "dist/results/dotnet-publish-${{ matrix.os }}.txt"
+      - name: Check the RID layout (nupkg, publish output, deps.json)
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          dotnet run --file dotnet/check-rid-layout.cs -- \
+            dist/nuget/FinePrint.Spike.Interop.0.0.0-spike.nupkg dist/dotnet-publish \
+            "${{ matrix.rid }}" "${{ matrix.lib }}"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-output-dotnet-${{ matrix.os }}
+          path: |
+            spikes/bindings/dist/results/dotnet-run-${{ matrix.os }}.txt
+            spikes/bindings/dist/results/dotnet-publish-${{ matrix.os }}.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  wasm-node:
+    name: wasm-node (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml) and the wasm32 target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and spike target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            spikes/bindings/target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-wasm-${{ hashFiles('spikes/bindings/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-spike-wasm-
+      - name: Check wasm-bindgen CLI pin equals the locked crate version
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          locked=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+          echo "Cargo.lock wasm-bindgen: $locked; CLI pin: $WASM_BINDGEN_VERSION"
+          test "$locked" = "$WASM_BINDGEN_VERSION"
+      - name: Cache wasm-bindgen CLI
+        uses: actions/cache@v4.2.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-wasm-bindgen-cli-${{ env.WASM_BINDGEN_VERSION }}
+      - name: Install wasm-bindgen CLI
+        shell: bash
+        run: |
+          if ! command -v wasm-bindgen >/dev/null; then
+            cargo install --locked --version "$WASM_BINDGEN_VERSION" wasm-bindgen-cli
+          fi
+          test "$(wasm-bindgen --version)" = "wasm-bindgen $WASM_BINDGEN_VERSION"
+      - name: cargo clippy (spike, wasm32)
+        shell: bash
+        working-directory: spikes/bindings
+        run: cargo clippy --all-targets --locked --target wasm32-unknown-unknown -- -D warnings
+      - name: Build wasm and generate bindings
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown
+          wasm=target/wasm32-unknown-unknown/release/fineprint_spike_bindings.wasm
+          wasm-bindgen --target nodejs --out-dir dist/node "$wasm"
+          wasm-bindgen --target web --out-dir dist/web "$wasm"
+          ls -l dist/node dist/web
+          cat dist/web/fineprint_spike_bindings.d.ts
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: spikes/bindings/web/package-lock.json
+      - name: npm ci
+        shell: bash
+        working-directory: spikes/bindings/web
+        run: npm ci
+      - name: Type-check a TypeScript consumer against the generated .d.ts
+        shell: bash
+        working-directory: spikes/bindings/web
+        run: |
+          npx tsc --version
+          npm run typecheck
+      - name: Run the Node.js caller
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          node --version
+          mkdir -p dist/results
+          node web/node.mjs vectors.txt > dist/results/wasm-node.txt
+          cat dist/results/wasm-node.txt
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-output-wasm-node
+          path: spikes/bindings/dist/results/wasm-node.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload the --target web build for the browser jobs
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-wasm-web-build
+          path: spikes/bindings/dist/web/
+          if-no-files-found: error
+          retention-days: 7
+
+  wasm-browser:
+    name: wasm-browser (${{ matrix.browser }})
+    needs: wasm-node
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: spike-wasm-web-build
+          path: spikes/bindings/dist/web
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: spikes/bindings/web/package-lock.json
+      - name: npm ci
+        shell: bash
+        working-directory: spikes/bindings/web
+        run: npm ci
+      - name: Install the Playwright browser
+        shell: bash
+        working-directory: spikes/bindings/web
+        run: |
+          npx playwright --version
+          npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Run the wasm build in headless ${{ matrix.browser }}
+        shell: bash
+        working-directory: spikes/bindings/web
+        run: |
+          npx playwright test --project=${{ matrix.browser }}
+          cat ../dist/results/wasm-browser-${{ matrix.browser }}.txt
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-output-wasm-browser-${{ matrix.browser }}
+          path: spikes/bindings/dist/results/wasm-browser-${{ matrix.browser }}.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Playwright output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: spike-playwright-${{ matrix.browser }}
+          path: spikes/bindings/dist/playwright/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  parity:
+    name: parity
+    needs: [c-abi, dotnet, wasm-node, wasm-browser]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: spike-output-*
+          merge-multiple: true
+          path: spikes/bindings/dist/results
+      - name: Every caller's output is byte-identical and equals the expected digests
+        shell: bash
+        working-directory: spikes/bindings
+        run: |
+          ls -l dist/results
+          bash scripts/parity.sh vectors.txt dist/results \
+            c-abi-ubuntu-latest.txt c-abi-windows-latest.txt c-abi-macos-latest.txt \
+            dotnet-run-ubuntu-latest.txt dotnet-run-windows-latest.txt dotnet-run-macos-latest.txt \
+            dotnet-publish-ubuntu-latest.txt dotnet-publish-windows-latest.txt dotnet-publish-macos-latest.txt \
+            wasm-node.txt \
+            wasm-browser-chromium.txt wasm-browser-firefox.txt wasm-browser-webkit.txt
