@@ -111,19 +111,31 @@ cargo build --workspace
 cargo test --workspace
 cargo fmt --all --check          # apply with: cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask coverage                 # runs cargo llvm-cov, prints the per-crate table, checks floors
+cargo xtask coverage --input <file>  # same, from `cargo llvm-cov --json --summary-only` output
+cargo xtask coverage --root <dir>    # workspace root for path-to-crate mapping (default: git toplevel, else cwd; a relative dir is resolved against the current directory)
+                                       # exits 1 if the report has files but none maps to a workspace crate under the root
+cargo xtask guard headers            # MPL-2.0 header in every source file
+cargo xtask guard card-data          # no committed card data or rules text
+cargo xtask guard card-branch        # no card-name/id literal comparisons in fineprint-core
+cargo xtask guard all                # the three guards, every violation reported
+cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
+                                                   # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
 
 Environment: none needed. `RUSTFLAGS="-D warnings"` is optional; `CARGO_TERM_COLOR=never` for
-logs. xtask is run as `cargo run -p xtask -- <command>` (a `cargo xtask` alias lands with #4).
+logs. xtask is run as `cargo xtask <command>` (alias in `.cargo/config.toml`);
+`cargo run -p xtask -- <command>` is equivalent. xtask uses the standard library only and takes
+its file list from `git ls-files`, so new files must be `git add`ed to be checked. Exit codes: 0
+success (one summary line on stdout), 1 violations (`path:line: message` per line on stderr),
+2 usage or input error.
 
 CI format, lint and test on Linux, Windows and macOS is available now; see "CI" below.
 
 Lands later:
 
-- `cargo run -p xtask -- check-paths` and the other guards (path check, card-data guard,
-  no-card-branch audit, header check): lands with #4 FP-003.
-- `cargo llvm-cov --workspace --fail-under-lines <floor>` (also `cargo xtask coverage`): lands
-  with #4 FP-003.
+- `cargo run -p xtask -- check-paths`: not delivered by #4 FP-003 (its guards are the three
+  above); a path check lands only if a later issue asks for it.
 - `cargo run -p xtask -- cite-check` (fetches into `cr-cache/`): lands with #7 FP-006.
 - `.pzl` runner `cargo run -p fineprint-cli -- pzl <file>` or an xtask equivalent (final syntax
   set by #51 FP-049).
@@ -156,17 +168,79 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `test (ubuntu-latest)` | `cargo test --workspace --locked` |
 | `test (windows-latest)` | `cargo test --workspace --locked` |
 | `test (macos-latest)` | `cargo test --workspace --locked` |
+| `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
+| `guards` | `cargo xtask guard all` |
+| `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 
-These nine job names are the contexts to list as required status checks on `main`
-(REQ-NFR-011). Do not rename them without updating branch protection. Binding, browser,
-coverage and guard jobs are added by later issues (#4, #6, #104).
+The first nine job names are the contexts listed as required status checks on `main`
+(REQ-NFR-011); the maintainer adds `coverage (ubuntu-latest)`, `guards` and `req-coverage`
+after #4 merges (docs/HUMAN_QUEUE.md). Do not rename them without updating branch protection. Binding and
+browser jobs are added by later issues (#6, #104).
 
 ## Coverage floors (REQ-NFR-008)
 
 Line coverage by `cargo-llvm-cov`: at least 90% for the rules core (state model, zones, objects
 and layouts, events, layers, turn structure, casting, SBAs, DSL runtime, API and redaction); at
 least 75% for everything else (bindings, `fineprint-ingest`, CLI and tooling). Each new public
-function has at least one test. The gates land with #4 FP-003.
+function has at least one test. `cargo xtask coverage` enforces these per crate; the table lives
+in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here.
+
+What is measured: every workspace crate's `src/`, `tests/`, `examples/` and `benches/` files
+(`--all-targets` with cargo-llvm-cov's default filename filter turned off). Excluded: registry and
+git dependency sources (`/.cargo/registry/`, `/.cargo/git/`), the rustup toolchain (`/.rustup/`)
+and std sources (`/rustc/`). Files outside the workspace crates (for example `spikes/bindings`) are
+not attributed to any crate. `xtask coverage` runs the same flags as the CI job
+(`llvm_cov_args` in `xtask/src/coverage.rs`).
+
+| Crate | Floor |
+|---|---|
+| `fineprint-base` | 90% |
+| `fineprint-dsl` | 90% |
+| `fineprint-core` | 90% |
+| `fineprint-ingest` | 75% |
+| `fineprint-ffi` | 75% |
+| `fineprint-wasm` | 75% |
+| `fineprint-bot` | 75% |
+| `fineprint-cli` | 75% |
+| `xtask` | 75% |
+| `fineprint-spike-libs` | 75% |
+
+- Percent per crate is the sum of covered lines over the sum of measured lines of all that
+  crate's files (not an average of per-file percentages), judged with integer arithmetic:
+  `covered * 100 >= floor * lines`. Files outside the workspace (registry sources) are ignored.
+- A crate with zero measured lines, or absent from the JSON, prints `n/a` and passes (the
+  stub crates have no code yet); the row is still printed.
+- A workspace crate found in the JSON but missing from the table fails the check: add it to
+  `FLOORS` in `xtask/src/coverage.rs` and to the table above in the same change; a new crate
+  directory outside `crates/<dir>`, `clients/cli`, `xtask` and `spikes/libs` also needs an arm in
+  `crate_of_rooted`. `spikes/libs/**` (`src`, `examples`, `tests`) is measured as
+  `fineprint-spike-libs` with no exemption.
+- CI installs `llvm-tools` and `cargo-llvm-cov` itself (not in `rust-toolchain.toml`).
+
+## Repository guards (REQ-NFR-012, REQ-NFR-004, REQ-ARCH-001, REQ-DSL-013)
+
+`cargo xtask guard` runs over `git ls-files` (tracked and staged files).
+
+- `headers`: every `.rs .cs .c .cpp .h .ts .js .py` file has the MPL-2.0 header sentence within
+  its first 20 lines (after an optional `#!` line); comment markers (`//`, `///`, `//!`, `#`,
+  `/*`, `*`, `<!--`) are stripped and whitespace collapsed before a case-sensitive containment
+  check. Skipped: paths under `target/`, `node_modules/`, `dist/`. Generated files need the
+  header too.
+- `card-data`: file-name checks apply everywhere, including `docs/` and `.github/ISSUE_TEMPLATE`;
+  content checks are skipped under those two. Rejected: `*.fpdb`,
+  `*.cr.txt`; file names `scryfall-*.json`, `oracle-cards-*.json`, `default-cards-*.json`,
+  `all-cards-*.json`, `unique-artwork-*.json`, `rulings-*.json`, `AtomicCards*.json`,
+  `AllPrintings*.json`, `AllIdentifiers*.json` (case-insensitive); `.json` files with an
+  `oracle_text` or `oracleText` key; any text file with five or more lines that start with a
+  rules-number shape followed by prose. Content is scanned for UTF-8 files under 5 MiB; a file of
+  5 MiB or more outside the exempt directories is reported as an incomplete scan (a violation).
+- `card-branch`: `.rs` files under `crates/fineprint-core/` must not compare `card_def_id`,
+  `cardDefId`, `card_name`, `name`, `def_id`, `definition_id` (including `.name()` and
+  `.card_def_id()`) with a string literal: `x == "..."`, `"..." != x`, `matches!(x, "...")`,
+  `match x { "..." => .. }`, `x.eq("...")`, `x.eq_ignore_ascii_case("...")`. Comments are
+  ignored. Allowlist: files under `crates/fineprint-core/src/support/`, and a line ending in
+  `// guard-allow: card-branch (<reason>)` with a non-empty reason. The full list of what the
+  scan does not catch is in the doc comment of `xtask/src/guard.rs`.
 
 ## Cache and fixture paths
 

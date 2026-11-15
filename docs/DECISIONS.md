@@ -185,6 +185,35 @@ Decision: The "deliberately failing test turns the run red" criterion was shown 
 Rationale: The session may push only to its assigned branch, so a separate scratch branch was not allowed. The branch tree after the revert equals the verified tree apart from this entry.
 Alternatives: A separate `scratch/` branch (not permitted here).
 
+## FP-003 (#4) — Coverage floors per crate and guard design
+
+**Decision:** (i) Crate-to-floor table: `fineprint-base`, `fineprint-dsl`, `fineprint-core` at 90%; `fineprint-ingest`, `fineprint-ffi`, `fineprint-wasm`, `fineprint-bot`, `fineprint-cli` (`clients/cli`) and `xtask` at 75%. Percent is summed covered over summed measured lines per crate; a crate with zero measured lines or absent from the JSON is `n/a` and passes; a workspace crate missing from the table fails. (ii) xtask uses no third-party crates: a hand-written JSON reader (depth cap 64, never panics) parses `cargo llvm-cov` output and files come from `git ls-files`. (iii) The header guard normalises the first 20 lines (after a shebang) by stripping comment markers and collapsing whitespace, then requires the MPL-2.0 sentence by containment, so wrapped and block-comment headers pass. (iv) card-data heuristics: bulk-data names, `.fpdb`/`.cr.txt`, `.json` with an Oracle text key, and five or more lines in a file (not necessarily consecutive, since real rules text separates rules with blank lines) that start with a rules-number shape followed by at least three words of prose; content is scanned only for UTF-8 files under 5 MiB. card-branch is a lexical line scan, not a parser (limits listed in `xtask/src/guard.rs`). (v) `cargo-llvm-cov` is pinned to 0.9.1 (newest on crates.io when checked, minimum Rust 1.87, below the pinned 1.97.0) and `llvm-tools` is installed by the CI coverage job, not added to `rust-toolchain.toml`.
+**Rationale:** The SRS gives two floors (REQ-NFR-008) but no crate list; the rules crates (base, dsl, core) are the "rules core". Integer arithmetic keeps the gate exact and deterministic. Std-only code keeps the supply chain empty (the dependency spike is #5). Keeping `llvm-tools` out of the toolchain file keeps developer installs small and does not change the pinned toolchain contract owned by #2.
+**Alternatives:** Averaging per-file percentages (rejected: skews small files); `cargo llvm-cov --fail-under-lines` (rejected: workspace-wide, no per-crate floors); `serde_json` (rejected: no third-party crates in xtask); consecutive-line CR detection (rejected: misses real rules text); `llvm-tools` in `rust-toolchain.toml` components (rejected: changes the toolchain contract for every developer).
+
+## FP-003 (#4) — Review-round fixes to guard behaviour
+
+**Decision:** (a) The `@generated` header exemption is removed; generated files need the MPL-2.0 header. (b) `.cpp` files are header-checked. (c) Card-data file-name checks (`*.fpdb`, `*.cr.txt`, bulk-data names) apply under `docs/` and `.github/ISSUE_TEMPLATE`; only the content checks are exempt there. (d) A file of 5 MiB or more outside the exempt directories is an explicit "scan incomplete" violation, superseding the earlier "scanned only under 5 MiB" clause. (e) `crate_of` classifies by the innermost workspace component of the path. (f) The card-branch block-comment blanking tracks nesting depth.
+**Rationale:** A silent skip (generated marker, oversized file, exempt directory for artifact names) lets forbidden or unlicensed content through unnoticed; failing loudly keeps the guards honest. An outer `crates/` directory in a developer checkout path must not change crate attribution, and Rust block comments nest, so the lexer must too.
+**Alternatives:** Incremental (streaming) scan of large files (rejected: more code, no benefit at current sizes; the largest tracked file is about 165 KB); passing the workspace root to `crate_of` (rejected: changes its public signature).
+
+## FP-003 (#4) — crate_of xtask arm restricted to workspace-root package
+
+**Decision:** `crate_of` maps a path to `xtask` only when the component after `xtask` is a package-layout entry (`src`, `tests`, `benches`, `examples`, `build.rs`) and the component before it is not `src`, `tests`, `benches` or `examples`. The `clients/cli` arm gets the same "not inside another crate's source subdirectory" check. Innermost-wins is kept.
+**Rationale:** A module directory named `xtask` inside a rules-core crate (for example `crates/fineprint-core/src/xtask/mod.rs`) was attributed to xtask and gated at 75% instead of 90%.
+**Alternatives:** Passing the workspace root to `crate_of` (rejected: changes its public signature); outermost-wins (rejected: breaks checkouts under an outer `crates/` directory).
+
+## FP-003 (#4) — Coverage paths anchored to the workspace root
+
+**Decision:** Coverage file paths are mapped to crates by `crate_of_rooted(root, path)`, which supersedes the earlier root-free `crate_of` entries (innermost match, and the `xtask` / `clients/cli` previous-component check). Both arguments are normalised (`\` to `/`, trailing `/` of the root dropped); the path must lie below the root; only the first components of the relative path are examined: `crates/<dir>/<more>` is `<dir>`, `clients/cli/<more>` is `fineprint-cli`, `xtask/<more>` is `xtask`, anything else is ignored. `parse_summary(text, root)` takes the root. `cargo xtask coverage` finds it with `git rev-parse --show-toplevel`, falls back to the current directory, and exits non-zero with a message if both fail; `--root <dir>` overrides it.
+**Rationale:** A root-free heuristic cannot tell `<root>/xtask/src/a.rs` from `<root>/crates/fineprint-core/src/nested/xtask/src/a.rs`, so a nested directory could pick the wrong coverage floor (75% instead of 90%). Anchoring to the root removes the ambiguity: nested `xtask`, `crates` or `clients` directories cannot claim anything, and registry, rustup and rustc sources fall outside the root. CI runs from the repository checkout, so it needs no change.
+**Alternatives:** More path heuristics (rejected: still wrong for some layouts); reading `Cargo.toml` metadata for package manifests (rejected: needs a TOML parser or `cargo metadata`, and the layout is fixed by the SRS); root from `CARGO_MANIFEST_DIR` (rejected: compile-time path, wrong for a relocated binary).
+
+## FP-003 (#4) — Coverage fails when no file lies under the workspace root
+
+**Decision:** `cargo xtask coverage` exits 1 with `coverage: none of the N files in the coverage report lies under the workspace root <root>; pass --root <dir> if the checkout path differs` when `data[0].files` is non-empty but no file path lies under the root. An empty files list, or files that are under the root but map to no crate, keep the previous behaviour (n/a, PASS). The check is in the run path; `crate_of_rooted` and the new `under_root` share one prefix helper.
+**Rationale:** With a symlinked checkout or a wrong `--root`, every file fell outside the root, every crate showed n/a, and the gate passed vacuously (REQ-NFR-008).
+**Alternatives:** Making `parse_summary` itself return an error (rejected: it is the pure parser and existing callers rely on an empty result for foreign roots); failing on an empty files list too (rejected: nothing to attribute is not a root mismatch); canonicalising the root with symlink resolution (rejected: needs filesystem access in the mapping and does not fix a wrong `--root`).
 ## FP-004 — PRNG: in-house PCG64-DXSM (no crate)
 
 **Decision:** The PCG64-DXSM generator (REQ-CORE-001) is a ~40-line pure-integer in-house
@@ -490,3 +519,69 @@ plus a copy of the native library to the output directory. Rejected: it does not
 Rejected: the program would be a Rust binary rather than a C one. Use `wasm-pack`. Rejected:
 it adds a tool whose wasm-bindgen pin is indirect. Use a third-party MSVC setup action.
 Rejected: `vswhere` + `Enter-VsDevShell` needs no third-party code.
+
+## FP-003 (#4) — Relative --root is resolved against the current directory
+**Decision:** `cargo xtask coverage --root <dir>` resolves a relative `<dir>` against the current
+working directory with a purely lexical normalisation (`.` and empty components dropped, `..`
+pops, never above the filesystem root, no trailing separator) before comparing it with the
+absolute filenames in the llvm-cov report. Absolute roots (leading `/` or `\`, or a drive prefix
+such as `C:\`) and the auto-detected root are used unchanged. If the current directory cannot be
+read and the root is relative, the command exits 2 with a message.
+**Rationale:** Since a root matching no file is a failure, `--root .` made every valid report
+fail. Lexical resolution is deterministic and does not touch the filesystem, so it cannot
+disagree with the paths llvm-cov recorded the way a symlink-resolving `canonicalize` could.
+**Alternatives:** `std::fs::canonicalize`. Rejected: resolves symlinks and needs the path to
+exist, so it may mismatch the report. Reject relative roots with an error. Rejected: `.` and `..`
+are the natural spellings when running from the workspace or from `xtask/`.
+
+## FP-003 (#4) — resolve_root preserves UNC and verbatim prefixes
+
+**Decision:** `resolve_root` treats a leading UNC prefix (`\\server\share` or `//server/share`) as one
+non-poppable unit and re-emits it with both leading separators; `..` never removes the server or the
+share. The Win32 verbatim forms are supported too: `\\?\C:` (drive, rooted like `C:\`) and
+`\\?\UNC\server\share` are kept as prefixes. Separator style still follows the cwd; absolute `--root`
+values pass through unchanged; no canonicalisation. `rel_to_root`/`under_root` needed no change.
+
+**Rationale:** Windows allows UNC current directories. The old code dropped one leading separator, so
+the root became `/server/share/repo` while llvm-cov filenames normalise to `//server/share/repo/...`,
+every file failed `under_root` and `run` exited 1 despite valid coverage. The verbatim forms cost a
+few lines in the same prefix parser.
+
+**Alternatives:** UNC only (rejected: small extra code covers verbatim); `std::fs::canonicalize`
+(rejected: filesystem access, resolves symlinks and yields `\\?\` paths that differ from the report).
+
+## FP-003 (#4) — spikes/libs is measured against the non-rules coverage floor
+
+**Decision:** `crate_of_rooted` maps `spikes/libs/<more>` (leading root-relative components
+`spikes`, `libs`, then at least one more) to `fineprint-spike-libs`, and `FLOORS` gains
+`("fineprint-spike-libs", 75)` after `xtask`. `spikes/bindings/**` and any other `spikes/` path stay
+unmapped.
+
+**Rationale:** The #5 entry "FP-004 — spikes/ directory handling by repo guards" requires the
+REQ-NFR-008 75% non-rules floor on all of `spikes/libs/**` (`src`, `examples`, `tests`) with no
+exemption. Without the mapping the spike's ~474 lines were silently unmeasured. The existing
+nested-directory protection is unchanged: only the leading components are examined.
+
+**Alternatives:** Exempting `examples/bench.rs` (rejected: needs an approved SRS change first);
+mapping all of `spikes/**` (rejected: `spikes/bindings` is not a Rust workspace member measured by
+llvm-cov); deleting the spike (rejected: only allowed once replacement golden-value tests exist).
+
+## FP-003 (#4) — Coverage measures tests/examples/benches of workspace crates
+
+**Decision.** `cargo xtask coverage` and the CI `coverage` job run `cargo llvm-cov --workspace
+--all-targets --no-default-ignore-filename-regex --ignore-filename-regex
+'(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only` (CI adds `--locked` and
+`--output-path`). Workspace `tests/`, `examples/` and `benches/` files are therefore measured.
+
+**Rationale.** cargo-llvm-cov 0.9.1 drops those files by default, which left
+`spikes/libs/examples/bench.rs` and `spikes/libs/tests/*.rs` out of the report although
+FP-004 requires the floor on all of `spikes/libs/**`. Measured with the new flags:
+`fineprint-spike-libs` 1105 lines, 916 covered, 82.89% (floor 75%); `xtask` 2026/1937, 95.60%;
+no other crate regressed (all others n/a). `spikes/libs/examples/bench.rs` is measured at 0/181
+(the example is only built, not run); tests/*.rs are 97-100%; src files 94-100%. Plain
+`--workspace` without `--all-targets` omits bench.rs even with the filter off, so `--all-targets`
+is part of the flag set. The two producers (`llvm_cov_args` and the CI step) must stay identical;
+a unit test pins the argument list.
+
+**Alternatives.** Leave the default filter (rejected: contradicts FP-004); exempt bench.rs
+(rejected: needs an SRS-approved exemption); add a bench smoke test (not needed: floor met).
