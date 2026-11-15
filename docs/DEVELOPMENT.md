@@ -114,12 +114,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask coverage                 # runs cargo llvm-cov, prints the per-crate table, checks floors
 cargo xtask coverage --input <file>  # same, from `cargo llvm-cov --json --summary-only` output
 cargo xtask coverage --root <dir>    # workspace root for path-to-crate mapping (default: git toplevel, else cwd; a relative dir is resolved against the current directory)
-                                       # exits 1 if the report has files but none lies under the root
+                                       # exits 1 if the report has files but none maps to a workspace crate under the root
 cargo xtask guard headers            # MPL-2.0 header in every source file
 cargo xtask guard card-data          # no committed card data or rules text
 cargo xtask guard card-branch        # no card-name/id literal comparisons in fineprint-core
 cargo xtask guard all                # the three guards, every violation reported
-cargo llvm-cov --workspace --json --summary-only   # needs: rustup component add llvm-tools;
+cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
                                                    # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
 
@@ -168,7 +168,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `test (ubuntu-latest)` | `cargo test --workspace --locked` |
 | `test (windows-latest)` | `cargo test --workspace --locked` |
 | `test (macos-latest)` | `cargo test --workspace --locked` |
-| `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
+| `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 
@@ -183,7 +183,14 @@ Line coverage by `cargo-llvm-cov`: at least 90% for the rules core (state model,
 and layouts, events, layers, turn structure, casting, SBAs, DSL runtime, API and redaction); at
 least 75% for everything else (bindings, `fineprint-ingest`, CLI and tooling). Each new public
 function has at least one test. `cargo xtask coverage` enforces these per crate; the table lives
-in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here:
+in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here.
+
+What is measured: every workspace crate's `src/`, `tests/`, `examples/` and `benches/` files
+(`--all-targets` with cargo-llvm-cov's default filename filter turned off). Excluded: registry and
+git dependency sources (`/.cargo/registry/`, `/.cargo/git/`), the rustup toolchain (`/.rustup/`)
+and std sources (`/rustc/`). Files outside the workspace crates (for example `spikes/bindings`) are
+not attributed to any crate. `xtask coverage` runs the same flags as the CI job
+(`llvm_cov_args` in `xtask/src/coverage.rs`).
 
 | Crate | Floor |
 |---|---|
