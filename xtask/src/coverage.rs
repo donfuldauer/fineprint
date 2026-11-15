@@ -1012,6 +1012,83 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// REQ-NFR-008: a workspace checked out at a directory literally named `src` keeps all of
+    /// its measurements (nothing is discarded, low coverage is not dropped as unmeasured).
+    #[test]
+    fn req_nfr_008_checkout_named_src() {
+        // `sep` is the separator used in the report paths; JSON needs backslashes doubled.
+        let build = |root: &str, sep: &str, xtask_covered: &str| {
+            let p = |tail: &str| {
+                let joined = format!("{root}/{tail}").replace('/', sep);
+                joined.replace('\\', "\\\\")
+            };
+            doc(&[
+                file(&p("xtask/src/main.rs"), "100", xtask_covered),
+                file(&p("clients/cli/src/main.rs"), "10", "9"),
+                file(&p("crates/fineprint-core/src/lib.rs"), "20", "19"),
+            ])
+        };
+        let expect_rows = |parsed: Vec<CrateSums>, xtask_covered: u64, passes: bool| {
+            assert_eq!(
+                parsed,
+                vec![
+                    ("fineprint-cli".to_string(), 10, 9),
+                    ("fineprint-core".to_string(), 20, 19),
+                    ("xtask".to_string(), 100, xtask_covered),
+                ]
+            );
+            let crates: Vec<CrateCoverage> =
+                parsed.into_iter().map(|(n, l, c)| cc(&n, l, c)).collect();
+            let report = check(&crates);
+            for (name, status) in [
+                ("xtask", if passes { Status::Pass } else { Status::Fail }),
+                ("fineprint-cli", Status::Pass),
+                ("fineprint-core", Status::Pass),
+            ] {
+                let row = report.rows.iter().find(|r| r.name == name).expect("row");
+                assert!(row.lines.is_some(), "{name} must be measured, not n/a");
+                assert_eq!(row.status, status, "{name}");
+            }
+            assert_eq!(report.passed(), passes);
+            if !passes {
+                assert_eq!(report.failures.len(), 1);
+                assert!(report.failures[0].starts_with("xtask"));
+            }
+        };
+        for (root, sep) in [("/work/src", "/"), ("C:\\work\\src", "\\")] {
+            // the Windows root is spelled with backslashes in the report paths
+            let norm = root.replace('\\', "/");
+            let good = build(&norm, sep, "90");
+            expect_rows(parse_summary(&good, root).expect("parses"), 90, true);
+            let bad = build(&norm, sep, "10");
+            expect_rows(parse_summary(&bad, root).expect("parses"), 10, false);
+        }
+
+        let dir = std::env::temp_dir().join(format!("xtask-cov-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let good = dir.join("good.json");
+        std::fs::write(&good, build("/work/src", "/", "90")).expect("write");
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, build("/work/src", "/", "10")).expect("write");
+        let args = |p: &std::path::Path, root: &str| {
+            vec![
+                "--input".to_string(),
+                p.display().to_string(),
+                "--root".to_string(),
+                root.to_string(),
+            ]
+        };
+        assert_eq!(run(&args(&good, "/work/src")), 0);
+        assert_eq!(run(&args(&bad, "/work/src")), 1);
+        let win_good = dir.join("win_good.json");
+        std::fs::write(&win_good, build("C:/work/src", "\\", "90")).expect("write");
+        let win_bad = dir.join("win_bad.json");
+        std::fs::write(&win_bad, build("C:/work/src", "\\", "10")).expect("write");
+        assert_eq!(run(&args(&win_good, "C:\\work\\src")), 0);
+        assert_eq!(run(&args(&win_bad, "C:\\work\\src")), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// REQ-NFR-008: a root matching no file of a non-empty report fails; other shapes keep working.
     #[test]
     fn req_nfr_008_root_mismatch_is_failure() {
