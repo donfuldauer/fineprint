@@ -151,7 +151,11 @@ jobs:
         if: steps.llvm-cov-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-llvm-cov --locked --version 0.9.1
       - name: Measure line coverage
-        run: cargo llvm-cov --workspace --locked --json --summary-only --output-path target/llvm-cov-summary.json
+        run: >-
+          cargo llvm-cov --workspace --locked --all-targets
+          --no-default-ignore-filename-regex
+          --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)'
+          --json --summary-only --output-path target/llvm-cov-summary.json
       - name: Check per-crate floors
         run: cargo xtask coverage --input target/llvm-cov-summary.json
 
