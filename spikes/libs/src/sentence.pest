@@ -1,0 +1,15 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
+
+// FP-004 spike grammar (REQ-NFR-005): neutral invented sentences, no game text.
+// Example: "move 3 marbles to the left bowl, then count 1 stone."
+
+WHITESPACE = _{ " " }
+number     = @{ ASCII_DIGIT+ }
+verb       = { "move" | "count" | "stack" }
+noun       = { "marbles" | "marble" | "stones" | "stone" }
+side       = { "left" | "right" }
+place      = { "to" ~ "the" ~ side ~ "bowl" }
+clause     = { verb ~ number ~ noun ~ place? }
+sentence   = { SOI ~ clause ~ ("," ~ "then" ~ clause)* ~ "." ~ EOI }
