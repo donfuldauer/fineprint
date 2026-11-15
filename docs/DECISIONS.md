@@ -222,7 +222,9 @@ and `pcg` crates were not evaluated (rand_pcg already covers the crate option).
 (`float_roundtrip` makes decimal parsing correctly rounded, so the canonical number is computed
 from the exact double; it is enabled on the documented behaviour of the feature, not on a
 measured failure). `serde = "=1.0.229"` (`std`, `derive`). Wrapper: `canonicalize(bytes)`
-parses into `serde_json::Value` and serialises with JCS.
+parses into `serde_json::Value` and serialises with JCS. The wrapper rejects duplicate property
+names, compared after string decoding, in every nested object via a serde visitor pre-pass
+(RFC 8785 requires I-JSON, where serde_json's `Value` would silently keep the last duplicate).
 **Rationale:** Vectors (hard-coded in `spikes/libs/tests/jcs.rs`), all passed by both
 candidates: 23 of 23 number-serialisation rows of the JCS specification table (copied from the
 RFC author's source `cyberphone/ietf-json-canon` draft XML; every row re-checked with Node.js 22
@@ -288,8 +290,10 @@ median of 51 samples, on Linux 6.18 x86_64, Intel Xeon @ 2.10 GHz (family 6 mode
 | Payload throughput, full | 240–280 MB/s | 88 MB/s | 167–185 MB/s |
 | Raw 1 MiB buffer | 1 492–1 614 MB/s | 330 MB/s | 3 001–3 261 MB/s |
 
-Budget (REQ-LAYER-005, ≤ 2 ms full board, 200 permanents): full recompute PASS at 3–9 % of
-the budget even with the software backend; incremental PASS. The soft figures came from
+Budget (REQ-LAYER-005, ≤ 2 ms full board, 200 permanents): on the local 4 vCPU Xeon KVM VM
+above only, full recompute PASS at 3–9 % of the budget even with the software backend;
+incremental PASS. The reference ubuntu-latest result is outstanding until a CI benchmark run
+records it (no CI job runs the benchmark yet). The soft figures came from
 `RUSTFLAGS='--cfg sha2_backend="soft"'`. Correctness tests (`tests/merkle.rs`): 10 repeated
 full hashes equal; incremental equals full after 1 and 10 permanent changes and after 600
 PRNG-driven random mutations (permanent edits, players, stack, triggers, turn, PRNG, permanents
@@ -347,7 +351,10 @@ Apache-2.0), arrayvec, rand_pcg, rand_core, serde_jcs (MIT OR Apache-2.0), ryu-j
 adds should (1) apply the MPL header, `forbid(unsafe_code)` and card-data guards to it, (2)
 treat it as non-rules for the no-float/no-HashMap rule (the spike's PRNG and Merkle code still
 avoid both; f64 appears only in `tests/jcs.rs` under the documented crate-level allow), and (3)
-exclude it from the coverage gate or give it a 0 % floor. Alternatively #4 may delete
+keep the REQ-NFR-008 75 % non-rules line-coverage floor for the spike library code
+(`spikes/libs/src/**`), with any exemption limited to the benchmark printer
+`spikes/libs/examples/bench.rs`; any wider exemption (for example of `src/**` or `tests/**`)
+needs an approved SRS change. Alternatively #4 may delete
 `spikes/libs` once the production crates adopt the pins, which removes the question.
 **Rationale:** The spike is evidence, not product; holding a benchmark printer
 (`examples/bench.rs`) to the 75 % floor would make the workspace gate fail for no product

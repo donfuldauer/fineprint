@@ -260,3 +260,68 @@ fn req_nfr_006_random_inputs_never_panic() {
     }
     assert!(accepted > 0);
 }
+
+/// REQ-NFR-006: RFC 8785 requires I-JSON input (no duplicate member names); a plain duplicate
+/// is rejected instead of silently keeping the last value.
+#[test]
+fn req_nfr_006_rejects_duplicate_keys_unescaped() {
+    assert!(canonicalize(br#"{"a":1,"a":2}"#).is_err());
+    assert!(canonicalize(br#"{"a":1,"b":2,"a":3}"#).is_err());
+}
+
+/// REQ-NFR-006: names are compared after JSON string decoding, so different escape spellings of
+/// the same name are duplicates.
+#[test]
+fn req_nfr_006_rejects_duplicate_keys_escaped() {
+    assert!(canonicalize(br#"{"a":1,"a":2}"#).is_err());
+    assert!(canonicalize(br#"{"a":1,"a":2}"#).is_err());
+    assert!(canonicalize(br#"{"/":1,"\/":2}"#).is_err());
+    assert!(canonicalize("{\"\u{1F602}\":1,\"\\ud83d\\ude02\":2}".as_bytes()).is_err());
+    assert!(canonicalize("{\"\\ud83d\\ude02\":1,\"\u{1F602}\":2}".as_bytes()).is_err());
+}
+
+/// REQ-NFR-006: duplicates are rejected in every nested object, including inside arrays.
+#[test]
+fn req_nfr_006_rejects_duplicate_keys_nested() {
+    assert!(canonicalize(br#"{"x":{"a":1,"a":2}}"#).is_err());
+    assert!(canonicalize(br#"[{"a":1,"a":2}]"#).is_err());
+    assert!(canonicalize(br#"{"x":[1,{"y":{"z":[{"b":true,"b":false}]}}]}"#).is_err());
+    // The first object is valid; the duplicate sits in a later array element.
+    assert!(canonicalize(br#"[{"a":1},{"c":{"d":null,"d":null}}]"#).is_err());
+}
+
+/// REQ-NFR-006: the same name in different objects, or names differing only in case, are not
+/// duplicates.
+#[test]
+fn req_nfr_006_accepts_same_key_in_different_objects() {
+    assert_eq!(
+        canonicalize(br#"{"a":{"a":1},"b":{"a":2}}"#)
+            .ok()
+            .as_deref(),
+        Some(&br#"{"a":{"a":1},"b":{"a":2}}"#[..])
+    );
+    assert_eq!(
+        canonicalize(br#"[{"a":1},{"a":2}]"#).ok().as_deref(),
+        Some(&br#"[{"a":1},{"a":2}]"#[..])
+    );
+    assert_eq!(
+        canonicalize(br#"{"a":1,"A":2}"#).ok().as_deref(),
+        Some(&br#"{"A":2,"a":1}"#[..])
+    );
+}
+
+/// REQ-NFR-006 / R12: very deep nesting is rejected by the recursion limit, not a stack overflow.
+#[test]
+fn req_nfr_006_deep_nesting_is_rejected_without_crashing() {
+    const DEPTH: usize = 10_000;
+    let mut arrays = Vec::new();
+    arrays.resize(DEPTH, b'[');
+    arrays.resize(2 * DEPTH, b']');
+    assert!(canonicalize(&arrays).is_err());
+    let mut objects = b"{\"k\":".repeat(DEPTH);
+    objects.extend_from_slice(b"1");
+    objects.extend(std::iter::repeat_n(b'}', DEPTH));
+    assert!(canonicalize(&objects).is_err());
+    // Trailing characters after a valid document are still rejected.
+    assert!(canonicalize(br#"{"a":1} x"#).is_err());
+}
