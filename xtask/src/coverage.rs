@@ -1308,6 +1308,82 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// REQ-NFR-008: `run` with a relative `--root` resolves it against the real current directory
+    /// and measures (and fails) coverage, rather than passing vacuously or reporting a mismatch.
+    /// The process working directory is never changed: the report paths are built under it.
+    #[test]
+    fn req_nfr_008_run_with_relative_root() {
+        let cwd = std::env::current_dir();
+        assert!(cwd.is_ok(), "current_dir() must be available for this test");
+        let cwd = cwd.expect("checked").display().to_string();
+        let sep = if cwd.contains('\\') && !cwd.contains('/') {
+            "\\"
+        } else {
+            "/"
+        };
+        let base = cwd.trim_end_matches(['/', '\\']);
+        let build = |xtask_covered: &str| {
+            let p = |tail: &str| {
+                let joined = format!("{base}{sep}{}", tail.replace('/', sep));
+                joined.replace('\\', "\\\\")
+            };
+            doc(&[
+                file(&p("xtask/src/main.rs"), "100", xtask_covered),
+                file(&p("clients/cli/src/main.rs"), "10", "9"),
+                file(&p("crates/fineprint-core/src/lib.rs"), "20", "19"),
+            ])
+        };
+        let good_json = build("90");
+        let bad_json = build("10");
+
+        // the resolved cwd roots all three crates; only the floor differs
+        for (json, covered, passes) in [(&good_json, 90, true), (&bad_json, 10, false)] {
+            let parsed = parse_summary(json, &cwd).expect("parses");
+            assert_eq!(
+                parsed,
+                vec![
+                    ("fineprint-cli".to_string(), 10, 9),
+                    ("fineprint-core".to_string(), 20, 19),
+                    ("xtask".to_string(), 100, covered),
+                ]
+            );
+            let crates: Vec<CrateCoverage> =
+                parsed.into_iter().map(|(n, l, c)| cc(&n, l, c)).collect();
+            let report = check(&crates);
+            for name in ["xtask", "fineprint-cli", "fineprint-core"] {
+                let row = report.rows.iter().find(|r| r.name == name).expect("row");
+                assert!(row.lines.is_some(), "{name} must be measured, not n/a");
+            }
+            assert_eq!(report.passed(), passes);
+            if !passes {
+                assert_eq!(report.failures.len(), 1);
+                assert!(report.failures[0].starts_with("xtask"));
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("xtask-cov-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let good = dir.join("good.json");
+        std::fs::write(&good, &good_json).expect("write");
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, &bad_json).expect("write");
+        let args = |p: &std::path::Path, root: &str| {
+            vec![
+                "--input".to_string(),
+                p.display().to_string(),
+                "--root".to_string(),
+                root.to_string(),
+            ]
+        };
+        for root in [".", "./", "xtask/.."] {
+            assert_eq!(run(&args(&good, root)), 0, "good report, root {root}");
+            assert_eq!(run(&args(&bad, root)), 1, "below-floor report, root {root}");
+        }
+        // a relative root that does not contain the files is a failure, not a pass
+        assert_eq!(run(&args(&good, "nonexistent_subdir")), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// REQ-NFR-008: a root matching no file of a non-empty report fails; other shapes keep working.
     #[test]
     fn req_nfr_008_root_mismatch_is_failure() {
