@@ -1,14 +1,11 @@
 # Fine Print — Agent Execution Process
 
 This file is the stable operating procedure for every agent that works on Fine Print. It does not
-change when the plan changes. The **plan** (`docs/PLAN.md`) says *what* to build: phases,
-subphases, owned paths, commands and gates. This file says *how* work moves from the plan to a
-merged pull request.
-
-`docs/PLAN.md` does not exist until the architecture and supported platforms are decided and the
-`plan-from-srs` skill has generated it from `docs/SRS.md`. Until then the only valid work is
-deciding the architecture (see `.claude/skills/plan-from-srs/SKILL.md` §1) and editing these
-process files.
+change when the plan changes. The **plan** is the set of **GitHub issues** labelled `work-unit`
+(milestones M1–M3): each issue is one unit of work, with its dependencies, requirements, owned
+paths and acceptance criteria. The plan is never written into the repository. `docs/DEVELOPMENT.md`
+(created by the workspace issue) holds the workspace layout, commands, gates and contracts. This
+file says *how* an issue becomes a merged pull request.
 
 Section numbers below (P1–P8) are what agents, briefs and replies cite.
 
@@ -16,18 +13,19 @@ Section numbers below (P1–P8) are what agents, briefs and replies cite.
 
 ## P1. Sources of truth
 
-| File | Role | Who writes it |
+| Source | Role | Who writes it |
 |---|---|---|
 | `docs/SRS.md` | Requirements (`REQ-<AREA>-<NNN>`), the rules baseline, and CR citations. Normative. | A person only. Agents propose SRS changes in `docs/HUMAN_QUEUE.md`. |
-| `docs/PLAN.md` | Architecture decisions, module layout, owned paths, commands, gates, phases, subphases, waves, REQ traceability. | `plan-from-srs` skill; afterwards the Orchestrator, through a reviewed PR. |
+| GitHub issues (`work-unit`) | **The plan.** One issue per reviewable PR: plan ID (`FP-NNN`, also the plan order), summary, `Depends on` list (also linked as GitHub "blocked by" dependencies), REQ IDs, deliverables, acceptance criteria, owned paths, expected tier. Labels: `ready` / `blocked` / `in-progress`, `type:*`, `area:*`, `phase:*`, `tier:*`; milestones M1–M3. | `plan-from-srs`; new issues for discovered work by any Orchestrator, with dependencies filled in. |
+| `docs/DEVELOPMENT.md` | Workspace layout, module ownership, exact commands and environment, coverage floors per crate, contracts and their owners, card-data and fixture paths. | The workspace issue creates it; later issues update it in their own PRs. |
 | `docs/PROCESS.md` | This file. | A person, or a reviewed PR the person asked for. |
 | `docs/DECISIONS.md` | Every ambiguity an agent resolved, with rationale. | Any agent (rule R8). |
 | `docs/HUMAN_QUEUE.md` | Judgement calls a person should see later. Never a request to close a review thread. | Any agent. |
 | `docs/RUN_LOG.md` | One row per unit-of-work attempt, plus wave gates and merges. | The Orchestrator. |
-| `contracts/CHANGE_REQUESTS.md` | Requests to change a contract (P3) after its owning subphase merged. | Any agent. |
+| `contracts/CHANGE_REQUESTS.md` | Requests to change a contract (P3) after its owning unit merged. | Any agent. |
 | `docs/briefs/` | Delegation briefs, when they are worth keeping (wave-wide `COMMON.md`, long briefs). | Work-classifier output, saved by the Orchestrator. |
 
-When the SRS and the plan disagree, the SRS wins and the disagreement goes to
+When the SRS and an issue disagree, the SRS wins and the disagreement goes to
 `docs/HUMAN_QUEUE.md`. When the SRS and the Comprehensive Rules (CR) of the SRS's rules baseline
 disagree, the CR wins, the work follows the CR, and the SRS erratum goes to `docs/HUMAN_QUEUE.md`
 (that is how Appendix A of the SRS was built).
@@ -37,9 +35,9 @@ disagree, the CR wins, the work follows the CR, and the SRS erratum goes to `doc
 These apply to every change, by every agent. Briefs inline them in full.
 
 1. **R1 — Module boundaries.** An agent edits only the paths its brief lists as OWNED PATHS. If
-   two subphases share a module in one wave, each owns a sub-directory and the earlier subphase
+   two units share a module in one wave, each owns a sub-directory and the earlier unit
    pre-stubs the module declarations.
-2. **R2 — Contract-change protocol.** The contracts (P3) are written freely only by the subphase
+2. **R2 — Contract-change protocol.** The contracts (P3) are written freely only by the unit
    that owns them. Any later change is appended to `contracts/CHANGE_REQUESTS.md` and lands as a
    separate contract-only PR. Additive changes merge immediately; breaking changes merge only
    between waves.
@@ -59,7 +57,7 @@ These apply to every change, by every agent. Briefs inline them in full.
    the CR itself defines (keywords, CR 111.10 tokens, counter kinds, designations) is allowed.
    Tests use **synthetic cards**: invented definitions with neutral names (`test.flier_2_2`,
    `test.global_humility_like`). The only exception is design documentation (`docs/SRS.md`,
-   `docs/PLAN.md`), which may name a card to identify an interaction. Scryfall bulk files live
+   and GitHub issues), which may name a card to identify an interaction. Scryfall bulk files live
    only in git-ignored caches. Product names and branding never contain third-party game names or
    marks; documentation that names the supported game carries the disclaimer from `README.md`.
 6. **R6 — Cite the rules.** Every rules procedure, SBA registry entry, keyword macro and rules
@@ -69,7 +67,7 @@ These apply to every change, by every agent. Briefs inline them in full.
 7. **R7 — Simulated time.** Tests never sleep and never assert on wall-clock time. Performance
    targets (REQ-LAYER-005) are measured by benchmarks, not asserted in unit tests.
 8. **R8 — Never wait on a person.** When a brief is ambiguous, choose the option most consistent
-   with the SRS, the plan and `docs/DECISIONS.md`; record it in `docs/DECISIONS.md` as
+   with the SRS, the issue and `docs/DECISIONS.md`; record it in `docs/DECISIONS.md` as
    `## <work item> — <title>` with **Decision**, **Rationale**, **Alternatives**; add one line to
    `docs/HUMAN_QUEUE.md`; continue. The only exceptions are listed in P8.
 9. **R9 — No self-review.** No agent reviews code for style or design, its own or another
@@ -91,8 +89,8 @@ These apply to every change, by every agent. Briefs inline them in full.
 ## P3. Contracts and blast radius
 
 ### Contracts
-A *contract* is anything that more than one module, binding or artifact depends on. The plan
-names the owning subphase of each. At minimum:
+A *contract* is anything that more than one module, binding or artifact depends on.
+`docs/DEVELOPMENT.md` names the issue that owns each. At minimum:
 
 - the public engine API (`IRulesEngine`, SRS §13.2) and its language bindings;
 - the card DSL schema and its `dslVersion` (SRS §14);
@@ -122,7 +120,7 @@ names the owning subphase of each. At minimum:
 
 ## P4. Model routing
 
-Every unit of work (a subphase, an Independent Tester task, a fixture task, a fix task, a
+Every unit of work (a unit, an Independent Tester task, a fixture task, a fix task, a
 CodeRabbit finding, a CI or gate failure) goes through the **work-classifier** before anyone works
 on it, except items that take the `triage` fast path.
 
@@ -130,7 +128,7 @@ on it, except items that take the `triage` fast path.
 |---|---|---|
 | T0 | Haiku 5.5 (`haiku`) | Docs-only edits, run-log and queue lines, formatting, renames, a review nit whose fix the comment spells out exactly |
 | T1 | Sonnet 5.5 (`sonnet`) | Well-specified changes in one module, adding tests, CI tweaks, most review findings, keyword macros or synthetic test cards from a clear template, verification runs |
-| T2 | Opus 5.5 (`opus`) | New subphase implementations; the layer evaluator, dependency solver, replacement bus, combat solvers, loop detection, determinized forking; grammar work; cross-module changes; anything ambiguous; every investigation |
+| T2 | Opus 5.5 (`opus`) | New unit implementations; the layer evaluator, dependency solver, replacement bus, combat solvers, loop detection, determinized forking; grammar work; cross-module changes; anything ambiguous; every investigation |
 | T3 | Fable 5.2 (`fable`) | Only under the Fable rule |
 
 **Fable rule.** Fable 5.2 is used only when all three hold:
@@ -151,7 +149,7 @@ but never move up into T3 that way.
 
 **Fast path.** The Orchestrator classifies an obviously small item inline with the `triage` skill
 instead of spawning a work-classifier, under the eligibility checks in that skill. The fast path
-never routes T2 or T3, and never handles subphases, Independent Tester tasks, fixture tasks,
+never routes T2 or T3, and never handles units, Independent Tester tasks, fixture tasks,
 investigations or gate failures.
 
 ## P5. Agents and the flow of one unit of work
@@ -170,7 +168,7 @@ as the `model` override. The Orchestrator writes no product code and reviews no 
 | `rules-researcher` | Sonnet 5.5 | Answers rules questions with exact CR citations and quoted text; checks SRS/CR consistency | Change repository files |
 
 **Flow.** classify (inline via `triage` for eligible small items) → execute (Implementer and
-Independent Tester in parallel for a subphase) → verify → on `fail`, investigate if the cause is
+Independent Tester in parallel for a unit) → verify → on `fail`, investigate if the cause is
 unclear, then classify and execute the fix → verify again → open the PR (P6) → CodeRabbit
 findings go through the same loop until the merge conditions hold.
 
@@ -185,15 +183,16 @@ classifier-bound item into the classifier batch; sends all classifier-bound item
 work-classifier call; runs one Fixer brief per (tier, module) group, with docs-only items as one
 docs group; and runs one work-verifier on the resulting head commit whenever the head changed.
 
-**Branches.** `main` is protected. Each unit of work runs on its own branch from the latest
-`main` (or the branch the session assigns) and reaches
-`main` only through its own PR. Branch names: `sp/<id>`, `fix/<id>`, `fixtures/<id>`. If the
+**Branches.** `main` is protected. Each unit of work is one GitHub issue and runs on its own
+branch from the latest `main` (`issue/<N>-<slug>`, or the branch the session assigns) and reaches
+`main` only through its own PR, which closes the issue. Work found along the way that the issue
+cannot absorb becomes a new issue with its dependencies filled in. If the
 session can push only to one assigned branch, record that
 in `docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] …`).
 
-**Subphase gate (definition of done).** All must hold:
-1. The plan's format and lint commands are clean (warnings are errors).
-2. Implementer tests and every verification criterion in the plan pass.
+**Unit gate (definition of done).** All must hold:
+1. The format and lint commands in `docs/DEVELOPMENT.md` are clean (warnings are errors).
+2. Implementer tests and every acceptance criterion in the issue pass.
 3. The Independent Tester's spec tests pass. A disagreement is resolved against the brief.
 4. Line coverage meets the floor for each touched module (REQ-NFR-008: 90% rules core, 75%
    everything else).
@@ -202,9 +201,9 @@ in `docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] 
 6. Determinism: the golden replay corpus replays to identical state hashes (10 runs, and on every
    binding and platform of REQ-NFR-003); cached and full-recompute layer modes agree
    (REQ-LAYER-005).
-7. Every `REQ-*` ID the subphase claims has at least one test that names it.
+7. Every `REQ-*` ID the unit claims has at least one test that names it.
 8. An automated path check confirms the diff touches only owned paths.
-9. The work-verifier reports `pass`. The subphase is done only when its PR merges under P6.
+9. The work-verifier reports `pass`. The unit is done only when its PR merges under P6.
 
 **Wave gate.** Full test suite on every platform in REQ-NFR-003; golden replay hashes identical
 across platforms and bindings; every earlier wave's tests still pass; benchmarks have not
@@ -213,12 +212,14 @@ regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
 
 ## P6. Pull request, review and merge
 
-1. **Open.** When the work-verifier passes, the Orchestrator pushes the branch and opens a PR
-   against `main` using `.github/pull_request_template.md`. Bot names in the body go in
-   backticks so nobody is notified by accident.
+1. **Open.** When the work-verifier passes, the Orchestrator commits the unit's
+   `docs/RUN_LOG.md` row(s), pushes the branch and opens a PR against `main` using
+   `.github/pull_request_template.md`, starting the body with `Closes #<issue>`. Bot names in the
+   body go in backticks so nobody is notified by accident.
 2. **Auto-fix on.** Right after opening, the Orchestrator subscribes to the PR's activity
-   (comments, reviews, CI). Every CodeRabbit comment and CI failure is handled as it arrives;
-   nobody polls or sleeps waiting.
+   (comments, reviews, CI) if the session offers that; otherwise it schedules `send_later`
+   check-ins (about every 10 minutes) until the PR merges. Every CodeRabbit comment and CI
+   failure is handled as it arrives; nobody sleep-polls in a loop.
 3. **Every finding is accounted for**, batch by batch (P5), each ending in exactly one
    disposition recorded as a reply on its thread:
    - **Fixed:** an executor commit addresses it and the verifier passed; the reply names the
@@ -246,8 +247,10 @@ regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
    CodeRabbit has reviewed the head with nothing actionable unanswered and no outstanding change
    request; every thread has a disposition reply and is resolved (except types that cannot be
    resolved); the branch is up to date with `main`; the work-verifier's last result for the head
-   is `pass`. Then merge with a merge commit, delete the branch, unsubscribe, and add a
-   `docs/RUN_LOG.md` row with the PR number and merge commit.
+   is `pass`. Then merge with a merge commit (the repository deletes the branch), unsubscribe,
+   and unblock dependents: every issue whose blockers are now all closed swaps its `blocked`
+   label for `ready`. The run-log row was committed in the PR itself, so nothing is pushed to
+   `main` directly.
 6. **Never**, to get green: skip, ignore, delete or weaken a test; force-push or rewrite history
    on a branch the agent did not create; push an empty commit; close and reopen a PR to restart
    CI; merge with a failing required check.
@@ -259,9 +262,9 @@ regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
 2. Then the issue-investigator makes a fresh pass and the classifier routes one more attempt one
    tier up from a fresh brief plus the failure history (Fable only under P4).
 3. Then the unit is marked `blocked` in `docs/RUN_LOG.md` and added to `docs/HUMAN_QUEUE.md`.
-4. A blocked subphase the plan marks *optional* (work outside milestone 1, REQ-NFR-010) is
+4. A blocked issue outside milestone M1 (REQ-NFR-010) is
    skipped with its dependents; the run continues.
-5. A blocked *core* subphase halts only its dependents. Independent work continues, and the run
+5. A blocked *core* unit halts only its dependents. Independent work continues, and the run
    ends with a partial result and a precise account of what is missing.
 6. Parser coverage is a measured number, not a gate: a card template the grammar cannot handle
    yet is reported as residue (REQ-ING-013) and becomes grammar work, never a blocked run.

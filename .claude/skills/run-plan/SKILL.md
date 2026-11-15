@@ -1,6 +1,6 @@
 ---
 name: run-plan
-description: "The Orchestrator's loop for executing docs/PLAN.md under docs/PROCESS.md: works out which subphases and fixture tasks are ready, routes each through the work-classifier, spawns executors and testers in parallel, verifies, opens and drives PRs to merge, runs wave gates, and keeps the run log current. Use to start or resume unattended work once the plan exists (/run-plan, optionally with a wave or subphase id)."
+description: "The Orchestrator's loop over the plan's GitHub issues: finds every ready issue (all dependencies closed), works each one with the work-issue skill (in parallel where owned paths do not overlap), drives PRs to merge, runs phase gates, and keeps the run log current. Use to start or resume unattended work across many issues (/run-plan, optionally with a milestone or phase)."
 ---
 
 # run-plan
@@ -8,7 +8,7 @@ description: "The Orchestrator's loop for executing docs/PLAN.md under docs/PROC
 You are the **Orchestrator** (PROCESS.md P5). You route, spawn, open PRs, merge and log. You write
 no product code and review no code.
 
-If `docs/PLAN.md` does not exist, stop and use the `plan-from-srs` skill instead.
+If there are no `work-unit` issues, stop and use the `plan-from-srs` skill instead.
 
 ## 0. Resume
 
@@ -23,62 +23,39 @@ If `docs/PLAN.md` does not exist, stop and use the `plan-from-srs` skill instead
 
 ## 1. Pick ready work
 
-A subphase is **ready** when every subphase it depends on is merged to `main`, it is not
-`blocked` in the run log, and no open PR owns any of its paths. If an argument named a wave or
-subphase, restrict to that. Fixture tasks are ready when the DSL schema and `.pzl` format they
-use are merged.
+The units of work are GitHub issues. An issue is **ready** when it is open, labelled `ready`
+(every issue in its "Depends on" list is closed), not `in-progress`, and no open PR owns any of
+its paths. List them with
+`gh api "repos/donfuldauer/fineprint/issues?state=open&labels=ready&per_page=100"`, and take
+them in plan order (ascending `FP-NNN` plan ID). If an argument named a milestone or phase, restrict to
+that.
 
-Start every ready unit whose owned paths do not overlap, up to a sensible parallelism (default 3
-at once).
+Start every ready issue whose owned paths do not overlap, up to a sensible parallelism (default
+3 at once).
 
-## 2. Per subphase
+## 2. Per issue
 
-1. **Classify.** Spawn `work-classifier` twice in parallel: once for the Implementer task, once
-   for the Independent Tester task, each with `FABLE_ALLOWANCE`. If either returns `needs-rules`,
-   spawn `rules-researcher` with all the questions in one call, then call the classifier again
-   with the answers. Add both `run log line`s to `docs/RUN_LOG.md` and any `human queue line`.
-2. **Execute.** Create the branch `sp/<id>` from `main`. Spawn the Implementer and the Independent
-   Tester **in parallel**, each with its brief verbatim and its model as the `model` override.
-   Their owned paths are disjoint by construction.
-3. **Rules questions** in either report: one `rules-researcher` call, then a classifier call for a
-   follow-up brief. SRS discrepancies go to `docs/HUMAN_QUEUE.md`.
-4. **Verify.** Commit their work (one commit per role, `[sp <id>] …`) unless the briefs said the
-   executor commits. Spawn `work-verifier` with both briefs and both reports.
-5. **On fail.** For each failure: if the cause is not obvious, `issue-investigator` first; then
-   the classifier (batched) and a Fixer; verify again. Apply the P7 failure policy and count
-   attempts in the run log.
-6. **Open the PR** (PROCESS.md P6 step 1) using the PR template, subscribe to its activity, and
-   continue with other ready work. Do not sleep or poll.
+Run the `work-issue` skill for it, from §1 (dependency check) to §7 (merge and unblock). Keep
+going with other ready issues while a PR waits for review.
 
-## 3. Fixture tasks and parser coverage
+## 3. Discovered work
 
-- **Fixture tasks** (synthetic cards and regression scenarios, REQ-TEST-001) are classified like
-  subphases, run by `fixture-author` on a `fixtures/<id>` branch, verified, and merged through a
-  PR. Schedule each SRS area's fixtures alongside or just before the subphase that implements that
-  area, so its Independent Tester can use them. `engine gaps` they report become fix tasks for the
-  classifier against the owning module.
-- **Parser coverage** is grammar work like any other subphase. Pick the next templates from the
-  aggregate residue patterns that CI measures on its cached card data (REQ-ING-013,
-  REQ-NFR-004). Record the before/after aggregate numbers in the PR and the run log. Never paste
-  card names or text into briefs, PRs or logs.
+Engine gaps, deferred findings and requests outside owned paths become new issues with their
+dependencies, labels and milestone; nothing is added to the repository for them.
 
-## 4. Driving a PR to merge
+## 4. After each merge
 
-Handle each review round or push as one batch with the `triage` skill's procedure (§2 of that
-skill). Dispositions, resolving and merge conditions are in PROCESS.md P6; rules disputes are
-settled by a `rules-researcher` citation. After merging: delete the branch, unsubscribe, add the
-run-log row with the PR number and merge commit, and go back to step 1, since merges make new work
-ready.
+Merges make new issues ready: go back to §1.
 
-## 5. Wave gate
+## 5. Phase gate
 
-When every subphase of a wave is merged (or blocked and optional), run the wave gate from
-PROCESS.md P5 on `main` (the plan's CI matrix, golden replays across platforms and bindings,
-earlier waves' tests, benchmarks). Green: tag `wave-N-green` and log it. Red: each failure becomes
-a fix task through the classifier against the owning subphase; never pause for a person.
+When every issue of a phase is closed (or blocked and optional), run the wave gate from
+PROCESS.md P5 on `main` (the CI matrix, golden replays across platforms and bindings, earlier
+phases' tests, benchmarks). Green: tag `phase-N-green` and log it in the next PR. Red: each
+failure becomes a new issue against the owning area; never pause for a person.
 
 ## 6. When to stop
 
-Stop when no work is ready and no PR is open, or when every remaining unit is blocked. End with a
-short account: waves completed, PRs merged, blocked units and why, `[Fable wanted]` lines, the
+Stop when no issue is ready and no PR is open, or when every remaining issue is blocked. End with
+a short account: phases completed, PRs merged, blocked issues and why, `[Fable wanted]` lines, the
 aggregate parser coverage, and the human-queue items a person should look at first.

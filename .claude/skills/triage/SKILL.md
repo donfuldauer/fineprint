@@ -1,6 +1,6 @@
 ---
 name: triage
-description: "The Orchestrator's inline fast path for classifying obviously small Fine Print work items (T0/T1 fixes, CodeRabbit nits, docs/run-log/queue edits, CI tweaks) under PROCESS.md P4, and the procedure for batching one review round or push. Do NOT use it for subphases, Independent Tester tasks, fixture tasks, investigations, gate failures, or anything that fails the eligibility checks; those go to the work-classifier."
+description: "The Orchestrator's inline fast path for classifying obviously small Fine Print work items (T0/T1 fixes, CodeRabbit nits, docs/run-log/queue edits, CI tweaks) under PROCESS.md P4, and the procedure for batching one review round or push. Do NOT use it for units, Independent Tester tasks, fixture tasks, investigations, gate failures, or anything that fails the eligibility checks; those go to the work-classifier."
 ---
 
 # triage (PROCESS.md P4 "Fast path", P5 "Batching")
@@ -12,7 +12,7 @@ task-executor and checked by the work-verifier. The fast path never routes T2 or
 ## 1. Eligibility (ALL must hold)
 
 - The item is a fix, a CodeRabbit finding, a docs/run-log/queue edit or a CI tweak (never a
-  subphase, an Independent Tester task, a fixture task, an investigation or a gate failure).
+  unit, an Independent Tester task, a fixture task, an investigation or a gate failure).
 - The tier is clearly T0 (Haiku 5.5) or T1 (Sonnet 5.5).
 - It touches one module, or docs only.
 - No contract change (PROCESS.md P3).
@@ -88,7 +88,7 @@ RULES
 
 COMMANDS
   <environment block from docs/briefs/COMMON.md, then the exact format / lint / test commands
-   from docs/PLAN.md §2.2 for the touched module>
+   from docs/DEVELOPMENT.md for the touched module>
 
 DONE WHEN
   <each "fixed" condition holds; the commands pass; the diff touches only OWNED PATHS>
