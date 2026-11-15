@@ -97,7 +97,7 @@ toolchain.
 ## Architecture — A9 Coverage and performance
 
 **Decision:** 90% line coverage for the rules core, 75% elsewhere (REQ-NFR-008); the performance
-reference is GitHub's hosted `ubuntu-latest` runner, tracked as a trend with a 10% wave-gate
+reference is GitHub's hosted `ubuntu-latest` runner, tracked as a trend with a 10% phase-gate
 regression limit (REQ-NFR-009).
 **Rationale:** Rules correctness is the product; CI-reproducible benchmarks.
 **Alternatives:** 85/60 or 95/80 floors; a local reference machine; no reference yet.
