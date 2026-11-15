@@ -1,0 +1,11 @@
+[package]
+name = "fineprint-base"
+description = "Shared base types for the Fine Print rules engine (rules crate)."
+license = "MPL-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -157,3 +157,24 @@ only; the SRS is unchanged.
 **Rationale:** A client per binding exercises every shipped API on every platform in REQ-NFR-003
 without building three near-identical desktop apps.
 **Alternatives:** one native GUI client per operating system.
+
+## FP-001 — Toolchain pin and workspace conventions
+
+**Decision:** The toolchain is pinned to exactly `1.97.0` (`rust-toolchain.toml`, profile
+`minimal`, components rustfmt and clippy, no targets yet); changing it is a recorded decision
+(REQ-NFR-001). Edition 2024, resolver 3, `rust-version = "1.97"`. `publish = false` on every
+crate until a release issue and a human decision (PROCESS P8). `license = "MPL-2.0"` is written
+literally in every crate. One workspace-wide `clippy.toml` bans `f32`, `f64`, `HashMap` and
+`HashSet` via `disallowed-types`; clippy 1.97 matches the float primitives (proved with a
+temporary violation in `fineprint-core`). The non-rules crates (ingest, ffi, wasm, bot, cli,
+xtask) carry `#![allow(clippy::disallowed_types)]`; the ffi crate is the only one without
+`forbid(unsafe_code)`. `fineprint-ingest` depends on base and dsl only, not core, because the
+toolchain shares the DSL types (REQ-NFR-005). `fineprint-cli` lives at `clients/cli` as a
+library stub. Issue #2's owned-path list omitted `clients/cli` and `docs/DECISIONS.md`; both
+were authorised in the brief.
+**Rationale:** An exact pin makes CI and developer builds identical. A single clippy.toml is
+the only config clippy reads per workspace; the crate-level allow keeps the rule scoped to the
+rules crates without extra files.
+**Alternatives:** floating `stable` (rejected: non-reproducible); per-crate clippy.toml files
+(rejected: duplication, drift); `[workspace.lints]` in place of attributes (rejected: the
+non-rules allow and the unsafe rule are clearer next to the code).
