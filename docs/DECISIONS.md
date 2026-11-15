@@ -406,24 +406,40 @@ with SplitMix64. Run SplitMix64 from state = seed and take four successive outpu
 initstate = (o0 << 64) | o1 and initseq = (o2 << 64) | o3 (big-endian word order, as written).
 Seeding then follows the NumPy `srandom` convention exactly as `Pcg64Dxsm::new` implements it in
 `spikes/libs/src/prng.rs`: the standard 128-bit multiplier during seeding only, the cheap
-multiplier for stepping, and the top bit of initseq discarded. Fork reseeding is not part of this
-decision: it stays exactly as REQ-API-004 words it, `SplitMix64(parentPrngState ⊕ forkSalt)`, and
-issue #9 (FP-008) implements it and must reuse the same SplitMix64 expansion helper. (2) JCS number
+multiplier for stepping, and the top bit of initseq discarded. Fork reseeding is defined
+bit-exactly as follows. Let the parent generator's raw state be (state: u128, increment: u128), as
+returned by `Pcg64Dxsm::raw()`, and forkSalt a u64. Reduce to a 64-bit seed by XOR-folding:
+`seed64 = hi64(state) ^ lo64(state) ^ hi64(increment) ^ lo64(increment) ^ forkSalt`, where hi64 is
+the top 64 bits and lo64 is the bottom 64 bits. The increment is included so that two generators
+with equal state but different streams fork differently. Then apply the same expansion as the
+initial seed: SplitMix64 from state = seed64, four successive outputs o0..o3, initstate =
+(o0 << 64) | o1, initseq = (o2 << 64) | o3, then NumPy `srandom` seeding via `Pcg64Dxsm::new`. One
+helper `from_u64_seed(seed64)` therefore serves both createMatch seeding and fork reseeding. This
+is the literal REQ-API-004 formula with its types made explicit (parentPrngState is the
+generator's whole raw state, folded), and repeated forks with the same salt stay reproducible.
+Issue #9 (FP-008) implements this and must add a test with fixed expected values for both the
+initial seed and one fork. (2) JCS number
 table: the vectors are accepted as they stand and the item is closed. (3) unicode-ident: the
-Unicode-3.0 conjunct is accepted, and the accepted-licence policy is recorded. (4) spikes/libs
+Unicode-3.0 conjunct is accepted, and the accepted-licence policy is recorded. This was resolved on
+the repository owner's instruction to the Orchestrator to decide the queued items (session of
+2026-11-15); it is a licensing decision under PROCESS.md P8, taken by that delegation, and can be
+reopened by the owner at any time. (4) spikes/libs
 guard handling: already implemented by #4 (FP-003); nothing further.
 **Rationale:** (1) SRS `createMatch(config, seed: uint64)` gives a 64-bit match seed, and
-REQ-CORE-001 says the seed derivation is specified in REQ-API-004. REQ-API-004 (§13.4) specifies
-only fork reseeding, not the initial expansion, so the initial expansion needed its own decision.
+REQ-CORE-001 says the seed derivation is specified in REQ-API-004. REQ-API-004 (§13.4) gives only
+the fork formula, not the types or the expansion, so this entry defines the initial expansion and
+makes the fork typing explicit.
 SplitMix64 is already mandated for forks, so one expansion primitive serves the whole engine; it is
 a few lines of integer arithmetic with no floats and no tables. The NumPy convention is the one
 anchored by published vectors: `tests/prng.rs` checks the seeded state against NumPy's published
 CSV rows, generated from NumPy's own initstate/initseq. The pcg-cpp/`rand_pcg` convention differs
 only in seeding and has no published vectors to test against. The choice is frozen per engine
 major version (REQ-CORE-001), so either convention would be deterministic; this one is testable.
-Scope note: this fixes only initial seeding. REQ-CORE-001's pointer to REQ-API-004 covers fork
-reseeding only. Optional, not a queue item: the SRS could be clarified later on this point. The
-SRS text is not edited here, because there is no owner-approved SRS edit.
+Scope note: REQ-API-004 gives only the formula, so this entry makes the typing explicit (state
+folded, same expansion as the initial seed). The SRS text is not edited here, because there is no
+owner-approved SRS edit. Optionally the SRS could spell out the folding later; this is an optional
+note, not a queue item, because it is the SRS formula with its types made explicit, not a change
+to it.
 (2) The final RFC 8785 text could not be fetched. rfc-editor.org, datatracker.ietf.org,
 www.ietf.org and tools.ietf.org are outside this session's allowed network hosts: DNS or proxy
 refusal on every attempt, including via the web fetch tool. The basis for accepting the vectors:
@@ -455,10 +471,14 @@ handling by repo guards" and is not changed here.
 **Alternatives:** (1) NumPy `SeedSequence` for the expansion: rejected, a large Python-specific
 mixing function that is not needed. The pcg-cpp/`rand_pcg` `new` convention: rejected, it differs
 from the published-vector anchor. Deriving initseq as a constant: rejected, it loses independent
-streams for forked or reseeded generators. (2) Leaving the item open until the final RFC text can
+streams for forked or reseeded generators. Fork reseed taking only `state` and ignoring
+`increment`: rejected, because forks of equal-state, different-stream generators would collide.
+Fork reseed mixing via nested SplitMix64 calls instead of XOR: rejected, because it departs from
+the literal REQ-API-004 formula. (2) Leaving the item open until the final RFC text can
 be fetched: rejected, because this session has no fetch route and no person action is available;
 the residual risk is recorded instead. (3) Adding cargo-deny now to enforce the list: not done in
-this change, and the list is policy only. (4) Editing the spikes/ guard entry or deleting the
+this change, and the list is policy only. Keeping the item open for a separate approval: rejected,
+because the owner delegated the decision. (4) Editing the spikes/ guard entry or deleting the
 spike now: rejected, because #4 already implements the floor and deletion is gated on production
 golden-value tests.
 
