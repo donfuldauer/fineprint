@@ -1,20 +1,21 @@
 ---
 name: plan-from-srs
-description: "Generates docs/PLAN.md for Fine Print from docs/SRS.md: first gets the architecture and supported-platform decisions from the user and writes them into the SRS as REQ-NFR-* nonfunctional requirements (propagating them through the repo), then writes the module layout, commands, gates, contracts, phased subphases, wave matrix and full REQ-ID traceability. Use when docs/PLAN.md does not exist, or when the SRS version or an architecture decision changes and the plan must be regenerated."
+description: "Turns docs/SRS.md into Fine Print's plan, which is a set of GitHub issues (one reviewable PR each) with dependency links, labels and milestones: first gets any missing architecture and platform decisions from the user and writes them into the SRS as REQ-NFR-* requirements, then creates the work-unit issues with full REQ-ID traceability. Use when there are no work-unit issues yet, or when an SRS or architecture change needs new or changed issues."
 ---
 
 # plan-from-srs
 
-The plan turns the SRS into units of work the agents in `.claude/agents/` can execute unattended
-under `docs/PROCESS.md`. Every later brief is built from it, so it must be concrete: exact paths,
-exact commands, exact gates.
+The plan turns the SRS into units of work the agents in `.claude/agents/` can execute under
+`docs/PROCESS.md`. **The plan is GitHub issues, never a repository file**: each `work-unit` issue
+is one unit, sized as one reviewable PR, and its body is the unit's spec. Every later brief is
+built from an issue, so issues must be concrete: owned paths, deliverables, acceptance criteria.
 
 This is the one workflow in which the Orchestrator stops to ask a person (PROCESS.md P8).
 
 ## 1. Architecture and platform decisions (ask before planning)
 
 Read `docs/SRS.md` and `docs/DECISIONS.md`. Every decision below must be made by the user and
-written into the SRS as a **nonfunctional requirement** before step 2. The plan is derived from
+written into the SRS as a **nonfunctional requirement** before step 2. Issues are derived from
 requirements, never from chat or from the decision log alone.
 
 1. **Ask.** For each decision with no `REQ-NFR-*` requirement in the SRS, ask the user with
@@ -54,100 +55,65 @@ requirements, never from chat or from the decision log alone.
 | A10 | Card-data distribution for development: may Scryfall bulk files be cached in the repository or CI cache; is the repository public | §1.3, REQ-ING-014 | not committed; legal review before any public distribution |
 | A11 | Review and CI: CodeRabbit installed; branch protection; required checks | PROCESS.md P6 | yes |
 
-## 2. Write `docs/PLAN.md`
+## 2. Design the work units
 
-Use this structure. Fill every section; write "none" rather than omitting one.
+Before creating anything, write the breakdown out (in the session's scratch space, not the
+repository) and check it.
 
-```
-# Fine Print — Implementation Plan (from SRS at commit <sha>)
-## 0. Decisions             (table: D-id | topic | decision | REQ-NFR-* | DECISIONS link)
-## 1. Summary               (scope of this plan; what is deferred, from A8)
-## 2. Workspace
-### 2.1 Module layout        (module → path → owned by subphase → coverage floor)
-### 2.2 Commands             (exact build, format, lint, test, coverage, .pzl runner, golden
-                              replay check, IP/card-branch guard, req_coverage; environment
-                              variables; per binding)
-### 2.3 CI matrix            (from A3; which jobs are required checks)
-### 2.4 Contracts            (each contract from PROCESS.md P3 → owning subphase → path)
-### 2.5 Fixtures & caches     (synthetic test-card library path; git-ignored card-data and CR caches)
-## 3. Contracts (normative excerpts the briefs paste: state types, IDs, the DSL schema files,
-                 the .pzl schema, the replay header, the artifact layout)
-## 4. Phases & subphases
-## 5. Wave & dependency matrix (wave | subphases | depends on | expected tier)
-## 6. Traceability            (every REQ-* ID → subphase(s) → test location)
-## 7. Parser coverage roadmap  (SRS §16.5 order; how CI measures aggregate coverage)
-## Appendix: open questions    (also mirrored in docs/HUMAN_QUEUE.md)
-```
+**Sizing.** One unit is one PR a person would review in one sitting: one coherent change in one
+area, usually under about 800 changed lines excluding generated files and fixtures. Split
+anything larger.
 
-### Each subphase
+**Dependencies.** Only real prerequisites (code the unit calls, a contract it implements
+against, a tool it runs), so independent units can run in parallel. The graph must be acyclic,
+and units are numbered `FP-NNN` in a topological order (that is the plan order).
 
-```
-#### Subphase <P.N>: <title>
-- Requirements: REQ-… (every ID it fully or partly satisfies; "partly" says which clause)
-- CR references: <rule numbers; text comes from the rules-researcher at brief time>
-- Depends on: <subphases>      Optional: yes/no (P7)
-- Owned paths: <paths>         Spec-test paths: <paths>
-- Deliverables: <numbered>
-- Verification criteria: <numbered, testable; include the REQ-TEST-001 scenarios that belong here>
-- Expected tier: T1 | T2 (T3 never planned in advance)
-- Independent Tester notes: <what to test black-box>
-```
+**Issue body** (`.github/ISSUE_TEMPLATE/work-unit.md`): plan ID line (phase, milestone, expected
+tier); summary; **Depends on** (issue numbers, or "None"); **Requirements** (each `REQ-*` ID with
+the clause it covers and the SRS section; never quote CR text from memory, cite SRS sections);
+**Deliverables** (checkboxes); **Acceptance criteria** (testable, checkboxes, ending with the P5
+gate); **Owned paths**; **Notes** (out of scope, decisions to record). The first infrastructure
+issue owns `docs/DEVELOPMENT.md` (layout, commands, gates, contracts, fixture and cache paths).
 
-Keep subphases small enough for one executor brief: one module, one coherent procedure, roughly a
-day of focused work. Split anything larger.
+**Labels:** `work-unit`; `ready` / `blocked` (later `in-progress`); `type:` infra, feature,
+binding, toolchain, client, fixtures, docs; `area:` the SRS area; `phase:NN-name`; `tier:T1` /
+`tier:T2` (expected; T3 is never planned). **Milestones:** M1 per REQ-NFR-010, then the deferred
+features in later milestones.
 
-### Suggested phase skeleton (adapt to the decisions)
+**Suggested phase order** (adapt to the decisions): repository and CI → foundations (numbers,
+IDs, PRNG, hashing, DSL schema, lints, synthetic card library) → state, zones, objects and
+layouts → events, choices, replacement and triggers → layers → state-based actions → turn
+structure and priority → casting and resolution → DSL runtime effects → combat → keywords →
+loops → engine API, views and replays → card toolchain → bindings → test clients → regression
+fixtures → hardening and release → later milestones.
 
-Dependency order matters more than the names:
+## 3. Check the breakdown
 
-0. **Spikes and pins:** toolchain, bindings build on every A3 platform, PRNG crate choice, hashing,
-   grammar library; record results in DECISIONS.md.
-1. **Foundation:** state tree and identities (§2.1–2.2), PRNG, canonical serialization and state
-   hash, LKI records, per-object memory and linked store, checkpoint/rollback (§2.5), citation
-   index and CI (REQ-DOC-001), CI matrix, IP/card-branch guard, golden-replay harness skeleton.
-2. **Objects and zones:** zones (§3), characteristics and mana value (§4.1), layout behaviours
-   (§4.2) one family per subphase, face-down (§4.3).
-3. **Events:** the replacement/prevention bus (§8.1), trigger detection incl. look-back (§8.2),
-   SBA registry (§9).
-4. **Layers:** pipeline, CDA-first, dependency and loops, lock-in, post-layer passes, caching with
-   differential testing (§6).
-5. **Turn and actions:** heartbeat and priority (§5.1), steps (§5.2), casting/activation and
-   resolution (§7), combat solvers and damage (§5.2), turn control (§5.3).
-6. **DSL runtime:** interpreter for §14.4 node families, choice specs → pending choices, text
-   tokens and layer 3, query points (§14.6), keyword macro registry (§14.7) in batches, native
-   effects (§14.8).
-7. **API and protocol:** `IRulesEngine` (§13), sandbox, determinized forking, replay integrity,
-   redaction and the wire protocol (§15), `.pzl` runner (REQ-TEST-001).
-8. **Ingestion toolchain** (§16): import/normalize, layout mapping, tokenizer, macro binding,
-   grammar (by template frequency), overrides, validation, test generation, status, artifact and
-   coverage report.
-9. **Formats and multiplayer:** FormatConfig, Commander, leaving the game, designations, loops
-   and shortcuts (§11, §12, §10.3); optional: community formats, `ext.digital`, subgames.
-10. **Bindings and cross-platform determinism:** C ABI, .NET, WASM per A2; golden replays on every
-    binding and platform.
-11. **Parser coverage waves:** grammar work ordered by CI's aggregate residue patterns (§16.5);
-    fixture tasks for the regression suite run alongside the subphases they test.
-12. **Hardening and release:** fuzzing (REQ-TEST-001.5), performance (REQ-LAYER-005), coverage
-    report publication, release packaging (a person signs off, P8).
+1. Every `REQ-*` ID in the SRS (except `[WITHDRAWN]`) appears in at least one unit. After the
+   issues exist, `python3 scripts/req_coverage.py` checks this against the live issues.
+2. The dependency graph is acyclic and every dependency comes earlier in plan order.
+3. Owned paths of units that can run at the same time do not overlap.
+4. Every contract in PROCESS.md P3 has an owning unit that comes before its first consumer.
 
-Phases 1–7 are mostly sequential; 8 can start after 6's schema is fixed; 9–10 overlap 8; 11 starts
-when 8 can parse. Work outside milestone 1 (REQ-NFR-010) is planned as optional subphases.
+## 4. Create the issues
 
-## 3. Check the plan
-
-1. Run `python3 scripts/req_coverage.py` from the repository root. Every `REQ-*` ID in the SRS
-   must appear in §6 of the plan. Fix the plan until it reports no missing IDs; IDs deliberately
-   deferred are listed in §1 with the decision that defers them, and the script's `--allow`
-   option names them.
-2. Every owned path belongs to exactly one subphase per wave.
-3. Every contract in PROCESS.md P3 has an owning subphase that comes before its first consumer.
-4. Every command in §2.2 has been run once (or the subphase that makes it runnable is named).
-5. Send the CR references of the first two waves to the `rules-researcher` in one batch, and fix
-   any rule number it reports as wrong or renumbered before committing.
-
-## 4. Land it
-
-Create `docs/briefs/` with a `COMMON.md` holding the environment block from §2.2. Add a
-`docs/RUN_LOG.md` row (`plan | — | Orchestrator | <model> | 1 | done | req_coverage clean | …`),
-commit on a `plan/v1` branch, and open a PR under PROCESS.md P6. The plan is in force once it
-merges; then use the `run-plan` skill.
+0. List the existing `work-unit` issues (open and closed) and match each drafted unit to one by
+   its `Plan ID`. Leave unaffected units alone. Edit a changed unit in place (body, labels,
+   blocked-by links) only while it is open. Never edit a closed (completed) unit to carry new
+   work: `work-issue` stops on a closed issue. When an SRS change affects a completed unit,
+   create a new follow-up unit instead (next free `FP-NNN`) that depends on the completed one
+   and references it. Create only units with no match, using the next free `FP-NNN` numbers.
+   Close units dropped from the breakdown as "not planned", with a comment naming what replaced
+   them.
+1. Ensure the labels and milestones exist.
+2. Open the new issues in plan order, so every "Depends on" entry names an existing issue
+   number. Pace the calls (about one per second) to stay under GitHub's content-creation limits.
+3. Link each dependency with GitHub's "blocked by" API
+   (`POST /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` with the blocker's numeric
+   `issue_id`). Label a unit `ready` only when every dependency is complete under the merged-PR rule
+   (PROCESS.md P6 step 5, `work-issue` §1 step 2); label the rest `blocked`. An open
+   dependency, or one closed as not planned without a qualifying replacement, is not complete.
+4. Run `python3 scripts/req_coverage.py` and fix any gap with an issue edit.
+5. Nothing is committed for the plan itself. Record any decisions made while planning in
+   `docs/DECISIONS.md` through a normal PR. Then: "Start work on issue X" (`work-issue`) or
+   `run-plan`.

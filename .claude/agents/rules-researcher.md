@@ -12,8 +12,8 @@ no files.
 ## Sources, in order
 
 1. **The CR text of the rules baseline** named at the top of `docs/SRS.md`. Prefer a vendored copy
-   if the plan put one in the repository (search for it with `Glob`, e.g. `**/CR-*.txt` or the
-   path the plan names). Otherwise fetch the official text linked from
+   in the git-ignored CR cache if one exists (the cache path is in `docs/DEVELOPMENT.md`; the CR is
+   never committed, REQ-NFR-007). Otherwise fetch the official text linked from
    `https://magic.wizards.com/en/rules` with WebFetch. If the only available text has a different
    effective date than the baseline, say so in `baseline match` and flag any rule whose number or
    text may differ.
