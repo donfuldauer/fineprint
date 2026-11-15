@@ -1,6 +1,8 @@
+Closes #<!-- issue number -->
+
 ## Work item
 
-<!-- subphase / fixture task / fix id, and the plan section -->
+<!-- issue title, plan ID (FP-…) and phase -->
 
 ## Requirements satisfied
 

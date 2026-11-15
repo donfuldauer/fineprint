@@ -29,18 +29,18 @@ Report `requirements: 0/0`; `pass` if both hold.
 
 1. **Requirements traced.** For each REQUIREMENTS item find the implementing code and a test that
    exercises it, and run that test: `met` (test name and result), `not met`, or `untestable here`
-   (must be listed in the plan as needing a person or special hardware). Docs-only requirements are
+   (the issue must say it needs a person or special hardware). Docs-only requirements are
    `met` on file:line evidence.
 2. **REQ-ID trace.** Every `REQ-*` ID the brief claims appears in at least one passing test's name,
-   doc comment or `.pzl` header. Run `python3 scripts/req_coverage.py --tests` if the plan enables
-   it, and report missing IDs.
-3. **Format and lint.** The plan's format and lint commands, warnings as errors, on every touched
+   doc comment or `.pzl` header. For a whole-milestone check run `python3 scripts/req_coverage.py --tests`
+   and report missing IDs.
+3. **Format and lint.** The format and lint commands in `docs/DEVELOPMENT.md`, warnings as errors, on every touched
    module and binding.
-4. **Tests.** Every applicable suite: touched modules' unit and integration tests, the subphase's
+4. **Tests.** Every applicable suite: touched modules' unit and integration tests, the unit's
    spec tests and `.pzl` scenarios, and dependents' tests where a public API changed. Report run /
    passed / failed / ignored. Any new skip, ignore, deletion or weakened assertion is a failure.
 5. **Coverage.** REQ-NFR-008: 90% line coverage for rules-core modules, 75% for everything else,
-   per touched module (`cargo llvm-cov`; the plan's commands for .NET and WASM wrappers). New public functions with no
+   per touched module (`cargo llvm-cov`; `docs/DEVELOPMENT.md`'s commands for .NET and WASM wrappers). New public functions with no
    test fail even when the module total passes.
 6. **Property and fuzz.** Every invariant named in the brief has a property test; every touched
    parser (`.fpdb`, `.pzl`, `.fpreplay`, Oracle-text tokenizer, wire messages, Scryfall records)
@@ -50,7 +50,7 @@ Report `requirements: 0/0`; `pass` if both hold.
    platform of REQ-NFR-003 available here (report which ones CI must confirm); cached and
    full-recompute layer modes agree. Also grep the diff for floating
    point types and hash-ordered iteration in rules paths and report each hit with file:line.
-8. **Card-data and card-branch guards (R4, R5).** Run the plan's guard command (or, until it
+8. **Card-data and card-branch guards (R4, R5).** Run the guard command in `docs/DEVELOPMENT.md` (or, until it
    exists, grep the whole diff outside `docs/` for string literals that look like real card names
    or Oracle text, for committed Scryfall/MTGJSON data, and for comparisons against `cardDefId` or
    card names in engine code). Report hits with file:line.
