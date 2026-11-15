@@ -22,7 +22,9 @@ What `--tests` counts (only test code, never production source):
   b. any .pzl file counts in full wherever it is;
   c. any other .rs file counts only its inline test modules: from each `#[cfg(test)]` line to
      the end of the annotated item (brace depth from the first `{` back to zero; an attribute
-     with no following `{` is ignored);
+     with no following `{` is ignored). The scan is lexically aware: braces and semicolons
+     inside comments, strings, raw strings and char literals are ignored, and an attribute
+     inside a comment or string is not an attribute;
   d. any other file does not count.
 Files are visited in sorted order; missing roots are skipped silently.
 
@@ -88,24 +90,96 @@ def is_test_path(p: pathlib.Path) -> bool:
     return any(fnmatch.fnmatchcase(p.name, pat) for pat in TEST_NAMES)
 
 
+def code_mask(text: str) -> list:
+    """Per character: True where `text` is Rust code, False inside comments, strings or chars.
+
+    One forward scan. Skipped regions: `//` comments, nested `/* */` comments, `"..."` and
+    `b"..."` strings (backslash escapes), raw strings `r#"..."#` (any number of `#`, with or
+    without a `b` prefix), and char/byte-char literals. A `'` that does not open a char literal
+    is a lifetime or label and stays code.
+    """
+    n = len(text)
+    mask = [True] * n
+    ident = lambda c: c.isalnum() or c == "_"
+    i = 0
+    while i < n:
+        c = text[i]
+        end = None  # exclusive end of a skipped region starting at i
+        if c == "/" and text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+        elif c == "/" and text.startswith("/*", i):
+            depth, k = 1, i + 2
+            while k < n and depth:
+                if text.startswith("/*", k):
+                    depth, k = depth + 1, k + 2
+                elif text.startswith("*/", k):
+                    depth, k = depth - 1, k + 2
+                else:
+                    k += 1
+            end = k
+        elif c == '"':
+            k = i + 1
+            while k < n and text[k] != '"':
+                k += 2 if text[k] == "\\" else 1
+            end = min(k + 1, n)
+        elif c in "rb" and (i == 0 or not ident(text[i - 1])):
+            k = i + 1
+            if c == "b" and k < n and text[k] == "r":
+                k += 1
+            if text[k - 1] == "r":  # `r` or `br`: raw string if `#`* then `"`
+                h = k
+                while h < n and text[h] == "#":
+                    h += 1
+                if h < n and text[h] == '"':
+                    close = '"' + "#" * (h - k)
+                    e = text.find(close, h + 1)
+                    end = n if e < 0 else e + len(close)
+        elif c == "'":
+            if i + 1 < n and text[i + 1] == "\\":
+                k = i + 3  # skip the escaped character, then find the closing quote
+                while k < n and text[k] != "'" and text[k] != "\n":
+                    k += 1
+                end = min(k + 1, n)
+            elif i + 2 < n and text[i + 2] == "'" and text[i + 1] != "'":
+                end = i + 3
+        if end is None:
+            i += 1
+        else:
+            for k in range(i, end):
+                mask[k] = False
+            i = end
+    return mask
+
+
 def cfg_test_text(text: str) -> str:
     """Rule (c): the text of inline `#[cfg(test)]` items, attribute line to closing brace.
 
     The annotated item ends at the first `;` before any `{` (a brace-less item contributes
-    nothing), else where brace depth returns to zero.
+    nothing), else where brace depth returns to zero. Braces and semicolons inside comments,
+    strings and char literals are ignored (see `code_mask`), and an attribute inside a comment
+    or string is not an attribute. The returned text is the full source span, comments included.
     """
-    lines = text.splitlines()
+    lines = text.split("\n")
+    offs, pos = [], 0
+    for ln in lines:
+        offs.append(pos)
+        pos += len(ln) + 1
+    mask = code_mask(text)
     out = []
     i = 0
     while i < len(lines):
         m = CFG_TEST.match(lines[i])
-        if not m:
+        if not m or not mask[offs[i] + m.end() - 1]:
             i += 1
             continue
         start, depth, opened, ended, j = i, 0, False, False, i
         col = m.end()  # scan after the attribute itself; later lines scan from column 0
         while j < len(lines) and not ended:
-            for ch in lines[j][col:]:
+            for k in range(col, len(lines[j])):
+                if not mask[offs[j] + k]:
+                    continue
+                ch = lines[j][k]
                 if ch == "{":
                     depth += 1
                     opened = True
