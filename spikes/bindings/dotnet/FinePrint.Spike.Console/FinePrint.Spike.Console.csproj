@@ -1,0 +1,35 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+   - If a copy of the MPL was not distributed with this file, You can obtain one at
+   - https://mozilla.org/MPL/2.0/. -->
+<!--
+  FP-005 (#6) spike (REQ-NFR-002, REQ-NFR-003): a normal NuGet consumer of the spike package.
+  It references FinePrint.Spike.Interop as a package from the local feed dist/nuget (see
+  ../nuget.config), never as a project, so the native library is resolved exactly as a
+  FinePrint.Core consumer's would be: from runtimes/<rid>/native via deps.json.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <!-- Keep restored packages out of the user-wide cache (the target below clears the spike
+         package from this folder before each restore). dist/ is git-ignored. -->
+    <RestorePackagesPath>$(MSBuildThisFileDirectory)../../dist/nuget-packages</RestorePackagesPath>
+  </PropertyGroup>
+
+  <!-- A repacked 0.0.0-spike keeps the same id and version, so NuGet would reuse the copy already
+       extracted under RestorePackagesPath. Delete that extracted folder (NuGet uses the lowercase
+       package id) before every restore so the package in dist/nuget is always the one restored. -->
+  <Target Name="FpDropStaleSpikePackage" BeforeTargets="Restore">
+    <RemoveDir Directories="$(RestorePackagesPath)/fineprint.spike.interop" />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="FinePrint.Spike.Interop" Version="0.0.0-spike" />
+  </ItemGroup>
+
+</Project>
