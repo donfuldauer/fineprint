@@ -170,6 +170,22 @@ pub fn check(crates: &[CrateCoverage]) -> Report {
     Report { rows, failures }
 }
 
+/// The normalised path of `path` relative to `root` (`\` to `/`, trailing `/` of the root
+/// dropped), or `None` when `path` does not lie strictly below `root`. Never panics.
+fn rel_to_root(root: &str, path: &str) -> Option<String> {
+    let root = root.replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    let path = path.replace('\\', "/");
+    let rel = path.strip_prefix(root)?.strip_prefix('/')?;
+    Some(rel.to_string())
+}
+
+/// True when `path` lies below the workspace `root` (REQ-NFR-008); shares its prefix logic with
+/// [`crate_of_rooted`].
+pub fn under_root(root: &str, path: &str) -> bool {
+    rel_to_root(root, path).is_some()
+}
+
 /// Map a file path from the JSON to a workspace crate name, anchored to the workspace `root`
 /// (REQ-NFR-008).
 ///
@@ -179,10 +195,7 @@ pub fn check(crates: &[CrateCoverage]) -> Report {
 /// `xtask`. Everything else (registry, toolchain sources, paths outside the root, nested
 /// `xtask`/`crates`/`clients` directories deeper in a crate) is `None`. Never panics.
 pub fn crate_of_rooted(root: &str, path: &str) -> Option<String> {
-    let root = root.replace('\\', "/");
-    let root = root.trim_end_matches('/');
-    let path = path.replace('\\', "/");
-    let rel = path.strip_prefix(root)?.strip_prefix('/')?;
+    let rel = rel_to_root(root, path)?;
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
     match parts.as_slice() {
         ["crates", dir, _, ..] => Some((*dir).to_string()),
@@ -192,10 +205,20 @@ pub fn crate_of_rooted(root: &str, path: &str) -> Option<String> {
     }
 }
 
+/// `(crate, lines, covered)` per crate.
+type CrateSums = (String, u64, u64);
+
 /// Parse `cargo llvm-cov --json --summary-only` output into `(crate, lines, covered)` triples
 /// sorted by crate name. Files that map to no workspace crate (see [`crate_of_rooted`]) under the
 /// workspace `root` are ignored.
-pub fn parse_summary(text: &str, root: &str) -> Result<Vec<(String, u64, u64)>, String> {
+#[cfg(test)]
+pub fn parse_summary(text: &str, root: &str) -> Result<Vec<CrateSums>, String> {
+    parse_summary_counted(text, root).map(|(sums, _, _)| sums)
+}
+
+/// Like [`parse_summary`], also returning the number of files in the report and how many of them
+/// lie under `root` (see [`under_root`]).
+fn parse_summary_counted(text: &str, root: &str) -> Result<(Vec<CrateSums>, usize, usize), String> {
     let doc = parse_json(text)?;
     let data = doc
         .get("data")
@@ -207,11 +230,15 @@ pub fn parse_summary(text: &str, root: &str) -> Result<Vec<(String, u64, u64)>, 
         .and_then(Json::as_array)
         .ok_or("missing `data[0].files` array")?;
     let mut sums: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut inside = 0usize;
     for file in files {
         let name = file
             .get("filename")
             .and_then(Json::as_str)
             .ok_or("file entry without a string `filename`")?;
+        if under_root(root, name) {
+            inside += 1;
+        }
         let Some(krate) = crate_of_rooted(root, name) else {
             continue;
         };
@@ -232,7 +259,8 @@ pub fn parse_summary(text: &str, root: &str) -> Result<Vec<(String, u64, u64)>, 
         entry.0 = entry.0.checked_add(count).ok_or("line count overflow")?;
         entry.1 = entry.1.checked_add(covered).ok_or("line count overflow")?;
     }
-    Ok(sums.into_iter().map(|(k, (l, c))| (k, l, c)).collect())
+    let sums = sums.into_iter().map(|(k, (l, c))| (k, l, c)).collect();
+    Ok((sums, files.len(), inside))
 }
 
 /// Parsed command-line options.
@@ -311,13 +339,20 @@ pub fn run(args: &[String]) -> u8 {
             return 2;
         }
     };
-    let parsed = match parse_summary(&text, &root) {
+    let (parsed, total, inside) = match parse_summary_counted(&text, &root) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("coverage: cannot parse llvm-cov JSON: {e}");
             return 1;
         }
     };
+    // A root that matches no file would leave every crate n/a: a vacuous PASS (REQ-NFR-008).
+    if total > 0 && inside == 0 {
+        eprintln!(
+            "coverage: none of the {total} files in the coverage report lies under the workspace root {root}; pass --root <dir> if the checkout path differs"
+        );
+        return 1;
+    }
     let crates: Vec<CrateCoverage> = parsed
         .into_iter()
         .map(|(name, lines, covered)| CrateCoverage {
@@ -968,12 +1003,60 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert_eq!(run(&["--bogus".to_string()]), 2);
         assert_eq!(run(&["--root".to_string()]), 2);
         assert_eq!(run(&["--input".to_string()]), 2);
-        // a root that does not contain the files measures nothing, so nothing fails
+        // a root that contains none of the (non-empty) files is a failure, not a vacuous pass
         let mut other = arg(&bad);
         other[3] = "/elsewhere".to_string();
-        assert_eq!(run(&other), 0);
+        assert_eq!(run(&other), 1);
         // auto-detected root (git toplevel or current dir) is accepted
         assert!(detect_root().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// REQ-NFR-008: a root matching no file of a non-empty report fails; other shapes keep working.
+    #[test]
+    fn req_nfr_008_root_mismatch_is_failure() {
+        assert!(under_root("/w", "/w/a.rs"));
+        assert!(under_root("C:\\w\\", "C:\\w\\a.rs"));
+        assert!(!under_root("/w", "/wx/a.rs"));
+        assert!(!under_root("/w", "/w"));
+        assert!(!under_root("/w", ""));
+        assert!(!under_root("", ""));
+
+        let dir = std::env::temp_dir().join(format!("xtask-cov-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let write = |name: &str, body: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write");
+            p.display().to_string()
+        };
+        let args = |input: String, root: &str| {
+            vec![
+                "--input".to_string(),
+                input,
+                "--root".to_string(),
+                root.to_string(),
+            ]
+        };
+        let good = write("good.json", doc(&[file("/w/xtask/src/a.rs", "10", "10")]));
+        assert_eq!(run(&args(good.clone(), "/w")), 0);
+        assert_eq!(run(&args(good.clone(), "/nonexistent")), 1);
+        // empty files list: nothing to attribute, still a pass
+        let empty = write("empty.json", doc(&[]));
+        assert_eq!(run(&args(empty.clone(), "/w")), 0);
+        assert_eq!(run(&args(empty, "/nonexistent")), 0);
+        // all files under the root but unmapped (e.g. vendored sources): pass
+        let unmapped = write("unmapped.json", doc(&[file("/w/vendor/x/a.rs", "5", "0")]));
+        assert_eq!(run(&args(unmapped, "/w")), 0);
+        // mixed: one file under the root, one outside; only the mapped crate is measured
+        let mixed_doc = doc(&[
+            file("/w/xtask/src/a.rs", "10", "10"),
+            file("/h/.cargo/registry/src/i/c/src/lib.rs", "99", "0"),
+        ]);
+        let (parsed, total, inside) = parse_summary_counted(&mixed_doc, "/w").expect("parses");
+        assert_eq!(parsed, vec![("xtask".to_string(), 10, 10)]);
+        assert_eq!((total, inside), (2, 1));
+        let mixed = write("mixed.json", mixed_doc);
+        assert_eq!(run(&args(mixed, "/w")), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
