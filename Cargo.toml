@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/fineprint-base",
+  "crates/fineprint-dsl",
+  "crates/fineprint-core",
+  "crates/fineprint-ingest",
+  "crates/fineprint-ffi",
+  "crates/fineprint-wasm",
+  "crates/fineprint-bot",
+  "clients/cli",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.97"
+repository = "https://github.com/donfuldauer/fineprint"
+publish = false
+
+[workspace.dependencies]
+fineprint-base = { path = "crates/fineprint-base" }
+fineprint-dsl = { path = "crates/fineprint-dsl" }
+fineprint-core = { path = "crates/fineprint-core" }
+fineprint-ingest = { path = "crates/fineprint-ingest" }
+fineprint-ffi = { path = "crates/fineprint-ffi" }
+fineprint-wasm = { path = "crates/fineprint-wasm" }
+fineprint-bot = { path = "crates/fineprint-bot" }
