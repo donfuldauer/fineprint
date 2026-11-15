@@ -178,3 +178,9 @@ rules crates without extra files.
 **Alternatives:** floating `stable` (rejected: non-reproducible); per-crate clippy.toml files
 (rejected: duplication, drift); `[workspace.lints]` in place of attributes (rejected: the
 non-rules allow and the unsafe rule are clearer next to the code).
+
+## FP-002 (#3) — Red-run evidence on the PR branch
+
+Decision: The "deliberately failing test turns the run red" criterion was shown by pushing a scratch failing test (`crates/fineprint-base/tests/ci_red_check.rs`, commit 71c7a75) to the PR branch and reverting it in the next commit. The three `test` jobs concluded `failure` on 71c7a75; `fmt` and `clippy` stayed green.
+Rationale: The session may push only to its assigned branch, so a separate scratch branch was not allowed. The branch tree after the revert equals the verified tree apart from this entry.
+Alternatives: A separate `scratch/` branch (not permitted here).

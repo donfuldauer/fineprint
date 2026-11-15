@@ -116,13 +116,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 Environment: none needed. `RUSTFLAGS="-D warnings"` is optional; `CARGO_TERM_COLOR=never` for
 logs. xtask is run as `cargo run -p xtask -- <command>` (a `cargo xtask` alias lands with #4).
 
+CI format, lint and test on Linux, Windows and macOS is available now; see "CI" below.
+
 Lands later:
 
 - `cargo run -p xtask -- check-paths` and the other guards (path check, card-data guard,
   no-card-branch audit, header check): lands with #4 FP-003.
 - `cargo llvm-cov --workspace --fail-under-lines <floor>` (also `cargo xtask coverage`): lands
   with #4 FP-003.
-- CI format, lint and test on Linux, Windows, macOS: lands with #3 FP-002.
 - `cargo run -p xtask -- cite-check` (fetches into `cr-cache/`): lands with #7 FP-006.
 - `.pzl` runner `cargo run -p fineprint-cli -- pzl <file>` or an xtask equivalent (final syntax
   set by #51 FP-049).
@@ -134,6 +135,31 @@ Lands later:
 - `dotnet test` for FinePrint.Core: lands with #103 FP-101.
 - `wasm-pack test` / wasm-bindgen + npm: lands with #104 FP-102.
 - Parser-coverage measurement from the CI cache: lands with #101 FP-099.
+
+## CI
+
+The workflow is `.github/workflows/ci.yml` (owned by #3 FP-002). It runs on every `push` and
+every `pull_request`; a newer run on the same ref cancels the superseded one (concurrency group
+per workflow and ref). The toolchain comes from `rust-toolchain.toml` (no version is repeated in
+the workflow). Caches of the cargo registry and `target/` are keyed on OS, toolchain and
+`Cargo.lock`, with a fallback to the same OS and toolchain. Line endings are checked out as
+committed (`core.autocrlf false`) so all three systems see the same bytes.
+
+| Job name | Command |
+|---|---|
+| `fmt (ubuntu-latest)` | `cargo fmt --all --check` |
+| `fmt (windows-latest)` | `cargo fmt --all --check` |
+| `fmt (macos-latest)` | `cargo fmt --all --check` |
+| `clippy (ubuntu-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| `clippy (windows-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| `clippy (macos-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| `test (ubuntu-latest)` | `cargo test --workspace --locked` |
+| `test (windows-latest)` | `cargo test --workspace --locked` |
+| `test (macos-latest)` | `cargo test --workspace --locked` |
+
+These nine job names are the contexts to list as required status checks on `main`
+(REQ-NFR-011). Do not rename them without updating branch protection. Binding, browser,
+coverage and guard jobs are added by later issues (#4, #6, #104).
 
 ## Coverage floors (REQ-NFR-008)
 
