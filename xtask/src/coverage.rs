@@ -170,44 +170,34 @@ pub fn check(crates: &[CrateCoverage]) -> Report {
     Report { rows, failures }
 }
 
-/// Map a file path from the JSON to a workspace crate name, or `None` for other files.
-pub fn crate_of(path: &str) -> Option<String> {
-    let norm = path.replace('\\', "/");
-    if norm.contains("/registry/src/") || norm.contains("/.rustup/") || norm.contains("/rustc/") {
-        return None;
+/// Map a file path from the JSON to a workspace crate name, anchored to the workspace `root`
+/// (REQ-NFR-008).
+///
+/// Both arguments are normalised (`\` to `/`, trailing `/` of the root dropped). The path must
+/// lie below the root; only the first components of the path relative to the root are examined:
+/// `crates/<dir>/<more>` is `<dir>`, `clients/cli/<more>` is `fineprint-cli`, `xtask/<more>` is
+/// `xtask`. Everything else (registry, toolchain sources, paths outside the root, nested
+/// `xtask`/`crates`/`clients` directories deeper in a crate) is `None`. Never panics.
+pub fn crate_of_rooted(root: &str, path: &str) -> Option<String> {
+    let root = root.replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    let path = path.replace('\\', "/");
+    let rel = path.strip_prefix(root)?.strip_prefix('/')?;
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        ["crates", dir, _, ..] => Some((*dir).to_string()),
+        ["clients", "cli", _, ..] => Some("fineprint-cli".to_string()),
+        ["xtask", _, ..] => Some("xtask".to_string()),
+        _ => None,
     }
-    let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
-    // Innermost match wins: a checkout may itself live under a `crates/` directory.
-    for (i, part) in parts.iter().enumerate().rev() {
-        let next = parts.get(i + 1);
-        let after = parts.get(i + 2);
-        // A directory named like a workspace package that sits inside another crate's
-        // source/test tree is not a workspace-root package.
-        let in_crate_subdir = i
-            .checked_sub(1)
-            .and_then(|j| parts.get(j))
-            .is_some_and(|prev| matches!(*prev, "src" | "tests" | "benches" | "examples"));
-        match (*part, next, after) {
-            ("crates", Some(dir), Some(_)) => return Some((*dir).to_string()),
-            ("clients", Some(&"cli"), Some(_)) if !in_crate_subdir => {
-                return Some("fineprint-cli".to_string());
-            }
-            ("xtask", Some(&("src" | "tests" | "benches" | "examples" | "build.rs")), _)
-                if !in_crate_subdir =>
-            {
-                return Some("xtask".to_string());
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Parse `cargo llvm-cov --json --summary-only` output into `(crate, lines, covered)` triples
-/// sorted by crate name. Files that map to no workspace crate are ignored.
-pub fn parse_summary(text: &str) -> Result<Vec<(String, u64, u64)>, String> {
-    let root = parse_json(text)?;
-    let data = root
+/// sorted by crate name. Files that map to no workspace crate (see [`crate_of_rooted`]) under the
+/// workspace `root` are ignored.
+pub fn parse_summary(text: &str, root: &str) -> Result<Vec<(String, u64, u64)>, String> {
+    let doc = parse_json(text)?;
+    let data = doc
         .get("data")
         .and_then(Json::as_array)
         .ok_or("missing `data` array")?;
@@ -222,7 +212,7 @@ pub fn parse_summary(text: &str) -> Result<Vec<(String, u64, u64)>, String> {
             .get("filename")
             .and_then(Json::as_str)
             .ok_or("file entry without a string `filename`")?;
-        let Some(krate) = crate_of(name) else {
+        let Some(krate) = crate_of_rooted(root, name) else {
             continue;
         };
         let lines = file
@@ -245,16 +235,83 @@ pub fn parse_summary(text: &str) -> Result<Vec<(String, u64, u64)>, String> {
     Ok(sums.into_iter().map(|(k, (l, c))| (k, l, c)).collect())
 }
 
-/// Entry point for `cargo xtask coverage [--input <file>]`. Returns the process exit code.
+/// Parsed command-line options.
+struct Options {
+    input: Option<String>,
+    root: Option<String>,
+}
+
+const USAGE: &str =
+    "usage: cargo xtask coverage [--input <llvm-cov-summary.json>] [--root <workspace-dir>]";
+
+fn parse_args(args: &[String]) -> Result<Options, String> {
+    let mut opts = Options {
+        input: None,
+        root: None,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let slot = match flag.as_str() {
+            "--input" => &mut opts.input,
+            "--root" => &mut opts.root,
+            _ => return Err(USAGE.to_string()),
+        };
+        match it.next() {
+            Some(v) if slot.is_none() => *slot = Some(v.clone()),
+            _ => return Err(USAGE.to_string()),
+        }
+    }
+    Ok(opts)
+}
+
+/// Workspace root: `git rev-parse --show-toplevel`, else the current directory.
+fn detect_root() -> Result<String, String> {
+    let git = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(root) = git {
+        return Ok(root);
+    }
+    std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .map_err(|e| {
+            format!("cannot determine the workspace root (git and current dir failed): {e}")
+        })
+}
+
+/// Entry point for `cargo xtask coverage [--input <file>] [--root <dir>]`. Returns the process
+/// exit code.
 pub fn run(args: &[String]) -> u8 {
-    let text = match read_input(args) {
+    let opts = match parse_args(args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("coverage: {e}");
+            return 2;
+        }
+    };
+    let root = match opts.root {
+        Some(r) => r,
+        None => match detect_root() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("coverage: {e}");
+                return 2;
+            }
+        },
+    };
+    let text = match read_input(opts.input.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("coverage: {e}");
             return 2;
         }
     };
-    let parsed = match parse_summary(&text) {
+    let parsed = match parse_summary(&text, &root) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("coverage: cannot parse llvm-cov JSON: {e}");
@@ -282,13 +339,10 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn read_input(args: &[String]) -> Result<String, String> {
-    match args {
-        [] => run_llvm_cov(),
-        [flag, path] if flag == "--input" => {
-            std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))
-        }
-        _ => Err("usage: cargo xtask coverage [--input <llvm-cov-summary.json>]".to_string()),
+fn read_input(input: Option<&str>) -> Result<String, String> {
+    match input {
+        None => run_llvm_cov(),
+        Some(path) => std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}")),
     }
 }
 
@@ -604,14 +658,19 @@ mod tests {
             file("/w/crates/fineprint-base/src/b.rs", "900", "800"),
             file("/w/crates/fineprint-dsl/src/lib.rs", "10", "5"),
             file("/w/clients/cli/src/lib.rs", "20", "20.0"),
-            file("C:\\\\w\\\\xtask\\\\src\\\\main.rs", "40", "30"),
             file(
                 "/home/u/.cargo/registry/src/idx/serde-1/src/lib.rs",
                 "999",
                 "0",
             ),
         ]);
-        let parsed = parse_summary(&json).expect("parses");
+        let mut parsed = parse_summary(&json, "/w").expect("parses");
+        // a Windows-style checkout with its own root maps the same way
+        let win = doc(&[file("C:\\\\w\\\\xtask\\\\src\\\\main.rs", "40", "30")]);
+        parsed.extend(parse_summary(&win, "C:\\w").expect("parses"));
+        // the same file is outside a different root
+        assert!(parse_summary(&win, "/w").expect("parses").is_empty());
+        parsed.sort();
         assert_eq!(
             parsed,
             vec![
@@ -681,72 +740,145 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         );
     }
 
+    /// REQ-NFR-008: crate mapping relative to an explicit root.
     #[test]
     fn req_nfr_008_crate_of_mapping() {
-        assert_eq!(crate_of("/w/crates/x/src/a.rs"), Some("x".to_string()));
-        assert_eq!(crate_of("C:\\w\\crates\\x\\a.rs"), Some("x".to_string()));
+        let r = crate_of_rooted;
+        assert_eq!(r("/w", "/w/crates/x/src/a.rs"), Some("x".to_string()));
+        assert_eq!(r("C:\\w", "C:\\w\\crates\\x\\a.rs"), Some("x".to_string()));
         assert_eq!(
-            crate_of("/w/clients/cli/src/a.rs"),
+            r("/w", "/w/clients/cli/src/a.rs"),
             Some("fineprint-cli".to_string())
         );
-        assert_eq!(crate_of("/w/xtask/src/a.rs"), Some("xtask".to_string()));
-        assert_eq!(crate_of("/w/other/a.rs"), None);
-        assert_eq!(crate_of("/h/.cargo/registry/src/i/c/crates/y/a.rs"), None);
+        assert_eq!(r("/w", "/w/xtask/src/a.rs"), Some("xtask".to_string()));
+        assert_eq!(r("/w", "/w/other/a.rs"), None);
+        assert_eq!(r("/h", "/h/.cargo/registry/src/i/c/crates/y/a.rs"), None);
+        // registry / rustup / rustc sources are outside the workspace root
+        assert_eq!(r("/w", "/h/.cargo/registry/src/i/c/crates/y/a.rs"), None);
+        assert_eq!(r("/w", "/h/.rustup/toolchains/t/lib/crates/y/a.rs"), None);
+        assert_eq!(r("/w", "/rustc/abc/library/crates/y/a.rs"), None);
+        assert_eq!(r("/w", "/w/.rustup/crates/y/a.rs"), None);
     }
 
+    /// REQ-NFR-008: a checkout that itself lives under `crates/` or `xtask/` directories.
     #[test]
     fn req_nfr_008_crate_of_outer_crates_dir() {
+        let core = Some("fineprint-core".to_string());
+        let root = "/home/dev/crates/fineprint";
         assert_eq!(
-            crate_of("/home/dev/crates/fineprint/crates/fineprint-core/src/lib.rs"),
-            Some("fineprint-core".to_string())
+            crate_of_rooted(
+                root,
+                "/home/dev/crates/fineprint/crates/fineprint-core/src/lib.rs"
+            ),
+            core
         );
         assert_eq!(
-            crate_of("C:\\dev\\crates\\fineprint\\crates\\fineprint-core\\src\\lib.rs"),
-            Some("fineprint-core".to_string())
+            crate_of_rooted(
+                "C:\\dev\\crates\\fineprint",
+                "C:\\dev\\crates\\fineprint\\crates\\fineprint-core\\src\\lib.rs"
+            ),
+            core
         );
         assert_eq!(
-            crate_of("/home/dev/crates/fineprint/clients/cli/src/main.rs"),
+            crate_of_rooted(root, "/home/dev/crates/fineprint/clients/cli/src/main.rs"),
             Some("fineprint-cli".to_string())
         );
         assert_eq!(
-            crate_of("/home/dev/crates/fineprint/xtask/src/main.rs"),
+            crate_of_rooted(root, "/home/dev/crates/fineprint/xtask/src/main.rs"),
             Some("xtask".to_string())
         );
-        // no inner workspace component and no file below the outer directory
-        assert_eq!(crate_of("/home/dev/crates/fineprint"), None);
+        // root equals path
+        assert_eq!(crate_of_rooted(root, "/home/dev/crates/fineprint"), None);
+        // root with `xtask` in its path
+        assert_eq!(
+            crate_of_rooted(
+                "/home/dev/xtask/fineprint",
+                "/home/dev/xtask/fineprint/xtask/src/a.rs"
+            ),
+            Some("xtask".to_string())
+        );
+        assert_eq!(
+            crate_of_rooted(
+                "/home/dev/xtask/fineprint",
+                "/home/dev/xtask/fineprint/crates/fineprint-core/src/a.rs"
+            ),
+            core
+        );
     }
 
-    /// REQ-NFR-008: `xtask` / `clients/cli` directories inside another crate's source tree
-    /// do not hijack the mapping.
+    /// REQ-NFR-008: `xtask` / `clients/cli` directories inside another crate's tree do not
+    /// hijack the mapping.
     #[test]
     fn req_nfr_008_crate_of_nested_workspace_names() {
         let core = Some("fineprint-core".to_string());
-        assert_eq!(crate_of("/w/crates/fineprint-core/src/xtask/mod.rs"), core);
+        let r = |p: &str| crate_of_rooted("/w", p);
+        let w = |p: &str| crate_of_rooted("C:\\w", p);
+        assert_eq!(r("/w/crates/fineprint-core/src/xtask/mod.rs"), core);
+        assert_eq!(r("/w/crates/fineprint-core/src/xtask/src/a.rs"), core);
+        assert_eq!(w("C:\\w\\crates\\fineprint-core\\src\\xtask\\mod.rs"), core);
         assert_eq!(
-            crate_of("/w/crates/fineprint-core/src/xtask/src/a.rs"),
+            w("C:\\w\\crates\\fineprint-core\\src\\xtask\\src\\a.rs"),
+            core
+        );
+        assert_eq!(r("/w/crates/fineprint-core/src/clients/cli/x.rs"), core);
+        assert_eq!(
+            w("C:\\w\\crates\\fineprint-core\\src\\clients\\cli\\x.rs"),
+            core
+        );
+        assert_eq!(r("/w/xtask/src/main.rs"), Some("xtask".to_string()));
+    }
+
+    /// REQ-NFR-008: regression cases for nested directories, roots, and odd input.
+    #[test]
+    fn req_nfr_008_crate_of_rooted_nested_dirs() {
+        let core = Some("fineprint-core".to_string());
+        let r = |p: &str| crate_of_rooted("/w", p);
+        assert_eq!(
+            r("/w/crates/fineprint-core/src/nested/xtask/src/a.rs"),
             core
         );
         assert_eq!(
-            crate_of("C:\\w\\crates\\fineprint-core\\src\\xtask\\mod.rs"),
+            r("/w/crates/fineprint-core/src/nested/crates/other/src/a.rs"),
+            core
+        );
+        assert_eq!(r("/w/crates/fineprint-core/tests/clients/cli/a.rs"), core);
+        assert_eq!(
+            crate_of_rooted(
+                "C:\\w",
+                "C:\\w\\crates\\fineprint-core\\src\\nested\\xtask\\src\\a.rs"
+            ),
+            core
+        );
+        // outside the root
+        assert_eq!(r("/other/crates/fineprint-core/src/a.rs"), None);
+        assert_eq!(r("/wx/crates/fineprint-core/src/a.rs"), None);
+        // root with trailing slash
+        assert_eq!(
+            crate_of_rooted("/w/", "/w/crates/fineprint-core/src/a.rs"),
             core
         );
         assert_eq!(
-            crate_of("C:\\w\\crates\\fineprint-core\\src\\xtask\\src\\a.rs"),
-            core
-        );
-        assert_eq!(
-            crate_of("/w/crates/fineprint-core/src/clients/cli/x.rs"),
-            core
-        );
-        assert_eq!(
-            crate_of("C:\\w\\crates\\fineprint-core\\src\\clients\\cli\\x.rs"),
-            core
-        );
-        assert_eq!(crate_of("/w/xtask/src/main.rs"), Some("xtask".to_string()));
-        assert_eq!(
-            crate_of("/home/dev/xtask/fineprint/xtask/src/a.rs"),
+            crate_of_rooted("C:\\w\\", "C:\\w\\xtask\\src\\a.rs"),
             Some("xtask".to_string())
         );
+        // no component after the crate directory
+        assert_eq!(r("/w/crates/fineprint-core"), None);
+        assert_eq!(r("/w/crates/fineprint-core/"), None);
+        assert_eq!(r("/w/crates"), None);
+        assert_eq!(r("/w/clients/cli"), None);
+        assert_eq!(r("/w/xtask"), None);
+        // an unknown crate directory keeps its name so the unknown-crate FAIL rule triggers
+        assert_eq!(
+            r("/w/crates/fineprint-new/src/a.rs"),
+            Some("fineprint-new".to_string())
+        );
+        // odd input never panics
+        assert_eq!(crate_of_rooted("", ""), None);
+        assert_eq!(crate_of_rooted("", "/crates/x/a.rs"), Some("x".to_string()));
+        assert_eq!(crate_of_rooted("/w", ""), None);
+        assert_eq!(crate_of_rooted("/w", "/w"), None);
+        assert_eq!(crate_of_rooted("/w", "/w/"), None);
+        assert_eq!(crate_of_rooted("/", "/"), None);
     }
 
     /// REQ-NFR-008: malformed input is an error, never a panic.
@@ -769,7 +901,7 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
             "1 2",
         ];
         for b in bad {
-            assert!(parse_summary(b).is_err(), "should fail: {b}");
+            assert!(parse_summary(b, "/w").is_err(), "should fail: {b}");
         }
         let deep = format!("{}{}", "[".repeat(100), "]".repeat(100));
         assert!(parse_json(&deep).is_err());
@@ -806,7 +938,7 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
                 text.push(alphabet[(s % alphabet.len() as u64) as usize]);
             }
             let _ = parse_json(&text);
-            let _ = parse_summary(&text);
+            let _ = parse_summary(&text, "/w");
         }
     }
 
@@ -821,12 +953,27 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         std::fs::write(&bad, doc(&[file("/w/xtask/src/a.rs", "10", "1")])).expect("write");
         let junk = dir.join("junk.json");
         std::fs::write(&junk, "nope").expect("write");
-        let arg = |p: &std::path::Path| vec!["--input".to_string(), p.display().to_string()];
+        let arg = |p: &std::path::Path| {
+            vec![
+                "--input".to_string(),
+                p.display().to_string(),
+                "--root".to_string(),
+                "/w".to_string(),
+            ]
+        };
         assert_eq!(run(&arg(&good)), 0);
         assert_eq!(run(&arg(&bad)), 1);
         assert_eq!(run(&arg(&junk)), 1);
         assert_eq!(run(&arg(&dir.join("missing.json"))), 2);
         assert_eq!(run(&["--bogus".to_string()]), 2);
+        assert_eq!(run(&["--root".to_string()]), 2);
+        assert_eq!(run(&["--input".to_string()]), 2);
+        // a root that does not contain the files measures nothing, so nothing fails
+        let mut other = arg(&bad);
+        other[3] = "/elsewhere".to_string();
+        assert_eq!(run(&other), 0);
+        // auto-detected root (git toplevel or current dir) is accepted
+        assert!(detect_root().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
