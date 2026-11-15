@@ -1,0 +1,112 @@
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+
+# Job names below are the required status checks on main (REQ-NFR-011).
+# Do not rename them without updating branch protection; see docs/DEVELOPMENT.md "CI".
+# Third-party actions: actions/checkout and actions/cache only, both first-party,
+# pinned to exact version tags (checkout v4.2.2, cache v4.2.0).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: fmt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-clippy-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-clippy-
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-test-
+      - name: cargo test
+        run: cargo test --workspace --locked
