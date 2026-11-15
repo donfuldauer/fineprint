@@ -1413,7 +1413,7 @@ These requirements record the architecture and platform decisions that the imple
 
 **REQ-NFR-008 — Test coverage.** Line coverage measured with `cargo-llvm-cov` (and the platform's equivalent for the .NET and WASM wrappers) SHALL be at least **90%** for the rules core (state model, zones, objects and layouts, events, layers, turn structure, casting, SBAs, DSL runtime, API and redaction) and at least **75%** for everything else (bindings, `fineprint-ingest`, CLI and tooling). New public functions SHALL each have at least one test.
 
-**REQ-NFR-009 — Performance reference.** The reference hardware for REQ-LAYER-005 is GitHub's standard hosted `ubuntu-latest` runner. Benchmarks SHALL run in CI and be tracked as a trend (median of repeated runs); a regression of more than 10% against the previous wave's baseline SHALL fail the wave gate. Performance targets are never asserted in unit tests.
+**REQ-NFR-009 — Performance reference.** The reference hardware for REQ-LAYER-005 is GitHub's standard hosted `ubuntu-latest` runner. Benchmarks SHALL run in CI and be tracked as a trend (median of repeated runs); a regression of more than 10% against the previous phase's baseline SHALL fail the phase gate (PROCESS.md P5). Performance targets are never asserted in unit tests.
 
 **REQ-NFR-010 — Milestone 1 scope.**
 * Milestone 1 SHALL deliver **two-player (1v1) constructed play**: every generic rule needed for two-player games, all layouts in REQ-OBJ-002 other than the variant-only ones, the full DSL, all three bindings, the card toolchain, overrides and the support report.
