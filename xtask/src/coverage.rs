@@ -181,10 +181,22 @@ pub fn crate_of(path: &str) -> Option<String> {
     for (i, part) in parts.iter().enumerate().rev() {
         let next = parts.get(i + 1);
         let after = parts.get(i + 2);
+        // A directory named like a workspace package that sits inside another crate's
+        // source/test tree is not a workspace-root package.
+        let in_crate_subdir = i
+            .checked_sub(1)
+            .and_then(|j| parts.get(j))
+            .is_some_and(|prev| matches!(*prev, "src" | "tests" | "benches" | "examples"));
         match (*part, next, after) {
             ("crates", Some(dir), Some(_)) => return Some((*dir).to_string()),
-            ("clients", Some(&"cli"), Some(_)) => return Some("fineprint-cli".to_string()),
-            ("xtask", Some(_), _) => return Some("xtask".to_string()),
+            ("clients", Some(&"cli"), Some(_)) if !in_crate_subdir => {
+                return Some("fineprint-cli".to_string());
+            }
+            ("xtask", Some(&("src" | "tests" | "benches" | "examples" | "build.rs")), _)
+                if !in_crate_subdir =>
+            {
+                return Some("xtask".to_string());
+            }
             _ => {}
         }
     }
@@ -704,6 +716,39 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert_eq!(crate_of("/home/dev/crates/fineprint"), None);
     }
 
+    /// REQ-NFR-008: `xtask` / `clients/cli` directories inside another crate's source tree
+    /// do not hijack the mapping.
+    #[test]
+    fn req_nfr_008_crate_of_nested_workspace_names() {
+        let core = Some("fineprint-core".to_string());
+        assert_eq!(crate_of("/w/crates/fineprint-core/src/xtask/mod.rs"), core);
+        assert_eq!(
+            crate_of("/w/crates/fineprint-core/src/xtask/src/a.rs"),
+            core
+        );
+        assert_eq!(
+            crate_of("C:\\w\\crates\\fineprint-core\\src\\xtask\\mod.rs"),
+            core
+        );
+        assert_eq!(
+            crate_of("C:\\w\\crates\\fineprint-core\\src\\xtask\\src\\a.rs"),
+            core
+        );
+        assert_eq!(
+            crate_of("/w/crates/fineprint-core/src/clients/cli/x.rs"),
+            core
+        );
+        assert_eq!(
+            crate_of("C:\\w\\crates\\fineprint-core\\src\\clients\\cli\\x.rs"),
+            core
+        );
+        assert_eq!(crate_of("/w/xtask/src/main.rs"), Some("xtask".to_string()));
+        assert_eq!(
+            crate_of("/home/dev/xtask/fineprint/xtask/src/a.rs"),
+            Some("xtask".to_string())
+        );
+    }
+
     /// REQ-NFR-008: malformed input is an error, never a panic.
     #[test]
     fn req_nfr_008_json_errors() {
@@ -715,8 +760,8 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
             "\"abc",
             "\"a\\qb\"",
             "\"\\u12\"",
-            "{\"data\":[{\"files\":[{\"filename\":\"/w/xtask/a.rs\",\"summary\":{\"lines\":{\"count\":\"x\",\"covered\":1}}}]}]}",
-            "{\"data\":[{\"files\":[{\"filename\":\"/w/xtask/a.rs\",\"summary\":{\"lines\":{\"count\":-1,\"covered\":1}}}]}]}",
+            "{\"data\":[{\"files\":[{\"filename\":\"/w/xtask/src/a.rs\",\"summary\":{\"lines\":{\"count\":\"x\",\"covered\":1}}}]}]}",
+            "{\"data\":[{\"files\":[{\"filename\":\"/w/xtask/src/a.rs\",\"summary\":{\"lines\":{\"count\":-1,\"covered\":1}}}]}]}",
             "{}",
             "{\"data\":[]}",
             "01x",
