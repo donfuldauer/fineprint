@@ -214,6 +214,189 @@ Alternatives: A separate `scratch/` branch (not permitted here).
 **Decision:** `cargo xtask coverage` exits 1 with `coverage: none of the N files in the coverage report lies under the workspace root <root>; pass --root <dir> if the checkout path differs` when `data[0].files` is non-empty but no file path lies under the root. An empty files list, or files that are under the root but map to no crate, keep the previous behaviour (n/a, PASS). The check is in the run path; `crate_of_rooted` and the new `under_root` share one prefix helper.
 **Rationale:** With a symlinked checkout or a wrong `--root`, every file fell outside the root, every crate showed n/a, and the gate passed vacuously (REQ-NFR-008).
 **Alternatives:** Making `parse_summary` itself return an error (rejected: it is the pure parser and existing callers rely on an empty result for foreign roots); failing on an empty files list too (rejected: nothing to attribute is not a root mismatch); canonicalising the root with symlink resolution (rejected: needs filesystem access in the mapping and does not fix a wrong `--root`).
+## FP-004 — PRNG: in-house PCG64-DXSM (no crate)
+
+**Decision:** The PCG64-DXSM generator (REQ-CORE-001) is a ~40-line pure-integer in-house
+implementation (`spikes/libs/src/prng.rs`, to be moved into a rules crate by its owner): state
+is `(state: u128, increment: u128)`; the LCG steps with the 64-bit "cheap multiplier"
+`0xda942042e4dd58b5`, and the output is the DXSM permutation of the pre-step state (the NumPy
+`PCG64DXSM` / pcg-cpp `cm_setseq_dxsm_128_64` definition). Seeding `new(initstate, initseq)`
+follows NumPy (`pcg_setseq_128_srandom_r`), which steps with the standard 128-bit PCG
+multiplier `0x2360ed051fc65da44385df649fccf645` while seeding only. No crate is pinned for the
+PRNG. The brief described the LCG as using "the standard PCG 128-bit default multiplier"; the
+published vectors show that multiplier is used only during NumPy's seeding, and the stepping
+uses the cheap multiplier. The seed derivation itself belongs to REQ-API-004 (see HUMAN_QUEUE).
+**Rationale:** Published vectors: NumPy `numpy/random/tests/data/pcg64dxsm-testset-1.csv` (seed
+0xdeadbeaf) and `-2.csv` (seed 0), rows 0–15 and row 999 of each, hard-coded in
+`tests/prng.rs`; 2 of 2 seed/stream pairs and 34 of 34 outputs match, plus the seeded raw state
+(NumPy 2.5.3 `SeedSequence(seed).generate_state(4, uint64)` gives the 128-bit
+`initstate`/`initseq`; that derivation was computed locally, not published). Throughput
+(`cargo run --release -p fineprint-spike-libs --example bench`, median of 51 samples of 10^6
+calls): 1.58–2.15 ns per u64 across two runs, equal to `rand_pcg` (1.60–2.12 ns). Zero
+dependencies, so no `getrandom`/OS entropy can be reached and wasm32 has nothing to build
+beyond core integer arithmetic. Licence: MPL-2.0 (own code). The output is frozen with the
+engine major version because no third-party update can change it.
+**Alternatives:** `rand_pcg =0.10.2` (`Pcg64Dxsm` = `Lcg128CmDxsm64`, MIT OR Apache-2.0, deps:
+`rand_core 0.10.1` only, no `getrandom` in 0.10): output matches the published rows when built
+with `from_state` from NumPy's seeded state, but its `new` seeds with the cheap multiplier
+(pcg-cpp convention), so `new(initstate, initseq)` gives a different state than NumPy (asserted
+in `req_core_001_rand_pcg_candidate_matches_published_vectors`). Rejected: an extra dependency
+for 40 lines, and a seeding convention that differs from the published vectors. `pcg_rand`
+and `pcg` crates were not evaluated (rand_pcg already covers the crate option).
+
+## FP-004 — RFC 8785 canonical JSON: serde_json_canonicalizer
+
+**Decision:** `serde_json_canonicalizer = "=0.4.1"` (no features exist) over `serde_json =
+"=1.0.154"` with `default-features = false, features = ["std", "float_roundtrip"]`
+(`float_roundtrip` makes decimal parsing correctly rounded, so the canonical number is computed
+from the exact double; it is enabled on the documented behaviour of the feature, not on a
+measured failure). `serde = "=1.0.229"` (`std`, `derive`). Wrapper: `canonicalize(bytes)`
+parses into `serde_json::Value` and serialises with JCS. The wrapper rejects duplicate property
+names, compared after string decoding, in every nested object via a serde visitor pre-pass
+(RFC 8785 requires I-JSON, where serde_json's `Value` would silently keep the last duplicate).
+**Rationale:** Vectors (hard-coded in `spikes/libs/tests/jcs.rs`), all passed by both
+candidates: 23 of 23 number-serialisation rows of the JCS specification table (copied from the
+RFC author's source `cyberphone/ietf-json-canon` draft XML; every row re-checked with Node.js 22
+`JSON.stringify`) plus NaN and Infinity rejected; 32 of 32 extra random doubles formatted by
+Node.js (not published); 6 of 6 reference files from `cyberphone/json-canonicalization/testdata`
+(arrays, french, structures, unicode, values, weird), where `weird` proves UTF-16 code-unit key
+order (U+1F602 sorts before U+FB33, the reverse of UTF-8/code-point order, also asserted
+directly); string escaping (`\u0000`, `\u001f`, `\b\t\n\f\r`, `\"`, `\\`, `/` unescaped, DEL
+and non-ASCII raw); lone surrogate rejected. Large numbers: both candidates serialise integers
+beyond 2^53 as the nearest double, silently (9007199254740993 -> `9007199254740992`, u64::MAX
+-> `18446744073709552000`, i64::MIN -> `-9223372036854776000`); `1e400` is rejected by the
+parser. This is the RFC's ECMAScript behaviour, so definition JSON that is content-hashed must
+keep integers within ±(2^53−1) or carry larger values as strings. Speed on a 23 114-byte
+document (200 objects): 0.64 ms (both candidates within 3 %). Licence: MIT; full tree below.
+Bounded random input (4000 inputs) never panics and canonicalisation is idempotent.
+**Alternatives:** `serde_jcs =0.2.0` (MIT OR Apache-2.0, depends on the older `ryu-js 0.2`):
+same vector results and speed (0.62–0.66 ms), rejects `i128` ("i128 is not supported") where
+`serde_json_canonicalizer` formats it as a double; rejected for the smaller API surface, older
+number formatter and lower adoption (crates.io: 6.6 M vs 18.3 M downloads). An in-house
+canonicalizer is not needed: no vector failed.
+
+## FP-004 — MessagePack transport: rmp-serde, named struct fields
+
+**Decision:** `rmp-serde = "=1.3.1"` (no features exist). Structs are encoded as maps keyed by
+field name (`rmp_serde::to_vec_named`); enums use serde's externally tagged form, which
+rmp-serde writes as a one-entry map `{"Variant": payload}` and a bare string for unit variants.
+MessagePack is transport only; nothing feeds its bytes into a hash (REQ-NFR-006).
+**Rationale:** Round trip of a three-level nested enum (unit, newtype, tuple and struct
+variants; `Vec`, `Option`, `BTreeMap` payloads; i64::MIN/MAX, u64::MAX; non-ASCII strings)
+passes, and three hard-coded byte vectors (`"Plain"` = `a5 50 6c 61 69 6e`, an extremes tuple
+of 31 bytes, a nested struct of 52 bytes) pin the exact encoding (`tests/transport.rs`). 4000
+random and mutated inputs decode without panicking. Sizes for 200 synthetic snapshots: named
+16 325 bytes, compact (struct as array) 6 397 bytes, JSON 23 114 bytes; named encode 24–25 µs,
+decode 42–43 µs. Named fields were chosen over the 2.5x smaller compact form because the web and
+.NET clients decode by field name, and adding a field does not shift positions; the size is
+still 29 % below JSON. Licence: MIT (`rmp 0.8.15` MIT, `num-traits` MIT OR Apache-2.0).
+**Alternatives:** compact arrays (`rmp_serde::to_vec`, 6 397 bytes): rejected for client
+schema fragility, can be revisited by the API contract owner. Other MessagePack crates were not
+evaluated: rmp-serde passed every check and is the de facto serde implementation (153 M
+downloads).
+
+## FP-004 — State hash: SHA-256 Merkle (sha2), budget met
+
+**Decision:** The canonical state hash digest is SHA-256 from `sha2 = "=0.11.1"` with
+`default-features = false` (the default `alloc` and `oid` features are not needed; the backend
+is chosen by runtime CPU-feature detection, SHA-NI on x86_64 and SHA2 on aarch64, otherwise the
+portable software code). The REQ-NFR-006 escape clause is not used. Prototype tree
+(`spikes/libs/src/merkle.rs`): leaf = `SHA-256(0x00 || tag || fields)`, parent =
+`SHA-256(0x01 || child digests)`; integers little-endian fixed width, strings and lists
+prefixed with a `u32` LE length; root children in fixed order players, battlefield, stack,
+pending triggers, turn position, PRNG; battlefield = node(membership leaf, binary tree over
+permanents in ObjectId order).
+**Rationale:** Measured with `cargo run --release -p fineprint-spike-libs --example bench`,
+median of 51 samples, on Linux 6.18 x86_64, Intel Xeon @ 2.10 GHz (family 6 model 207, KVM,
+4 vCPU; not the reference ubuntu-latest runner), synthetic 4-player state with 200 permanents
+(16 345 payload bytes):
+
+| Figure | SHA-256 (auto: SHA-NI) | SHA-256 (soft backend) | BLAKE3 1.8.7 (`pure`) |
+|---|---|---|---|
+| Full recompute | 58–68 µs | 185 µs | 88–98 µs |
+| Incremental, 1 permanent | 2.4–3.3 µs | 5.5 µs | 3.3–4.4 µs |
+| Incremental, 10 permanents | 14.1–14.3 µs | 41 µs | 20 µs |
+| Payload throughput, full | 240–280 MB/s | 88 MB/s | 167–185 MB/s |
+| Raw 1 MiB buffer | 1 492–1 614 MB/s | 330 MB/s | 3 001–3 261 MB/s |
+
+Budget (REQ-LAYER-005, ≤ 2 ms full board, 200 permanents): on the local 4 vCPU Xeon KVM VM
+above only, full recompute PASS at 3–9 % of the budget even with the software backend;
+incremental PASS. The reference ubuntu-latest result is outstanding until a CI benchmark run
+records it (no CI job runs the benchmark yet). The soft figures came from
+`RUSTFLAGS='--cfg sha2_backend="soft"'`. Correctness tests (`tests/merkle.rs`): 10 repeated
+full hashes equal; incremental equals full after 1 and 10 permanent changes and after 600
+PRNG-driven random mutations (permanent edits, players, stack, triggers, turn, PRNG, permanents
+added and removed, battlefields of 200, 0, 1 and 7) comparing every cached digest; the
+first-differing-component walk finds each kind of change. Golden root of
+`synthetic_state(0x5eed0004, 200)`: SHA-256
+`738f06e1f327b8745855fdd2837722d572e0488a76052b1a4864314b567c33ba` (reproduced by an
+independent Python `hashlib` implementation of the encoding), BLAKE3
+`85bf5e48d505692983eb9715328151028010bb9c8048ad8b0dc31ddbcf827e17`. Licence: sha2 and its 8
+dependencies are MIT OR Apache-2.0 (libc, via cpufeatures, is used on some targets only).
+**Alternatives:** BLAKE3 (`blake3 =1.8.7`, `pure` feature so no C or assembly; CC0-1.0 OR
+Apache-2.0): faster on large buffers but 1.4x slower on this tree of small leaves; not needed
+because SHA-256 meets the budget. Kept as a spike-only dependency for the comparison and not
+pinned. Zobrist hashing was already rejected in A6.
+
+## FP-004 — pest grammar crates
+
+**Decision:** `pest = "=2.9.6"` and `pest_derive = "=2.9.6"`, both `default-features = false`.
+With pest's `std` feature off, the target-side pest depends only on `ucd-trie`; the crate root
+needs `extern crate alloc;` because pest_derive then emits `alloc::` paths. pest is for
+`fineprint-ingest` (offline toolchain) only and must not enter the rules crates (REQ-NFR-005).
+**Rationale:** A synthetic grammar file (`spikes/libs/src/sentence.pest`, invented sentences
+about marbles and bowls) accepts 3 of 3 valid inputs, rejects 7 of 7 invalid ones, and 4000
+random strings never panic (`tests/grammar.rs`). Compile cost: clean `cargo build --release -p
+pest -p pest_derive` 5.6 s, whole spike crate 10.0 s (same machine as the hash entry). Pure
+Rust on the target side. On the build host, pest_derive's own pest copy keeps `std`, which
+pulls `pest_stack_guard` -> `stacker`/`psm` (psm assembles a small file with `cc`); this runs at
+compile time only and does not reach the target. Licence: MIT OR Apache-2.0 for pest,
+pest_derive, pest_generator, pest_meta, ucd-trie, pest_stack_guard, stacker, psm.
+**Alternatives:** target-side `std` feature (adds the stack guard; rejected for now because it
+adds the psm assembly build step to every target including wasm32; the ingest owner may enable
+it for native-only builds). tree-sitter and Lark were rejected earlier (A5).
+
+## FP-004 — Licence check of the pinned crates
+
+**Decision:** All pinned crates and their transitive dependencies are accepted.
+**Rationale:** `cargo metadata --format-version 1 --locked`, walking the dependency graph from
+the seven pinned crates: 35 packages over normal dependencies (including proc-macro hosts), 41
+including build dependencies. Licences of the 41: MIT OR Apache-2.0 (31), MIT (4: rmp,
+rmp-serde, serde_json_canonicalizer, zmij), Unlicense OR MIT (1: memchr), Apache-2.0 OR MIT
+(2: autocfg, object), and three to note: `ryu-js 1.0.3` Apache-2.0 OR BSL-1.0 (Apache-2.0 elected);
+`ar_archive_writer 0.5.5` Apache-2.0 WITH LLVM-exception (build dependency of psm, compile time
+only); `unicode-ident 1.0.27` (MIT OR Apache-2.0) AND Unicode-3.0 (a permissive data licence;
+used only inside the `proc-macro2`/`syn` proc-macros at compile time, nothing is linked into
+the output). No GPL, AGPL, LGPL or unknown licence. Comparison-only crates: blake3 (CC0-1.0
+OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception), constant_time_eq (CC0-1.0 OR MIT-0 OR
+Apache-2.0), arrayvec, rand_pcg, rand_core, serde_jcs (MIT OR Apache-2.0), ryu-js 0.2.2
+(Apache-2.0 OR BSL-1.0).
+**Alternatives:** `cargo-deny` (not added: the brief forbids it here; the guards are #4's).
+
+## FP-004 — spikes/ directory handling by repo guards
+
+**Decision:** `spikes/libs/**` is a non-rules, throwaway area and a workspace member
+(`fineprint-spike-libs`, `publish = false`). Nothing depends on it. The guards that #4 (FP-003)
+adds should (1) apply the MPL header, `forbid(unsafe_code)` and card-data guards to it, (2)
+treat it as non-rules for the no-float/no-HashMap rule (the spike's PRNG and Merkle code still
+avoid both; f64 appears only in `tests/jcs.rs` under the documented crate-level allow), and (3)
+apply the REQ-NFR-008 75 % non-rules line-coverage floor to all of `spikes/libs/**` (`src`,
+`examples` and `tests`, as the coverage tool measures them) with no exemption; any exemption
+(for example of `examples/bench.rs`) needs an approved SRS change first. Alternatively #4 may
+delete `spikes/libs`, but only after the production crates carry replacement golden-value tests
+(equivalent PRNG, canonical-JSON, MessagePack and Merkle-hash vectors) that run in CI on Linux,
+Windows and macOS; adopting the pins alone is not enough.
+**Rationale:** The spike is evidence, not product, but REQ-NFR-008 has no benchmark
+exemption. The practical consequence for #4: if the benchmark printer
+(`examples/bench.rs`) cannot reach the floor, cover it with a smoke test that runs it with tiny
+iteration counts, or delete the spike once production crates carry replacement golden-value tests
+that run in CI on Linux, Windows and macOS (adopting the pins alone is not enough). Keeping it in
+the workspace makes CI run its golden-value tests on all three platforms, which is the
+cross-platform acceptance criterion of #5.
+**Alternatives:** a separate workspace under `spikes/` (rejected: CI would not run it without
+editing `.github/`, which #5 does not own); deleting the spike in #5 (rejected: the tests are
+the cross-platform evidence until production crates carry them).
+
 ## FP-005 (#6) — Binding toolchain spike: cbindgen, .NET 10 P/Invoke, wasm-bindgen, headless browsers
 
 **Decision:** The binding toolchains are proved on a toy SHA-256 function in an isolated spike
