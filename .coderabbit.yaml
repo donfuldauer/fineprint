@@ -1,0 +1,56 @@
+# CodeRabbit is the only code reviewer in the run (docs/PROCESS.md P6, rule R9).
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: true
+  high_level_summary: true
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_pause_after_reviewed_commits: 0
+    base_branches:
+      - main
+  # Keep generated, binary and recorded data out of review. Source, DSL schemas, card
+  # definitions, .pzl scenarios, CI and docs stay in review.
+  path_filters:
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.svg"
+    - "!**/*.wasm"
+    - "!**/*.fpdb"
+    - "!**/*.fpreplay"
+    - "!**/*.msgpack"
+    - "!**/Cargo.lock"
+    - "!**/packages.lock.json"
+    - "!**/package-lock.json"
+    - "!**/proptest-regressions/**"
+    - "!**/target/**"
+    - "!**/bin/**"
+    - "!**/obj/**"
+    - "!**/ingest-cache/**"
+    - "!**/coverage-report*.json"
+    - "!dist/**"
+  path_instructions:
+    - path: "**/*.{rs,cs,c,h,cpp,ts}"
+      instructions: >-
+        Check docs/PROCESS.md rules. R3: no floating point in rules paths, no iteration over
+        hash-ordered containers where order can affect results, no clock/I/O/global state, all
+        randomness from the state's PRNG. R4: no branch on a cardDefId or card name in engine
+        code. R5: no card names or Oracle text in engine source. R6: rules procedures cite the
+        CR rule they implement. Flag any path where a redacted player view or determinized fork
+        could expose hidden information (REQ-CORE-004, REQ-API-004).
+    - path: "**/*.pzl"
+      instructions: >-
+        Scenario tests (REQ-TEST-001). Header must list REQ IDs, CR rules, card definition hashes
+        and a fixed PRNG seed. Flag missing orderings (both timestamp orders, APNAP), assertions on
+        wall-clock or non-canonical bookkeeping, and weakened or removed assertions.
+    - path: "**/tests/**"
+      instructions: >-
+        Tests must not sleep or assert on wall-clock time, and must name the REQ IDs they cover.
+        Flag skipped, ignored or weakened assertions.
+    - path: "docs/**"
+      instructions: >-
+        Planning and decision records. Check consistency with docs/SRS.md requirement IDs and
+        docs/PROCESS.md. CR rule numbers must use the SRS rules baseline.
+chat:
+  auto_reply: true

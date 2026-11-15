@@ -1,0 +1,24 @@
+# Build output
+target/
+**/bin/Debug/
+**/bin/Release/
+**/obj/
+dist/
+node_modules/
+*.wasm
+
+# Card data and CR text are never committed (REQ-NFR-004, REQ-NFR-007; PROCESS.md R5)
+ingest-cache/
+cr-cache/
+*.cr.txt
+*.fpdb
+scryfall-*.json
+oracle-cards-*.json
+rulings-*.json
+AtomicCards*.json
+
+# Local tooling
+.env
+*.log
+.DS_Store
+__pycache__/
