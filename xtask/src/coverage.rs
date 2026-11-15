@@ -327,7 +327,10 @@ fn is_absolute_root(root: &str) -> bool {
 /// not resolved and the result matches the paths in the llvm-cov report): `.` and empty components
 /// are dropped, `..` pops the previous component and never goes above the root. The separator is
 /// `\` when `cwd` uses only backslashes, else `/`. There is no trailing separator, except that the
-/// filesystem root itself is returned as `/` (or `C:\`); the result is never empty. Never panics.
+/// filesystem root itself is returned as `/` (or `C:\`); the result is never empty. A leading UNC
+/// prefix (`\\server\share`, `//server/share`) and the Win32 verbatim prefixes (`\\?\C:`,
+/// `\\?\UNC\server\share`) are kept as one non-poppable unit: `..` never removes the server or
+/// share. Never panics.
 pub fn resolve_root(cwd: &str, root: &str) -> String {
     if is_absolute_root(root) {
         return root.to_string();
@@ -339,13 +342,44 @@ pub fn resolve_root(cwd: &str, root: &str) -> String {
     };
     let b = cwd.as_bytes();
     let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
-    let (prefix, rest) = if drive {
-        (format!("{}{sep}", &cwd[..2]), &cwd[2..])
+    let pieces: Vec<&str> = cwd.split(['/', '\\']).collect();
+    let unc =
+        pieces.len() > 2 && pieces[0].is_empty() && pieces[1].is_empty() && !pieces[2].is_empty();
+    // `fixed` is the number of leading pieces that form the non-poppable prefix.
+    let (prefix, skip, rooted) = if unc {
+        let verbatim = matches!(pieces[2], "?" | ".");
+        let n = if verbatim && pieces.get(3).is_some_and(|p| p.eq_ignore_ascii_case("UNC")) {
+            // `\\?\UNC\server\share`
+            6
+        } else {
+            // `\\server\share`, `\\?\C:`, `\\?\<device>`
+            4
+        };
+        let n = n.min(pieces.len());
+        let drive_like = verbatim
+            && n == 4
+            && pieces.get(3).is_some_and(|p| {
+                p.len() == 2 && p.as_bytes()[0].is_ascii_alphabetic() && p.as_bytes()[1] == b':'
+            });
+        let head = format!("{sep}{sep}{}", pieces[2..n].join(&sep.to_string()));
+        (head, n, drive_like)
+    } else if drive {
+        (cwd[..2].to_string(), 1, true)
     } else {
-        (sep.to_string(), cwd)
+        (String::new(), 0, true)
     };
+    let rest = &pieces[skip.min(pieces.len())..];
+    // For the drive and plain-root forms the prefix is followed by a separator even when empty.
     let mut comps: Vec<&str> = Vec::new();
-    for c in rest.split(['/', '\\']).chain(root.split(['/', '\\'])) {
+    let drive_rest: Vec<&str> = if drive && !unc {
+        // `C:` was the first piece's head; its remainder is `pieces[0][2..]`, always empty or a
+        // component without separators (e.g. `C:w` is treated as the component `w`).
+        let tail = &pieces[0][2..];
+        std::iter::once(tail).chain(rest.iter().copied()).collect()
+    } else {
+        rest.to_vec()
+    };
+    for c in drive_rest.into_iter().chain(root.split(['/', '\\'])) {
         match c {
             "" | "." => {}
             ".." => {
@@ -354,7 +388,12 @@ pub fn resolve_root(cwd: &str, root: &str) -> String {
             c => comps.push(c),
         }
     }
-    format!("{prefix}{}", comps.join(&sep.to_string()))
+    let joined = comps.join(&sep.to_string());
+    if rooted || !joined.is_empty() {
+        format!("{prefix}{sep}{joined}")
+    } else {
+        prefix
+    }
 }
 
 /// Entry point for `cargo xtask coverage [--input <file>] [--root <dir>]`. Returns the process
@@ -1054,11 +1093,89 @@ xtask | 40 | 30 | 75.00% | 75% | PASS
         assert_eq!(r("C:\\w\\xtask", ".."), "C:\\w");
         assert_eq!(r("C:\\w", "..\\.."), "C:\\");
         assert_eq!(r("C:\\w\\", "."), "C:\\w");
+        // UNC cwd keeps both leading separators, server and share; `..` never pops them
+        let unc = "\\\\server\\share\\repo";
+        assert_eq!(r(unc, "."), unc);
+        assert_eq!(r(unc, ".."), "\\\\server\\share");
+        assert_eq!(r(unc, "..\\.."), "\\\\server\\share");
+        assert_eq!(r(unc, "..\\..\\.."), "\\\\server\\share");
+        assert_eq!(r(unc, "sub\\dir"), "\\\\server\\share\\repo\\sub\\dir");
+        assert_eq!(r("\\\\server\\share\\repo\\", "."), unc);
+        assert_eq!(r("\\\\server\\share\\", "x"), "\\\\server\\share\\x");
+        assert_eq!(r("//server/share/repo", "."), "//server/share/repo");
+        assert_eq!(r("//server/share/repo/", "../.."), "//server/share");
+        assert_eq!(r("\\\\server", ".."), "\\\\server");
+        assert_eq!(
+            r("\\\\server\\share\\repo", "\\\\other\\s\\r"),
+            "\\\\other\\s\\r"
+        );
+        // verbatim forms
+        assert_eq!(r("\\\\?\\C:\\w\\x", ".."), "\\\\?\\C:\\w");
+        assert_eq!(r("\\\\?\\C:\\w", "..\\.."), "\\\\?\\C:\\");
+        assert_eq!(
+            r("\\\\?\\UNC\\server\\share\\repo", "."),
+            "\\\\?\\UNC\\server\\share\\repo"
+        );
+        assert_eq!(
+            r("\\\\?\\UNC\\server\\share\\repo", "..\\..\\.."),
+            "\\\\?\\UNC\\server\\share"
+        );
+        // UNC root and UNC report paths agree, in either separator style
+        let root = r(unc, ".");
+        for p in [
+            "\\\\server\\share\\repo\\xtask\\src\\main.rs",
+            "//server/share/repo/xtask/src/main.rs",
+        ] {
+            assert!(under_root(&root, p));
+            assert_eq!(crate_of_rooted(&root, p).as_deref(), Some("xtask"));
+        }
+        assert_eq!(
+            crate_of_rooted(
+                &root,
+                "\\\\server\\share\\repo\\crates\\fineprint-core\\src\\lib.rs"
+            )
+            .as_deref(),
+            Some("fineprint-core")
+        );
+        assert!(!under_root(
+            &root,
+            "\\\\server\\share\\other\\xtask\\src\\main.rs"
+        ));
+        let froot = r("//server/share/repo", ".");
+        assert!(under_root(&froot, "//server/share/repo/xtask/src/main.rs"));
+        assert_eq!(
+            crate_of_rooted(
+                &froot,
+                "//server/share/repo/crates/fineprint-core/src/lib.rs"
+            )
+            .as_deref(),
+            Some("fineprint-core")
+        );
+        // end to end: UNC root and UNC filenames keep every measurement
+        let report = doc(&[
+            file(
+                "\\\\\\\\server\\\\share\\\\repo\\\\xtask\\\\src\\\\main.rs",
+                "100",
+                "90",
+            ),
+            file(
+                "//server/share/repo/crates/fineprint-core/src/lib.rs",
+                "20",
+                "19",
+            ),
+        ]);
+        assert_eq!(
+            parse_summary(&report, &root).expect("parse"),
+            vec![
+                ("fineprint-core".to_string(), 20, 19),
+                ("xtask".to_string(), 100, 90)
+            ]
+        );
         // a resolved root classifies files as the absolute one does
         assert!(under_root(&r("/w", "."), "/w/a.rs"));
         assert!(under_root(&r("/w/xtask", ".."), "/w/a.rs"));
         // fixed-seed fuzz: arbitrary strings never panic or yield an empty string
-        let alphabet: Vec<char> = "/\\.:aC \u{e9}".chars().collect();
+        let alphabet: Vec<char> = "/\\.:aC ?\u{e9}".chars().collect();
         let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
             let mut t = String::new();

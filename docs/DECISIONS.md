@@ -350,3 +350,19 @@ disagree with the paths llvm-cov recorded the way a symlink-resolving `canonical
 **Alternatives:** `std::fs::canonicalize`. Rejected: resolves symlinks and needs the path to
 exist, so it may mismatch the report. Reject relative roots with an error. Rejected: `.` and `..`
 are the natural spellings when running from the workspace or from `xtask/`.
+
+## FP-003 (#4) — resolve_root preserves UNC and verbatim prefixes
+
+**Decision:** `resolve_root` treats a leading UNC prefix (`\\server\share` or `//server/share`) as one
+non-poppable unit and re-emits it with both leading separators; `..` never removes the server or the
+share. The Win32 verbatim forms are supported too: `\\?\C:` (drive, rooted like `C:\`) and
+`\\?\UNC\server\share` are kept as prefixes. Separator style still follows the cwd; absolute `--root`
+values pass through unchanged; no canonicalisation. `rel_to_root`/`under_root` needed no change.
+
+**Rationale:** Windows allows UNC current directories. The old code dropped one leading separator, so
+the root became `/server/share/repo` while llvm-cov filenames normalise to `//server/share/repo/...`,
+every file failed `under_root` and `run` exited 1 despite valid coverage. The verbatim forms cost a
+few lines in the same prefix parser.
+
+**Alternatives:** UNC only (rejected: small extra code covers verbatim); `std::fs::canonicalize`
+(rejected: filesystem access, resolves symlinks and yields `\\?\` paths that differ from the report).
