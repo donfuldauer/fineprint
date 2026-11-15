@@ -1,0 +1,30 @@
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "fineprint-spike-libs"
+description = "Throwaway FP-004 spike: PRNG, JCS, MessagePack, SHA-256 Merkle and pest evidence (non-rules)."
+license = "MPL-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+rmp-serde = { workspace = true }
+sha2 = { workspace = true }
+pest = { workspace = true }
+pest_derive = { workspace = true }
+# Comparison-only candidate (not pinned in the workspace; see docs/DECISIONS.md FP-004).
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure"] }
+
+[dev-dependencies]
+# Comparison-only candidates (not pinned in the workspace; see docs/DECISIONS.md FP-004).
+serde_jcs = "=0.2.0"
+rand_pcg = { version = "=0.10.2", default-features = false }
+rand_core = { version = "=0.10.1", default-features = false }
