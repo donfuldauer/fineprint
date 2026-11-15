@@ -4,5 +4,8 @@ Items for a person (PROCESS.md R8, P7, P8). Never a request to close a review th
 Resolved items are struck through with the resolution and a link.
 
 - ~~[setup] Decide architecture and supported platforms.~~ Resolved: SRS §17 (`REQ-NFR-001`–`012`), DECISIONS.md "Architecture — …".
-- [setup] Generate the plan with `/plan-from-srs`.
+- ~~[setup] Generate the plan.~~ Resolved: `work-unit` issues on GitHub (DECISIONS.md "Repository — The plan is GitHub issues").
+- [setup] Once the CI issue (#3, FP-002) merges, add its jobs as required status checks in the `main` branch protection rule (PROCESS.md P6 step 5).
+- [planning] Confirm the client interpretation: one demonstration client per binding (DECISIONS.md "Planning — One demonstration client per binding").
 - [setup] Install the CodeRabbit GitHub app on this repository and enable branch protection on `main` with required checks (PROCESS.md P6).
+- [PR #47] SRS REQ-NFR-009 says "wave gate"; the process now calls it the "phase gate" (tag `phase-<NN>-green`). Rename it in the SRS when convenient (SRS changes are a person's change, PROCESS.md P8).

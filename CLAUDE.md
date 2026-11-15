@@ -2,13 +2,15 @@
 
 Fine Print is a deterministic, data-driven rules engine. The requirements are `docs/SRS.md`
 (SRS-TCG-ENGINE-001). The process every agent follows is `docs/PROCESS.md` (cite it as P1–P8,
-rules R1–R12). The plan is `docs/PLAN.md`.
+rules R1–R12). The plan is the set of GitHub issues labelled `work-unit` (milestones M1–M3); it
+is never written into the repository. Workspace layout and commands are in `docs/DEVELOPMENT.md`
+once the workspace issue has merged.
 
-**If `docs/PLAN.md` does not exist yet:** no product code is written. Run the `plan-from-srs`
-skill: it gets the architecture and platform decisions from the user, writes them into the SRS as
-`REQ-NFR-*` nonfunctional requirements, then generates the plan. This is the only step where the Orchestrator stops to ask a person.
-
-**Once the plan exists:** run the `run-plan` skill to pick up the next ready work and drive it.
+**Starting work:** each issue is one unit of work with its dependencies. When the user says
+"Start work on issue X", use the `work-issue` skill: it checks the issue's dependencies are
+merged, drives the work through the agents below, opens a PR that closes the issue, resolves the
+CodeRabbit review and merges. The `run-plan` skill loops over
+every ready issue in plan order.
 
 - **Model routing (P4).** Every unit of work goes through the `work-classifier` agent first,
   except items that pass the `triage` skill's fast-path checks. Tiers: Haiku 5.5, Sonnet 5.5,

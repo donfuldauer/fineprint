@@ -2,7 +2,7 @@
 
 The work-classifier fills this in for each delegation (PROCESS.md P4, P5), and the Orchestrator
 passes it verbatim to the named agent. A brief must be usable without access to `docs/SRS.md`,
-`docs/PLAN.md` or `docs/PROCESS.md`: everything the agent needs is pasted in.
+the GitHub issue, `docs/DEVELOPMENT.md` or `docs/PROCESS.md`: everything the agent needs is pasted in.
 
 ```text
 WORK ITEM <id>: <title>          AGENT: task-executor | fixture-author | work-verifier | issue-investigator | rules-researcher
@@ -10,15 +10,16 @@ ROLE: Implementer | Independent Tester | Fixer | Fixture Author | Verifier | Inv
 MODEL: <Haiku 5.5 | Sonnet 5.5 | Opus 5.5 | Fable 5.2>   TIER: T0–T3 (+ Fable evidence if T3)
 BRANCH: <branch>   BASE: main   PR: <number or "not yet open">
 
-REQUIREMENT IDS: <REQ-… list this work satisfies, from docs/PLAN.md traceability>
+ISSUE: #<n> <url>   PLAN ID: FP-<NNN>
+REQUIREMENT IDS: <REQ-… list from the issue>
 CR REFERENCES:   <rule numbers, each with its text quoted from the rules-researcher's answer>
 
 OWNED PATHS (you may modify only these):
   <paths>
 DO NOT TOUCH:
-  <paths, especially contracts owned by other subphases>
+  <paths, especially contracts owned by other units>
 READ-ONLY CONTEXT:
-  <public APIs of dependency subphases, with signatures>
+  <public APIs of dependency units, with signatures>
 
 GOAL
   <one paragraph on the result, not the method>
@@ -29,7 +30,7 @@ REQUIREMENTS / DELIVERABLES
    For a fixture task: the regression scenarios and the abilities each synthetic card needs.>
 
 CONTRACTS YOU MUST HONOUR
-  <relevant SRS excerpts (schemas, tables, procedures) and plan contracts, inlined in full>
+  <relevant SRS excerpts (schemas, tables, procedures) and contracts from docs/DEVELOPMENT.md, inlined in full>
 
 RULES
   <PROCESS.md P2 rules R1–R12, inlined in full>
@@ -39,24 +40,24 @@ TESTS REQUIRED
    existing suites that must still pass>
 
 COMMANDS
-  <exact build / format / lint / test / coverage / replay commands from docs/PLAN.md,
+  <exact build / format / lint / test / coverage / replay commands from docs/DEVELOPMENT.md,
    with the environment variables for this run>
 
 VERIFICATION CRITERIA
-  <numbered list copied from the plan's subphase section>
+  <the issue's acceptance criteria, verbatim>
 
 GATE / DONE WHEN
-  <the subphase gate from PROCESS.md P5, inlined, or the checks the work-verifier will run>
+  <the unit gate from PROCESS.md P5, inlined, or the checks the work-verifier will run>
 
 WHEN SOMETHING IS UNCLEAR
-  Choose the option most consistent with the SRS, the plan and the decision-log excerpts below,
+  Choose the option most consistent with the SRS, the issue and the decision-log excerpts below,
   record it in docs/DECISIONS.md, add a line to docs/HUMAN_QUEUE.md, and continue. Do not wait.
   If the question is what a rule of the game says, stop that item and report it as a
   rules question; the Orchestrator sends it to the rules-researcher.
   <relevant DECISIONS.md excerpts>
 
 ROLE-SPECIFIC
-  Implementer:        deliver code + unit tests; do not read the subphase's spec tests.
+  Implementer:        deliver code + unit tests; do not read the unit's spec tests.
   Independent Tester: you have NOT seen the implementation and must not ask for it. Write
                       black-box, property and .pzl tests from this brief alone.
   Fixer:              smallest change that meets "fixed"; regression test; name the thread(s).

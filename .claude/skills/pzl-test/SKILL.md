@@ -7,8 +7,9 @@ description: "How to write Fine Print .pzl scenario tests (REQ-TEST-001): rules-
 
 A `.pzl` file is a declarative scenario: an exact starting state, a scripted sequence of player
 choices, and assertions (SRS REQ-TEST-001). It is the main evidence that a rule or a card works.
-The exact schema is a contract defined in `docs/PLAN.md` §3; this skill is the conventions that
-sit on top of it. If the plan's schema and this skill disagree, the schema wins for syntax and
+The exact schema is a contract defined by the scenario-format issue and documented in
+`docs/DEVELOPMENT.md`; this skill is the conventions that sit on top of it. If that schema and
+this skill disagree, the schema wins for syntax and
 this skill wins for what a good test contains.
 
 ## 1. Header (always)
@@ -50,7 +51,7 @@ this skill wins for what a good test contains.
 - Assert **absence** as well as presence where the rule forbids something (no prompt for damage
   assignment order; ward does not prevent targeting; no trigger from a look-back that should not
   fire).
-- Never assert on wall-clock time, memory addresses, hash-map order or anything the plan marks as
+- Never assert on wall-clock time, memory addresses, hash-map order or anything the SRS marks as
   non-canonical bookkeeping (REQ-LOOP-001.1).
 
 ## 5. Coverage obligations
@@ -65,7 +66,7 @@ this skill wins for what a good test contains.
   (CR 400.7) and the last-known information used.
 - **Multiplayer.** When a rule has a multiplayer variant (APNAP, leaving the game, attack targets),
   include a three-or-more-player scenario.
-- **Determinism.** Each new scenario is added to the golden replay corpus when the plan says so,
+- **Determinism.** Each new scenario is added to the golden replay corpus when its issue says so,
   and must replay to the same state hash on every binding.
 
 ## 6. Client behavioral tests (format only)
@@ -77,6 +78,6 @@ synthetic cards.
 
 ## 7. Naming and placement
 
-Follow the plan's paths. Rules-regression scenarios are grouped by SRS area (layers, replacement,
+Follow the paths in `docs/DEVELOPMENT.md`. Rules-regression scenarios are grouped by SRS area (layers, replacement,
 casting, combat, layouts, SBAs, multiplayer, loops) with one file per scenario and a name that
 says what it proves, e.g. `layers/humility_then_opalescence.pzl`.
