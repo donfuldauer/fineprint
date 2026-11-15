@@ -351,14 +351,14 @@ Apache-2.0), arrayvec, rand_pcg, rand_core, serde_jcs (MIT OR Apache-2.0), ryu-j
 adds should (1) apply the MPL header, `forbid(unsafe_code)` and card-data guards to it, (2)
 treat it as non-rules for the no-float/no-HashMap rule (the spike's PRNG and Merkle code still
 avoid both; f64 appears only in `tests/jcs.rs` under the documented crate-level allow), and (3)
-keep the REQ-NFR-008 75 % non-rules line-coverage floor for the spike library code
-(`spikes/libs/src/**`), with any exemption limited to the benchmark printer
-`spikes/libs/examples/bench.rs`; any wider exemption (for example of `src/**` or `tests/**`)
-needs an approved SRS change. Alternatively #4 may delete
-`spikes/libs` once the production crates adopt the pins, which removes the question.
-**Rationale:** The spike is evidence, not product; holding a benchmark printer
-(`examples/bench.rs`) to the 75 % floor would make the workspace gate fail for no product
-benefit. Keeping it in the workspace makes CI run its golden-value tests on all three
+apply the REQ-NFR-008 75 % non-rules line-coverage floor to all of `spikes/libs/**` (`src`,
+`examples` and `tests`, as the coverage tool measures them) with no exemption; any exemption
+(for example of `examples/bench.rs`) needs an approved SRS change first. Alternatively #4 may
+delete `spikes/libs` once the production crates adopt the pins, which removes the question.
+**Rationale:** The spike is evidence, not product, but REQ-NFR-008 has no benchmark
+exemption. The practical consequence for #4: if the benchmark printer
+(`examples/bench.rs`) cannot reach the floor, cover it with a smoke test that runs it with tiny
+iteration counts, or delete the spike once production crates adopt the pins. Keeping it in the workspace makes CI run its golden-value tests on all three
 platforms, which is the cross-platform acceptance criterion of #5.
 **Alternatives:** a separate workspace under `spikes/` (rejected: CI would not run it without
 editing `.github/`, which #5 does not own); deleting the spike in #5 (rejected: the tests are
