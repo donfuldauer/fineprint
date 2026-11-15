@@ -118,12 +118,14 @@ CodeRabbit review under `docs/PROCESS.md` (REQ-NFR-011).
 
 ## Architecture — A12 Code license
 
-**Decision:** GPL-3.0-or-later (REQ-NFR-012).
-**Rationale:** The maintainer wants the most common license under which distributed modifications
-must stay open source and forks must keep attribution to the original.
-**Alternatives:** MIT OR Apache-2.0 (permissive); MPL-2.0 (file-level copyleft, allows embedding in
-closed-source applications); LGPL-3.0 (allows linking from closed-source applications); AGPL-3.0
-(also covers network use).
+**Decision:** MPL-2.0, with the Exhibit A header in every source file (REQ-NFR-012). Supersedes an
+initial choice of GPL-3.0-or-later.
+**Rationale:** The maintainer wants distributed modifications to stay open source with attribution,
+while allowing closed-source clients (for example game clients) to embed the engine. MPL-2.0's
+file-level copyleft does that with no relinking requirement, which suits Rust's static linking and
+the bundled WASM package; the LGPL's relinking obligation would burden both.
+**Alternatives:** GPL-3.0-or-later (every embedding app must be GPL-compatible); LGPL-3.0
+(relinking requirement); MIT OR Apache-2.0 (no copyleft); AGPL-3.0 (also covers network use).
 
 ## Repository — SRS is not versioned
 
