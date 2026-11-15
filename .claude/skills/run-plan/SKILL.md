@@ -1,6 +1,6 @@
 ---
 name: run-plan
-description: "The Orchestrator's loop over the plan's GitHub issues: finds every ready issue (all dependencies closed), works each one with the work-issue skill (in parallel where owned paths do not overlap), drives PRs to merge, runs phase gates, and keeps the run log current. Use to start or resume unattended work across many issues (/run-plan, optionally with a milestone or phase)."
+description: "The Orchestrator's loop over the plan's GitHub issues: finds every ready issue (all dependencies merged), works each one with the work-issue skill (in parallel where owned paths do not overlap), drives PRs to merge, runs phase gates, and keeps the run log current. Use to start or resume unattended work across many issues (/run-plan, optionally with a milestone or phase)."
 ---
 
 # run-plan
@@ -24,7 +24,8 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
 ## 1. Pick ready work
 
 The units of work are GitHub issues. An issue is **ready** when it is open, labelled `ready`
-(every issue in its "Depends on" list is closed), not `in-progress`, and no open PR owns any of
+(every issue in its "Depends on" list is satisfied: closed as completed by a merged PR, or
+explicitly replaced as `work-issue` §1 step 2 describes), not `in-progress`, and no open PR owns any of
 its paths. List them with
 `gh api "repos/donfuldauer/fineprint/issues?state=open&labels=ready&per_page=100"`, and take
 them in plan order (ascending `FP-NNN` plan ID). If an argument named a milestone or phase, restrict to
@@ -35,8 +36,9 @@ Start every ready issue whose owned paths do not overlap, up to a sensible paral
 
 ## 2. Per issue
 
-Run the `work-issue` skill for it, from §1 (dependency check) to §7 (merge and unblock). Keep
-going with other ready issues while a PR waits for review.
+Run the `work-issue` skill for it, from §1 (dependency check) to §7 (merge and unblock). Each
+issue works in its own git worktree (`work-issue` §2), so parallel issues never share a working
+tree. Keep going with other ready issues while a PR waits for review.
 
 ## 3. Discovered work
 
