@@ -202,7 +202,9 @@ in `docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] 
    binding and platform of REQ-NFR-003); cached and full-recompute layer modes agree
    (REQ-LAYER-005).
 7. Every `REQ-*` ID the unit claims has at least one test that names it.
-8. An automated path check confirms the diff touches only owned paths.
+8. An automated path check confirms the diff touches only owned paths plus the shared files
+   `docs/RUN_LOG.md`, `docs/DECISIONS.md`, `docs/HUMAN_QUEUE.md` and
+   `contracts/CHANGE_REQUESTS.md`.
 9. The work-verifier reports `pass`. The unit is done only when its PR merges under P6.
 
 **Wave gate.** Full test suite on every platform in REQ-NFR-003; golden replay hashes identical
@@ -212,8 +214,9 @@ regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
 
 ## P6. Pull request, review and merge
 
-1. **Open.** When the work-verifier passes, the Orchestrator commits the unit's
-   `docs/RUN_LOG.md` row(s), pushes the branch and opens a PR against `main` using
+1. **Open.** The Orchestrator commits the unit's `docs/RUN_LOG.md` row(s) before the
+   work-verifier's final run, so the verified commit is the PR head. When the verifier passes, it
+   pushes the branch and opens a PR against `main` using
    `.github/pull_request_template.md`, starting the body with `Closes #<issue>`. Bot names in the
    body go in backticks so nobody is notified by accident.
 2. **Auto-fix on.** Right after opening, the Orchestrator subscribes to the PR's activity
@@ -248,8 +251,11 @@ regressed by more than 10% (REQ-NFR-009). The wave's last merge commit is tagged
    request; every thread has a disposition reply and is resolved (except types that cannot be
    resolved); the branch is up to date with `main`; the work-verifier's last result for the head
    is `pass`. Then merge with a merge commit (the repository deletes the branch), unsubscribe,
-   and unblock dependents: every issue whose blockers are now all closed swaps its `blocked`
-   label for `ready`. The run-log row was committed in the PR itself, so nothing is pushed to
+   and unblock dependents: every issue whose blockers are now all satisfied swaps its
+   `blocked` label for `ready`. A blocker is satisfied only if it is closed as completed by a
+   merged PR (the issue timeline shows a `closed` event from a merged PR, or a merged PR body
+   contains `Closes #<n>`), or a comment on it names the replacement issue(s) that delivered the
+   work and those pass the same test. The run-log row was committed in the PR itself, so nothing is pushed to
    `main` directly.
 6. **Never**, to get green: skip, ignore, delete or weaken a test; force-push or rewrite history
    on a branch the agent did not create; push an empty commit; close and reopen a PR to restart

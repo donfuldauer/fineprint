@@ -57,8 +57,8 @@ Report `requirements: 0/0`; `pass` if both hold.
 9. **Owned paths.** From the repository root (`cd "$(git rev-parse --show-toplevel)"`), take the
    union of `git diff --no-renames --name-only <base>...HEAD`, `git diff --no-renames --name-only
    --cached`, `git diff --no-renames --name-only` and `git ls-files --others --exclude-standard`.
-   Every path must be in OWNED PATHS or the shared files `docs/DECISIONS.md`,
-   `docs/HUMAN_QUEUE.md`, `contracts/CHANGE_REQUESTS.md`.
+   Every path must be in OWNED PATHS or the shared files `docs/RUN_LOG.md`,
+   `docs/DECISIONS.md`, `docs/HUMAN_QUEUE.md`, `contracts/CHANGE_REQUESTS.md`.
 10. **Fixtures and overrides.** Synthetic cards in the diff are neutrally named, pass the
     toolchain lints (REQ-ING-009) and are used by at least one scenario. Where the diff touches
     override handling or support status, a test proves that `VERIFIED` cannot be reached without

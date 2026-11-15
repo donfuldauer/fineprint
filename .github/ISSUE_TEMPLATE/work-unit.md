@@ -2,7 +2,7 @@
 name: Work unit
 about: One reviewable unit of Fine Print work (one PR). Use for new work found during a unit.
 title: "FP-XXX: <title>"
-labels: ["blocked"]
+labels: ["work-unit", "blocked"]
 ---
 
 > **Plan ID:** FP-XXX · **Phase:** <n — name> · **Milestone:** <M1|M2|M3> · **Expected tier:** <T1 (Sonnet 5.5) | T2 (Opus 5.5)>
