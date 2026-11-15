@@ -208,17 +208,19 @@ in `xtask/src/coverage.rs` (`FLOORS`) and is mirrored here:
 
 `cargo xtask guard` runs over `git ls-files` (tracked and staged files).
 
-- `headers`: every `.rs .cs .c .h .ts .js .py` file has the MPL-2.0 header sentence within its
-  first 20 lines (after an optional `#!` line); comment markers (`//`, `///`, `//!`, `#`, `/*`,
-  `*`, `<!--`) are stripped and whitespace collapsed before a case-sensitive containment check.
-  Skipped: paths under `target/`, `node_modules/`, `dist/`, and files with `@generated` in the
-  first five lines.
-- `card-data`: exempt: everything under `docs/` and `.github/ISSUE_TEMPLATE`. Rejected: `*.fpdb`,
+- `headers`: every `.rs .cs .c .cpp .h .ts .js .py` file has the MPL-2.0 header sentence within
+  its first 20 lines (after an optional `#!` line); comment markers (`//`, `///`, `//!`, `#`,
+  `/*`, `*`, `<!--`) are stripped and whitespace collapsed before a case-sensitive containment
+  check. Skipped: paths under `target/`, `node_modules/`, `dist/`. Generated files need the
+  header too.
+- `card-data`: file-name checks apply everywhere, including `docs/` and `.github/ISSUE_TEMPLATE`;
+  content checks are skipped under those two. Rejected: `*.fpdb`,
   `*.cr.txt`; file names `scryfall-*.json`, `oracle-cards-*.json`, `default-cards-*.json`,
   `all-cards-*.json`, `unique-artwork-*.json`, `rulings-*.json`, `AtomicCards*.json`,
   `AllPrintings*.json`, `AllIdentifiers*.json` (case-insensitive); `.json` files with an
   `oracle_text` or `oracleText` key; any text file with five or more lines that start with a
-  rules-number shape followed by prose. Content is scanned only for UTF-8 files under 5 MiB.
+  rules-number shape followed by prose. Content is scanned for UTF-8 files under 5 MiB; a file of
+  5 MiB or more outside the exempt directories is reported as an incomplete scan (a violation).
 - `card-branch`: `.rs` files under `crates/fineprint-core/` must not compare `card_def_id`,
   `cardDefId`, `card_name`, `name`, `def_id`, `definition_id` (including `.name()` and
   `.card_def_id()`) with a string literal: `x == "..."`, `"..." != x`, `matches!(x, "...")`,
