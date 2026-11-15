@@ -225,7 +225,8 @@ follows NumPy (`pcg_setseq_128_srandom_r`), which steps with the standard 128-bi
 multiplier `0x2360ed051fc65da44385df649fccf645` while seeding only. No crate is pinned for the
 PRNG. The brief described the LCG as using "the standard PCG 128-bit default multiplier"; the
 published vectors show that multiplier is used only during NumPy's seeding, and the stepping
-uses the cheap multiplier. The seed derivation itself belongs to REQ-API-004 (see HUMAN_QUEUE).
+uses the cheap multiplier. The seed derivation itself belongs to REQ-API-004
+(decided in "FP-004 — Resolution of the queued items").
 **Rationale:** Published vectors: NumPy `numpy/random/tests/data/pcg64dxsm-testset-1.csv` (seed
 0xdeadbeaf) and `-2.csv` (seed 0), rows 0–15 and row 999 of each, hard-coded in
 `tests/prng.rs`; 2 of 2 seed/stream pairs and 34 of 34 outputs match, plus the seeded raw state
@@ -396,6 +397,89 @@ cross-platform acceptance criterion of #5.
 **Alternatives:** a separate workspace under `spikes/` (rejected: CI would not run it without
 editing `.github/`, which #5 does not own); deleting the spike in #5 (rejected: the tests are
 the cross-platform evidence until production crates carry them).
+
+## FP-004 — Resolution of the queued items
+
+**Decision:** The open `[#5 FP-004]` and `[#4 FP-003]` items in HUMAN_QUEUE.md are resolved as
+follows. (1) PRNG seeding: the initial generator is built from the u64 match seed by expanding it
+with SplitMix64. Run SplitMix64 from state = seed and take four successive outputs o0..o3;
+initstate = (o0 << 64) | o1 and initseq = (o2 << 64) | o3 (big-endian word order, as written).
+Seeding then follows the NumPy `srandom` convention exactly as `Pcg64Dxsm::new` implements it in
+`spikes/libs/src/prng.rs`: the standard 128-bit multiplier during seeding only, the cheap
+multiplier for stepping, and the top bit of initseq discarded. Fork reseeding is defined
+bit-exactly as follows. Let the parent generator's raw state be (state: u128, increment: u128), as
+returned by `Pcg64Dxsm::raw()`, and forkSalt a u64. Reduce to a 64-bit seed by XOR-folding:
+`seed64 = hi64(state) ^ lo64(state) ^ hi64(increment) ^ lo64(increment) ^ forkSalt`, where hi64 is
+the top 64 bits and lo64 is the bottom 64 bits. The increment is included so that two generators
+with equal state but different streams fork differently. Then apply the same expansion as the
+initial seed: SplitMix64 from state = seed64, four successive outputs o0..o3, initstate =
+(o0 << 64) | o1, initseq = (o2 << 64) | o3, then NumPy `srandom` seeding via `Pcg64Dxsm::new`. One
+helper `from_u64_seed(seed64)` therefore serves both createMatch seeding and fork reseeding. This
+is the literal REQ-API-004 formula with its types made explicit (parentPrngState is the
+generator's whole raw state, folded), and repeated forks with the same salt stay reproducible.
+Issue #9 (FP-008) implements this and must add a test with fixed expected values for both the
+initial seed and one fork. (2) JCS number
+table: the vectors are accepted as they stand and the item is closed. (3) unicode-ident: the
+Unicode-3.0 conjunct is accepted, and the accepted-licence policy is recorded. This is a licensing
+decision under PROCESS.md P8 and it is approved: the repository owner explicitly approved accepting
+the Unicode-3.0 conjunct and this accepted-licence list when asked in this session (2026-11-15).
+The owner can reopen it at any time. (4) spikes/libs
+guard handling: already implemented by #4 (FP-003); nothing further.
+**Rationale:** (1) SRS `createMatch(config, seed: uint64)` gives a 64-bit match seed, and
+REQ-CORE-001 says the seed derivation is specified in REQ-API-004. REQ-API-004 (§13.4) gives only
+the fork formula, not the types or the expansion, so this entry defines the initial expansion and
+makes the fork typing explicit.
+SplitMix64 is already mandated for forks, so one expansion primitive serves the whole engine; it is
+a few lines of integer arithmetic with no floats and no tables. The NumPy convention is the one
+anchored by published vectors: `tests/prng.rs` checks the seeded state against NumPy's published
+CSV rows, generated from NumPy's own initstate/initseq. The pcg-cpp/`rand_pcg` convention differs
+only in seeding and has no published vectors to test against. The choice is frozen per engine
+major version (REQ-CORE-001), so either convention would be deterministic; this one is testable.
+Scope note: REQ-API-004 gives only the formula, so this entry makes the typing explicit (state
+folded, same expansion as the initial seed). The SRS text is not edited here, because there is no
+owner-approved SRS edit. The SRS could spell out the folding later as an optional clarification.
+The decision is recorded as a resolved HUMAN_QUEUE.md line (PROCESS.md R8).
+(2) The final RFC 8785 text could not be fetched. rfc-editor.org, datatracker.ietf.org,
+www.ietf.org and tools.ietf.org are outside this session's allowed network hosts: DNS or proxy
+refusal on every attempt, including via the web fetch tool. The basis for accepting the vectors:
+the rule the table illustrates is defined by reference to ECMAScript Number-to-String
+serialization, and Node.js 22 implements that rule. All 23 of 23 Appendix B rows, plus 32
+additional random doubles, were re-derived with Node.js 22 and matched by both candidate crates.
+The RFC author's six reference files (including the UTF-16 key-order case) also pass. Residual
+risk: the table rows came from the author's draft source, not the final published text, so a
+transcription difference in the final text is theoretically possible. It would surface as a test
+correction, not a design change, and affects only a spike vector. No person action is required,
+and the network settings are not to be changed for this.
+(3) `unicode-ident 1.0.27` is `(MIT OR Apache-2.0) AND Unicode-3.0`. It is used only by
+compile-time proc-macros (proc-macro2/syn behind pest_derive and serde_derive), and nothing is
+linked into any output. Unicode-3.0 is a permissive, OSI-approved licence compatible with MPL-2.0
+distribution. The accepted-licence policy used by the FP-004 licence check: MIT, Apache-2.0
+(including WITH LLVM-exception), BSD-2-Clause, BSD-3-Clause, ISC, Unlicense, CC0-1.0, MIT-0,
+MPL-2.0, and Unicode-3.0; dual licences where at least one option is in this set; BSL-1.0 only as
+the non-elected option of an OR. Rejected: GPL, AGPL, LGPL, and any unknown or custom licence.
+Condition: if a Unicode-3.0 component is ever linked into a distributed artifact, the packaging
+issue must ship its notice text. This is not the case today. This is policy only: no
+licence-checking tool exists yet (cargo-deny is not added), and nothing in xtask enforces the list.
+(4) Issue #4 (FP-003) is merged and implements the handling. `xtask/src/coverage.rs` maps
+`spikes/libs/**` (src, examples and tests) to the crate `fineprint-spike-libs` with a 75 % floor
+and no exemption (floor table row; docs/DEVELOPMENT.md "Coverage floors"; "FP-003 (#4) — Coverage
+floors per crate and guard design"). `spikes/bindings` is outside the floor table. The
+`coverage (ubuntu-latest)`, `guards` and `req-coverage` jobs are green on main commit ce37085,
+which contains PR #146. The deletion condition stays as recorded in "FP-004 — spikes/ directory
+handling by repo guards" and is not changed here.
+**Alternatives:** (1) NumPy `SeedSequence` for the expansion: rejected, a large Python-specific
+mixing function that is not needed. The pcg-cpp/`rand_pcg` `new` convention: rejected, it differs
+from the published-vector anchor. Deriving initseq as a constant: rejected, it loses independent
+streams for forked or reseeded generators. Fork reseed taking only `state` and ignoring
+`increment`: rejected, because forks of equal-state, different-stream generators would collide.
+Fork reseed mixing via nested SplitMix64 calls instead of XOR: rejected, because it departs from
+the literal REQ-API-004 formula. (2) Leaving the item open until the final RFC text can
+be fetched: rejected, because this session has no fetch route and no person action is available;
+the residual risk is recorded instead. (3) Adding cargo-deny now to enforce the list: not done in
+this change, and the list is policy only. Keeping the item open for a later approval: not needed,
+because the owner approved it explicitly when asked. (4) Editing the spikes/ guard entry or deleting the
+spike now: rejected, because #4 already implements the floor and deletion is gated on production
+golden-value tests.
 
 ## FP-005 (#6) — Binding toolchain spike: cbindgen, .NET 10 P/Invoke, wasm-bindgen, headless browsers
 
