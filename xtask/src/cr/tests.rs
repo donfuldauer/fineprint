@@ -452,3 +452,51 @@ fn req_nfr_007_parsers_fuzz_no_panic() {
         let _ = fetch::validate(text.as_bytes());
     }
 }
+
+/// REQ-DOC-001: a missing SRS is an input error for both `index` and `check`.
+#[test]
+fn req_doc_001_missing_srs_exits_2() {
+    let fx = Fixture::new(&srs_text(), &[], &synthetic_cr(&[]));
+    fs::remove_file(fx.root().join(SRS_PATH)).unwrap();
+    let i = fx.index();
+    assert_eq!(i.code, 2);
+    assert!(i.stderr.join("\n").contains("SRS.md"), "{:?}", i.stderr);
+    let c = fx.check();
+    assert_eq!(c.code, 2);
+    assert!(c.stderr.join("\n").contains("SRS.md"), "{:?}", c.stderr);
+}
+
+/// REQ-DOC-001: an unreadable SRS (a directory in its place) is an input error.
+#[test]
+fn req_doc_001_unreadable_srs_exits_2() {
+    let fx = Fixture::new(&srs_text(), &[], &synthetic_cr(&[]));
+    fs::remove_file(fx.root().join(SRS_PATH)).unwrap();
+    fs::create_dir_all(fx.root().join(SRS_PATH)).unwrap();
+    assert_eq!(fx.index().code, 2);
+    assert_eq!(fx.check().code, 2);
+}
+
+/// REQ-DOC-001: unreadable eligible sources fail; deleted ones are skipped.
+#[test]
+fn req_doc_001_read_errors_propagate() {
+    let fx = Fixture::new(&srs_text(), &[], &synthetic_cr(&[]));
+    // A directory where an eligible file is expected: a read error, not NotFound.
+    fs::create_dir_all(fx.root().join("crates/x/a.rs")).unwrap();
+    let err = read_scan_files(fx.root(), s(&["crates/x/a.rs"])).unwrap_err();
+    assert!(err.contains("a.rs"), "{err}");
+    // Listed but deleted: skipped.
+    let ok = read_scan_files(fx.root(), s(&["crates/x/gone.rs"])).unwrap();
+    assert_eq!(ok.len(), 1);
+    // Ineligible extensions are not read at all.
+    let ok = read_scan_files(fx.root(), s(&["crates/x/a.rs/", "notes.bin"])).unwrap();
+    assert_eq!(ok.len(), 1);
+}
+
+/// REQ-DOC-001: `walk` propagates directory read errors.
+#[test]
+fn req_doc_001_walk_propagates_errors() {
+    let tmp = TempDir::new("walk");
+    let mut out = Vec::new();
+    let err = walk(&tmp.0.join("absent"), "", &mut out).unwrap_err();
+    assert!(err.contains("absent"), "{err}");
+}
