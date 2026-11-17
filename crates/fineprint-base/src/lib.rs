@@ -5,3 +5,10 @@
 //! Shared base types for the Fine Print rules engine (rules crate).
 
 #![forbid(unsafe_code)]
+
+/// Ordered collections and the stable (ObjectId, Timestamp) sort (REQ-CORE-006).
+pub mod collections;
+/// Identifier newtypes, monotonic generators and the canonical encoding hook (REQ-CORE-002).
+pub mod ids;
+/// Checked integer and scale-2 fixed-point numbers (REQ-CORE-006).
+pub mod num;
