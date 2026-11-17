@@ -832,14 +832,19 @@ uncited index entries (rejected: harmless and fixed by re-indexing).
 ## #7 FP-006 — `cr.yml` is not a required check
 
 **Decision.** `.github/workflows/cr.yml` (job `cr`) runs on pull requests touching
-`docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `**/*.rs` or the workflow, weekly
-(Monday 04:17 UTC) and on `workflow_dispatch`. It caches `cr-cache/` with actions/cache (key on
-the index hash), runs `cr fetch` on pull requests and `cr fetch --force` on the schedule and
-manual runs, then `cr check`. It is not a required status check.
+`docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, any source file with an extension the
+citation scanner reads (`.rs .cs .c .cpp .h .ts .js .py .toml .yml .yaml`) or the workflow, weekly
+(Monday 04:17 UTC) and on `workflow_dispatch`. It caches `cr-cache/` with actions/cache (exact key
+on the index hash, no prefix restore), runs `cr fetch` on pull requests and `cr fetch --force` on
+the schedule and manual runs, then `cr check`. It is not a required status check.
 
 **Rationale.** The job depends on the network and an external site; a required check would block
 merges on outages. The weekly forced refetch detects a new CR release; a changed rule then fails
-the job and blocks release until a maintainer re-verifies (REQ-DOC-001).
+the job, which flags it for re-verification. REQ-DOC-001 also requires a changed rule to block
+release; no release step reads this job's result yet, so that gate is not enforced by this unit.
+The enforcement mechanism (for example a release precondition requiring a passing `cr` run on the
+release commit, or a required status check) is an open maintainer choice recorded in
+`docs/HUMAN_QUEUE.md`.
 
 **Alternatives.** Required check (rejected: network dependence); running on every pull request
 (rejected: unnecessary downloads).
