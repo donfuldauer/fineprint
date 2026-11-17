@@ -82,11 +82,12 @@ threads.
       lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other).
       **Re-verify a loss once.** Two sessions can each lose at the same moment: one to the
       plan-ID tie-break against an abandoned issue, the other to the first one's claim before it
-      is deleted. So before deleting a losing claim, wait about 30 seconds, then repeat the step 2
-      checks (issue still open and not blocked, governing claim still yours and, without an issue
-      number, the candidate still qualifies) and this overlap check, all with fresh reads. If
-      every step 2 check passes and you now win against every live overlapping claim, continue;
-      otherwise delete your claim and act as in step 2. This cannot let two
+      is deleted. So before deleting a losing claim, wait about 30 seconds, then repeat with fresh
+      reads the dependency check of §1 step 2 (every dependency still satisfied), the checks of
+      step 4.2 (issue still open and not blocked, governing claim still yours and, without an
+      issue number, the candidate still qualifies) and this overlap check. If all of them pass
+      and you now win against every live overlapping claim, continue; otherwise delete your
+      claim and act as in step 4.2. This cannot let two
       overlapping sessions both proceed: a session only proceeds after a check in which its
       claim beats every live overlapping claim, and the lower comment ID always beats the
       higher.
