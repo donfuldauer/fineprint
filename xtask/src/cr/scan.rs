@@ -403,6 +403,19 @@ fn slash_comments(content: &str, backticks: bool) -> Vec<(usize, String)> {
                 i += 1;
             }
             i += 1;
+        } else if ch == '\'' && backticks {
+            // TypeScript/JavaScript: a single-quoted string ends at its closing
+            // quote or at the end of the line; backslash escapes the next char.
+            i += 1;
+            while i < c.len() && at(i) != '\'' && at(i) != '\n' {
+                if at(i) == '\\' && at(i + 1) != '\n' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if at(i) == '\'' {
+                i += 1;
+            }
         } else if ch == '\'' {
             if at(i + 1) == '\\' {
                 let mut j = i + 2;
@@ -681,5 +694,37 @@ mod tests {
         ] {
             assert!(!is_scanned_source(p), "{p}");
         }
+    }
+}
+
+#[cfg(test)]
+mod single_quote_tests {
+    use super::*;
+
+    /// REQ-DOC-001: JS/TS single-quoted strings are skipped like double-quoted ones.
+    #[test]
+    fn req_doc_001_js_single_quoted_strings() {
+        let n = format!("{}.{}z", 999, 9);
+        for path in ["a.ts", "a.js"] {
+            let src = format!("const s = '/*'; // CR {n}\nconst t = 1;\n");
+            let got = comment_lines(path, &src);
+            assert_eq!(got, vec![(1, format!(" CR {n}"))], "{path}");
+            let src = format!("const s = '// CR {n}'; const e = 'a\\'b'; // k\n");
+            let got = comment_lines(path, &src);
+            assert_eq!(got, vec![(1, " k".to_string())], "{path}");
+            // Unterminated: ends at the end of the line.
+            let got = comment_lines(path, "const s = 'oops\n// x\n");
+            assert_eq!(got, vec![(2, " x".to_string())], "{path}");
+        }
+    }
+
+    /// REQ-DOC-001: Rust lifetimes and char literals are unchanged.
+    #[test]
+    fn req_doc_001_rust_lifetimes_unchanged() {
+        let got = comment_lines("a.rs", "fn f<'a>(x: &'a str) { let c = '/'; } // k\n");
+        assert_eq!(got, vec![(1, " k".to_string())]);
+        // A lifetime does not swallow a following block comment start.
+        let got = comment_lines("a.rs", "fn f<'a>() {} /* k */\n");
+        assert_eq!(got, vec![(1, " k  ".to_string())]);
     }
 }
