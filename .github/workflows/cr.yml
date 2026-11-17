@@ -17,6 +17,16 @@ on:
       - docs/cr-citations.json
       - xtask/src/cr/**
       - "**/*.rs"
+      - "**/*.cs"
+      - "**/*.c"
+      - "**/*.cpp"
+      - "**/*.h"
+      - "**/*.ts"
+      - "**/*.js"
+      - "**/*.py"
+      - "**/*.toml"
+      - "**/*.yml"
+      - "**/*.yaml"
       - .github/workflows/cr.yml
   schedule:
     # weekly, Monday 04:17 UTC; refetches so a changed upstream text is detected
@@ -54,8 +64,6 @@ jobs:
         with:
           path: cr-cache
           key: cr-text-v1-${{ hashFiles('docs/cr-citations.json') }}
-          restore-keys: |
-            cr-text-v1-
       - name: Fetch the CR text (cached on pull requests)
         if: github.event_name == 'pull_request'
         run: cargo xtask cr fetch
