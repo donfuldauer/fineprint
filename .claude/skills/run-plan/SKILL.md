@@ -16,7 +16,9 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
 2. Read `docs/RUN_LOG.md` (last rows), `docs/HUMAN_QUEUE.md` (anything a person has answered
    since the last run: struck-through lines with a resolution), and the open `work-unit` issues' phases and dependencies.
 3. List open PRs you created (`gh pr list --author @me` or the session's PR tools). Each open PR
-   is driven to merge (step 4) before new work on the same paths starts.
+   is driven to merge (step 4) before new work on the same paths starts, except the PR of an
+   issue labelled `status:blocked-failure` or `blocked`: it waits for a person and reserves no
+   paths (§1).
 4. Read the account's current usage limits once and set `FABLE_ALLOWANCE` to `sufficient`,
    `insufficient` or `unknown` for this session's classifier calls. Re-read it before any call
    that could route T3.
@@ -25,8 +27,8 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
 
 The units of work are GitHub issues. An issue is **ready** when it is open, labelled `ready`
 (every issue in its "Depends on" list is satisfied: closed as completed by a merged PR, or
-explicitly replaced as `work-issue` §1 step 2 describes), not `in-progress`, and no open PR owns any of
-its paths. List them with
+explicitly replaced as `work-issue` §1 step 2 describes), not `in-progress`, not labelled
+`status:blocked-failure` or `blocked`, and no open PR of a non-blocked issue owns any of its paths. List them with
 `gh api "repos/donfuldauer/fineprint/issues?state=open&labels=ready&per_page=100&page=N"`, paging
 explicitly with N = 1, 2, … until a page returns fewer than 100 issues (do not use
 `gh api --paginate`: this environment's proxy blocks it because it follows numeric-ID links).
@@ -34,7 +36,10 @@ Take them in plan order (ascending `FP-NNN` plan ID). If an argument named a mil
 that.
 
 Reserve the owned paths (each issue's "Owned paths" section) of every active issue, meaning one
-labelled `in-progress` or with an open PR, until it merges or is marked blocked. Start every ready
+labelled `in-progress`, with an open PR, or that has a governing claim
+(`work-issue` §1 step 4), until it merges or is marked blocked. Issues labelled
+`status:blocked-failure` or `blocked` reserve nothing. Overlapping claims are settled by
+`work-issue` §1 step 4.3. Start every ready
 issue whose owned paths overlap no reservation and no other candidate, up to a sensible
 parallelism (default 3 at once).
 
