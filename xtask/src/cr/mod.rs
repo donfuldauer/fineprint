@@ -188,36 +188,66 @@ pub fn list_files(root: &Path) -> Result<Vec<ScanFile>, String> {
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
     } else {
-        walk(&canon, "", &mut paths);
+        walk(&canon, "", &mut paths)?;
     }
     paths.sort();
     paths.dedup();
-    Ok(paths
-        .into_iter()
-        .filter_map(|p| {
-            fs::read(root.join(&p))
-                .ok()
-                .map(|bytes| ScanFile { path: p, bytes })
-        })
-        .collect())
+    read_scan_files(root, paths)
 }
 
-fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.filter_map(Result::ok) {
+/// Read the SRS and every eligible source among `paths` (relative to `root`).
+///
+/// The SRS must exist and be readable: without it the baseline guard and every
+/// SRS citation would silently vanish. Any other read error is fatal too, except
+/// `NotFound` for a path that `git ls-files` listed but the working tree no
+/// longer holds: a deleted file holds no citations, so it is skipped.
+/// Files the scanner would ignore (ineligible extension) are not read.
+fn read_scan_files(root: &Path, paths: Vec<String>) -> Result<Vec<ScanFile>, String> {
+    let srs = root.join(scan::SRS_PATH);
+    let srs_bytes = fs::read(&srs).map_err(|e| {
+        format!(
+            "cannot read {} (the SRS must exist and be readable): {e}",
+            srs.display()
+        )
+    })?;
+    let mut files = vec![ScanFile {
+        path: scan::SRS_PATH.to_string(),
+        bytes: srs_bytes,
+    }];
+    for p in paths {
+        if p == scan::SRS_PATH || !scan::is_scanned_source(&p) {
+            continue;
+        }
+        let full = root.join(&p);
+        match fs::read(&full) {
+            Ok(bytes) => files.push(ScanFile { path: p, bytes }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot read {}: {e}", full.display())),
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), String> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
+    for e in entries {
+        let e = e.map_err(|e| format!("cannot read an entry of {}: {e}", dir.display()))?;
         let name = e.file_name().to_string_lossy().into_owned();
         let rel = format!("{prefix}{name}");
-        let Ok(ft) = e.file_type() else { continue };
+        let ft = e
+            .file_type()
+            .map_err(|e| format!("cannot stat {}: {e}", dir.join(&name).display()))?;
         if ft.is_dir() {
             if ![".git", "target", "cr-cache", "node_modules"].contains(&name.as_str()) {
-                walk(&e.path(), &format!("{rel}/"), out);
+                walk(&e.path(), &format!("{rel}/"), out)?;
             }
         } else if ft.is_file() {
             out.push(rel);
         }
     }
+    Ok(())
 }
 
 /// The parsed cache: rule hashes and the recorded source.
