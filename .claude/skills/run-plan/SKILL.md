@@ -34,7 +34,9 @@ Take them in plan order (ascending `FP-NNN` plan ID). If an argument named a mil
 that.
 
 Reserve the owned paths (each issue's "Owned paths" section) of every active issue, meaning one
-labelled `in-progress` or with an open PR, until it merges or is marked blocked. Start every ready
+labelled `in-progress`, with an open PR, or whose latest claim comment names a live session
+(`work-issue` §1 step 4), until it merges or is marked blocked. Overlapping claims are settled by
+`work-issue` §1 step 4.3. Start every ready
 issue whose owned paths overlap no reservation and no other candidate, up to a sensible
 parallelism (default 3 at once).
 
