@@ -669,3 +669,25 @@ a unit test pins the argument list.
 
 **Alternatives.** Leave the default filter (rejected: contradicts FP-004); exempt bench.rs
 (rejected: needs an SRS-approved exemption); add a bench smoke test (not needed: floor met).
+
+## Self-chaining — claim ordering
+
+**Decision.** `work-issue` §1 step 4 arbitrates concurrent claims by GitHub issue-comment ID. Each
+issue's governing claim is its lowest-ID claim comment that names a live session. A new claim wins
+only if its ID is lower than the governing claim of the same issue and of every issue whose owned
+paths overlap. Labels change only after the claim holds.
+
+**Rationale.** GitHub offers no atomic lock on issues. Timestamps have one-second resolution, so
+they tie. Comment IDs are unique, so they don't tie. Comparing only an issue's latest claim let a
+third session's later claim hide an earlier winner, so every comparison uses the governing claim.
+
+**Assumption (undocumented).** Issue-comment IDs are allocated in creation order across issues,
+and a comment is listed immediately after its creation call returns. Both are observed behaviour,
+not guaranteed by the GitHub REST documentation. If either fails, two sessions can rarely start
+overlapping work. The P6 merge conditions still apply: a branch must be up to date with `main`
+before it merges, so the later PR meets a conflict or a red check, not a silent overwrite.
+
+**Alternatives.** A lock file committed to a branch, using git push as the atomic step (rejected
+for now: it adds commits and a cleanup path for every claim). A single orchestrating session
+(`run-plan`) that alone selects work (still available: the race only exists when several sessions
+pick work independently).

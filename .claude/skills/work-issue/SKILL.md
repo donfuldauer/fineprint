@@ -22,8 +22,7 @@ threads.
    **No issue number** ("the next ready issue"):
    - **Resume abandoned work first.** Candidates are issues labelled `in-progress` (never one
      labelled `status:blocked-failure` or `blocked`) and your open PRs. One is abandoned only if
-     the session named in its latest claim comment (step 4) is not live: `get_session` on it
-     reports a status bucket other than `working` or `blocked`, or the comment names no session.
+     it has no governing claim (step 4): no claim comment on it names a live session.
      Never resume work a live session owns.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
@@ -45,20 +44,24 @@ threads.
    no atomic lock, so the earliest claim wins, ordered by **comment ID**. Comment IDs are unique and
    increase over time, so there are no ties. A claim posted after yours always has a higher ID and
    can never supersede a claim that has already passed its check: that claim's session saw every
-   lower-ID claim when it checked.
+   lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
+   on it that names a live session (`get_session` reports `working` or `blocked`) and was posted
+   after the issue was last labelled `ready` or resumed as abandoned. Compare governing claims,
+   never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
+   order and listed as soon as they are created: observed behaviour that GitHub does not document
+   (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read the issue's comments. If another claim comment with a lower comment ID than yours, and
-      later than the issue's last `ready` label or abandoned-work resume, names a session that is
-      live (`get_session` reports `working` or `blocked`), your claim loses: delete it. With an
+   2. Re-read all the issue's comments. If the governing claim is not yours, your claim loses:
+      delete it. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
       posted until the issue merges or is marked blocked. After posting yours, check this
       issue's owned paths against every other reservation: issues labelled `in-progress`, issues
-      with an open PR, and open issues whose latest claim comment names a live session. If one
-      overlaps, the claim with the lower comment ID wins (an `in-progress` issue or open PR
-      counts by its own claim comment's ID, or wins outright if it has none). If yours loses,
+      with an open PR, and open issues that have a governing claim. If one overlaps, compare
+      your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
+      issue or open PR with no governing claim wins outright). If yours loses,
       delete it and act as in step 2.
    4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
