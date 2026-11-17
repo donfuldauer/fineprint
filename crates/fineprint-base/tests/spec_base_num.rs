@@ -96,13 +96,21 @@ fn clamp(x: i128) -> i64 {
     x.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
-/// Independent round-half-away-from-zero division oracle.
+/// Independent round-half-away-from-zero division oracle. Works on u128
+/// magnitudes and never doubles the numerator, so it cannot overflow for any
+/// i64 x i64 product. Equivalent to q = (2n + d) / (2d) on magnitudes.
 fn div_round(n: i128, d: i128) -> i128 {
     assert!(d != 0);
     let neg = (n < 0) != (d < 0);
-    let an = n.abs();
-    let ad = d.abs();
-    let q = (2 * an + ad) / (2 * ad);
+    let an = n.unsigned_abs();
+    let ad = d.unsigned_abs();
+    let mut q = an / ad;
+    let r = an % ad;
+    // r < ad, so r >= ad - r is the exact-tie-or-above test (2r >= ad).
+    if r >= ad - r {
+        q += 1;
+    }
+    let q = q as i128;
     if neg { -q } else { q }
 }
 
