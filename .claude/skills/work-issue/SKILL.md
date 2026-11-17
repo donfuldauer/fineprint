@@ -32,6 +32,8 @@ threads.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
    `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
+   Without an issue number, exclude this candidate instead and continue with the next one under
+   step 0.
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
@@ -61,9 +63,12 @@ threads.
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read all the issue's comments, its labels and its state. If the issue is now closed or
-      labelled `status:blocked-failure` or `blocked`, or the governing claim is not yours, your
-      claim loses: delete it. With an
+   2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
+      delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
+      if the governing claim is not yours, or (without an issue number) if the issue no longer
+      qualifies as the candidate step 0 chose it as: a ready candidate must still carry `ready`
+      and must not have gained `in-progress` from another session; an abandoned candidate must
+      still have no other governing claim. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
@@ -74,8 +79,15 @@ threads.
       your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
       issue or open PR with no governing claim wins outright, unless your issue also has no
       other governing claim because you are resuming it as abandoned work: then the issue with the
-      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other). If yours loses,
-      delete it and act as in step 2.
+      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other).
+      **Re-verify a loss once.** Two sessions can each lose at the same moment: one to the
+      plan-ID tie-break against an abandoned issue, the other to the first one's claim before it
+      is deleted. So before deleting a losing claim, wait about 30 seconds and run this overlap
+      check again with fresh reads. If you now win against every live overlapping claim,
+      continue; otherwise delete your claim and act as in step 2. This cannot let two
+      overlapping sessions both proceed: a session only proceeds after a check in which its
+      claim beats every live overlapping claim, and the lower comment ID always beats the
+      higher.
    4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
