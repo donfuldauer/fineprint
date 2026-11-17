@@ -54,8 +54,9 @@ threads.
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read all the issue's comments. If the governing claim is not yours, your claim loses:
-      delete it. With an
+   2. Re-read all the issue's comments and its labels. If the issue is now labelled
+      `status:blocked-failure` or `blocked`, or the governing claim is not yours, your claim
+      loses: delete it. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
