@@ -4,7 +4,8 @@
 
 //! Repository automation for Fine Print.
 //!
-//! Commands: `coverage [--input <file>]` and `guard <headers|card-data|card-branch|all>`.
+//! Commands: `coverage [--input <file>]`, `guard <headers|card-data|card-branch|all>` and
+//! `cr <fetch|index|check>`.
 //! Run as `cargo xtask <command>` (alias in `.cargo/config.toml`).
 
 // non-rules crate: REQ-CORE-006 applies to the rules crates only
@@ -12,17 +13,19 @@
 #![forbid(unsafe_code)]
 
 mod coverage;
+mod cr;
 mod guard;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo xtask <command>\n  coverage [--input <llvm-cov-summary.json>]\n  guard <headers|card-data|card-branch|all>";
+const USAGE: &str = "usage: cargo xtask <command>\n  coverage [--input <llvm-cov-summary.json>]\n  guard <headers|card-data|card-branch|all>\n  cr <fetch|index|check> [options]";
 
 /// Dispatch a command line (without the program name) and return the exit code.
 fn dispatch(args: &[String]) -> u8 {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "coverage" => coverage::run(rest),
         Some((cmd, rest)) if cmd == "guard" => guard::run(rest),
+        Some((cmd, rest)) if cmd == "cr" => cr::run(rest),
         _ => {
             eprintln!("{USAGE}");
             2
@@ -46,5 +49,7 @@ mod tests {
         assert_eq!(dispatch(&["nope".to_string()]), 2);
         assert_eq!(dispatch(&["guard".to_string()]), 2);
         assert_eq!(dispatch(&["coverage".to_string(), "--x".to_string()]), 2);
+        assert_eq!(dispatch(&["cr".to_string()]), 2);
+        assert_eq!(dispatch(&["cr".to_string(), "nope".to_string()]), 2);
     }
 }
