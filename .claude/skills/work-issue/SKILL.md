@@ -59,7 +59,8 @@ threads.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
       posted until the issue merges or is marked blocked. After posting yours, check this
       issue's owned paths against every other reservation: issues labelled `in-progress`, issues
-      with an open PR, and open issues that have a governing claim. If one overlaps, compare
+      with an open PR, and open issues that have a governing claim. Issues labelled
+      `status:blocked-failure` or `blocked` reserve nothing. If one overlaps, compare
       your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
       issue or open PR with no governing claim wins outright). If yours loses,
       delete it and act as in step 2.
@@ -112,7 +113,7 @@ commit updates the row and is verified again.
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
+(label `status:blocked-failure`, remove `in-progress`), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
 
 ## 5. Open the PR
 
