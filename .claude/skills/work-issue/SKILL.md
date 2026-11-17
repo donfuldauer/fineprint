@@ -42,10 +42,13 @@ threads.
 3. Read the issues it depends on, `docs/DEVELOPMENT.md` (if it exists yet), the SRS sections
    the issue names, and any `docs/DECISIONS.md` entries its area touches.
 4. **Claim, then verify.** This applies whether or not the prompt named the issue. GitHub has
-   no atomic lock, so the earliest claim wins.
+   no atomic lock, so the earliest claim wins, ordered by **comment ID**. Comment IDs are unique and
+   increase over time, so there are no ties. A claim posted after yours always has a higher ID and
+   can never supersede a claim that has already passed its check: that claim's session saw every
+   lower-ID claim when it checked.
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read the issue's comments. If another claim comment that is earlier than yours, and
+   2. Re-read the issue's comments. If another claim comment with a lower comment ID than yours, and
       later than the issue's last `ready` label or abandoned-work resume, names a session that is
       live (`get_session` reports `working` or `blocked`), your claim loses: delete it. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
@@ -54,8 +57,9 @@ threads.
       posted until the issue merges or is marked blocked. After posting yours, check this
       issue's owned paths against every other reservation: issues labelled `in-progress`, issues
       with an open PR, and open issues whose latest claim comment names a live session. If one
-      overlaps, the earlier claim comment wins (by `created_at`; on an exact tie, the lower
-      issue number). If yours loses, delete it and act as in step 2.
+      overlaps, the claim with the lower comment ID wins (an `in-progress` issue or open PR
+      counts by its own claim comment's ID, or wins outright if it has none). If yours loses,
+      delete it and act as in step 2.
    4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
