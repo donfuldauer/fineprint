@@ -848,3 +848,27 @@ release commit, or a required status check) is an open maintainer choice recorde
 
 **Alternatives.** Required check (rejected: network dependence); running on every pull request
 (rejected: unnecessary downloads).
+
+## Self-chaining — claim ordering
+
+**Decision.** `work-issue` §1 step 4 arbitrates concurrent claims by GitHub issue-comment ID. Each
+issue's governing claim is its lowest-ID claim comment that names a live session. A new claim wins
+only if its ID is lower than the governing claim of the same issue and of every issue whose owned
+paths overlap. Labels change only after the claim holds.
+
+**Rationale.** GitHub offers no atomic lock on issues. Timestamps have one-second resolution, so
+they tie. Comment IDs are unique, so they don't tie. Comparing only an issue's latest claim let a
+third session's later claim hide an earlier winner, so every comparison uses the governing claim.
+
+**Assumption (undocumented).** Issue-comment IDs are allocated in creation order across issues,
+and a comment is listed immediately after its creation call returns. Both are observed behaviour,
+not guaranteed by the GitHub REST documentation. If either fails, two sessions can rarely start
+overlapping work. **Residual risk:** the P6 merge conditions (branch up to date with `main`,
+required checks green) often surface such overlap as a merge conflict or a red check, but they do
+not guarantee it. Two branches can make independent textual edits that merge cleanly and pass CI
+while their combined behaviour conflicts. The owner weighs this risk against the lock below.
+
+**Alternatives.** A lock file committed to a branch, using git push as the atomic step (rejected
+for now: it adds commits and a cleanup path for every claim). A single orchestrating session
+(`run-plan`) that alone selects work (still available: the race only exists when several sessions
+pick work independently).
