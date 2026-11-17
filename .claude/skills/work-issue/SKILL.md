@@ -48,7 +48,10 @@ threads.
    can never supersede a claim that has already passed its check: that claim's session saw every
    lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
    on it that names a live session (`get_session` reports `working` or `blocked`) and was posted
-   after the issue was last labelled `ready` or resumed as abandoned. Compare governing claims,
+   after the issue was last labelled `ready` (the `labeled` event in the issue timeline). That
+   label event is the only cutoff. Resuming abandoned work writes no separate record: claims from
+   ended sessions are never live, so they cannot govern, and the lowest-ID live claim still wins
+   among sessions resuming at the same time. Compare governing claims,
    never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
    order and listed as soon as they are created: observed behaviour that GitHub does not document
    (DECISIONS.md "Self-chaining — claim ordering").
