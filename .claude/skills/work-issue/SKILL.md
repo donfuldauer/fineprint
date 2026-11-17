@@ -50,7 +50,13 @@ threads.
       live (`get_session` reports `working` or `blocked`), your claim loses: delete it. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
-   3. Only after the claim holds, add the `in-progress` label (remove `ready`).
+   3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
+      posted until the issue merges or is marked blocked. After posting yours, check this
+      issue's owned paths against every other reservation: issues labelled `in-progress`, issues
+      with an open PR, and open issues whose latest claim comment names a live session. If one
+      overlaps, the earlier claim comment wins (by `created_at`; on an exact tie, the lower
+      issue number). If yours loses, delete it and act as in step 2.
+   4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
 
