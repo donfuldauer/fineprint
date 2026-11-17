@@ -19,10 +19,19 @@ threads.
    for it in some form ("and self-chain", "chain to the next issue", "keep going in a new
    session"). Otherwise it is false, and §8 does nothing. A request to work an issue is not a
    request to chain.
-   **No issue number** ("the next ready issue"): if an issue is labelled `in-progress` with no
-   open PR, or one of your PRs is open, resume that one first. Otherwise list ready issues as
-   `run-plan` §1 does and take the lowest `FP-NNN` whose owned paths overlap no active issue. If
-   none qualifies, tell the user why and stop (no chaining).
+   **No issue number** ("the next ready issue"):
+   - **Resume abandoned work first.** Candidates are issues labelled `in-progress` (never one
+     labelled `status:blocked-failure` or `blocked`) and your open PRs. One is abandoned only if
+     the session named in its latest claim comment (step 4) is not live: `get_session` on it
+     reports a status bucket other than `working` or `blocked`, or the comment names no session.
+     Never resume work a live session owns.
+   - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
+     owned paths overlap no active issue.
+   - **Claim, then verify** (GitHub has no atomic lock, so the earliest claim wins): post the
+     step 4 claim comment, then re-read the issue's comments. If an earlier claim comment from
+     another live session appeared after the issue was last labelled `ready`, delete your claim
+     and pick the next candidate. Only then change labels.
+   - If none qualifies, tell the user why and stop (no chaining).
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, or if it is not a work unit (no `Plan ID` line).
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
@@ -35,8 +44,9 @@ threads.
    which ones, and which of them are themselves ready to start. Do not start blocked work.
 3. Read the issues it depends on, `docs/DEVELOPMENT.md` (if it exists yet), the SRS sections
    the issue names, and any `docs/DECISIONS.md` entries its area touches.
-4. Comment on the issue that work has started (one line, with the branch name), and add the
-   `in-progress` label (remove `ready`).
+4. Comment on the issue that work has started (one line, with the branch name and this
+   session's ID, which `get_session` with no argument returns): this is the claim comment. Then
+   add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
 
