@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', or similar."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar; add 'and self-chain' to have it start a fresh session for the next issue after merging."
 ---
 
 # work-issue
@@ -15,8 +15,23 @@ threads.
 
 ## 1. Load and check the issue
 
+0. **Self-chain flag.** Set `SELF_CHAIN` to true only if the prompt that started this work asks
+   for it in some form ("and self-chain", "chain to the next issue", "keep going in a new
+   session"). Otherwise it is false, and §8 does nothing. A request to work an issue is not a
+   request to chain.
+   **No issue number** ("the next ready issue"):
+   - **Resume abandoned work first.** Candidates are open issues labelled `in-progress` (a closed
+     issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
+     wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
+     comment on it names a live session.
+     Never resume work a live session owns.
+   - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
+     owned paths overlap no active issue.
+   - Claim it with step 4. If the claim loses, pick the next candidate.
+   - If none qualifies, tell the user why and stop (no chaining).
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
-   Stop if it is closed, or if it is not a work unit (no `Plan ID` line).
+   Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
+   `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
@@ -25,10 +40,43 @@ threads.
    merged PR counts only if a comment on it names the replacement issue(s) that delivered the
    work and those replacements pass the same test. If any is unsatisfied, stop and tell the user
    which ones, and which of them are themselves ready to start. Do not start blocked work.
+   Without an issue number, exclude this candidate instead and continue with the next one under
+   step 0 (abandoned candidates first, then ready issues).
 3. Read the issues it depends on, `docs/DEVELOPMENT.md` (if it exists yet), the SRS sections
    the issue names, and any `docs/DECISIONS.md` entries its area touches.
-4. Comment on the issue that work has started (one line, with the branch name), and add the
-   `in-progress` label (remove `ready`).
+4. **Claim, then verify.** This applies whether or not the prompt named the issue. GitHub has
+   no atomic lock, so the earliest claim wins, ordered by **comment ID**. Comment IDs are unique and
+   increase over time, so there are no ties. A claim posted after yours always has a higher ID and
+   can never supersede a claim that has already passed its check: that claim's session saw every
+   lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
+   on it that names a live session (`get_session` reports `working` or `blocked`). There is no
+   time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
+   claim. A claim stops counting only when its session ends or deletes it, and a session deletes
+   its own claim whenever it loses (step 4), marks the issue blocked (§4) or finishes (§7).
+   Resuming abandoned work writes no separate record: claims from ended sessions are never live,
+   so they cannot govern, and the lowest-ID live claim still wins among sessions resuming at the
+   same time. Compare governing claims,
+   never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
+   order and listed as soon as they are created: observed behaviour that GitHub does not document
+   (DECISIONS.md "Self-chaining — claim ordering").
+   1. Post the claim comment: work has started, with the branch name and this session's ID
+      (`get_session` with no argument returns it).
+   2. Re-read all the issue's comments, its labels and its state. If the issue is now closed or
+      labelled `status:blocked-failure` or `blocked`, or the governing claim is not yours, your
+      claim loses: delete it. With an
+      issue number, tell the user which session owns the issue and stop. Without one, return to
+      step 0 and pick the next candidate.
+   3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
+      posted until the issue merges or is marked blocked. After posting yours, check this
+      issue's owned paths against every other reservation: issues labelled `in-progress`, issues
+      with an open PR, and open issues that have a governing claim. Issues labelled
+      `status:blocked-failure` or `blocked` reserve nothing. If one overlaps, compare
+      your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
+      issue or open PR with no governing claim wins outright, unless your issue also has no
+      other governing claim because you are resuming it as abandoned work: then the issue with the
+      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other). If yours loses,
+      delete it and act as in step 2.
+   4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
 
@@ -77,7 +125,7 @@ commit updates the row and is verified again.
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
+(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
 
 ## 5. Open the PR
 
@@ -122,14 +170,38 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
    closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
    its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)".
-4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`).
+4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
+   and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
    ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
    in plan order.
+7. If `SELF_CHAIN` is true, go to §8.
+
+## 8. Self-chain (only when `SELF_CHAIN` is true)
+
+Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
+now ready; say why in the final message instead.
+
+1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: starting
+   successor" or "Self-chained to session" comment from this session already exists, a successor
+   was or may have been created: find it with `list_sessions` by the tag
+   `fineprint-chain-<marker comment ID>` (step 2), never by time alone, so another chain's
+   session is never mistaken for this one's. If one exists, post step 3's comment if it is missing and end the turn;
+   never create another. If the marker exists but no successor session is found, create none and
+   say so in the final message: the backstop scheduled task restarts the chain.
+2. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
+   start one new session with `create_session`: `source_url`
+   `https://github.com/donfuldauer/fineprint`, tags `fineprint-chain` and
+   `fineprint-chain-<marker comment ID>` (the ID of the marker just posted), a title naming the
+   next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
+   environment and model to be inherited.
+3. Comment on the merged issue: "Self-chained to session <id>."
+4. End the turn. Never start more than one session per merge, and never chain from a session
+   whose prompt did not ask for it.
 
 ## Never
 
-Start an issue whose dependencies are open; push to `main`; merge with a failing required check
+Self-chain unless the starting prompt asked for it; start an issue whose dependencies are open; push to `main`; merge with a failing required check
 or an unresolved thread; skip, ignore or weaken a test; put card data in the repository (R5);
 quote CR rules from memory (R6).
