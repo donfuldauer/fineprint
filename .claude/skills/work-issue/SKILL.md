@@ -93,7 +93,9 @@ threads.
       overlapping sessions both proceed: a session only proceeds after a check in which its
       claim beats every live overlapping claim, and the lower comment ID always beats the
       higher.
-   4. Only after the claim holds, add the `in-progress` label (remove `ready`).
+   4. Only after the claim holds, run the §1 step 2 dependency check once more with fresh reads.
+      If a dependency is no longer satisfied, delete your claim and act as in §1 step 2.
+      Otherwise add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
 
