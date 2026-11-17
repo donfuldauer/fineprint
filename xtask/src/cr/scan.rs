@@ -408,7 +408,19 @@ fn slash_comments(content: &str, backticks: bool) -> Vec<(usize, String)> {
             // quote or at the end of the line; backslash escapes the next char.
             i += 1;
             while i < c.len() && at(i) != '\'' && at(i) != '\n' {
-                if at(i) == '\\' && at(i + 1) != '\n' {
+                if at(i) == '\\' {
+                    // A backslash-newline (or backslash-CRLF) is a line
+                    // continuation: the string stays open on the next line.
+                    if at(i + 1) == '\n' {
+                        line += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if at(i + 1) == '\r' && at(i + 2) == '\n' {
+                        line += 1;
+                        i += 3;
+                        continue;
+                    }
                     i += 1;
                 }
                 i += 1;
@@ -715,6 +727,21 @@ mod single_quote_tests {
             // Unterminated: ends at the end of the line.
             let got = comment_lines(path, "const s = 'oops\n// x\n");
             assert_eq!(got, vec![(2, " x".to_string())], "{path}");
+        }
+    }
+
+    /// REQ-DOC-001: a backslash-newline continues a JS/TS single-quoted string.
+    #[test]
+    fn req_doc_001_js_single_quote_line_continuation() {
+        let n = format!("{}.{}z", 999, 9);
+        for path in ["a.ts", "a.js"] {
+            for nl in ["\n", "\r\n"] {
+                let src = format!("const s = 'first\\{nl}second'; // CR {n}{nl}");
+                let got = comment_lines(path, &src);
+                assert_eq!(got.len(), 1, "{path}");
+                assert_eq!(got[0].0, 2, "{path}");
+                assert!(got[0].1.contains(&format!("CR {n}")), "{path}");
+            }
         }
     }
 
