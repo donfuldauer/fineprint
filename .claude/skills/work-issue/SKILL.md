@@ -27,10 +27,7 @@ threads.
      Never resume work a live session owns.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
-   - **Claim, then verify** (GitHub has no atomic lock, so the earliest claim wins): post the
-     step 4 claim comment, then re-read the issue's comments. If an earlier claim comment from
-     another live session appeared after the issue was last labelled `ready`, delete your claim
-     and pick the next candidate. Only then change labels.
+   - Claim it with step 4. If the claim loses, pick the next candidate.
    - If none qualifies, tell the user why and stop (no chaining).
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, or if it is not a work unit (no `Plan ID` line).
@@ -44,9 +41,16 @@ threads.
    which ones, and which of them are themselves ready to start. Do not start blocked work.
 3. Read the issues it depends on, `docs/DEVELOPMENT.md` (if it exists yet), the SRS sections
    the issue names, and any `docs/DECISIONS.md` entries its area touches.
-4. Comment on the issue that work has started (one line, with the branch name and this
-   session's ID, which `get_session` with no argument returns): this is the claim comment. Then
-   add the `in-progress` label (remove `ready`).
+4. **Claim, then verify.** This applies whether or not the prompt named the issue. GitHub has
+   no atomic lock, so the earliest claim wins.
+   1. Post the claim comment: work has started, with the branch name and this session's ID
+      (`get_session` with no argument returns it).
+   2. Re-read the issue's comments. If another claim comment that is earlier than yours, and
+      later than the issue's last `ready` label or abandoned-work resume, names a session that is
+      live (`get_session` reports `working` or `blocked`), your claim loses: delete it. With an
+      issue number, tell the user which session owns the issue and stop. Without one, return to
+      step 0 and pick the next candidate.
+   3. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
 ## 2. Branch
 
