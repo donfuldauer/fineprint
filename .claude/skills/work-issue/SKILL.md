@@ -40,6 +40,8 @@ threads.
    merged PR counts only if a comment on it names the replacement issue(s) that delivered the
    work and those replacements pass the same test. If any is unsatisfied, stop and tell the user
    which ones, and which of them are themselves ready to start. Do not start blocked work.
+   Without an issue number, exclude this candidate instead and continue with the next one under
+   step 0 (abandoned candidates first, then ready issues).
 3. Read the issues it depends on, `docs/DEVELOPMENT.md` (if it exists yet), the SRS sections
    the issue names, and any `docs/DECISIONS.md` entries its area touches.
 4. **Claim, then verify.** This applies whether or not the prompt named the issue. GitHub has
