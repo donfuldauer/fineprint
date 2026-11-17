@@ -717,6 +717,7 @@ starting at 0 or wrapping on exhaustion (rejected: ambiguous saved state, repeat
 length-prefixed or tagged encoding in the hook (rejected: belongs to #10); proptest (rejected: new
 dependency).
 
+<<<<<<< HEAD
 ## Self-chaining — claim ordering
 
 **Decision.** `work-issue` §1 step 4 arbitrates concurrent claims by GitHub issue-comment ID. Each
@@ -740,3 +741,136 @@ while their combined behaviour conflicts. The owner weighs this risk against the
 for now: it adds commits and a cleanup path for every claim). A single orchestrating session
 (`run-plan`) that alone selects work (still available: the race only exists when several sessions
 pick work independently).
+=======
+## #7 FP-006 — `cr fetch` shells out to curl
+
+**Decision.** `cargo xtask cr fetch` downloads with the `curl` program through
+`std::process::Command` (arguments passed separately, no shell): `--fail --location --silent
+--show-error --max-time 120 --output <cache>/<name>.part --url <url>`, never `-k`/`--insecure`;
+curl applies the environment's proxy and CA settings itself. Each download goes to a `.part` file
+that is validated and then renamed into place, so a failed run never leaves a partial cache. The
+client sits behind the `Http` trait (`xtask/src/cr/fetch.rs`) so tests inject a fake and never
+touch the network; a missing curl exits 2 with a clear message.
+
+**Rationale.** xtask is standard-library only (FP-003), and the standard library has no TLS.
+curl is preinstalled on the CI runners and on developer machines.
+
+**Alternatives.** A Rust TLS/HTTP crate (rejected: xtask is std-only, no new dependencies); a
+shell or Python script (rejected: harder to unit test and to keep on the exit-code contract).
+
+## #7 FP-006 — CR source URL discovery and cache layout
+
+**Decision.** Without `--url`, fetch downloads `https://magic.wizards.com/en/rules` and takes the
+first `https://media.wizards.com/...MagicCompRules....txt` link, encoding spaces as `%20`; if none
+is found it exits 2 suggesting `--url <url>`. `--url` overrides discovery. The cache is
+`cr-cache/rules.txt` (the bytes as downloaded) and `cr-cache/source.json` (`sourceUrl`,
+`effectiveDate` as an ISO date parsed from "These rules are effective as of <Month D, YYYY>.",
+`sha256`, `byteCount`). A download that is empty, not UTF-8 or has no effective-date line is
+rejected (exit 2) and the cache is left untouched. An existing cache is reused unless `--force`.
+`fetch` also takes `--cache <dir>` (not in the brief) so tests and CI can point at another
+directory; `index` and `check` refuse a cache whose `rules.txt` no longer matches the recorded
+SHA-256 (exit 2, refetch with `--force`).
+
+**Rationale.** The download link carries the release date and changes with each release; the
+rules page is the stable entry point. Recording the checksum and date lets `check` warn when a
+newer release is cached.
+
+**Alternatives.** A hard-coded URL per baseline (rejected: breaks on every release); storing the
+URL only in the index (rejected: the fetch must work before any index exists).
+
+## #7 FP-006 — Command spelling `cargo xtask cr fetch|index|check`
+
+**Decision.** The CR tooling is `cargo xtask cr fetch`, `cargo xtask cr index` and
+`cargo xtask cr check`, replacing the `cite-check` placeholder in docs/DEVELOPMENT.md.
+
+**Rationale.** Matches the issue's deliverables; one `cr` command group keeps the three steps
+(network, regenerate, verify) separate so CI can cache the fetch and run only `check`.
+
+**Alternatives.** A single `cite-check` that fetches and checks (rejected: mixes network and
+verification, and has no way to regenerate the index).
+
+## #7 FP-006 — Rule text extent and normalization
+
+**Decision.** The rules body is the text strictly between the LAST line equal to
+`1. Game Concepts` and the LAST line equal to `Glossary` (BOM and CR stripped first). A rule starts
+at `ddd.n[x[x]][.] ` or a section heading `ddd. Title`; its text is the first line (number
+included) plus following non-blank lines up to the next blank line OR the next rule start, so
+`Example:` lines are included and a changed example re-flags the rule. A heading's text is the
+heading line alone. A repeated number keeps the later entry. Normalization
+`sha256-normalized-v1`: strip the BOM, replace every run of Unicode whitespace with one ASCII
+space, trim; quotes and dashes are kept byte for byte. The hash is the SHA-256 of the normalized
+text only. Two adaptations to the real 2026-11-06 file, which differs from the brief's layout
+facts: (1) sub-rules can have two letters (a sub-rule after the `z` sub-rule), so up to two
+lowercase letters are accepted in rule numbers, in both the parser and the scanner; (2) one
+section heading directly follows the previous rule with no blank line, so a rule start also ends
+the previous rule. The parse finds 3331 rules and no duplicates.
+
+**Rationale.** Conservative: any edit to a cited rule's wording or examples is flagged for
+re-verification. Without the two adaptations the two-letter sub-rule would be swallowed into its
+predecessor and the heading's text would be appended to the previous rule.
+
+**Alternatives.** Hashing the first line only (rejected: misses changes in continuation lines and
+examples); excluding examples (rejected: the brief prefers conservative re-flagging); Unicode NFC
+normalization (rejected: needs tables std lacks, and the official text is stable).
+
+## #7 FP-006 — Citation grammar, range endpoints and the errata exclusions
+
+**Decision.** In `docs/SRS.md`: every bare dotted token `ddd.n[x[x]]` (not preceded by a letter,
+digit or dot; not followed by a letter, digit, `_` or a dot plus digit, so version-like numbers
+are skipped), and every item of a `CR `/`CRs ` list separated by `,` `;` `/` or `and`. An item is a
+rule number or a range with an attached en dash or hyphen; only the two endpoints are indexed. A
+bare section counts only inside a `CR` list. In source comments only `CR` lists count (the R6
+style), not bare numbers. One extension of the brief's grammar: after a dotted start, a bare-number
+end is a rule in the same section (`CR 702.178–179` cites 702.178 and 702.179); the brief's
+grammar read that end as section 179, which does not exist, and the real SRS uses this shape.
+The exclusion list holds exactly two entries, both `docs/SRS.md` errata rows (29: `906`, 31:
+`729.4`), matched by path, rule and a marker text on the row, so it cannot hide a source comment.
+The real scan gives 456 cited rules (67 sections, 389 rules; one location outside the SRS, an
+example citation in xtask/src/guard.rs's doc comment) and 2 excluded citations; no other SRS token
+is missing from the CR.
+
+**Rationale.** The SRS cites in several shapes; endpoint-only ranges keep the index small and
+avoid inventing rules between endpoints. Restricting source comments to `CR` lists avoids false
+positives from ordinary numbers in code comments.
+
+**Alternatives.** Expanding ranges to every rule in between (rejected: brief says endpoints
+only); bare tokens in source comments (rejected: false positives); a per-line exclusion by line
+number (rejected: SRS edits shift lines).
+
+## #7 FP-006 — `cr check` compares sets and hashes, not locations
+
+**Decision.** `check` fails (exit 1) when a cited rule is missing from the fetched CR, is cited
+but not in the committed index, has a hash different from the committed one, or when the index is
+missing, unparsable or of an unknown `schemaVersion`. Locations and line numbers are never
+compared. An indexed rule that is no longer cited, and a fetched effective date that differs from
+`baseline.effectiveDate`, are `warning:` lines only. `index` refuses to write when a citation is
+missing from the CR, or when `docs/SRS.md` does not contain the fetched baseline id
+(`CR-<effective date>`).
+
+**Rationale.** SRS and source edits move lines constantly; only the set of cited rules and their
+verified text matter (REQ-DOC-001). The baseline-id check keeps the index tied to the SRS rules
+baseline.
+
+**Alternatives.** Comparing locations (rejected: every edit would fail the check); failing on
+uncited index entries (rejected: harmless and fixed by re-indexing).
+
+## #7 FP-006 — `cr.yml` is not a required check
+
+**Decision.** `.github/workflows/cr.yml` (job `cr`) runs on pull requests touching
+`docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, any source file with an extension the
+citation scanner reads (`.rs .cs .c .cpp .h .ts .js .py .toml .yml .yaml`) or the workflow, weekly
+(Monday 04:17 UTC) and on `workflow_dispatch`. It caches `cr-cache/` with actions/cache (exact key
+on the index hash, no prefix restore), runs `cr fetch` on pull requests and `cr fetch --force` on
+the schedule and manual runs, then `cr check`. It is not a required status check.
+
+**Rationale.** The job depends on the network and an external site; a required check would block
+merges on outages. The weekly forced refetch detects a new CR release; a changed rule then fails
+the job, which flags it for re-verification. REQ-DOC-001 also requires a changed rule to block
+release; no release step reads this job's result yet, so that gate is not enforced by this unit.
+The enforcement mechanism (for example a release precondition requiring a passing `cr` run on the
+release commit, or a required status check) is an open maintainer choice recorded in
+`docs/HUMAN_QUEUE.md`.
+
+**Alternatives.** Required check (rejected: network dependence); running on every pull request
+(rejected: unnecessary downloads).
+>>>>>>> origin/main

@@ -70,7 +70,9 @@ threads.
       with an open PR, and open issues that have a governing claim. Issues labelled
       `status:blocked-failure` or `blocked` reserve nothing. If one overlaps, compare
       your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
-      issue or open PR with no governing claim wins outright). If yours loses,
+      issue or open PR with no governing claim wins outright, unless your issue also has no
+      other governing claim because you are resuming it as abandoned work: then the issue with the
+      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other). If yours loses,
       delete it and act as in step 2.
    4. Only after the claim holds, add the `in-progress` label (remove `ready`).
 
@@ -181,13 +183,15 @@ now ready; say why in the final message instead.
 
 1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: starting
    successor" or "Self-chained to session" comment from this session already exists, a successor
-   was or may have been created: find it with `list_sessions` (tag `fineprint-chain`, created
-   after that comment). If one exists, post step 3's comment if it is missing and end the turn;
+   was or may have been created: find it with `list_sessions` by the tag
+   `fineprint-chain-<marker comment ID>` (step 2), never by time alone, so another chain's
+   session is never mistaken for this one's. If one exists, post step 3's comment if it is missing and end the turn;
    never create another. If the marker exists but no successor session is found, create none and
    say so in the final message: the backstop scheduled task restarts the chain.
 2. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
    start one new session with `create_session`: `source_url`
-   `https://github.com/donfuldauer/fineprint`, tag `fineprint-chain`, a title naming the
+   `https://github.com/donfuldauer/fineprint`, tags `fineprint-chain` and
+   `fineprint-chain-<marker comment ID>` (the ID of the marker just posted), a title naming the
    next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
    environment and model to be inherited.
 3. Comment on the merged issue: "Self-chained to session <id>."
