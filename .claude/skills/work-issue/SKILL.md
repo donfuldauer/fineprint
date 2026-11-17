@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', or similar."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar; add 'and self-chain' to have it start a fresh session for the next issue after merging."
 ---
 
 # work-issue
@@ -15,6 +15,14 @@ threads.
 
 ## 1. Load and check the issue
 
+0. **Self-chain flag.** Set `SELF_CHAIN` to true only if the prompt that started this work asks
+   for it in some form ("and self-chain", "chain to the next issue", "keep going in a new
+   session"). Otherwise it is false, and §8 does nothing. A request to work an issue is not a
+   request to chain.
+   **No issue number** ("the next ready issue"): if an issue is labelled `in-progress` with no
+   open PR, or one of your PRs is open, resume that one first. Otherwise list ready issues as
+   `run-plan` §1 does and take the lowest `FP-NNN` whose owned paths overlap no active issue. If
+   none qualifies, tell the user why and stop (no chaining).
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, or if it is not a work unit (no `Plan ID` line).
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
@@ -127,9 +135,23 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
    in plan order.
+7. If `SELF_CHAIN` is true, go to §8.
+
+## 8. Self-chain (only when `SELF_CHAIN` is true)
+
+Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
+now ready; say why in the final message instead.
+
+1. Start one new session with `create_session`: `source_url`
+   `https://github.com/donfuldauer/fineprint`, tag `fineprint-chain`, a title naming the
+   next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
+   environment and model to be inherited.
+2. Comment on the merged issue: "Self-chained to session <id>."
+3. End the turn. Never start more than one session per merge, and never chain from a session
+   whose prompt did not ask for it.
 
 ## Never
 
-Start an issue whose dependencies are open; push to `main`; merge with a failing required check
+Self-chain unless the starting prompt asked for it; start an issue whose dependencies are open; push to `main`; merge with a failing required check
 or an unresolved thread; skip, ignore or weaken a test; put card data in the repository (R5);
 quote CR rules from memory (R6).
