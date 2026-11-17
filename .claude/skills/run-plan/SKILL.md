@@ -25,8 +25,8 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
 
 The units of work are GitHub issues. An issue is **ready** when it is open, labelled `ready`
 (every issue in its "Depends on" list is satisfied: closed as completed by a merged PR, or
-explicitly replaced as `work-issue` §1 step 2 describes), not `in-progress`, and no open PR owns any of
-its paths. List them with
+explicitly replaced as `work-issue` §1 step 2 describes), not `in-progress`, not labelled
+`status:blocked-failure` or `blocked`, and no open PR of a non-blocked issue owns any of its paths. List them with
 `gh api "repos/donfuldauer/fineprint/issues?state=open&labels=ready&per_page=100&page=N"`, paging
 explicitly with N = 1, 2, … until a page returns fewer than 100 issues (do not use
 `gh api --paginate`: this environment's proxy blocks it because it follows numeric-ID links).
