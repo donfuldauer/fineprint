@@ -95,7 +95,11 @@ threads.
       higher.
    4. Only after the claim holds, run the §1 step 2 dependency check once more with fresh reads.
       If a dependency is no longer satisfied, delete your claim and act as in §1 step 2.
-      Otherwise add the `in-progress` label (remove `ready`).
+      Otherwise add the `in-progress` label (remove `ready`), then re-read the issue once more:
+      if it is now closed or labelled `status:blocked-failure` or `blocked`, remove
+      `in-progress`, delete your claim and act as in step 4.2. Checking after the label change
+      closes the window between the last check and the change; a block or close after this
+      point is handled like any other blocked or closed issue.
 
 ## 2. Branch
 
