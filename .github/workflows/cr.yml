@@ -1,0 +1,74 @@
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at
+# https://mozilla.org/MPL/2.0/.
+
+# CR citation check (REQ-DOC-001, REQ-NFR-007): fetches the official Comprehensive Rules text
+# into the git-ignored cr-cache/ and compares every citation with docs/cr-citations.json.
+# This job is NOT a required status check: it depends on the network and on Wizards of the
+# Coast's site. See docs/DEVELOPMENT.md "CI".
+# Third-party actions: actions/checkout and actions/cache only, both first-party,
+# pinned to exact version tags (checkout v4.2.2, cache v4.2.0).
+name: CR citations
+
+on:
+  pull_request:
+    paths:
+      - docs/SRS.md
+      - docs/cr-citations.json
+      - xtask/src/cr/**
+      - "**/*.rs"
+      - "**/*.cs"
+      - "**/*.c"
+      - "**/*.cpp"
+      - "**/*.h"
+      - "**/*.ts"
+      - "**/*.js"
+      - "**/*.py"
+      - "**/*.toml"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - .github/workflows/cr.yml
+  schedule:
+    # weekly, Monday 04:17 UTC; refetches so a changed upstream text is detected
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+concurrency:
+  group: cr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cr:
+    name: cr
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Keep line endings as committed
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache the CR text (never committed)
+        uses: actions/cache@v4.2.0
+        with:
+          path: cr-cache
+          key: cr-text-v1-${{ hashFiles('docs/cr-citations.json') }}
+      - name: Fetch the CR text (cached on pull requests)
+        if: github.event_name == 'pull_request'
+        run: cargo xtask cr fetch
+      - name: Fetch the CR text (forced refetch)
+        if: github.event_name != 'pull_request'
+        run: cargo xtask cr fetch --force
+      - name: Check citations against the verified baseline
+        run: cargo xtask cr check
