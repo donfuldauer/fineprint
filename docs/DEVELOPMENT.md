@@ -119,9 +119,26 @@ cargo xtask guard headers            # MPL-2.0 header in every source file
 cargo xtask guard card-data          # no committed card data or rules text
 cargo xtask guard card-branch        # no card-name/id literal comparisons in fineprint-core
 cargo xtask guard all                # the three guards, every violation reported
+cargo xtask cr fetch [--url <url>] [--force] [--cache <dir>]
+                                     # download the official CR text into git-ignored cr-cache/ (uses curl)
+cargo xtask cr index [--cache <dir>] [--root <dir>] [--out <file>]
+                                     # parse the CR, scan citations, write docs/cr-citations.json
+cargo xtask cr check [--cache <dir>] [--root <dir>] [--index <file>]
+                                     # fail on a cited rule missing from the CR, not indexed, or with changed text
 cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
                                                    # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
+
+`cargo xtask cr` (REQ-DOC-001, REQ-NFR-007; details in `xtask/src/cr/mod.rs` and its
+submodules): the rules body is the text between the last `1. Game Concepts` line and the last
+`Glossary` line; a rule's text is its first line plus following non-blank lines up to a blank line
+or the next rule (examples included); a section heading's text is the heading line. Normalization
+`sha256-normalized-v1`: strip the BOM, replace every run of Unicode whitespace (CR and LF
+included) with one ASCII space, trim; nothing else changes. The hash is the lowercase hex SHA-256
+of the normalized text. Citations come from `docs/SRS.md` (`CR` lists and bare dotted rule
+numbers) and from `CR ...` lists in comments of tracked `.rs .cs .c .cpp .h .ts .js .py .toml .yml
+.yaml` files, except `xtask/src/cr/` (its own fixtures). `check` compares citation sets and hashes,
+never line numbers.
 
 Environment: none needed. `RUSTFLAGS="-D warnings"` is optional; `CARGO_TERM_COLOR=never` for
 logs. xtask is run as `cargo xtask <command>` (alias in `.cargo/config.toml`);
@@ -136,7 +153,6 @@ Lands later:
 
 - `cargo run -p xtask -- check-paths`: not delivered by #4 FP-003 (its guards are the three
   above); a path check lands only if a later issue asks for it.
-- `cargo run -p xtask -- cite-check` (fetches into `cr-cache/`): lands with #7 FP-006.
 - `.pzl` runner `cargo run -p fineprint-cli -- pzl <file>` or an xtask equivalent (final syntax
   set by #51 FP-049).
 - Replay and golden-hash verification: lands with #83 FP-081 and #106 FP-104.
@@ -171,6 +187,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
+| `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`; `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
 The first nine job names are the contexts listed as required status checks on `main`
 (REQ-NFR-011); the maintainer adds `coverage (ubuntu-latest)`, `guards` and `req-coverage`
@@ -245,8 +262,9 @@ not attributed to any crate. `xtask coverage` runs the same flags as the CI job
 ## Cache and fixture paths
 
 - `ingest-cache/`: git-ignored bulk-data cache; never committed or published.
-- `cr-cache/`: git-ignored fetched rules text; rules text is never committed, only the citation
-  index (#7 FP-006) is.
+- `cr-cache/`: git-ignored fetched rules text (`rules.txt` plus `source.json` with the source
+  URL, effective date, SHA-256 and byte count, written by `cargo xtask cr fetch`); rules text is
+  never committed, only the citation index `docs/cr-citations.json` (#7 FP-006) is.
 - Committed synthetic data: `tests/fixtures/cards/`, `tests/scenarios/`, `tests/golden/`.
 - Already git-ignored: `target/`, `*.fpdb`, `*.cr.txt`, `*.wasm`, bulk-data json
   (`scryfall-*.json`, `oracle-cards-*.json`, `rulings-*.json`, `AtomicCards*.json`), `dist/`,
