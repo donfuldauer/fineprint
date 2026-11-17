@@ -86,8 +86,10 @@ threads.
       reads the dependency check of §1 step 2 (every dependency still satisfied), the checks of
       step 4.2 (issue still open and not blocked, governing claim still yours and, without an
       issue number, the candidate still qualifies) and this overlap check. If all of them pass
-      and you now win against every live overlapping claim, continue; otherwise delete your
-      claim and act as in step 4.2. This cannot let two
+      and you now win against every live overlapping claim, continue. Otherwise delete your
+      claim; if the dependency check failed, act as in §1 step 2 (report the unsatisfied
+      dependencies and which of them are ready, or, without an issue number, move on to the
+      next candidate), and for any other failure act as in step 4.2. This cannot let two
       overlapping sessions both proceed: a session only proceeds after a check in which its
       claim beats every live overlapping claim, and the lower comment ID always beats the
       higher.
