@@ -16,7 +16,9 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
 2. Read `docs/RUN_LOG.md` (last rows), `docs/HUMAN_QUEUE.md` (anything a person has answered
    since the last run: struck-through lines with a resolution), and the open `work-unit` issues' phases and dependencies.
 3. List open PRs you created (`gh pr list --author @me` or the session's PR tools). Each open PR
-   is driven to merge (step 4) before new work on the same paths starts.
+   is driven to merge (step 4) before new work on the same paths starts, except the PR of an
+   issue labelled `status:blocked-failure` or `blocked`: it waits for a person and reserves no
+   paths (§1).
 4. Read the account's current usage limits once and set `FABLE_ALLOWANCE` to `sufficient`,
    `insufficient` or `unknown` for this session's classifier calls. Re-read it before any call
    that could route T3.
