@@ -20,9 +20,10 @@ threads.
    session"). Otherwise it is false, and §8 does nothing. A request to work an issue is not a
    request to chain.
    **No issue number** ("the next ready issue"):
-   - **Resume abandoned work first.** Candidates are issues labelled `in-progress` (never one
-     labelled `status:blocked-failure` or `blocked`) and your open PRs. One is abandoned only if
-     it has no governing claim (step 4): no claim comment on it names a live session.
+   - **Resume abandoned work first.** Candidates are issues labelled `in-progress` and your open
+     PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
+     wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
+     comment on it names a live session.
      Never resume work a live session owns.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
