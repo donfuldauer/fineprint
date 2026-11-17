@@ -684,8 +684,10 @@ third session's later claim hide an earlier winner, so every comparison uses the
 **Assumption (undocumented).** Issue-comment IDs are allocated in creation order across issues,
 and a comment is listed immediately after its creation call returns. Both are observed behaviour,
 not guaranteed by the GitHub REST documentation. If either fails, two sessions can rarely start
-overlapping work. The P6 merge conditions still apply: a branch must be up to date with `main`
-before it merges, so the later PR meets a conflict or a red check, not a silent overwrite.
+overlapping work. **Residual risk:** the P6 merge conditions (branch up to date with `main`,
+required checks green) often surface such overlap as a merge conflict or a red check, but they do
+not guarantee it. Two branches can make independent textual edits that merge cleanly and pass CI
+while their combined behaviour conflicts. The owner weighs this risk against the lock below.
 
 **Alternatives.** A lock file committed to a branch, using git push as the atomic step (rejected
 for now: it adds commits and a cleanup path for every claim). A single orchestrating session
