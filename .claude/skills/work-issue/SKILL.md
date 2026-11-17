@@ -48,8 +48,8 @@ threads.
    can never supersede a claim that has already passed its check: that claim's session saw every
    lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
    on it that names a live session (`get_session` reports `working` or `blocked`) and was posted
-   after the issue was last labelled `ready` (the `labeled` event in the issue timeline). That
-   label event is the only cutoff. Resuming abandoned work writes no separate record: claims from
+   after the issue was last labelled `ready` (the `labeled` event in the issue timeline), or at
+   any time if the issue has never been labelled `ready`. That label event is the only cutoff. Resuming abandoned work writes no separate record: claims from
    ended sessions are never live, so they cannot govern, and the lowest-ID live claim still wins
    among sessions resuming at the same time. Compare governing claims,
    never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
@@ -57,9 +57,9 @@ threads.
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read all the issue's comments and its labels. If the issue is now labelled
-      `status:blocked-failure` or `blocked`, or the governing claim is not yours, your claim
-      loses: delete it. With an
+   2. Re-read all the issue's comments, its labels and its state. If the issue is now closed or
+      labelled `status:blocked-failure` or `blocked`, or the governing claim is not yours, your
+      claim loses: delete it. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
