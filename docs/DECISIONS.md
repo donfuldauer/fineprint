@@ -670,6 +670,53 @@ a unit test pins the argument list.
 **Alternatives.** Leave the default filter (rejected: contradicts FP-004); exempt bench.rs
 (rejected: needs an SRS-approved exemption); add a bench smoke test (not needed: floor met).
 
+## FP-007 (#8) — Numeric and identity vocabulary
+
+**Decision.** `fineprint-base` gains `num` (`Int`, `Fixed2`, `OverflowError`), `ids` (seven `u64`
+newtype IDs, the `Id` and `CanonicalEncode` traits, `IdGenerator`, `IdGenerators`, `IdExhausted`)
+and `collections` (`OrderedMap`/`OrderedSet` as `BTreeMap`/`BTreeSet` aliases and
+`stable_sort_by_object_timestamp`). Choices:
+- No operator overloading on `Int` or `Fixed2`; every arithmetic method names its overflow policy,
+  `checked_*` (returns `None`) or `saturating_*` (clamps). Nothing panics or wraps.
+- `Int` division and remainder truncate toward zero (Rust `/` and `%`); `None` for a zero divisor
+  and for `MIN / -1`.
+- `Fixed2` has one rounding rule for every precision-dropping operation (`checked_mul`,
+  `checked_div`, `round_int`): round half away from zero, computed exactly in `i128`.
+- IDs are `u64` newtypes ordered by the `u64`. Generators issue `last + 1`, so the first issued value
+  is 1 and 0 is never issued; at `u64::MAX` `issue` returns `Err(IdExhausted)` and leaves the
+  generator unchanged (an error, not a wrap).
+- `CanonicalEncode` appends fixed-width little-endian bytes (8 bytes for every ID, `Int` and the
+  `Fixed2` raw value), per the FP-004 "State hash" decision. Tag bytes and length prefixes are left
+  to the hashing issue (#10).
+- The property tests use a hand-rolled deterministic harness (SplitMix64 with literal seeds, at least
+  5 000 iterations per property plus a fixed edge-value list, `i128` oracles) instead of proptest.
+- The brief mentions `Fixed2` `try_` helpers without listing them; `Fixed2::try_from_int` and
+  `Fixed2::try_from_halves` (returning `Result<Fixed2, OverflowError>`) were added as extra items.
+- `crates/fineprint-base/src/lib.rs` was edited only to declare `pub mod collections; pub mod ids;
+  pub mod num;` with doc lines, although it was not in the issue's owned list (the brief authorised
+  it).
+- Clippy `disallowed-types` evidence: a throwaway `src/num/scratch_disallowed.rs` using `f64` and
+  `std::collections::HashMap`, declared from `num/mod.rs`, made
+  `cargo clippy -p fineprint-base --all-targets -- -D warnings` exit with status 101, with:
+  `error: use of a disallowed type `f64`` (note `REQ-CORE-006: no floating point in rules paths`)
+  and `error: use of a disallowed type `std::collections::HashMap`` (note `REQ-CORE-006: hash
+  iteration order is forbidden; use an ordered container`). The file and the `mod` line were then
+  deleted and the same command exited 0.
+
+**Rationale.** REQ-CORE-006 forbids floats and hash-order iteration and asks for scale-2 fixed point;
+spelling the overflow policy in every call makes overflow mistakes visible at the call site. Round
+half away from zero is a single symmetric rule (sign-independent), and truncating `Int` division
+matches the host language so that no hidden adjustment exists. Starting IDs at 1 keeps 0 free as a
+"none issued" marker in saved state (REQ-CORE-002). proptest is not in the FP-004 dependency table
+and adding a dependency needs its own decision; `fineprint-base` depends on nothing.
+
+**Alternatives.** Operator overloading that panics or wraps on overflow (rejected: hides the
+policy); banker's rounding or truncation for `Fixed2` (rejected: two rules, or asymmetric for
+negative values); floor division for `Int` (rejected: differs from `/` and surprises callers); IDs
+starting at 0 or wrapping on exhaustion (rejected: ambiguous saved state, repeated IDs); a
+length-prefixed or tagged encoding in the hook (rejected: belongs to #10); proptest (rejected: new
+dependency).
+
 ## Self-chaining — claim ordering
 
 **Decision.** `work-issue` §1 step 4 arbitrates concurrent claims by GitHub issue-comment ID. Each
