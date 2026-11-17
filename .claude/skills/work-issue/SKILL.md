@@ -47,11 +47,13 @@ threads.
    increase over time, so there are no ties. A claim posted after yours always has a higher ID and
    can never supersede a claim that has already passed its check: that claim's session saw every
    lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
-   on it that names a live session (`get_session` reports `working` or `blocked`) and was posted
-   after the issue was last labelled `ready` (the `labeled` event in the issue timeline), or at
-   any time if the issue has never been labelled `ready`. That label event is the only cutoff. Resuming abandoned work writes no separate record: claims from
-   ended sessions are never live, so they cannot govern, and the lowest-ID live claim still wins
-   among sessions resuming at the same time. Compare governing claims,
+   on it that names a live session (`get_session` reports `working` or `blocked`). There is no
+   time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
+   claim. A claim stops counting only when its session ends or deletes it, and a session deletes
+   its own claim whenever it loses (step 4), marks the issue blocked (§4) or finishes (§7).
+   Resuming abandoned work writes no separate record: claims from ended sessions are never live,
+   so they cannot govern, and the lowest-ID live claim still wins among sessions resuming at the
+   same time. Compare governing claims,
    never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
    order and listed as soon as they are created: observed behaviour that GitHub does not document
    (DECISIONS.md "Self-chaining — claim ordering").
@@ -119,7 +121,7 @@ commit updates the row and is verified again.
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`, remove `in-progress`), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
+(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
 
 ## 5. Open the PR
 
@@ -164,7 +166,8 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
    closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
    its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)".
-4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`).
+4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
+   and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
    ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
@@ -176,12 +179,19 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
 now ready; say why in the final message instead.
 
-1. Start one new session with `create_session`: `source_url`
+1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: starting
+   successor" or "Self-chained to session" comment from this session already exists, a successor
+   was or may have been created: find it with `list_sessions` (tag `fineprint-chain`, created
+   after that comment). If one exists, post step 3's comment if it is missing and end the turn;
+   never create another. If the marker exists but no successor session is found, create none and
+   say so in the final message: the backstop scheduled task restarts the chain.
+2. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
+   start one new session with `create_session`: `source_url`
    `https://github.com/donfuldauer/fineprint`, tag `fineprint-chain`, a title naming the
    next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
    environment and model to be inherited.
-2. Comment on the merged issue: "Self-chained to session <id>."
-3. End the turn. Never start more than one session per merge, and never chain from a session
+3. Comment on the merged issue: "Self-chained to session <id>."
+4. End the turn. Never start more than one session per merge, and never chain from a session
    whose prompt did not ask for it.
 
 ## Never
