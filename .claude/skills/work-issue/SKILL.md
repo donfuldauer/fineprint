@@ -99,7 +99,9 @@ threads.
       if it is now closed or labelled `status:blocked-failure` or `blocked`, remove
       `in-progress`, delete your claim and act as in step 4.2. Checking after the label change
       closes the window between the last check and the change; a block or close after this
-      point is handled like any other blocked or closed issue.
+      point is handled like any other blocked or closed issue. The cleanup leaves the issue with
+      neither `ready` nor `in-progress`; whoever clears `blocked` replaces it with `ready` (as §7
+      step 3 does), which makes the issue selectable again.
 
 ## 2. Branch
 
