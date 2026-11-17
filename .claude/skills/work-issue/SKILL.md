@@ -30,7 +30,8 @@ threads.
    - Claim it with step 4. If the claim loses, pick the next candidate.
    - If none qualifies, tell the user why and stop (no chaining).
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
-   Stop if it is closed, or if it is not a work unit (no `Plan ID` line).
+   Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
+   `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
