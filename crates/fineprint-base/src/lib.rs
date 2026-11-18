@@ -12,3 +12,5 @@ pub mod collections;
 pub mod ids;
 /// Checked integer and scale-2 fixed-point numbers (REQ-CORE-006).
 pub mod num;
+/// PCG64-DXSM generator, SplitMix64 seed expansion and unbiased sampling (REQ-CORE-001, REQ-API-004).
+pub mod prng;
