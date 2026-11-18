@@ -1172,6 +1172,51 @@ fn req_dsl_010_choose_mode_rules() {
     no_encode(&mk(0, 0, &[]));
 }
 
+/// REQ-DSL-010: CHOOSE_MODE with many distinct ids is accepted, and a duplicate that is not
+/// adjacent (first and last) is rejected with the "listed twice" diagnostic on decode and encode.
+#[test]
+fn req_dsl_010_choose_mode_many_ids_and_duplicates() {
+    let ids: Vec<String> = (0..200).map(|n| format!("m{n}")).collect();
+    let mk = |ids: &[String]| Instruction::ChooseMode {
+        chooser: ctrl(),
+        min: 0,
+        max: 1,
+        modes: ids
+            .iter()
+            .map(|id| InstructionMode {
+                id: id.clone(),
+                targets: None,
+                effect: vec![Instruction::Populate],
+            })
+            .collect(),
+    };
+    let wire = |ids: &[String]| {
+        let modes: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"id": id, "effect": [{"op":"POPULATE"}]}))
+            .collect();
+        op_doc(
+            "CHOOSE_MODE",
+            &json!({"chooser":{"ref":"CONTROLLER"},"min":0,"max":1,"modes":modes}),
+        )
+    };
+    let ok = mk(&ids);
+    let bytes = serde_json::to_vec(&ok).expect("distinct ids encode");
+    assert_eq!(instr(&wire(&ids)), ok);
+    assert_eq!(
+        serde_json::from_slice::<Instruction>(&bytes).expect("decode"),
+        ok
+    );
+
+    let mut dup = ids.clone();
+    dup.push(ids[0].clone());
+    let enc = serde_json::to_vec(&mk(&dup)).expect_err("duplicate must not encode");
+    assert!(enc.to_string().contains("listed twice"), "{enc}");
+    let dec =
+        serde_json::from_str::<Instruction>(&wire(&dup)).expect_err("duplicate must not decode");
+    assert!(dec.to_string().contains("listed twice"), "{dec}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Lists, triggers, control flow
 
