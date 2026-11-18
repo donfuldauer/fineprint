@@ -1764,16 +1764,20 @@ abilities, which use their own envelope, so it does not apply to a resolving ins
 **Alternatives.** Keep accepting `false` and make the helper return true for CHAR: rejected, the
 wire value would still misstate the rule. Drop the member: deferred, it is a wire-contract change.
 
-## Repository — README legal section keeps the Fan Content Policy notice
+## Repository — Trademark notice replaces the Fan Content Policy disclaimer
 
-**Decision.** The README keeps the Fan Content Policy disclaimer verbatim and puts a statement
-ahead of it: the repository distributes no Wizards of the Coast materials (no card names, Oracle
-or rules text, card definitions, art or logos), names the game only descriptively, and does not
-commit the Comprehensive Rules text (CI fetches it and stores only rule numbers and hashes).
-**Rationale.** The SRS and the docs name the supported game, CI downloads the CR from Wizards of
-the Coast, and SRS §1.3 and line 1430 require the notice wherever the game is named. Dropping
-the notice would contradict the SRS (an SRS change is a person's decision). The clarification
-is accurate for the repository as it stands.
-**Alternatives.** Remove the notice: rejected, because the repository does reference the game
-and the SRS requires the notice. Reword the notice: rejected, because the policy prescribes its
-wording.
+**Decision.** Made by the maintainer on 2026-11-18. Fine Print's README, package metadata and
+documentation carry a trademark and non-affiliation notice instead of the Fan Content Policy
+disclaimer (SRS §1.3 item 3, REQ-ARCH-003 item 2, REQ-NFR-012, PROCESS.md R5). The policy's
+disclaimer becomes the responsibility of clients that import card data or build or distribute a
+card database. REQ-ARCH-001 (zero hardcoded IP) and REQ-NFR-007 (CR text never committed) are
+unchanged, and so are the references to the game and to the CR.
+**Rationale.** The Fan Content Policy is a permission to use Wizards of the Coast IP, so its
+disclaimer is a condition of that permission. Fine Print contains and distributes none of that
+IP. It names the game only descriptively and cites rule numbers without reproducing their text.
+Card data, the only IP in play, enters through clients under Scryfall's terms, which require
+the policy, so the obligation sits with them. This is not legal advice.
+**Alternatives.** Keep the disclaimer: rejected, because Fine Print uses none of the policy's
+permission. Scrub every reference to the game and stop fetching the CR: rejected. The CR is the
+specification, the citation check needs the text, and removing the game's name would make the
+documents harder to use without changing the legal position.

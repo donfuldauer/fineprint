@@ -190,27 +190,21 @@ Fine Print's own files must stay available under MPL-2.0 with the original notic
 
 ## Legal
 
-Fine Print is an independent project. Wizards of the Coast has not approved, endorsed or
-sponsored it and is not affiliated with it.
+**Trademarks.** *Magic: The Gathering* is a trademark of Wizards of the Coast LLC. It is named
+here only to describe what Fine Print is compatible with. Fine Print is an independent project,
+and Wizards of the Coast has not approved, endorsed or sponsored it and is not affiliated with it.
 
 **What this repository contains.** Original code and documentation only: no card names, Oracle or
-rules text, card definitions, art, set symbols or logos. The game, its formats and its mechanics
-are named only descriptively, to say what the engine is compatible with. The Comprehensive Rules
-text is not committed. CI downloads the official file at build time to check citations and keeps
-only rule numbers and hashes (`docs/cr-citations.json`). Fine Print's name and branding use no
-third-party trademark. The test suite uses invented synthetic cards.
-
-**Fan Content Policy notice.** The requirements and documentation name the supported game, and
-SRS §1.3 requires this notice wherever the game is named. It is kept even though the project
-distributes no Wizards of the Coast materials:
-
-> Fine Print is unofficial Fan Content permitted under the Fan Content Policy. Not
-> approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the
-> Coast. ©Wizards of the Coast LLC.
+rules text, card definitions, art, set symbols or logos. Fine Print's name and branding use no
+third-party trademark, and the test suite uses invented synthetic cards. The Comprehensive Rules
+text is never committed. CI downloads the official file to check citations and keeps only rule
+numbers and hashes (`docs/cr-citations.json`). Because Fine Print uses no Wizards of the Coast
+materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
 **Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
-of use) and build their own card databases with the toolchain. Anyone who redistributes a card
-database is responsible for those terms and the Fan Content Policy. Commercial distribution of
-anything that bundles card data requires legal review first (SRS §1.3).
+of use) and build their own card databases with the toolchain. A client that does this uses the
+data under Scryfall's terms and the Wizards of the Coast Fan Content Policy, and is responsible
+for meeting them, including the policy's disclaimer. Commercial distribution of anything that
+bundles card data requires legal review first (SRS §1.3).
 
 This section is not legal advice.
