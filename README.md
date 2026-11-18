@@ -57,9 +57,9 @@ and about 700 tests (368 of them black-box spec tests).
 **Workspace, CI and guards (FP-001 to FP-006)**
 
 - A Cargo workspace of nine product crates (`fineprint-base`, `-dsl`, `-core`, `-ingest`, `-ffi`,
-  `-wasm`, `-bot`, `clients/cli`, `xtask`) plus the spike crate `spikes/libs`, with Rust pinned to 1.97.0, edition 2024 and
-  MPL-2.0 headers on every source file. Dependencies point downward only (base → dsl → core →
-  bindings and tools). Floats, `HashMap` and `HashSet` are banned in the rules crates through
+  `-wasm`, `-bot`, `clients/cli`, `xtask`) plus the spike crate `spikes/libs`, with Rust pinned
+  to 1.97.0, edition 2024 and MPL-2.0 headers on every source file. Dependencies point downward
+  only (base → dsl → core → bindings and tools). Floats, `HashMap` and `HashSet` are banned in the rules crates through
   `clippy.toml`, and unsafe code is forbidden everywhere except `fineprint-ffi`.
 - CI on Linux, Windows and macOS: `cargo fmt`, `clippy -D warnings` and `cargo test`. It also
   enforces per-crate line-coverage floors (`cargo xtask coverage`) and runs repository guards
