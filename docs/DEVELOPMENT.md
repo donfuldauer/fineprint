@@ -181,7 +181,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 
 | Job name | Command |
 |---|---|
-| `changes` | `git diff --name-only` between the pull request's base and head; outputs `code` (always `true` on a push) |
+| `changes` | `git diff --no-renames --name-only` between the pull request's base and head; outputs `code` (always `true` on a push) |
 | `fmt (ubuntu-latest)` | `cargo fmt --all --check` |
 | `clippy (ubuntu-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `test (ubuntu-latest)` | `cargo test --workspace --locked` |
