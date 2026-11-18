@@ -235,49 +235,78 @@ fn is_public_info_unknown_id_is_none() {
 // ---------------------------------------------------------------------------------------------
 
 // REQ-ZONE-001 items 2, 5, 6, CR 402.3, 406.3, 400.7, 400.8, 406.7, 400.10: hand, battlefield,
-// exile and command list ascending ObjectId whatever Position is requested. Two generators are
-// used so that a larger id enters before a smaller one (both start below every id issued by the
-// other, so neither collides with a live object).
+// exile and command list ascending ObjectId whatever Position is requested. One generator is
+// used throughout; a larger id enters an unordered zone before a smaller one because objects are
+// moved in descending creation order, and a low-id object moved out and back gets a higher id.
 #[test]
 fn unordered_zones_list_ascending_object_ids_whatever_the_position() {
+    let positions = [
+        Position::Top,
+        Position::Bottom,
+        Position::Index(0),
+        Position::Index(1),
+        Position::Index(usize::MAX),
+    ];
     for kind in [
         ZoneKind::Hand,
         ZoneKind::Battlefield,
         ZoneKind::Exile,
         ZoneKind::Command,
     ] {
-        let mut z = two();
-        let mut high = IdGenerator::<ObjectId>::from_last_issued(1000);
-        let mut low = IdGenerator::<ObjectId>::new();
-        let a = z
-            .create_object(&mut high, cid(1), pid(1), req_pos(kind, Position::Top))
-            .unwrap();
-        let b = z
-            .create_object(&mut low, cid(2), pid(1), req_pos(kind, Position::Bottom))
-            .unwrap();
-        let c = z
-            .create_object(&mut high, cid(3), pid(1), req_pos(kind, Position::Index(0)))
-            .unwrap();
-        let d = z
-            .create_object(&mut low, cid(4), pid(1), req_pos(kind, Position::Top))
-            .unwrap();
-        assert_eq!((a, b, c, d), (oid(1001), oid(1), oid(1002), oid(2)));
-        let zone = ZoneId::of(kind, pid(1));
-        assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(1001), oid(1002)]);
-        // Moving within the zone keeps the listing ascending. R10 correction for finding F1
-        // (CodeRabbit comment 4621941423): in the hand and on the battlefield this is not a zone
-        // change and keeps the id; in exile and the command zone it is a new object.
-        let e = z
-            .move_object(&mut low, c, req_pos(kind, Position::Index(1)))
-            .unwrap()
-            .new;
-        if matches!(kind, ZoneKind::Exile | ZoneKind::Command) {
-            assert_eq!(e, oid(3));
-            assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(3), oid(1001)]);
-        } else {
-            assert_eq!(e, c);
-            assert_eq!(low.last_issued(), 2);
-            assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(1001), oid(1002)]);
+        for rotation in 0..positions.len() {
+            let mut z = two();
+            let mut g = IdGenerator::<ObjectId>::new();
+            let zone = ZoneId::of(kind, pid(1));
+            // Four objects in the library with ids 1..=4.
+            let made: Vec<ObjectId> = (1..=4)
+                .map(|n| {
+                    z.create_object(&mut g, cid(n), pid(1), req(ZoneKind::Library))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(made, vec![oid(1), oid(2), oid(3), oid(4)]);
+            // Move them in descending creation order with varying positions (Top and Index(0)
+            // ask for each later, larger id to sit before the earlier, smaller ones); the
+            // listing must still be ascending ObjectId.
+            let mut in_zone = Vec::new();
+            for (i, id) in made.iter().rev().enumerate() {
+                let pos = positions[(i + rotation) % positions.len()];
+                let m = z.move_object(&mut g, *id, req_pos(kind, pos)).unwrap();
+                in_zone.push(m.new);
+                let mut sorted = z.contents(zone);
+                sorted.sort();
+                assert_eq!(z.contents(zone), sorted);
+            }
+            assert_eq!(in_zone, vec![oid(5), oid(6), oid(7), oid(8)]);
+            assert_eq!(z.contents(zone), in_zone);
+            // Out and back: the lowest object leaves and returns with a larger id, after
+            // larger ids are already present.
+            let low = in_zone[0];
+            let out = z
+                .move_object(&mut g, low, req(ZoneKind::Graveyard))
+                .unwrap()
+                .new;
+            let back = z
+                .move_object(&mut g, out, req_pos(kind, positions[rotation]))
+                .unwrap()
+                .new;
+            assert_eq!(back, oid(10));
+            assert_eq!(z.contents(zone), vec![oid(6), oid(7), oid(8), oid(10)]);
+            // Moving within the zone keeps the listing ascending. R10 correction for finding F1
+            // (CodeRabbit comment 4621941423): in the hand and on the battlefield this is not a
+            // zone change and keeps the id; in exile and the command zone it is a new object.
+            let e = z
+                .move_object(&mut g, oid(7), req_pos(kind, Position::Index(0)))
+                .unwrap()
+                .new;
+            if matches!(kind, ZoneKind::Exile | ZoneKind::Command) {
+                assert_eq!(e, oid(11));
+                assert_eq!(z.contents(zone), vec![oid(6), oid(8), oid(10), oid(11)]);
+            } else {
+                assert_eq!(e, oid(7));
+                assert_eq!(g.last_issued(), 10);
+                assert_eq!(z.contents(zone), vec![oid(6), oid(7), oid(8), oid(10)]);
+            }
         }
     }
 }
@@ -854,7 +883,8 @@ fn construction_dedups_and_sorts_players() {
     assert_eq!(d.controller, None);
 }
 
-// REQ-ZONE-001, CR 400.3: with no players, every call naming a player fails cleanly.
+// REQ-ZONE-001, R12: with no players, every call naming a player fails cleanly (container
+// input validation).
 #[test]
 fn empty_player_list_rejects_owners_without_panic() {
     let mut z = Zones::new(&[], ZonesConfig::default());

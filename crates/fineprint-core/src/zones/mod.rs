@@ -17,11 +17,12 @@
 //! container. The returned [`Moved`] carries both ids so that the caller can hand them to the
 //! exception registry ([`EXCEPTIONS`], CR 400.7a-m). A move into the zone the object is already
 //! in is not a zone change: in a library, hand, graveyard, the battlefield or the stack the
-//! object keeps its id and is only repositioned (CR 400.7, CR 400.5, CR 400.12; `Moved` then has
+//! object keeps its id and is only repositioned (CR 400.7: not a move from one zone to another; CR 400.5; `Moved` then has
 //! `old == new`), while in exile and the command zone it becomes a new object without changing
 //! zones (CR 400.8, CR 406.7, CR 400.10) and gets a fresh id. Objects that would go to another
-//! player's library, hand or graveyard go to their owner's (CR 400.3). An issued id that already
-//! names a live object is rejected ([`ZoneError::IdCollision`]).
+//! player's library, hand or graveyard go to their owner's (CR 400.3). An issued id that is live or
+//! was ever held by the container (at or below its high-water mark) is rejected
+//! ([`ZoneError::IdCollision`]).
 //!
 //! **Omniscient state.** [`Zones`] is the omniscient engine state: `contents`, `object`,
 //! `object_of_card`, `all_object_ids` and the canonical encoding expose hidden information
