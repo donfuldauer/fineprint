@@ -202,15 +202,16 @@ Fine Print's own files must stay available under MPL-2.0 with the original notic
 here only to describe what Fine Print is compatible with. Fine Print is an independent project,
 and Wizards of the Coast has not approved, endorsed or sponsored it and is not affiliated with it.
 
-**What this repository contains.** Original code and documentation only: no card names, Oracle text,
-card definitions, art, set symbols or logos, and not the Comprehensive Rules text. Design notes
-quote at most a few words of a rule where a decision turns on its wording. The rules vocabulary
-artifact lists only the game terms the rules define, with rule numbers, which SRS §1.3 permits. Fine
-Print's name and branding use no third-party trademark, and the test suite uses invented synthetic
-cards. The Comprehensive Rules text is never committed. CI downloads the official file into the
-git-ignored `cr-cache/` directory and its build cache to check citations. Only rule numbers and
-hashes are committed, in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
-materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
+**What this repository contains.** Original code and documentation only: no card names except the
+interaction examples `docs/SRS.md` names (REQ-NFR-004), no Oracle text, no card definitions, art,
+set symbols or logos, and not the Comprehensive Rules text. Design notes quote at most a few words
+of a rule where a decision turns on its wording. The rules vocabulary artifact lists only the game
+terms the rules define, with rule numbers, which SRS §1.3 permits. Fine Print's name and branding
+use no third-party trademark, and the test suite uses invented synthetic cards. The Comprehensive
+Rules text is never committed. CI downloads the official file into the git-ignored `cr-cache/`
+directory and its build cache to check citations. Only rule numbers and hashes are committed, in
+`docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast materials, it does not
+rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
 **Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
 of use) and build their own card databases with the toolchain. A client that does this uses the

@@ -1773,17 +1773,17 @@ disclaimer becomes the responsibility of clients that import card data or build 
 card database. REQ-ARCH-001 (zero hardcoded IP) and REQ-NFR-007 (CR text never committed) are
 unchanged, and so are the references to the game and to the CR.
 **Rationale.** The Fan Content Policy is a permission to use Wizards of the Coast IP, so its
-disclaimer is a condition of that permission. Fine Print contains and distributes none of that
-IP. It names the game only descriptively and cites rule numbers; it does not commit the CR text,
-which CI fetches into the git-ignored `cr-cache/` and its build cache (only rule numbers and
-hashes are committed, in `docs/cr-citations.json`), and design notes quote at most a few words
-of a rule.
-Two kinds of Wizards of the Coast material are involved. The CR text (Architecture A7) is
-fetched by CI only to check citations, and is neither committed nor distributed; reading it to
-build a compatible engine does not rely on the policy's permission. Card data enters only
-through clients, under Scryfall's terms (which require the policy) when it comes from Scryfall,
-so the policy's obligations sit with those clients. The maintainer made this decision knowing
-that CI fetches the CR text. This is not legal advice.
+disclaimer is a condition of that permission. Fine Print contains and distributes none of that IP,
+apart from card names the SRS uses as interaction examples (REQ-NFR-004). It names the game only
+descriptively and cites rule numbers; it does not commit the CR text, which CI fetches into the
+git-ignored `cr-cache/` and its build cache (only rule numbers and hashes are committed, in
+`docs/cr-citations.json`), and design notes quote at most a few words of a rule. Two kinds of
+Wizards of the Coast material are involved. The CR text (Architecture A7) is fetched by CI only to
+check citations, and is neither committed nor distributed; reading it to build a compatible engine
+does not rely on the policy's permission. Card data enters only through clients, under Scryfall's
+terms (which require the policy) when it comes from Scryfall, so the policy's obligations sit with
+those clients. The maintainer made this decision knowing that CI fetches the CR text. This is not
+legal advice.
 **Alternatives.** Keep the disclaimer: rejected, because Fine Print uses none of the policy's
 permission. Scrub every reference to the game and stop fetching the CR: rejected. The CR is the
 specification, the citation check needs the text, and removing the game's name would make the
