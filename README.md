@@ -215,10 +215,13 @@ git-ignored `cr-cache/` directory and its build cache to check citations. Only r
 hashes are committed, in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
 materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
-**Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
-of use) and build their own card databases with the toolchain. A client that does this uses the
-data under Scryfall's terms and the Wizards of the Coast Fan Content Policy, and is responsible
-for meeting them, including the policy's disclaimer. Commercial distribution of anything that
-bundles card data requires legal review first (SRS §1.3).
+**Card data.** Clients obtain card data themselves and build their own card databases with the
+toolchain. A client is responsible for the terms of each source it uses: Scryfall's terms for data
+obtained from Scryfall, and the terms of any other provider for that provider's data. A client that
+uses Wizards of the Coast card data (names, Oracle text, art) in its own fan content can rely only
+on the Wizards of the Coast Fan Content Policy and must meet it, including its disclaimer. That
+policy does not cover reposting card data verbatim or grant anything beyond its scope, so a client
+must obtain any further permission its use needs. Commercial distribution of anything that bundles
+card data requires legal review first (SRS §1.3).
 
 This section is not legal advice.
