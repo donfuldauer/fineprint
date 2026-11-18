@@ -2181,8 +2181,8 @@ implementation meets: (1) a move within one ordered zone (for example library to
 (2) `add_outside_card` with an unknown owner is `UnknownPlayer(owner)`; (3) a request controller
 naming the owner is still `ControllerNotApplicable` outside the battlefield and the stack;
 (4) `reorder_graveyard` with an empty list is `InvalidOrder` for a non-empty graveyard and accepted
-for an empty one; (5) `ZonesConfig` is not part of the canonical encoding of `Zones` (it is format
-configuration, not game state).
+for an empty one; (5) the spec tests do not require a `ZonesConfig` difference to change the
+canonical bytes; the implementation does encode the flag first, which is allowed.
 **Rationale.** Each is the literal reading of the #19 brief and keeps the zone-move primitive the
 single place an object changes position.
 **Alternatives.** Inserting at `k` counted before removal (makes `Index(k)` depend on where the
