@@ -22,10 +22,11 @@ check once on the head; check 1 traces each group's requirements; check 9 compar
 (per thread URL where given).
 
 **Docs-only round.** If the only changes are to `docs/DECISIONS.md`, `docs/RUN_LOG.md` or
-`docs/HUMAN_QUEUE.md` (for example the entry for a deferred finding), run check 9 (the diff
-touches only those files), confirm each deferred finding has its entry, and run check 1 in full
-at the current head for every brief requirement: file:line evidence for the documentation part,
-and the implementing test run for any code-behaviour part (R11). Report the real
+`docs/HUMAN_QUEUE.md` (for example the entry for a deferred finding), run check 8 (the card-data
+and card-branch guards, which scan the changed documents too) and check 9 (the diff touches only
+those files), confirm each deferred finding has its entry, and run check 1 in full at the current
+head for every brief requirement: file:line evidence for the documentation part, and the
+implementing test run for any code-behaviour part (R11). Report the real
 `requirements: <n met / n total>` count over all brief requirements (never a default 0/0);
 `pass` only if every requirement is met. The other checks are skipped only because the diff
 cannot affect them.
