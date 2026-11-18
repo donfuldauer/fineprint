@@ -1751,7 +1751,10 @@ fn value_depth(v: &Value) -> usize {
 fn value_not(levels: usize) -> Value {
     let mut v = json!({"pred": "TAPPED"});
     for _ in 0..levels {
-        v = json!({"op": "NOT", "condition": v});
+        let mut m = Map::new();
+        m.insert("op".to_string(), json!("NOT"));
+        m.insert("condition".to_string(), v);
+        v = Value::Object(m);
     }
     v
 }
@@ -1759,7 +1762,13 @@ fn value_not(levels: usize) -> Value {
 fn value_math(levels: usize) -> Value {
     let mut v = json!({"LITERAL": 1});
     for _ in 0..levels {
-        v = json!({"MATH": {"op": "ADD", "lhs": v, "rhs": {"LITERAL": 1}}});
+        let mut inner = Map::new();
+        inner.insert("op".to_string(), json!("ADD"));
+        inner.insert("lhs".to_string(), v);
+        inner.insert("rhs".to_string(), json!({"LITERAL": 1}));
+        let mut m = Map::new();
+        m.insert("MATH".to_string(), Value::Object(inner));
+        v = Value::Object(m);
     }
     v
 }
@@ -1767,7 +1776,12 @@ fn value_math(levels: usize) -> Value {
 fn value_count(levels: usize) -> Value {
     let mut v = json!({"zones": ["HAND"]});
     for _ in 0..levels {
-        v = json!({"zones": ["HAND"], "count": {"COUNT": v}});
+        let mut inner = Map::new();
+        inner.insert("COUNT".to_string(), v);
+        let mut m = Map::new();
+        m.insert("zones".to_string(), json!(["HAND"]));
+        m.insert("count".to_string(), Value::Object(inner));
+        v = Value::Object(m);
     }
     v
 }
