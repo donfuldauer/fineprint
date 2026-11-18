@@ -129,6 +129,9 @@ cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt
                                      # regenerate crates/fineprint-dsl/data/vocab.json (RulesVocabulary, #15 FP-014)
 cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
                                      # compare the committed vocab.json with regeneration (writes nothing)
+FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec_ingest_vocab
+                                     # the real-CR vocabulary test; with the variable set a missing
+                                     # cr-cache/rules.txt fails it (without it, the test is skipped)
 cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
                                                    # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
@@ -155,8 +158,13 @@ success (one summary line on stdout), 1 violations (`path:line: message` per lin
 `crates/fineprint-ingest/src/vocab/mod.rs`): generates the `RulesVocabulary` from the cached CR
 text. `--out` defaults to `crates/fineprint-dsl/data/vocab.json` relative to the current directory
 (run it from the repository root); `--out -` writes the JSON to stdout and the summary line to
-stderr. `--check` writes nothing and compares bytes with the `--out` file; a mismatch names the
-first differing top-level member. Exit codes as for xtask: 0 success, 1 violations (check
+stderr. A file is written atomically (a temporary file next to it, then a rename). `--cr` and
+`--out` never take one of the options as their value (`--out --check` is a usage error; write
+`./--check` for such a file). `--check` writes nothing and compares bytes with the `--out` file;
+a mismatch names the first differing top-level member (never a value from the file) and says to
+rerun the same command without `--check`. A missing default `vocab.json` must be restored from
+git (`git checkout -- crates/fineprint-dsl/data/vocab.json`): `fineprint-dsl` embeds it, so
+nothing builds without it. Exit codes as for xtask: 0 success, 1 violations (check
 mismatch, missing committed file, keyword id collision), 2 usage or input error (unreadable or
 unparseable CR text, a missing required rule). Output is byte-identical for the same CR bytes
 whatever the line endings or BOM.
@@ -205,7 +213,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
-| `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
+| `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed), then `cargo test --locked -p fineprint-ingest --test spec_ingest_vocab` with `FINEPRINT_REQUIRE_CR_CACHE=1` (step `env:`; the real-CR test fails instead of skipping when `cr-cache/rules.txt` is missing; also runs even if an earlier check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
 `fmt` and `clippy` run on Linux only: formatting and lints do not depend on the OS, and `test`
 builds and runs the whole workspace on all three systems (REQ-NFR-003). The five job names
