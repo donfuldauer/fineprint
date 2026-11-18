@@ -62,3 +62,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 01-foundations | #12 | Independent Tester | Opus 5.5 | 1 | done | spec_dsl_expr 36, spec_dsl_text 14, spec_dsl_choice 14 passed | T2 classifier brief: black-box spec and seeded property tests |
 | 01-foundations | #12 (PR #160 review round 1) | Fixer | Sonnet 5.5 | 1 | done | cargo test --workspace green; fmt, clippy, guard clean; dsl coverage 98.72% | T1 classifier brief: findings 1-7 (BTreeSet ENUM check, token error index, four doc qualifications, escape test); no Fable (allowance unknown) |
 | 01-foundations | #12 (PR #160 review round 1) | Independent Tester | Sonnet 5.5 | 1 | done | spec_dsl_expr 37, spec_dsl_text 15 passed | T1 classifier brief: finding 8, borrowed-Value depth guard tests (127 ok, 128+ rejected) |
+| 01-foundations | #12 | Work-verifier | (agent default) | 1 | pass | pass @ c70697f: 8/8 implementer, 9/9 tester; dsl coverage 98.73% | initial unit gate |
+| 01-foundations | #12 (PR #160 review round 1) | Work-verifier | (agent default) | 1 | pass | pass @ 6fcea82: 8/8 findings; dsl coverage 98.72% | round-1 fixes |
+| 01-foundations | #12 (PR #160 review round 2) | Fixer | Sonnet 5.5 | 1 | done | cargo test -p fineprint-dsl green (lib 106); fmt, clippy, guard clean | T1 classifier brief: ENUM test expect, positioned token field errors, expr doc qualifiers |
+| 01-foundations | #12 (PR #160 review round 2) | Independent Tester | Sonnet 5.5 | 1 | done | spec_dsl_expr 37 passed; fixture JSON byte-identical | T1 classifier brief: linear fixture builders |
