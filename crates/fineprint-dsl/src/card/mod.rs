@@ -505,7 +505,10 @@ impl CardDefinitionDSL {
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised.
     pub fn compute_hash(&self) -> Result<String, CanonicalError> {
-        hash_without_member(canonical::to_checked_value(self)?)
+        // The member is omitted from the hash input, so a stale value is never validated here.
+        let mut copy = self.clone();
+        copy.definition_hash.clear();
+        hash_without_member(canonical::to_checked_value(&copy)?)
     }
 
     /// Returns `self` normalised and with `definition_hash` set to
@@ -514,11 +517,17 @@ impl CardDefinitionDSL {
     /// Normalising means replacing the value by what its canonical JSON decodes to, so numbers
     /// inside placeholder ASTs take their canonical form (`-0.0` becomes `0`, `1.0` becomes `1`).
     /// The canonical bytes and the hash are unchanged by this, and the result `v` satisfies
-    /// `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`.
+    /// `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`. The previous
+    /// `definition_hash` is ignored, whatever it contains.
     ///
     /// # Errors
-    /// [`CanonicalError`] if the value cannot be canonicalised.
-    pub fn seal(self) -> Result<CardDefinitionDSL, CanonicalError> {
+    /// [`CanonicalError::Serialize`] carrying the [`DslVersionError`] message if `dsl_version`
+    /// is one [`CardDefinitionDSL::from_json`] would reject (malformed, or a different major
+    /// version); otherwise [`CanonicalError`] if the value cannot be canonicalised.
+    pub fn seal(mut self) -> Result<CardDefinitionDSL, CanonicalError> {
+        check_dsl_version(&self.dsl_version)
+            .map_err(|e| CanonicalError::Serialize(e.to_string()))?;
+        self.definition_hash.clear();
         let bytes = self.to_canonical_json()?;
         let value = canonical::parse_checked(&bytes)?;
         let mut sealed: CardDefinitionDSL =

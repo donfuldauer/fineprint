@@ -247,16 +247,12 @@ impl ManaCostDSL {
         if symbols.is_empty() {
             return Err(ManaParseError::Empty);
         }
-        let mut offset = 0usize;
-        for symbol in &symbols {
-            let text = symbol.to_string();
-            if !symbol.is_valid() {
-                return Err(ManaParseError::UnknownSymbol {
-                    offset,
-                    symbol: text,
-                });
-            }
-            offset += text.len();
+        if let Some(i) = symbols.iter().position(|s| !s.is_valid()) {
+            let offset = symbols[..i].iter().map(|s| s.to_string().len()).sum();
+            return Err(ManaParseError::UnknownSymbol {
+                offset,
+                symbol: symbols[i].to_string(),
+            });
         }
         Ok(ManaCostDSL(symbols))
     }
