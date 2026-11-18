@@ -35,7 +35,8 @@ no files.
    citing a rule for each step.
 5. Compare with `docs/SRS.md`: if the SRS models the rule differently or cites a wrong or
    renumbered rule, report an **SRS discrepancy** with the requirement ID, what the SRS says, and
-   what the CR says. The CR wins (PROCESS.md P1); the discrepancy goes to the human queue.
+   what the CR says. The CR wins (PROCESS.md P1); give the `docs/DECISIONS.md` text for the erratum and, since SRS
+   edits are a person's (P8), one human queue line proposing the SRS edit.
 6. When the answer implies a test, describe the minimal `.pzl` scenario that would prove it
    (cards by characteristics where possible, the initial state, the actions, the expected
    assertions).
@@ -56,5 +57,5 @@ reasoning <n>: <numbered steps, each citing a rule>
 srs discrepancies: <REQ-ID: SRS says … / CR says …> | none
 suggested test: <minimal scenario> | none
 sources: <URLs or file paths>
-human queue line: <text for each SRS discrepancy, or none>
+human queue line: <one line proposing the SRS edit per SRS discrepancy, or none>
 ```

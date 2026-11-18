@@ -1030,3 +1030,47 @@ iterative for any depth (rejected: it adds iterative re-implementations and a cu
 the hash-critical path for depths nothing needs, and a hand-rolled iterative `View` risks
 diverging from the recursive reference); a smaller limit such as 64 (rejected: too close to the
 existing depth-64 test and to plausible state nesting).
+
+## Process — Judgement calls are decisions, not queue items
+
+**Decision.** An agent's recommendation on a judgement call is the decision (R8). It is recorded
+once in `docs/DECISIONS.md` (Decision / Rationale / Alternatives) and is final unless a later
+DECISIONS.md entry or the repository owner changes it. `docs/HUMAN_QUEUE.md` is kept only for the
+P8 items an agent cannot do or decide itself: architecture and platform decisions that become
+`REQ-NFR-*`, edits to `docs/SRS.md` or `docs/PROCESS.md`, anything with legal weight, publishing a
+release, and repository settings an agent cannot change (for example branch-protection required
+checks). Consequently: a `[Fable wanted]` note goes in the unit's `docs/RUN_LOG.md` row; a
+CodeRabbit that never reviews is a RUN_LOG row; a unit that fails P7 is marked `blocked` in
+RUN_LOG with the `status:blocked-failure` label and an issue comment with the failure history; a
+deferred review finding becomes a new `work-unit` issue or a DECISIONS.md entry; an SRS-versus-CR
+erratum is recorded in DECISIONS.md with one P8 queue line proposing the SRS edit.
+
+**Rationale.** Asked by the repository owner (2026-11-18). Queue lines for decided calls asked for
+a confirmation nobody gave, and the run never waited for them anyway.
+
+**Alternatives.** Keeping informational queue lines (rejected: the owner asked not to). Removing
+the queue entirely (rejected: P8 items such as SRS edits, licensing and branch-protection settings
+can only be done by a person). Existing open judgement-call lines in HUMAN_QUEUE.md are left as
+they are; they are resolved when someone works on them.
+
+## #10 FP-009 — Resolution of the queued items
+
+**Decision.** Both #10 queue items are final decisions with no person action.
+
+1. `diff_first_divergence(a, b) -> Option<ComponentPath>` is the approved signature (`None` =
+   structurally identical trees); issue #10's deliverable line was updated to match. The
+   `sha2 =0.11.1` dependency (already pinned and licence-accepted in FP-004) and hashing child
+   labels into parent digests (so renamed components cannot collide) are likewise final.
+2. `MAX_PATH_DEPTH` = 256 labels stays.
+
+**Rationale.** (1) A bare `ComponentPath` has no unambiguous "equal" value: the root path is also
+the answer for a difference at the root. `Option` makes the equal case explicit for the
+investigator use (REQ-NFR-006). (2) SRS §17 REQ-NFR-006 (docs/SRS.md ~line 1408) lists the hashed
+components as each zone, object, player, the stack, pending triggers, turn position and PRNG
+state, so a state tree is a handful of levels deep (state, zone, object, characteristic, value:
+roughly 5 to 8). 256 is two orders of magnitude of headroom and keeps the recursive
+digest/diff/clone/drop well inside a 2 MiB stack (tested). If a future unit needs deeper paths, it
+raises the constant through a DECISIONS.md entry; the hash layout does not depend on the limit.
+
+**Alternatives.** Iterative traversal for unbounded depth (rejected in the earlier #10 entry). A
+lower limit such as 64 (rejected: too close to the depth-64 tests and leaves little margin).
