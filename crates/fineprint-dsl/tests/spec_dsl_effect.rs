@@ -1342,6 +1342,36 @@ fn try_all(bytes: &[u8]) {
     }
 }
 
+/// Every successful decode of `T` re-encodes and decodes back equal; decode errors are allowed.
+fn roundtrip_ok<T>(r: Result<T, serde_json::Error>)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    if let Ok(x) = r {
+        let enc = serde_json::to_string(&x).expect("a decoded value must re-encode");
+        assert_eq!(serde_json::from_str::<T>(&enc).unwrap(), x);
+    }
+}
+
+fn roundtrip_type<T>(bytes: &[u8])
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    roundtrip_ok(serde_json::from_slice::<T>(bytes));
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        roundtrip_ok(serde_json::from_str::<T>(s));
+    }
+}
+
+/// Like `try_all`, and every successful decode of each supported type re-encodes and decodes
+/// back equal.
+fn try_roundtrip(bytes: &[u8]) {
+    try_all(bytes);
+    roundtrip_type::<Instruction>(bytes);
+    roundtrip_type::<DurationAST>(bytes);
+    roundtrip_type::<NativeEffectAST>(bytes);
+}
+
 /// R12, REQ-DSL-010, REQ-DSL-015 (requirement 10): bounded random bytes never panic the
 /// `Instruction`, `DurationAST` or `NativeEffectAST` decoders.
 #[test]
@@ -1421,18 +1451,15 @@ fn req_dsl_010_mutated_documents_never_panic() {
                 Value::Object(m)
             }
         };
+        let original = serde_json::to_string(&doc).unwrap();
         let edits = 1 + below(&mut rng, 3);
         for _ in 0..edits {
             mutate_value(&mut doc, &mut rng);
         }
         let text = serde_json::to_string(&doc).unwrap();
-        try_all(text.as_bytes());
-        if let Ok(x) = serde_json::from_str::<Instruction>(&text) {
-            let enc = serde_json::to_string(&x).unwrap();
-            assert_eq!(serde_json::from_str::<Instruction>(&enc).unwrap(), x);
-        }
+        try_roundtrip(text.as_bytes());
         // Byte-level edits of the valid text.
-        let mut bytes = text.into_bytes();
+        let mut bytes = original.into_bytes();
         for _ in 0..1 + below(&mut rng, 4) {
             if bytes.is_empty() {
                 break;
@@ -1446,6 +1473,6 @@ fn req_dsl_010_mutated_documents_never_panic() {
                 _ => bytes.truncate(i),
             }
         }
-        try_all(&bytes);
+        try_roundtrip(&bytes);
     }
 }

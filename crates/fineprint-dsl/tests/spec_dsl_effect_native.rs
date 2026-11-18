@@ -517,7 +517,7 @@ fn req_dsl_010_duration_rejections() {
     reject_text::<DurationAST>(r#"{"kind":"PERMANENT","kind":"PERMANENT"}"#);
     // Every step is accepted in UNTIL.
     for step in [
-        "UNTIL",
+        "UNTAP",
         "UPKEEP",
         "DRAW",
         "PRECOMBAT_MAIN",
@@ -532,11 +532,12 @@ fn req_dsl_010_duration_rejections() {
         "CLEANUP",
     ] {
         let doc = json!({"kind":"UNTIL","step":step,"whose":{"players":"ALL_PLAYERS"}});
-        if step == "UNTIL" {
-            reject::<DurationAST>(&doc);
-        } else {
-            accept::<DurationAST>(&doc);
-        }
+        accept::<DurationAST>(&doc);
+    }
+    // Unknown and lower-case steps are rejected.
+    for step in ["UNTIL", "untap", "end"] {
+        let doc = json!({"kind":"UNTIL","step":step,"whose":{"players":"ALL_PLAYERS"}});
+        reject::<DurationAST>(&doc);
     }
 }
 
