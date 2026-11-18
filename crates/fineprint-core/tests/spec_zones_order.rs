@@ -217,8 +217,9 @@ fn stack_entries_default_to_top() {
     assert_eq!(z.contents(ZoneId::Stack), vec![b, a]);
 }
 
-// REQ-ZONE-001 item 1, CR 400.5, 401.2: moving an object within its own library re-inserts the
-// new object at the requested position of the remaining pile.
+// REQ-ZONE-001 item 1, CR 400.5, 401.2, 400.7: moving an object within its own library is not a
+// zone change: the same object (same id) is re-inserted at the requested position of the
+// remaining pile (R10 correction for finding F1, CodeRabbit comment 4621941423).
 #[test]
 fn library_to_library_move_reinserts_at_position() {
     let mut z = two();
@@ -227,6 +228,8 @@ fn library_to_library_move_reinserts_at_position() {
     let m = z
         .move_object(&mut g, ids[0], req_pos(ZoneKind::Library, Position::Bottom))
         .unwrap();
+    assert_eq!(m.new, ids[0]);
+    assert_eq!(g.last_issued(), 5);
     assert_eq!(
         z.contents(ZoneId::Library(pid(1))),
         vec![ids[1], ids[2], ids[3], ids[4], m.new]
@@ -238,6 +241,7 @@ fn library_to_library_move_reinserts_at_position() {
             req_pos(ZoneKind::Library, Position::Index(1)),
         )
         .unwrap();
+    assert_eq!(m2.new, ids[3]);
     assert_eq!(
         z.contents(ZoneId::Library(pid(1))),
         vec![ids[1], m2.new, ids[2], ids[4], m.new]
@@ -399,7 +403,7 @@ fn check_against_model(z: &Zones, m: &Model, players: &[PlayerId], seed: u64, st
     }
 }
 
-// REQ-ZONE-001 items 1, 2, 4, 5, 6, REQ-CORE-002, CR 400.3, 400.5, 401.7, 404.1, 405.2: over
+// REQ-ZONE-001 items 1, 2, 4, 5, 6, REQ-CORE-002, CR 400.3, 400.5, 400.7, 401.7, 404.1, 405.2: over
 // many seeds, random creates, moves (every kind and position) and outside round trips match a
 // reference model of every zone: ordered zones keep relative order and honour positions;
 // unordered zones list ascending ids; untouched objects are never perturbed.
@@ -430,7 +434,12 @@ fn property_zone_order_matches_reference_model() {
                 let id = live[pick(&mut rng, live.len())];
                 let to = ZoneKind::ALL[pick(&mut rng, 7)];
                 let p = random_pos(&mut rng);
+                let from = z.object(id).unwrap().zone;
                 let moved = z.move_object(&mut g, id, request(to, p)).unwrap();
+                // CR 400.7, 400.8, 406.7, 400.10 (finding F1): only a same-zone move outside exile
+                // and the command zone keeps the id.
+                let keeps = moved.to == from && !matches!(to, ZoneKind::Exile | ZoneKind::Command);
+                assert_eq!(moved.new == id, keeps, "seed {seed} step {step}");
                 let (card, owner) = m.remove(id);
                 m.insert(moved.new, card, owner, to, p);
             } else if action == 8 {

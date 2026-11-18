@@ -2148,36 +2148,68 @@ tournament option) is `ZonesConfig::free_graveyard_reorder` (default `false`) be
 first (so a disabled flag reports `ReorderNotAllowed` even for an unknown player or an unchanged
 order), then the player, then that the order is a permutation of exactly the current contents.
 (c) `move_object`, `create_object` and `enter_from_outside` take `&mut IdGenerator<ObjectId>`
-because `GameState`'s generators are private; the id is issued after every check, so an error
-leaves the container and the generator unchanged. (d) A move to the same zone (same `ZoneId`) is
-also a move and creates a new `ObjectId` (CR 400.8, CR 406.7, CR 400.10 are same-zone new-object
-cases; CR 400.9 and CR 401.6 are later work). (e) Outside the game is never a zone (CR 400.11):
+because `GameState`'s generators are private; `ids` must be the generator that issued every
+existing `ObjectId` in the container. The id is issued from a copy of the generator after every
+other check, rejected as `ZoneError::IdCollision` if it names a live object (PR #167 round 1,
+finding F3), and the copy is written back only on success, so an error leaves the container and
+the generator unchanged and a real zone change can never return `Moved { old == new }`. (d) A
+move into the zone the object is already in (same `ZoneId`; a per-player destination is always
+the owner's, CR 400.3, so a library-to-library move is always the same library) depends on the
+zone (PR #167 round 1, finding F1, which corrects the original brief's "a same-zone move also
+creates a new ObjectId"): in a library, hand, graveyard, the battlefield or the stack it is not a
+zone change (CR 400.7 speaks of moving "from one zone to another"), so the object keeps its
+`ObjectId`, the generator is not advanced, `Moved` has `old == new`, and the object is only
+repositioned (ordered zones: removed and re-inserted at the requested position of the remaining
+pile, CR 400.5; unordered zones: position ignored; CR 400.12: the zone itself is not affected),
+with `face_down` and the controller taken from the request as for any move; in exile and the
+command zone the object becomes a new object without changing zones (CR 400.8, CR 406.7 for
+exile, CR 400.10 for the command zone) and gets a fresh `ObjectId`. CR 400.9 and CR 401.6 are
+later work. (e) Outside the game is never a zone (CR 400.11):
 it is a per-owner set of `OutsidePool` pools of `CardId`s with no object ids; a card is in at most
 one place (a zone object or one pool), and empty pools are not stored so equal contents are equal
 values. (f) The SRS REQ-ZONE-001 item 1 clause attributing re-evaluation "including partway
 through casting or resolution" to CR 401.5 is not covered by CR 401.5 (casting, activation and
 special actions only) and is out of scope here, with the rest of top-card reveal statics;
 simultaneous-entry ordering choices (CR 401.4, CR 404.3, CR 405.3), merged permanents, ante and
-subgames are later work. (g) A controller is meaningful only on the battlefield and the stack: a
-request controller elsewhere, or `set_controller` elsewhere, is `ControllerNotApplicable`; on
-entering any other zone the controller is the owner. (h) The CR 400.7 exception registry has 12
+subgames are later work. (g) Only objects on the stack or the battlefield have a controller
+(CR 109.4). The container keeps an explicit controller only there: a request controller
+elsewhere, or `set_controller` elsewhere, is `ControllerNotApplicable` as a container rule (the
+CR has exceptions, CR 109.4a-g, such as emblems in the command zone, CR 109.4c; emblems and
+variant cards are not modelled yet); on entering any other zone the stored `controller` field is
+the owner, the CR 108.4a fallback, and `ObjectRecord::rules_controller` returns `None` there
+(PR #167 round 1, finding F4). (h) The CR 400.7 exception registry has 12
 entries (CR 400.7a-k and CR 400.7m) because the CR has no letter l; each is a named stub function
 returning `ExceptionOutcome::NotImplemented` until the unit that needs it fills it in.
 `Position::Index(n)` past the bottom of any ordered zone means the bottom (the CR 401.7 treatment,
-applied to every ordered zone).
+applied to every ordered zone). (i) Out of scope: cardless stack objects. In this unit the stack
+holds only card-backed objects (spells, and copies that have a `CardId`), and
+`Zones::create_object` requires a `CardId`. Abilities go on the stack without a card (CR 405.1;
+an object can be an ability on the stack, CR 109.1) and SRS REQ-CORE-002 gives them a separate
+`AbilityInstanceId`; copies of spells that are not cards are also cardless. Their representation
+is the job of the units that own them: #31 FP-030 (putting triggered abilities on the stack),
+#58 FP-056 (resolution of spells and abilities) and #66 FP-064 (copies of spells and abilities),
+with activated abilities in a later stack/ability unit. This limit is documented on `Zones`,
+`ZoneId::Stack`, `ZoneKind::Stack` and the module doc (PR #167 round 1, finding F2, deferred).
 **Rationale.** Keeps the frozen state hash and wire contracts untouched while giving the next
 unit a ready component; follows the issue brief, SRS REQ-ZONE-001 and REQ-CORE-002, and the
-rules-researcher answers for #19.
+rules-researcher answers for #19 and for PR #167 round 1 (CR 400.7 applies only to moves between
+zones; CR 400.8, CR 406.7 and CR 400.10 are the only same-zone new-object rules).
 **Alternatives.** Wiring into `GameState` now (outside owned paths, would change the frozen Merkle
-layout). Outside the game as a `ZoneKind` (contradicts CR 400.11). A same-zone move that keeps the
-id (contradicts CR 400.8, CR 406.7, CR 400.10). A 13-entry registry with a placeholder for a
-missing letter (no such rule exists).
+layout). Outside the game as a `ZoneKind` (contradicts CR 400.11). A new id for every same-zone
+move (the original brief's reading; contradicts CR 400.7, which applies to moves from one zone to
+another, and would make a library reposition a new object). Keeping the id for exile and command
+same-zone moves too (contradicts CR 400.8, CR 406.7, CR 400.10). Inventing a cardless stack
+entry now (owned by later units; would pre-empt their design). A 13-entry registry with a
+placeholder for a missing letter (no such rule exists).
 
 ## #19 FP-018 — Zones spec-test readings
 
 **Decision.** Readings the Independent Tester chose where the brief was silent, all of which the
 implementation meets: (1) a move within one ordered zone (for example library to library at
-`Index(k)`) removes the old object first, then inserts the new one at `k` in the remaining pile;
+`Index(k)`) removes the object first, then re-inserts it at `k` in the remaining pile; since PR
+#167 round 1 (finding F1) this is a reposition of the same object, which keeps its `ObjectId`,
+not a new object (only exile-to-exile and command-to-command moves give a new id, CR 400.8,
+CR 406.7, CR 400.10), and the spec tests were corrected to assert that per zone kind;
 (2) `add_outside_card` with an unknown owner is `UnknownPlayer(owner)`; (3) a request controller
 naming the owner is still `ControllerNotApplicable` outside the battlefield and the stack;
 (4) `reorder_graveyard` with an empty list is `InvalidOrder` for a non-empty graveyard and accepted

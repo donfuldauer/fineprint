@@ -234,9 +234,10 @@ fn is_public_info_unknown_id_is_none() {
 // Item 5: unordered zones and counting.
 // ---------------------------------------------------------------------------------------------
 
-// REQ-ZONE-001 items 2, 5, 6, CR 402.3, 406.3: hand, battlefield, exile and command list
-// ascending ObjectId whatever Position is requested. Two generators are used so that a larger
-// id enters before a smaller one.
+// REQ-ZONE-001 items 2, 5, 6, CR 402.3, 406.3, 400.7, 400.8, 406.7, 400.10: hand, battlefield,
+// exile and command list ascending ObjectId whatever Position is requested. Two generators are
+// used so that a larger id enters before a smaller one (both start below every id issued by the
+// other, so neither collides with a live object).
 #[test]
 fn unordered_zones_list_ascending_object_ids_whatever_the_position() {
     for kind in [
@@ -263,13 +264,21 @@ fn unordered_zones_list_ascending_object_ids_whatever_the_position() {
         assert_eq!((a, b, c, d), (oid(1001), oid(1), oid(1002), oid(2)));
         let zone = ZoneId::of(kind, pid(1));
         assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(1001), oid(1002)]);
-        // Moving within the zone keeps the listing ascending.
+        // Moving within the zone keeps the listing ascending. R10 correction for finding F1
+        // (CodeRabbit comment 4621941423): in the hand and on the battlefield this is not a zone
+        // change and keeps the id; in exile and the command zone it is a new object.
         let e = z
             .move_object(&mut low, c, req_pos(kind, Position::Index(1)))
             .unwrap()
             .new;
-        assert_eq!(e, oid(3));
-        assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(3), oid(1001)]);
+        if matches!(kind, ZoneKind::Exile | ZoneKind::Command) {
+            assert_eq!(e, oid(3));
+            assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(3), oid(1001)]);
+        } else {
+            assert_eq!(e, c);
+            assert_eq!(low.last_issued(), 2);
+            assert_eq!(z.contents(zone), vec![oid(1), oid(2), oid(1001), oid(1002)]);
+        }
     }
 }
 
@@ -312,8 +321,9 @@ fn len_and_is_empty_agree_with_contents() {
 // Item 7: owner and controller bookkeeping.
 // ---------------------------------------------------------------------------------------------
 
-// REQ-CORE-002, CR 400.3, 400.7: the owner never changes across moves; the controller defaults
-// to the owner; the CardId persists.
+// REQ-CORE-002, CR 400.7, 109.4, 108.4a: the owner never changes across moves; the stored
+// controller defaults to the owner (the CR 108.4a fallback outside the battlefield and the
+// stack); the CardId persists.
 #[test]
 fn owner_never_changes_and_controller_defaults_to_owner() {
     let mut z = two();
@@ -346,7 +356,8 @@ fn owner_never_changes_and_controller_defaults_to_owner() {
     }
 }
 
-// REQ-ZONE-001, CR 400.3: an explicit controller is honoured on the battlefield and the stack.
+// REQ-ZONE-001, CR 109.4, 110.2, 110.2a, 405.4: an explicit controller is honoured on the
+// battlefield and the stack.
 #[test]
 fn explicit_controller_allowed_on_battlefield_and_stack() {
     let mut z = two();
@@ -378,8 +389,9 @@ fn explicit_controller_allowed_on_battlefield_and_stack() {
     assert_eq!(z.object(d).unwrap().owner, pid(2));
 }
 
-// REQ-ZONE-001, CR 400.3, 400.7: after leaving the battlefield (or the stack) the controller is
-// the owner again, including a battlefield-to-battlefield move with a default request.
+// REQ-ZONE-001, CR 400.7, 109.4, 110.2a, 108.4a: after leaving the battlefield (or the stack)
+// the stored controller is the owner again (the CR 108.4a fallback); a battlefield-to-battlefield
+// move with a default request also takes the owner as controller from the request.
 #[test]
 fn controller_reverts_to_owner_after_leaving_battlefield() {
     for to in ZoneKind::ALL {
@@ -405,8 +417,10 @@ fn controller_reverts_to_owner_after_leaving_battlefield() {
     }
 }
 
-// REQ-ZONE-001, CR 400.3: a controller in the request is not applicable outside the battlefield
-// and stack (even when it names the owner); state and generator are unchanged on the error.
+// REQ-ZONE-001, CR 109.4: a controller in the request is rejected outside the battlefield and
+// the stack (even when it names the owner); state and generator are unchanged on the error. This
+// is a container rule, not a CR prohibition: CR 109.4c gives emblems in the command zone a
+// controller, but the container does not model emblems or variant cards yet.
 #[test]
 fn controller_in_request_rejected_outside_battlefield_and_stack() {
     for kind in [
@@ -441,8 +455,8 @@ fn controller_in_request_rejected_outside_battlefield_and_stack() {
     }
 }
 
-// REQ-ZONE-001, CR 400.3: an unknown controller on the battlefield or stack is UnknownPlayer;
-// state and generator unchanged.
+// REQ-ZONE-001, CR 109.4, 110.2a, 405.4: an unknown controller on the battlefield or stack is
+// UnknownPlayer; state and generator unchanged.
 #[test]
 fn unknown_controller_on_battlefield_or_stack_is_unknown_player() {
     for kind in [ZoneKind::Battlefield, ZoneKind::Stack] {
@@ -467,8 +481,8 @@ fn unknown_controller_on_battlefield_or_stack_is_unknown_player() {
     }
 }
 
-// REQ-ZONE-001, REQ-CORE-002, CR 400.7: set_controller changes control in place (no new
-// object) on the battlefield and stack.
+// REQ-ZONE-001, REQ-CORE-002, CR 400.7, 109.4, 110.2: set_controller changes control in place
+// (no new object) on the battlefield and stack.
 #[test]
 fn set_controller_works_on_battlefield_and_stack() {
     for kind in [ZoneKind::Battlefield, ZoneKind::Stack] {
@@ -488,8 +502,9 @@ fn set_controller_works_on_battlefield_and_stack() {
     }
 }
 
-// REQ-ZONE-001, CR 400.3: set_controller errors: other zones, unknown object, unknown player;
-// state unchanged on each.
+// REQ-ZONE-001, CR 109.4, 400.7: set_controller errors: other zones (a container rule; emblems,
+// CR 109.4c, and variant cards are not modelled yet), unknown object, unknown player; state
+// unchanged on each.
 #[test]
 fn set_controller_errors_leave_state_unchanged() {
     let mut z = two();
@@ -527,16 +542,54 @@ fn set_controller_errors_leave_state_unchanged() {
         Err(ZoneError::UnknownObject(oid(5000)))
     );
     assert_eq!(z, before);
-    // A moved object's old id is unknown.
-    let nb = z
+    // R10 correction for finding F1 (CodeRabbit comment 4621941423): a battlefield-to-battlefield
+    // move is not a zone change (CR 400.7) and keeps the id.
+    let same = z
         .move_object(&mut g, bf, req(ZoneKind::Battlefield))
         .unwrap()
         .new;
+    assert_eq!(same, bf);
+    // A moved object's old id is unknown after a real zone change.
+    let nb = z.move_object(&mut g, bf, req(ZoneKind::Stack)).unwrap().new;
+    assert_ne!(nb, bf);
     assert_eq!(
         z.set_controller(bf, pid(2)),
         Err(ZoneError::UnknownObject(bf))
     );
     assert_eq!(z.object(nb).unwrap().controller, pid(1));
+}
+
+// REQ-ZONE-001, REQ-CORE-002, CR 109.4, 108.4a: the rules-level controller is Some only on the
+// battlefield and the stack; in the library, hand, graveyard, exile and command zone it is None
+// while the stored `controller` field keeps the owner fallback (finding F4, comment 4621941395).
+#[test]
+fn rules_controller_is_none_outside_battlefield_and_stack() {
+    let mut z = two();
+    let mut g = IdGenerator::<ObjectId>::new();
+    let mut card = 0;
+    for kind in ZoneKind::ALL {
+        card += 1;
+        let on_bf_or_stack = matches!(kind, ZoneKind::Battlefield | ZoneKind::Stack);
+        let r = if on_bf_or_stack {
+            req_ctrl(kind, pid(2))
+        } else {
+            req(kind)
+        };
+        let a = z.create_object(&mut g, cid(card), pid(1), r).unwrap();
+        let rec = *z.object(a).unwrap();
+        if on_bf_or_stack {
+            assert_eq!(rec.rules_controller(), Some(pid(2)), "{kind:?}");
+            assert_eq!(rec.controller, pid(2));
+            // Leaving for the owner's hand: no rules controller, owner fallback stored.
+            let m = z.move_object(&mut g, a, req(ZoneKind::Hand)).unwrap();
+            let moved = *z.object(m.new).unwrap();
+            assert_eq!(moved.rules_controller(), None);
+            assert_eq!(moved.controller, pid(1));
+        } else {
+            assert_eq!(rec.rules_controller(), None, "{kind:?}");
+            assert_eq!(rec.controller, pid(1), "{kind:?}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -876,16 +929,22 @@ fn odd_arguments_never_panic() {
     assert_eq!(z, before);
     assert_eq!(g.last_issued(), 1);
     assert_eq!(z.object_of_card(cid(1)), Some(a));
-    // Extreme positions and card ids.
+    // Extreme positions and card ids. Both calls must succeed (finding F6, comment
+    // 4621941418); an index beyond the length goes to the bottom (CR 401.7), so the second
+    // object is below the first.
+    let mut made = Vec::new();
     for (i, raw) in [0, u64::MAX].into_iter().enumerate() {
         let r = req_pos(ZoneKind::Library, Position::Index(usize::MAX));
-        let made = z.create_object(&mut g, cid(raw), pid(2), r);
-        if let Ok(id) = made {
-            assert_eq!(z.object(id).unwrap().card, cid(raw));
-            assert_eq!(z.object_of_card(cid(raw)), Some(id));
-            assert_eq!(z.len(ZoneId::Library(pid(2))), i + 1);
-        }
+        let id = z
+            .create_object(&mut g, cid(raw), pid(2), r)
+            .expect("Index(usize::MAX) is a valid position: the bottom");
+        assert_eq!(z.object(id).unwrap().card, cid(raw));
+        assert_eq!(z.object_of_card(cid(raw)), Some(id));
+        assert_eq!(z.len(ZoneId::Library(pid(2))), i + 1);
+        made.push(id);
     }
+    assert_eq!(made, vec![oid(2), oid(3)]);
+    assert_eq!(z.contents(ZoneId::Library(pid(2))), made);
 }
 
 // REQ-ZONE-001, REQ-CORE-002: ZoneError values display non-empty text and are std errors.
@@ -900,6 +959,7 @@ fn zone_error_display_and_error_trait() {
         ZoneError::ReorderNotAllowed,
         ZoneError::InvalidOrder,
         ZoneError::NoSuchOutsideCard(cid(4)),
+        ZoneError::IdCollision(oid(5)),
     ];
     for e in errors {
         assert!(!e.to_string().is_empty(), "{e:?}");
