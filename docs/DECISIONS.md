@@ -1083,3 +1083,307 @@ lower limit such as 64 (rejected: too close to the depth-64 tests and leaves lit
 **Rationale.** A required status check would block every merge during an outage of the external rules site (the reason recorded in "#7 FP-006 — `cr.yml` is not a required check"); a precondition on the release commit enforces REQ-DOC-001 exactly where it applies, at release time, and the release itself is a P8 action a person triggers.
 
 **Alternatives.** Making `cr` a required status check (rejected: network-dependent merge blocking); leaving the choice open (rejected: R8, judgement calls are decided).
+
+## #11 FP-010 tests — idempotence vs. unsafe-integer output
+
+**Superseded** by "## #11 FP-010 — Safe integer range for hashed JSON": any number whose value is integral with magnitude above 2^53-1 is UnsafeInteger whatever its spelling, and idempotence holds for every accepted vector.
+
+**Decision.** The spec tests assert that a non-integer number token whose value lies between 2^53
+and 1e21 (for example `1e20`, `1.2345678901234568e20`) canonicalises to its ECMAScript plain-digit
+form (`100000000000000000000`, `123456789012345680000`), and that re-canonicalising that output is
+`UnsafeInteger`. The idempotence assertion is applied to every other vector and to all random
+documents, but not to these outputs.
+
+**Rationale.** The brief requires three things that cannot all hold for these inputs: ECMAScript
+number forms including "123456789012345680000 style cases", rejection of integer tokens with
+magnitude above 2^53-1 "anywhere", and idempotence "on every vector". ECMAScript prints these values
+without an exponent, and the result is a plain integer token beyond the safe range. The specific
+clauses (number forms, unsafe-integer rejection, both quoted from RFC 8785 / I-JSON practice in
+REQ-NFR-006) are kept over the general one; definitions are unaffected because every typed
+integer field is limited to the safe range.
+
+**Alternatives.** Rejecting any number whose value is an integer beyond 2^53-1 whatever its
+spelling (rejected: also rejects `1e21`, which the brief requires to canonicalise to `1e+21`);
+dropping the large-value vectors (rejected: weakens the test, R10).
+
+## #11 FP-010 — serde, serde_json and serde_json_canonicalizer in fineprint-dsl
+
+**Decision.** `fineprint-dsl` depends on `serde`, `serde_json` and `serde_json_canonicalizer`
+through the existing `[workspace.dependencies]` pins (`=1.0.229`, `=1.0.154` with `std` and
+`float_roundtrip`, `=0.4.1`), chosen by the FP-004 spike ("FP-004 — RFC 8785 canonical JSON:
+serde_json_canonicalizer"). `serde_json`'s `preserve_order` feature stays off, so
+`serde_json::Map` is a `BTreeMap` (REQ-CORE-006). No other dependency is added.
+**Rationale.** REQ-NFR-006 requires RFC 8785 canonical JSON for `definitionHash`; FP-004 already
+selected and licence-checked these crates. Reusing the pins keeps one version of each.
+**Alternatives.** Depending on the spike crate (rejected: spikes are not product code); a
+hand-written JCS serialiser (rejected: FP-004 measured the library against the RFC vectors).
+
+## #11 FP-010 — Wiring edits outside the owned directories
+
+**Decision.** Besides `src/card/`, `src/mana/` and `src/canonical/`, the unit edits only
+`crates/fineprint-dsl/src/lib.rs` (three `pub mod` declarations with doc comments),
+`crates/fineprint-dsl/Cargo.toml` (the three dependencies above) and `Cargo.lock` (the
+resulting lock entries), as the brief sanctions.
+**Rationale.** The new modules cannot be reached or built without them (R1 minimum wiring).
+**Alternatives.** None that compile.
+
+## #11 FP-010 — definitionHash excludes the definitionHash member
+
+**Decision.** `definitionHash` is the lowercase-hex SHA-256 (`fineprint_base::hash::sha256`) of
+the RFC 8785 bytes of the serialised definition with the `definitionHash` member omitted.
+`verify_hash` compares strings exactly, so uppercase hex is a mismatch. `from_json` checks, in
+order: canonical-level JSON checks, a string `dslVersion` with the engine's major, the typed
+schema, then the hash.
+**Rationale.** SRS §14.2 says "sha256 of canonical JSON of this definition"; a hash cannot cover
+itself, and omitting the member (rather than hashing a placeholder value) leaves no magic value
+in the format. A single spelling of the hex text keeps hash comparison byte-exact.
+**Alternatives.** Hashing with `definitionHash: ""` (rejected: an invented placeholder);
+case-insensitive comparison (rejected: two spellings of one artifact identity).
+
+## #11 FP-010 — ManaCostDSL JSON is the canonical symbol string
+
+**Decision.** `ManaCostDSL` serialises as one JSON string of its canonical text (`"{2}{W}{W}"`).
+An empty or invalid string is a deserialisation error. "No mana cost" is the absence of the
+face's `manaCost` member (`Option::None`); `{0}` is `"{0}"`. Every symbol has exactly one
+accepted spelling, so text and value map one to one and canonical JSON is unique.
+Malformed-bracket offsets: an unterminated `{` and an empty `{}` report the offset of that `{`;
+a nested `{` reports the inner `{`; a stray `}` or text outside braces reports its first byte.
+`UnknownSymbol.symbol` carries the braced text including the braces.
+**Rationale.** The string form is compact, readable in definition diffs and is the same grammar
+the ingestion parser reads (SRS §16). One spelling per symbol keeps `definitionHash` stable.
+**Alternatives.** An array of tagged symbol objects (rejected: verbose, and a second grammar to
+keep in sync); reporting the end of input for an unterminated `{` (rejected: the `{` is the byte
+that lacks its partner).
+
+## #11 FP-010 — ColorBitmask bit assignment
+
+**Decision.** `ColorBitmask(u8)` uses W = 1, U = 2, B = 4, R = 8, G = 16, serialised as a JSON
+integer 0..=31; any other value (32, negative, non-integer) is rejected on input.
+**Rationale.** The bits follow the conventional W U B R G color order, which is also the
+declaration order of `mana::Color`. An integer is the cheapest canonical form.
+**Alternatives.** An array of color letters (rejected: several spellings of one set unless
+sorted, larger JSON).
+
+## #11 FP-010 — Mana symbol set limited to SRS §4.1
+
+**Decision.** The parser accepts exactly the SRS §4.1 symbol classes: generic `{n}`
+(0..=1 000 000, no leading zeros), colored, colorless `{C}`, snow `{S}`, `{X}`/`{Y}`/`{Z}`, two-color
+hybrid `{a/b}` (a ≠ b, written order kept, so `{W/U}` and `{U/W}` are different values),
+monocolored hybrid `{n/c}` (n ≥ 1), Phyrexian `{c/P}` and hybrid Phyrexian `{a/b/P}`.
+Colorless hybrid, half mana, energy and infinity symbols are rejected as unknown symbols.
+**Rationale.** SRS §4.1 is the normative list for `ManaCost`; symbols outside it have no rules
+support in the engine yet, and accepting them would let definitions carry costs nothing can pay.
+Adding a class later is an additive grammar change.
+**Alternatives.** Accepting every symbol seen in bulk data (rejected: outside §4.1, unhandled);
+normalising hybrid order (rejected: the written order is data, and one spelling per value
+already holds).
+
+## #11 FP-010 — Strict deny_unknown_fields on definition types
+
+**Decision.** Every definition struct uses `#[serde(rename_all = "camelCase",
+deny_unknown_fields)]`. A definition with a newer minor `dslVersion` that adds members is
+therefore rejected with `CardDefinitionError::Schema` until this engine learns the member; only
+the major version is gated by `check_dsl_version`. Plain `Deserialize` performs no version or
+hash check; `CardDefinitionDSL::from_json` is the checked loader. A present `power` or
+`toughness` member is decoded as `Some` even when it is JSON `null`, so
+`Some(ValueExpressionAST(Value::Null))` survives a round trip.
+**Rationale.** The hash is verified over the checked input (with only `definitionHash`
+removed), and the loader also requires the decoded value to re-serialise to exactly that input
+(see "#11 FP-010 — Lossless decode and hash over the checked input"); an unknown member would be
+dropped by decoding, so the decode would not be lossless and it cannot be tolerated. Failing loudly is also R11 ("never silently runs an incomplete definition").
+**Alternatives.** Ignoring unknown members (rejected: the hash would not cover them); keeping
+unknown members in a catch-all map (rejected: the engine would carry data it cannot interpret).
+
+## #11 FP-010 — Placeholder AST types
+
+**Decision.** `ValueExpressionAST`, `AbilityAST` and `PartnerAbilityDSL` wrap a
+`serde_json::Value` and `TextTokenStream` wraps `Vec<serde_json::Value>`, all
+`#[serde(transparent)]`, until FP-011/012/013 define the real schemas. Their content takes part
+in canonical JSON and the hash.
+**Rationale.** The top-level schema and hash can land and be tested now without inventing AST
+shapes that later issues own (R1).
+**Alternatives.** Empty structs (rejected: definitions with content could not round-trip);
+defining the ASTs here (rejected: owned by later units).
+
+## #11 FP-010 — Safe integer range for hashed JSON
+
+**Decision.** `canonical::canonicalize` and `to_canonical_vec` reject, with
+`CanonicalError::UnsafeInteger`, every number whose value is an integer of magnitude above
+`MAX_SAFE_INTEGER` (2^53 − 1), whatever its spelling: integer literals such as
+`9007199254740992`, and also exponent or fraction spellings with an integral value such as
+`1e20`, `1e21` or `9007199254740992.0`. Non-integer numbers (for example `1.5`, `1e-7`) are
+accepted. The check is lexical, with no floating-point type (REQ-CORE-006): integer literals on
+the input, and the JCS output's ECMAScript number forms (a positive exponent means an integer of
+at least 1e21; no `.` and no exponent means an integer).
+**Rationale.** JCS prints large integral doubles silently rounded ("FP-004 — RFC 8785 canonical
+JSON"), so such values must travel as strings. The brief also requires idempotence
+(`canonicalize(canonicalize(x)) == canonicalize(x)`) and rejection of out-of-range integer
+literals: the canonical form of `1e20` is the integer literal `100000000000000000000`, so
+accepting `1e20` while rejecting that literal would break idempotence. Rejecting by value is the
+only rule that satisfies both.
+**Alternatives.** Rejecting only digit-only literals (rejected: not idempotent, as above);
+accepting exponent-form integers of 1e21 or more because JCS prints them with an exponent
+(rejected: they are still integers beyond the safe range, and it makes the rule depend on a
+printing threshold).
+
+## #11 FP-010 — Checked serializer replaces serde_json::to_value
+
+**Decision.** `canonical::to_canonical_vec` (and through it `CardDefinitionDSL::to_canonical_json`,
+`compute_hash` and `seal`) serialises with a private `serde::Serializer`
+(`canonical/ser.rs`, `to_checked_value`) that builds the same `serde_json::Value` as
+`serde_json::to_value` for every input that function accepts (demonstrated by a differential unit
+test), and errors instead where `to_value` would silently lose or alter content: non-finite
+floats (`CanonicalError::Serialize`, at any depth), a member name emitted twice
+(`CanonicalError::DuplicateKey`), noncharacters, nesting beyond `MAX_DEPTH`, and integers outside
+±`MAX_SAFE_INTEGER` (`UnsafeInteger`, all widths up to 128 bits). Scalars, floats and map keys
+are delegated to `serde_json::value::Serializer` after the checks, so number and key formatting
+is serde_json's own. Its `serialize_f32`/`serialize_f64` methods carry a scoped
+`#[allow(clippy::disallowed_types)]`; the two unit tests that construct NaN and infinities do
+too. The old post-hoc `check_value_integers` pass is removed (redundant). The final lexical scan
+of the JCS bytes stays (it catches large integral doubles such as `1e20`).
+**Rationale.** REQ-NFR-006: exported bytes must be what the loader accepts, and RFC 8785 requires
+an error for NaN and infinity. REQ-CORE-006 bans floats in rules arithmetic; the serializer's float
+methods are the boundary that rejects non-finite values and passes finite ones through untouched,
+so naming the type there is the only way to enforce the rule, and the allow is limited to those
+methods. Duplicate detection uses the object's own ordered `serde_json::Map` (BTreeMap-backed,
+`preserve_order` off) via `contains_key` before insertion, which is the per-object ordered set the
+brief asks for without keeping a second copy of the names.
+**Alternatives.** Post-checking the `Value` from `to_value` (rejected: NaN is already `null` and
+the first duplicate already lost); a separate `BTreeSet` per object (equivalent; not needed);
+writing JSON text and re-parsing it (rejected: serde_json's writer also emits `null` for NaN).
+
+## #11 FP-010 — Duplicate member names on export are DuplicateKey
+
+**Decision.** A `Serialize` impl that emits the same member name twice (through `SerializeMap` or
+`SerializeStruct`) gives `CanonicalError::DuplicateKey(<name>)`, the same kind the input path uses.
+**Rationale.** One error kind for one defect, whichever path finds it; callers already match it.
+**Alternatives.** `CanonicalError::Serialize` (rejected: hides the kind behind a message).
+
+## #11 FP-010 — Noncharacters rejected without a new error variant
+
+**Decision.** Noncharacters (U+FDD0..=U+FDEF and every code point whose low 16 bits are FFFE or
+FFFF) are rejected in decoded member names and string values, literal or escaped (RFC 7493 §2.1).
+On input (`canonicalize`, `parse_checked`, hence `from_json`) the error is
+`CanonicalError::Syntax`; on export (`to_canonical_vec`) it is `CanonicalError::Serialize`; both
+messages name the code point (`U+XXXX`). The input check is an iterative walk of the parsed tree.
+**Rationale.** The input is not acceptable I-JSON, which the `Syntax` variant documents; on
+export the value cannot be represented, which is what `Serialize` means. No variant is added
+because the Independent Tester's spec tests match `CanonicalError` exhaustively.
+**Alternatives.** A new `Noncharacter` variant (rejected: breaks exhaustive matches, a public API
+change); accepting noncharacters (rejected: RFC 7493 §2.1).
+
+## #11 FP-010 — One depth budget: MAX_DEPTH = 127
+
+**Decision.** `canonical::MAX_DEPTH = 127` is the largest nesting depth (simultaneously open
+arrays and objects; a scalar adds none) accepted by loading, hashing and export. The checked
+serializer errors with `CanonicalError::Serialize("nesting depth exceeds 127")` the moment a
+container would exceed it, before recursing. For a card the definition object, `faces`, a face
+and `abilities` use four levels. The parser limit is not relaxed.
+**Rationale.** The value was read from serde_json 1.0.154's parser (`remaining_depth` starts at
+128 and is decremented on every `[`/`{`, failing when it reaches 0, so 127 levels pass and 128 do
+not) and is pinned by a unit test that `canonicalize` accepts 127 nested arrays and rejects 128,
+so the constant cannot drift from the parser. Checking before recursion means a pathologically
+deep value (tested at 100 000 levels) cannot overflow the stack.
+**Alternatives.** Raising the parser limit (rejected: weakens the untrusted-input bound); a
+smaller separate export limit (rejected: two budgets are what produced the defect).
+
+## #11 FP-010 — No explicit null for optional members
+
+**Decision.** Every optional, non-nullable member (`manaCost`, `colorIndicator`, `loyalty`,
+`defense`, `handModifier`, `lifeModifier`, `knownGaps`, `meldPartner`, `commanderEligibility`,
+`relatedTokens`, `parserVersion`, `overrideSource`, `verifiedBy`) uses
+`deserialize_with = "present"`: omission gives `None`, a present `null` is an error (also for
+plain serde `Deserialize`). `power` and `toughness` keep `Some(Value::Null)` for `null`.
+**Rationale.** The SRS marks these members `?:`, never `| null`, and the canonical form omits
+them; accepting `null` made two documents with different bytes decode to one value.
+**Alternatives.** Rejecting `null` only in `from_json` (rejected: the type's own decoder should
+match the schema; the lossless check would catch it anyway).
+
+## #11 FP-010 — Lossless decode and hash over the checked input
+
+**Decision.** `CardDefinitionDSL::from_json` takes the checked document in its canonical form
+(parsed back from the JCS bytes, so `1.0`, `-0.0` and `1` load as the integer value), checks
+`dslVersion` first as before, decodes the typed struct (`Schema` on failure), then requires the
+decoded value re-serialised with the checked serializer to equal that document exactly
+(`Schema`: "decoding changed the content ..."), and finally compares `definitionHash` with
+SHA-256 of the RFC 8785 bytes of the checked document with only `definitionHash` removed
+(`HashMismatch`). The string enums now decode only from strings (hand-written `Deserialize` in
+`string_enum!`). Plain serde `Deserialize` stays the documented unchecked building block (it may
+still accept positional arrays).
+**Rationale.** The digest must cover what the file says, not what decoding kept: a positional
+array, a `null` member or a singleton-object enum decoded to the same struct and passed the old
+re-serialised-hash check. One equality check rejects every lossy decode, including ones not yet
+imagined, without per-type map-only deserializers; the error order of the contract is unchanged.
+**Alternatives.** Map-only deserializers per struct (rejected: covers only the listed cases);
+hashing the input while skipping the lossless check (rejected: a decoded value could still differ
+from the hashed document).
+
+## #11 FP-010 — Sealing normalises placeholder numbers
+
+**Decision.** `seal` replaces the value with the decode of its own canonical JSON before storing
+the hash, so a placeholder holding `-0.0` or `1.0` is stored as `0` or `1`. The canonical bytes
+and the hash are unchanged; only sealed values carry the guarantee
+`from_json(&v.to_canonical_json()?) == Ok(v)`.
+**Rationale.** JCS writes `-0.0` as `0`; without normalising, the loaded value would not equal the
+sealed one although the hash agreed.
+**Alternatives.** Rejecting non-canonical number spellings in placeholders (rejected: valid JSON
+the JCS defines; normalising is lossless for the hash).
+
+## #11 FP-010 — ManaCostDSL::new validates with the parser's rule
+
+**Decision.** `ManaSymbol::is_valid` (new public method) states the parser's rules
+(`Generic` 0..=1 000 000, `GenericHybrid` 1..=1 000 000, two different colours for `Hybrid` and
+`HybridPhyrexian`); the parser filters every candidate symbol through it and `ManaCostDSL::new`
+rejects the first invalid symbol with the existing `ManaParseError::UnknownSymbol { offset,
+symbol }`, `offset` being its byte offset in the cost's canonical text. The parser's
+`symbol_from_inner` no longer allocates (it takes at most four `/`-parts from the iterator).
+**Rationale.** A constructed cost must print as text the loader accepts. Reusing `UnknownSymbol`
+keeps `ManaParseError` unchanged (the spec tests match it exhaustively) and is what the parser
+reports for the same text. One shared predicate means parser and constructor cannot disagree
+(an equivalence unit test covers a spread of symbols).
+**Alternatives.** A new error variant (rejected: public API change); a private check duplicated
+in `new` (rejected: could drift from the parser).
+
+## #11 FP-010 — seal rejects unsupported dslVersion
+
+**Decision.** `CardDefinitionDSL::seal` calls `check_dsl_version` first and maps its error to
+`CanonicalError::Serialize(e.to_string())`. Supported versions (`1.x[.y]`) seal as before. Seal and
+`compute_hash` also ignore the previous `definitionHash` value (cleared before validation).
+**Rationale.** Every `Ok` sealed value must round-trip through `from_json`, which rejects other
+majors. The signature and the error enums are frozen (exhaustive matches in spec tests); the error
+text carries the `DslVersionError` message.
+**Alternatives.** Returning `CardDefinitionError` (breaking signature change, R2); a new
+`CanonicalError` variant (breaks exhaustive matches).
+
+## #11 FP-010 — Test-path ownership
+
+**Decision.** The issue's owned paths (src/card, src/mana, src/canonical) are the Implementer's.
+Independent spec tests under crates/fineprint-dsl/tests/spec_dsl_*.rs (including
+spec_dsl_review1.rs) are owned by the Independent Tester role, per docs/DEVELOPMENT.md (Tests:
+crates/<crate>/tests/spec_<area>_*.rs); every classifier brief for this unit names them as the
+Tester's owned paths and lists them as DO NOT TOUCH for the Implementer and Fixer. They are not an
+extension of the issue's owned paths.
+**Rationale.** R1 limits each role to the paths in its brief; CodeRabbit flagged the new file
+against the issue's list only.
+**Alternatives.** Move the tests into src/ (rejected: the Tester must stay independent of src/,
+R9).
+
+## #11 FP-010 — compute_hash hashes the borrowed definition
+
+**Decision.** `compute_hash` serialises `&self` through a crate-private checked-serializer entry
+point, `canonical::to_checked_value_without_member(value, "definitionHash")`, which leaves the
+named member out of the outermost struct or map before its value is serialised or checked (a
+repeated skipped member counts as absent; members of that name at any deeper level are kept and
+checked). The result is hashed exactly as before (`hash_without_member`: RFC 8785 bytes, SHA-256,
+lowercase hex), so every valid card keeps its digest. No clone of the definition or any `Value`
+remains on the hash path. This supersedes the "cleared before validation" mechanism of the entry
+"seal rejects unsupported dslVersion" for `compute_hash`; `seal` still clears the field it owns.
+**Rationale.** Cloning recursed through placeholder `Value`s without a depth bound, so an
+in-memory value nested past `MAX_DEPTH` could overflow the stack before the checked serializer's
+depth check returned `CanonicalError::Serialize`. Skipping the member before serialisation keeps
+a stale hash (noncharacter, wrong length, anything) out of both the hash and the checks
+(REQ-DSL-002, REQ-NFR-006, REQ-CORE-006).
+**Alternatives.** Clone and clear the field (rejected: unbounded `Clone` recursion before the depth
+check). Serialise `self` unchanged and remove the member afterwards (rejected: a stale hash with a
+noncharacter would fail the check). Note: `serde_json::Value`'s `Drop` is also recursive, so an
+erroring by-value `seal` still drops a deep value; out of scope (no custom `Drop`).
