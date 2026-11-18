@@ -5,10 +5,12 @@
 //! Spec tests for `fineprint-ingest vocab` (REQ-SUB-001, REQ-OBJ-001, REQ-DSL-014; #15 FP-014),
 //! run through the built binary. The synthetic CR is assembled in code from invented words
 //! (R5); no line of this file starts with a rule number. The tests against the real CR run only
-//! when the git-ignored `cr-cache/rules.txt` exists; everything else needs no cache.
+//! when the git-ignored `cr-cache/rules.txt` exists, unless `FINEPRINT_REQUIRE_CR_CACHE=1`
+//! makes a missing cache a failure (the `cr` workflow sets it); everything else needs no cache.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fineprint_dsl::vocab::RulesVocabulary;
 
@@ -18,14 +20,34 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// A new, empty scratch directory created exclusively under Cargo's private
+/// `CARGO_TARGET_TMPDIR` (never a shared, predictable temp path). The leaf name combines the
+/// pid, a process-wide counter and the clock (for uniqueness only, R7); `create_dir` fails if
+/// the leaf exists, which is retried a bounded number of times with a new name. Any other
+/// error panics.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fp-spec-ingest-vocab-{}-{name}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(root).expect("create the scratch root");
+    for _ in 0..16 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let leaf = root.join(format!(
+            "fp-spec-ingest-vocab-{name}-{}-{n}-{nanos}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&leaf) {
+            Ok(()) => return leaf,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("cannot create scratch dir {}: {e}", leaf.display()),
+        }
+    }
+    panic!(
+        "no fresh scratch dir under {} after 16 tries",
+        root.display()
+    );
 }
 
 fn run(args: &[&std::ffi::OsStr]) -> Output {
@@ -298,13 +320,28 @@ fn req_dsl_014_collision_exit_1() {
 
 /// REQ-SUB-001, REQ-OBJ-001, REQ-DSL-014 (CI check): with the cached CR, `--check` exits 0 on
 /// the committed file, 1 on a copy with one altered byte, and regeneration equals the file.
-/// Runs only when `cr-cache/rules.txt` exists (the CI test jobs do not fetch the CR).
+/// Runs only when `cr-cache/rules.txt` exists (the CI test jobs do not fetch the CR); with
+/// `FINEPRINT_REQUIRE_CR_CACHE=1` (set by the `cr` workflow after its fetch) a missing or
+/// unreadable cache fails the test instead.
 #[test]
 fn req_sub_001_real_cr_check_when_cached() {
     let root = workspace_root();
     let cr = root.join("cr-cache/rules.txt");
+    let required = std::env::var_os("FINEPRINT_REQUIRE_CR_CACHE").is_some_and(|v| v == "1");
     if !cr.is_file() {
+        assert!(
+            !required,
+            "FINEPRINT_REQUIRE_CR_CACHE=1 but {} is missing or not a file; fetch it with \
+             `cargo xtask cr fetch`",
+            cr.display()
+        );
         return;
+    }
+    if let Err(e) = std::fs::read(&cr) {
+        panic!(
+            "{} exists but is unreadable ({e}); fetch it again with `cargo xtask cr fetch --force`",
+            cr.display()
+        );
     }
     let committed = root.join("crates/fineprint-dsl/data/vocab.json");
     let o = run(&[
