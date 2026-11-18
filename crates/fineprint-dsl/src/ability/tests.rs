@@ -1778,8 +1778,8 @@ fn req_nfr_006_serialize_rechecks_parts() {
 // ---------------------------------------------------------------------------------------------
 // PR #162 review round 1 regressions
 
-/// REQ-DSL-008, REQ-DSL-004: lock-in anchors may come later in the list, and a large list is
-/// handled in one pass (decode and encode); a missing anchor is still rejected.
+/// REQ-DSL-008, REQ-DSL-004, CR 613.6: lock-in anchors may come later in the list, and a large
+/// list is handled in one pass (decode and encode); a missing anchor is still rejected.
 #[test]
 fn req_dsl_008_lock_in_forward_reference_and_large_list() {
     let lock = r#"{"type":"CHAR","layer":"7b","affected":{"sameAsLayer":"6"},"modification":{"op":"SET_BASE_PT","power":1,"toughness":1}}"#;
