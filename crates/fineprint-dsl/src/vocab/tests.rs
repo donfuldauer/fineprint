@@ -574,3 +574,67 @@ fn req_obj_001_mutations_load_or_error() {
     }
     assert!(loaded > 0, "some mutations (inside names) must still load");
 }
+
+/// Removes `members` from the first face of the first token.
+fn without_face_members(members: &[&str]) -> Value {
+    let mut v = sample_value();
+    let face = v["predefinedTokens"][0]["faces"][0]
+        .as_object_mut()
+        .unwrap();
+    for m in members {
+        assert!(face.remove(*m).is_some(), "{m}");
+    }
+    v
+}
+
+/// REQ-SUB-001, REQ-NFR-004 (R12): an omitted `power` is a missing member, not `null`.
+#[test]
+fn req_sub_001_face_power_omitted_is_rejected() {
+    let e = load(&without_face_members(&["power"])).unwrap_err();
+    assert!(
+        matches!(&e, VocabError::Shape(m) if m.contains("power")),
+        "{e}"
+    );
+}
+
+/// REQ-SUB-001, REQ-NFR-004 (R12): an omitted `toughness` is a missing member, not `null`.
+#[test]
+fn req_sub_001_face_toughness_omitted_is_rejected() {
+    let e = load(&without_face_members(&["toughness"])).unwrap_err();
+    assert!(
+        matches!(&e, VocabError::Shape(m) if m.contains("toughness")),
+        "{e}"
+    );
+}
+
+/// REQ-SUB-001, REQ-NFR-004 (R12): omitting both members is rejected too (it is not the same
+/// as an explicit `null`/`null` face).
+#[test]
+fn req_sub_001_face_power_and_toughness_omitted_is_rejected() {
+    let e = load(&without_face_members(&["power", "toughness"])).unwrap_err();
+    assert!(
+        matches!(&e, VocabError::Shape(m) if m.contains("missing field")),
+        "{e}"
+    );
+}
+
+/// REQ-SUB-001: explicit `null`/`null` (a face without printed power and toughness) and
+/// explicit numbers both load; the paired-presence rule still rejects one `null`.
+#[test]
+fn req_sub_001_face_explicit_null_loads() {
+    let mut v = sample_value();
+    let face = &mut v["predefinedTokens"][0]["faces"][0];
+    face["power"] = Value::Null;
+    face["toughness"] = Value::Null;
+    let loaded = load(&v).unwrap();
+    let f = &loaded.predefined_tokens[0].faces[0];
+    assert_eq!((f.power, f.toughness), (None, None));
+    let bytes = loaded.to_canonical_bytes().unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("\"power\":null"));
+    assert_eq!(RulesVocabulary::from_slice(&bytes).unwrap(), loaded);
+    v["predefinedTokens"][0]["faces"][0]["power"] = json!(2);
+    v["predefinedTokens"][0]["faces"][0]["toughness"] = json!(3);
+    assert!(load(&v).is_ok());
+    v["predefinedTokens"][0]["faces"][0]["toughness"] = Value::Null;
+    assert!(matches!(load(&v), Err(VocabError::Invalid { .. })));
+}
