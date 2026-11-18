@@ -8,6 +8,10 @@
 
 /// Ordered collections and the stable (ObjectId, Timestamp) sort (REQ-CORE-006).
 pub mod collections;
+/// Canonical injective binary encoding: helpers and fixed layouts (REQ-NFR-006).
+pub mod encode;
+/// SHA-256 digests and the incremental Merkle hashing framework (REQ-NFR-006, REQ-LOOP-001).
+pub mod hash;
 /// Identifier newtypes, monotonic generators and the canonical encoding hook (REQ-CORE-002).
 pub mod ids;
 /// Checked integer and scale-2 fixed-point numbers (REQ-CORE-006).
