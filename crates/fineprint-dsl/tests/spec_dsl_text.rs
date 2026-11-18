@@ -522,12 +522,30 @@ fn req_nfr_006_text_mutations_never_panic() {
     }
 }
 
-/// REQ-NFR-006: a stream nested deeper than 127 containers is an error, not a stack overflow.
+/// REQ-NFR-006: raw-input robustness check. Deeply nested or unclosed bracket text is an error
+/// (no panic, no stack overflow). It does not by itself prove the DSL depth guard: these inputs
+/// are also rejected on shape and by the text parser's own nesting limit.
 #[test]
-fn req_nfr_006_text_deep_nesting_is_error() {
+fn req_nfr_006_text_deep_raw_input_is_error() {
     for depth in [128usize, 200, 100_000] {
         let s = "[".repeat(depth) + &"]".repeat(depth);
         assert!(serde_json::from_str::<TextTokenStream>(&s).is_err());
         assert!(serde_json::from_str::<TextTokenStream>(&"[".repeat(depth)).is_err());
+    }
+}
+
+/// REQ-NFR-006: deeply nested arrays handed over as a borrowed `serde_json::Value` are an error
+/// and never panic or overflow. None of them is a valid stream (a stream is an array of token
+/// objects, at most 2 containers deep), so the discriminating 127/128 depth assertions live in
+/// spec_dsl_expr.rs (`req_nfr_006_borrowed_value_depth_guard`).
+#[test]
+fn req_nfr_006_text_deep_borrowed_value_is_error() {
+    for depth in [127usize, 128, 129, 1000] {
+        let mut value = json!([]);
+        for _ in 1..depth {
+            value = Value::Array(vec![value]);
+        }
+        let r = <TextTokenStream as serde::Deserialize>::deserialize(&value);
+        assert!(r.is_err(), "depth {depth} was accepted");
     }
 }
