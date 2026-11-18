@@ -483,6 +483,15 @@ fn property_ids_are_fresh_and_never_reused() {
                     assert_eq!(m.old, id);
                     assert_eq!(m.from, expected_from, "{ctx}: wrong source");
                     assert_eq!(m.to, expected_to, "{ctx}: wrong destination");
+                    assert_eq!(
+                        z.object(m.new).map(|o| o.zone),
+                        Some(expected_to),
+                        "{ctx}: new object not in the destination"
+                    );
+                    assert!(
+                        z.contents(expected_to).contains(&m.new),
+                        "{ctx}: destination does not contain the new id"
+                    );
                     if expected_to == expected_from
                         && !matches!(expected_to, ZoneId::Exile | ZoneId::Command)
                     {

@@ -20,9 +20,12 @@
 //! object keeps its id and is only repositioned (CR 400.7: not a move from one zone to another; CR 400.5; `Moved` then has
 //! `old == new`), while in exile and the command zone it becomes a new object without changing
 //! zones (CR 400.8, CR 406.7, CR 400.10) and gets a fresh id. Objects that would go to another
-//! player's library, hand or graveyard go to their owner's (CR 400.3). An issued id that is live or
-//! was ever held by the container (at or below its high-water mark) is rejected
-//! ([`ZoneError::IdCollision`]).
+//! player's library, hand or graveyard go to their owner's (CR 400.3). An issued id that is not above
+//! the container's high-water mark (the highest id it has issued or accepted) is rejected
+//! ([`ZoneError::IdCollision`]). This is a high-water rejection, not proof of id reuse: it also
+//! rejects ids the container never held. Example: the first object created gets id 10 from a
+//! generator restored with `IdGenerator::from_last_issued(9)`; a later generator that proposes 5
+//! gets `IdCollision(5)` although 5 was never held.
 //!
 //! **Omniscient state.** [`Zones`] is the omniscient engine state: `contents`, `object`,
 //! `object_of_card`, `all_object_ids` and the canonical encoding expose hidden information

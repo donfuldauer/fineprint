@@ -74,7 +74,7 @@ pub struct Zones {
     /// The highest `ObjectId` raw value this container has ever issued or accepted (0 when none):
     /// the high-water mark that keeps retired ids from being issued again (REQ-CORE-002). Part
     /// of equality and of the canonical encoding.
-    pub(super) max_issued: u64,
+    max_issued: u64,
 }
 
 /// Inserts `id` into the top-first sequence `seq` at `position`; an index past the bottom means
@@ -227,7 +227,7 @@ impl Zones {
     }
 
     /// Issues the next id from a copy of `ids` and rejects it unless it is above the high-water
-    /// mark, so an id that is live or was ever held by this container is never issued again
+    /// mark, so an id at or below it (live, retired or never held) is never issued
     /// (REQ-CORE-002, CR 400.7). Returns the advanced copy, to be written back (with
     /// [`Zones::commit_issued`]) only once the operation cannot fail any more, and the id.
     fn issue_fresh(
@@ -267,8 +267,9 @@ impl Zones {
     /// [`ZoneError::CardAlreadyPresent`] if `card` is in a zone or pool,
     /// [`ZoneError::ControllerNotApplicable`] if a controller is requested outside the
     /// battlefield and the stack, [`ZoneError::IdExhausted`] if `ids` is exhausted,
-    /// [`ZoneError::IdCollision`] if `ids` issues an id that is live or was ever held by this
-    /// container. The container and `ids` are then unchanged.
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that is not above the highest id this
+    /// container has issued or accepted (a high-water rejection: it can reject an id the
+    /// container never held). The container and `ids` are then unchanged.
     pub fn create_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -361,8 +362,9 @@ impl Zones {
     /// # Errors
     /// [`ZoneError::UnknownObject`], [`ZoneError::ControllerNotApplicable`],
     /// [`ZoneError::UnknownPlayer`] (requested controller), and, when a new id is needed,
-    /// [`ZoneError::IdExhausted`] and [`ZoneError::IdCollision`] (the issued id is live or was
-    /// ever held by this container). The container and `ids` are then unchanged.
+    /// [`ZoneError::IdExhausted`] and [`ZoneError::IdCollision`] (the issued id is not above the
+    /// highest id this container has issued or accepted: a high-water rejection, which can
+    /// reject an id the container never held). The container and `ids` are then unchanged.
     pub fn move_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -434,8 +436,9 @@ impl Zones {
     /// # Errors
     /// [`ZoneError::UnknownPlayer`], [`ZoneError::NoSuchOutsideCard`] if the card is not in that
     /// pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`],
-    /// [`ZoneError::IdCollision`] if `ids` issues an id that is live or was ever held by this
-    /// container. The container and `ids` are then unchanged.
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that is not above the highest id this
+    /// container has issued or accepted (a high-water rejection: it can reject an id the
+    /// container never held). The container and `ids` are then unchanged.
     pub fn enter_from_outside(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
