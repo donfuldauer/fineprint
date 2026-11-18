@@ -915,3 +915,53 @@ the golden corpus on every listed platform. REQ-NFR-011 makes those jobs require
   workspace has no such code.
 - If a future test reads another Markdown file, the docs-only classification must be widened in
   the `changes` job.
+
+## #9 FP-008 — PRNG module
+
+**Decision** (REQ-CORE-001, REQ-API-004). `fineprint_base::prng` is the engine's only source
+of randomness, in-house, with no new dependency (`fineprint-base` still depends on nothing).
+- `ALGORITHM_ID = "PCG64-DXSM"`, the value replay headers and the state record.
+- `Pcg64Dxsm` is ported from `spikes/libs/src/prng.rs`; `from_u64_seed(seed64)` is the single
+  SplitMix64 seed-expansion helper for match seeding and fork reseeding, as decided in
+  "FP-004 — Resolution of the queued items". `fork(salt)` is
+  `from_u64_seed(hi64(state) ^ lo64(state) ^ hi64(increment) ^ lo64(increment) ^ salt)` and does
+  not advance the parent.
+- Bounded integers use Lemire's multiply-with-rejection exactly: `m = x * bound` (128-bit);
+  if `lo64(m) < bound`, reject while `lo64(m) < (2^64 - bound) % bound`; return `hi64(m)`.
+  `bound == 0` is `None` with no draw; `bound == 1` is `Some(0)` and consumes one draw.
+- Shuffle is Fisher-Yates from the end: for `i` from `len - 1` down to 1, swap `i` with
+  `next_bounded(i + 1)`. Lengths 0 and 1 consume no draws.
+- `choose` draws `next_bounded(len)`; empty slices give `None` with no draw.
+- `random_subset(n, k)` is selection sampling over `0..n` (choose `i` when
+  `next_bounded(n - i) < k - chosen`), stopping as soon as `k` indices are chosen, and returns
+  the indices in ascending order. `k > n` is `None` and `k == 0` is empty, both with no draw.
+  If the result vector cannot be reserved (`Vec::try_reserve_exact(k)` fails, which includes the
+  capacity overflow of `random_subset(usize::MAX, usize::MAX)`), the result is also `None` with
+  no draw: the reservation is made before the first draw, so the call never panics and the
+  generator is untouched. The public contract is therefore `None` when `k > n` or when `k`
+  indices cannot be reserved; a `Some` result is unchanged.
+- `from_raw(state, increment)` rejects an even increment (`None`) and validates nothing else.
+- `CanonicalEncode` appends 32 bytes: `state` little-endian (16), then `increment`
+  little-endian (16); no tag, no length prefix.
+- `crates/fineprint-base/src/lib.rs` gained only the `pub mod prng;` declaration, by explicit
+  authorisation in the issue #9 brief (exception to R1).
+
+**Rationale.** REQ-CORE-001 requires one specified algorithm, stored in the state, with output
+fixed per engine major version, so every sampling algorithm (and the number of draws it consumes)
+is part of the frozen contract and is pinned by hard-coded vectors that CI checks on Linux,
+Windows and macOS. Lemire's method is unbiased and needs only integer arithmetic; the
+from-the-end Fisher-Yates and ascending selection sampling are the textbook forms and make the
+draw count a simple function of the input sizes. An odd increment is the only structural
+invariant of a PCG stream, so it is the only check `from_raw` makes on untrusted saved state
+(R12). Little-endian fixed-width bytes follow the `CanonicalEncode` contract. CodeRabbit
+(PR #155) found that `Vec::with_capacity(k)` panics for `k` whose byte size exceeds `isize::MAX`,
+which contradicts the module's non-panicking guarantee; a fallible reservation before any draw
+was chosen over dropping the up-front reservation, because it keeps the single-allocation
+behaviour for normal inputs and keeps draw consumption unchanged.
+
+**Alternatives.** The `rand_pcg`/`rand` crates (rejected: a dependency in the rules crate, and
+`rand_pcg` seeds with the cheap multiplier, which differs from NumPy; see
+"FP-004 — PRNG: in-house PCG64-DXSM (no crate)"). Modulo reduction or the "widening multiply
+without rejection" (rejected: biased). Floyd's or reservoir subset sampling (rejected: unordered
+output or more draws for small `k`). Fisher-Yates from the front (equivalent in distribution;
+rejected only to fix one frozen order).
