@@ -7,3 +7,7 @@
 // non-rules crate: REQ-CORE-006 applies to the rules crates only
 #![allow(clippy::disallowed_types)]
 #![forbid(unsafe_code)]
+
+/// `fineprint-ingest vocab`: the `RulesVocabulary` generator (REQ-OBJ-001, REQ-SUB-001,
+/// REQ-DSL-014).
+pub mod vocab;
