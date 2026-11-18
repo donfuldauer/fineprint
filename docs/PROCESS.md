@@ -60,7 +60,7 @@ These apply to every change, by every agent. Briefs inline them in full.
    `test.global_humility_like`). The only exception is design documentation (`docs/SRS.md`,
    and GitHub issues), which may name a card to identify an interaction. Scryfall bulk files live
    only in git-ignored caches. Product names and branding never contain third-party game names or
-   marks; documentation that names the supported game carries the disclaimer from `README.md`.
+   marks; documentation that names the supported game carries the trademark notice from `README.md`.
 6. **R6 — Cite the rules.** Every rules procedure, SBA registry entry, keyword macro and rules
    test cites the CR rule it implements (`// CR 613.8b`), using the numbering of the SRS rules
    baseline. Every test names the `REQ-*` IDs it covers. Unknown or uncertain rule numbers go to
