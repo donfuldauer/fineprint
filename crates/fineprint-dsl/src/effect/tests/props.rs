@@ -515,11 +515,23 @@ fn gen_op(rng: &mut Pcg64Dxsm, op: usize, depth: u32) -> Instruction {
         58 => I::Waterbend {
             cost: gen_costs(rng),
         },
-        59 => I::CreateContinuousEffect {
-            effects: (0..1 + pick(rng, 3)).map(|_| gen_static(rng)).collect(),
-            duration: gen_duration(rng),
-            lock_affected_set: flag(rng),
-        },
+        59 => {
+            let effects: Vec<StaticEffect> =
+                (0..1 + pick(rng, 3)).map(|_| gen_static(rng)).collect();
+            let duration = gen_duration(rng);
+            // CR 611.2c: `false` is only valid when no effect is CHAR.
+            let mut lock_affected_set = flag(rng);
+            if lock_affected_set == Some(false)
+                && effects.iter().any(|e| matches!(e, StaticEffect::Char(_)))
+            {
+                lock_affected_set = if pick(rng, 2) == 0 { None } else { Some(true) };
+            }
+            I::CreateContinuousEffect {
+                effects,
+                duration,
+                lock_affected_set,
+            }
+        }
         60 => I::CreateDelayedTrigger {
             trigger: gen_trigger(rng),
             effect: gen_instrs(rng, d),

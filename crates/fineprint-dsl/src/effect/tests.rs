@@ -1516,13 +1516,34 @@ fn req_dsl_010_continuous_effect() {
     };
     let absent = instr(&doc(""));
     let yes = instr(&doc(r#","lockAffectedSet":true"#));
-    let no = instr(&doc(r#","lockAffectedSet":false"#));
     assert!(absent.locks_affected_set());
     assert!(yes.locks_affected_set());
-    assert!(!no.locks_affected_set());
     assert_ne!(absent, yes);
-    assert_ne!(absent, no);
-    assert_ne!(yes, no);
+    // `false` is rejected for CHAR effects (CR 611.2c); it stays valid for RULE/PLAYER-only.
+    reject::<Instruction>(&doc(r#","lockAffectedSet":false"#));
+    let rule_only = |extra: &str| {
+        instr(&format!(
+            r#"{{"op":"CREATE_CONTINUOUS_EFFECT","effects":[{{"type":"RULE","kind":"PROHIBITION","what":"test"}}],"duration":{{"kind":"UNTIL_END_OF_TURN"}}{extra}}}"#
+        ))
+    };
+    let player_only = |extra: &str| {
+        instr(&format!(
+            r#"{{"op":"CREATE_CONTINUOUS_EFFECT","effects":[{{"type":"PLAYER","affected":{{"ref":"CONTROLLER"}},"modification":{{"op":"TEST_PLAYER_OP"}}}}],"duration":{{"kind":"UNTIL_END_OF_TURN"}}{extra}}}"#
+        ))
+    };
+    let makers: [&dyn Fn(&str) -> Instruction; 2] = [&rule_only, &player_only];
+    for mk in makers {
+        let (a, y, n) = (
+            mk(""),
+            mk(r#","lockAffectedSet":true"#),
+            mk(r#","lockAffectedSet":false"#),
+        );
+        assert!(a.locks_affected_set() && y.locks_affected_set());
+        assert!(!n.locks_affected_set());
+        assert_ne!(a, y);
+        assert_ne!(a, n);
+        assert_ne!(y, n);
+    }
     match &absent {
         Instruction::CreateContinuousEffect {
             effects,
@@ -1545,6 +1566,111 @@ fn req_dsl_010_continuous_effect() {
     // Instructions other than CREATE_CONTINUOUS_EFFECT lock nothing.
     assert!(!Instruction::Populate.locks_affected_set());
     assert!(!Instruction::NativeEffect(NativeEffectAST::new("test.n", 1)).locks_affected_set());
+}
+
+/// Wire text of a CREATE_CONTINUOUS_EFFECT whose effects are the given JSON snippets.
+fn cce_doc(effects: &[&str], extra: &str) -> String {
+    format!(
+        r#"{{"op":"CREATE_CONTINUOUS_EFFECT","effects":[{}],"duration":{{"kind":"PERMANENT"}}{extra}}}"#,
+        effects.join(",")
+    )
+}
+
+const CHAR_7C: &str = r#"{"type":"CHAR","layer":"7c","affected":{"ref":"TARGET","slot":0},"modification":{"op":"TEST_OP"}}"#;
+const CHAR_L2: &str = r#"{"type":"CHAR","layer":"2","affected":{"ref":"TARGET","slot":0},"modification":{"op":"TEST_OP"}}"#;
+const RULE_E: &str = r#"{"type":"RULE","kind":"PROHIBITION","what":"test"}"#;
+const PLAYER_E: &str =
+    r#"{"type":"PLAYER","affected":{"ref":"CONTROLLER"},"modification":{"op":"TEST_PLAYER_OP"}}"#;
+const LOCK_FALSE: &str = r#","lockAffectedSet":false"#;
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): a CHAR effect with `lockAffectedSet:false` is
+/// rejected on decode.
+#[test]
+fn req_layer_003_char_lock_false_rejected() {
+    reject::<Instruction>(&cce_doc(&[CHAR_7C], LOCK_FALSE));
+    let err = serde_json::from_str::<Instruction>(&cce_doc(&[CHAR_7C], LOCK_FALSE))
+        .expect_err("rejected");
+    assert!(err.to_string().contains("lockAffectedSet"), "{err}");
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): a layer 2 (control change) CHAR effect with
+/// `lockAffectedSet:false` is rejected.
+#[test]
+fn req_layer_003_control_lock_false_rejected() {
+    reject::<Instruction>(&cce_doc(&[CHAR_L2], LOCK_FALSE));
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): a RULE-only effect with `false` is accepted and does
+/// not lock.
+#[test]
+fn req_layer_003_rule_only_lock_false_accepted() {
+    let i = instr(&cce_doc(&[RULE_E], LOCK_FALSE));
+    assert!(!i.locks_affected_set());
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): a PLAYER-only effect with `false` is accepted and
+/// does not lock.
+#[test]
+fn req_layer_003_player_only_lock_false_accepted() {
+    let i = instr(&cce_doc(&[PLAYER_E], LOCK_FALSE));
+    assert!(!i.locks_affected_set());
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): mixing a CHAR effect with RULE or PLAYER effects
+/// does not make `false` acceptable.
+#[test]
+fn req_layer_003_mixed_lock_false_rejected() {
+    reject::<Instruction>(&cce_doc(&[CHAR_7C, RULE_E], LOCK_FALSE));
+    reject::<Instruction>(&cce_doc(&[RULE_E, CHAR_7C], LOCK_FALSE));
+    reject::<Instruction>(&cce_doc(&[CHAR_7C, PLAYER_E], LOCK_FALSE));
+    reject::<Instruction>(&cce_doc(&[PLAYER_E, CHAR_L2, RULE_E], LOCK_FALSE));
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): CHAR with `true` or an absent member is accepted and
+/// locks.
+#[test]
+fn req_layer_003_char_lock_true_or_absent_accepted() {
+    for extra in ["", r#","lockAffectedSet":true"#] {
+        for effects in [&[CHAR_7C][..], &[CHAR_L2], &[CHAR_7C, RULE_E, PLAYER_E]] {
+            assert!(instr(&cce_doc(effects, extra)).locks_affected_set());
+        }
+    }
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c): a hand-built CHAR instruction with
+/// `Some(false)` does not serialize, and the helper still reports a locked set.
+#[test]
+fn req_layer_003_hand_built_char_lock_false_not_written() {
+    let mut i = instr(&cce_doc(&[CHAR_7C], ""));
+    match &mut i {
+        Instruction::CreateContinuousEffect {
+            lock_affected_set, ..
+        } => *lock_affected_set = Some(false),
+        other => panic!("{other:?}"),
+    }
+    assert!(i.locks_affected_set());
+    assert!(serde_json::to_value(&i).is_err());
+    no_encode(&i);
+}
+
+/// REQ-DSL-010: a duplicated mode target slot in a non-adjacent position (0, 1, 0) is rejected
+/// on decode and on encode.
+#[test]
+fn req_dsl_010_mode_duplicate_slot_non_adjacent() {
+    let t = |n: u32| format!(r#"{{"slot":{n},"selector":{{"ref":"SELF"}},"min":1,"max":1}}"#);
+    let mode = |slots: &[u32]| {
+        let ts: Vec<String> = slots.iter().map(|n| t(*n)).collect();
+        format!(
+            r#"{{"id":"m","targets":[{}],"effect":[{{"op":"POPULATE"}}]}}"#,
+            ts.join(",")
+        )
+    };
+    let ok = accept::<InstructionMode>(&mode(&[0, 1, 2]));
+    reject::<InstructionMode>(&mode(&[0, 1, 0]));
+    let mut bad = ok;
+    let first = bad.targets.as_ref().expect("targets")[0].clone();
+    bad.targets.as_mut().expect("targets").push(first);
+    no_encode(&bad);
 }
 
 /// REQ-DSL-011: every instruction with a decision accepts a `choice` and rejects an invalid one.
