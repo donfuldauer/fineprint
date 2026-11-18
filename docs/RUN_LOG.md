@@ -48,3 +48,6 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 00-repository | PR #157 r3 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 3 on PR #157 (docs-only round runs check 1 in full) |
 | 00-repository | PR #157 r4 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 4 on PR #157 (docs-only round runs check 8) |
 | 00-repository | PR #157 r5 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 5 on PR #157 (no docs-only shortcut; check 8 reads docs/ content) |
+| 01-foundations | #11 | Implementer | Opus 5.5 | 1 | done | fmt, clippy, guard all clean; 36 unit tests; dsl lib coverage 98.11% (unit tests only) | FP-010 card DSL, mana grammar, JCS, definitionHash; classifier brief T2, no Fable (allowance unknown) |
+| 01-foundations | #11 | Independent Tester | Opus 5.5 | 1 | done | 49 spec tests (card 23, mana 11, canonical 15) | 2 canonical tests disagreed with the implementation on large integral numbers |
+| 01-foundations | #11 | Fixer (tests) | Opus 5.5 | 1 | done | cargo test --workspace 363 passed; fmt, clippy, guard all clean | Orchestrator R8 decision: integral values beyond 2^53−1 are UnsafeInteger in any spelling (DECISIONS "Safe integer range for hashed JSON") |
