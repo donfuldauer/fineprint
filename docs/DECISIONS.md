@@ -1580,8 +1580,11 @@ contract of H and I, and the instruction schema of FP-013 will be typed anyway).
 ## #13 FP-012 — Smaller choices where the brief is silent
 
 **Decision.** (1) Opaque values are re-checked on encode (no null, integers within the safe
-range, no noncharacters, nesting bounded by `MAX_DEPTH`), so a hand-built `serde_json::Value`
-cannot produce JSON that fails to decode. Inside opaque values, empty member names and empty
+range, no noncharacters, nesting bounded by `MAX_DEPTH`). The nesting check is relative to the
+opaque value itself, not to the complete document: a value that passes it can still sit deep
+enough in an ability that the whole document exceeds `MAX_DEPTH`, so output of
+`serde_json::to_vec` is not guaranteed to reload as `AbilityAST`. Callers that need reloadable
+output use `canonical::to_canonical_vec`, which checks the complete document. Inside opaque values, empty member names and empty
 strings are allowed; only the flat member names must be non-empty. (2) `EventSubject` is the
 `Players` variant exactly when the object has a `players` member; otherwise it is decoded as an
 `ObjectSelectorAST`. `Affected` is `SameAsLayer` exactly when the object has `sameAsLayer`.
@@ -1609,3 +1612,26 @@ integers inside opaque values are rejected under W2.
 left for the units that give them meaning (FP-013 effects, the replacement bus).
 **Alternatives.** Assert behaviour the brief does not state (rejected: R10, tests assert only
 what the brief requires).
+
+## #13 FP-012 — SRS §14.4 examples written in shorthand
+
+**Decision.** Three published SRS §14.4 examples use spellings the FP-011 wire contract rejects
+(decision "#12 FP-011 — SRS shorthand is not a wire form"), and are tested in adapted form:
+(1) the activated-ability example (SRS §14.4.2) writes the subtype as
+`{"textToken":"CREATURE_TYPE","value":"…"}`, which `WordRef` rejects (a rewritable word is a token
+id `{"textToken":"t14"}` or a fixed `{"name":…}`, SRS §14.5); EX3 uses `{"name":"TestType"}`.
+(2) The max-speed example (SRS §14.4.3) writes `"player":"CONTROLLER"` and
+`"affected":{"selector":"OTHER_CREATURES_YOU_CONTROL"}`; `PlayerSelectorAST` needs
+`{"ref":"CONTROLLER"}` and there is no named-selector form, so EX8 spells the selector out as a
+filter. (3) The "as this enters, choose a creature type" example (SRS §14.4.4) writes
+`"choice":"CREATURE_TYPE","chooser":"CONTROLLER"` beside `op`; `ChoiceSpec` is an object, so
+EX10 nests `{"chooser":{"ref":"CONTROLLER"},"kind":"CREATURE_TYPE"}` in `choice`. Spec tests pin
+that the verbatim spellings are rejected, so the gap stays visible. The proposed SRS edit is a
+PROCESS.md P8 line in `docs/HUMAN_QUEUE.md`. The issue's acceptance criterion "every SRS
+§14.4.1–14.4.4 JSON example parses" is read as "every example, in the FP-011 wire form".
+**Rationale.** SRS §14.5 requires by-id word references and the wire contract requires one
+spelling per value (G5); accepting the shorthand as aliases would break both. The SRS examples
+are illustrative JSON, and the SRS text around them (§14.5) is the normative rule.
+**Alternatives.** Accept the shorthand as aliases in the decoder (rejected: two spellings per
+value, and a change to the FP-011 contract owned by #12); leave the examples untested
+(rejected: the acceptance criterion would have no evidence).
