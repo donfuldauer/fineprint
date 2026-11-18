@@ -166,21 +166,24 @@ Lands later:
 
 ## CI
 
-The workflow is `.github/workflows/ci.yml` (owned by #3 FP-002). It runs on every `push` and
-every `pull_request`; a newer run on the same ref cancels the superseded one (concurrency group
-per workflow and ref). The toolchain comes from `rust-toolchain.toml` (no version is repeated in
+The workflow is `.github/workflows/ci.yml` (owned by #3 FP-002). It runs on every
+`pull_request` and on pushes to `main` only (a push to a pull-request branch is already covered
+by its `pull_request` run); a newer run on the same ref cancels the superseded one (concurrency
+group per workflow and ref). The first job, `changes`, decides whether a pull request changes
+anything besides documentation: Markdown files other than `docs/SRS.md` (which the xtask `cr`
+tests read), and `.claude/**`. If it changes only documentation, `fmt`, `clippy` and `test` still
+report success under their required names but skip their steps, and `coverage` is skipped;
+`guards` and `req-coverage` always run, and every push to `main` runs everything
+(docs/DECISIONS.md "CI — PR load"). The toolchain comes from `rust-toolchain.toml` (no version is repeated in
 the workflow). Caches of the cargo registry and `target/` are keyed on OS, toolchain and
 `Cargo.lock`, with a fallback to the same OS and toolchain. Line endings are checked out as
 committed (`core.autocrlf false`) so all three systems see the same bytes.
 
 | Job name | Command |
 |---|---|
+| `changes` | `git diff --no-renames --name-only` between the pull request's base and head; outputs `code` (always `true` on a push) |
 | `fmt (ubuntu-latest)` | `cargo fmt --all --check` |
-| `fmt (windows-latest)` | `cargo fmt --all --check` |
-| `fmt (macos-latest)` | `cargo fmt --all --check` |
 | `clippy (ubuntu-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| `clippy (windows-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| `clippy (macos-latest)` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `test (ubuntu-latest)` | `cargo test --workspace --locked` |
 | `test (windows-latest)` | `cargo test --workspace --locked` |
 | `test (macos-latest)` | `cargo test --workspace --locked` |
@@ -189,8 +192,10 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 | `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`; `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
-The first nine job names are the contexts listed as required status checks on `main`
-(REQ-NFR-011); the maintainer adds `coverage (ubuntu-latest)`, `guards` and `req-coverage`
+`fmt` and `clippy` run on Linux only: formatting and lints do not depend on the OS, and `test`
+builds and runs the whole workspace on all three systems (REQ-NFR-003). The five job names
+`fmt (ubuntu-latest)`, `clippy (ubuntu-latest)` and `test (ubuntu-latest|windows-latest|macos-latest)`
+are the contexts listed as required status checks on `main` (REQ-NFR-011); the maintainer adds `coverage (ubuntu-latest)`, `guards` and `req-coverage`
 after #4 merges (docs/HUMAN_QUEUE.md). Do not rename them without updating branch protection. Binding and
 browser jobs are added by later issues (#6, #104).
 
