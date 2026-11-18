@@ -1187,9 +1187,10 @@ the major version is gated by `check_dsl_version`. Plain `Deserialize` performs 
 hash check; `CardDefinitionDSL::from_json` is the checked loader. A present `power` or
 `toughness` member is decoded as `Some` even when it is JSON `null`, so
 `Some(ValueExpressionAST(Value::Null))` survives a round trip.
-**Rationale.** The hash is verified over the re-serialised typed value; an unknown member would
-be dropped by decoding and the hash would then not cover what the file says, so it cannot be
-tolerated. Failing loudly is also R11 ("never silently runs an incomplete definition").
+**Rationale.** The hash is verified over the checked input (with only `definitionHash`
+removed), and the loader also requires the decoded value to re-serialise to exactly that input
+(see "#11 FP-010 — Lossless decode and hash over the checked input"); an unknown member would be
+dropped by decoding, so the decode would not be lossless and it cannot be tolerated. Failing loudly is also R11 ("never silently runs an incomplete definition").
 **Alternatives.** Ignoring unknown members (rejected: the hash would not cover them); keeping
 unknown members in a catch-all map (rejected: the engine would carry data it cannot interpret).
 
@@ -1224,3 +1225,121 @@ only rule that satisfies both.
 accepting exponent-form integers of 1e21 or more because JCS prints them with an exponent
 (rejected: they are still integers beyond the safe range, and it makes the rule depend on a
 printing threshold).
+
+## #11 FP-010 — Checked serializer replaces serde_json::to_value
+
+**Decision.** `canonical::to_canonical_vec` (and through it `CardDefinitionDSL::to_canonical_json`,
+`compute_hash` and `seal`) serialises with a private `serde::Serializer`
+(`canonical/ser.rs`, `to_checked_value`) that builds the same `serde_json::Value` as
+`serde_json::to_value` for every input that function accepts (demonstrated by a differential unit
+test), and errors instead where `to_value` would silently lose or alter content: non-finite
+floats (`CanonicalError::Serialize`, at any depth), a member name emitted twice
+(`CanonicalError::DuplicateKey`), noncharacters, nesting beyond `MAX_DEPTH`, and integers outside
+±`MAX_SAFE_INTEGER` (`UnsafeInteger`, all widths up to 128 bits). Scalars, floats and map keys
+are delegated to `serde_json::value::Serializer` after the checks, so number and key formatting
+is serde_json's own. Its `serialize_f32`/`serialize_f64` methods carry a scoped
+`#[allow(clippy::disallowed_types)]`; the two unit tests that construct NaN and infinities do
+too. The old post-hoc `check_value_integers` pass is removed (redundant). The final lexical scan
+of the JCS bytes stays (it catches large integral doubles such as `1e20`).
+**Rationale.** REQ-NFR-006: exported bytes must be what the loader accepts, and RFC 8785 requires
+an error for NaN and infinity. REQ-CORE-006 bans floats in rules arithmetic; the serializer's float
+methods are the boundary that rejects non-finite values and passes finite ones through untouched,
+so naming the type there is the only way to enforce the rule, and the allow is limited to those
+methods. Duplicate detection uses the object's own ordered `serde_json::Map` (BTreeMap-backed,
+`preserve_order` off) via `contains_key` before insertion, which is the per-object ordered set the
+brief asks for without keeping a second copy of the names.
+**Alternatives.** Post-checking the `Value` from `to_value` (rejected: NaN is already `null` and
+the first duplicate already lost); a separate `BTreeSet` per object (equivalent; not needed);
+writing JSON text and re-parsing it (rejected: serde_json's writer also emits `null` for NaN).
+
+## #11 FP-010 — Duplicate member names on export are DuplicateKey
+
+**Decision.** A `Serialize` impl that emits the same member name twice (through `SerializeMap` or
+`SerializeStruct`) gives `CanonicalError::DuplicateKey(<name>)`, the same kind the input path uses.
+**Rationale.** One error kind for one defect, whichever path finds it; callers already match it.
+**Alternatives.** `CanonicalError::Serialize` (rejected: hides the kind behind a message).
+
+## #11 FP-010 — Noncharacters rejected without a new error variant
+
+**Decision.** Noncharacters (U+FDD0..=U+FDEF and every code point whose low 16 bits are FFFE or
+FFFF) are rejected in decoded member names and string values, literal or escaped (RFC 7493 §2.1).
+On input (`canonicalize`, `parse_checked`, hence `from_json`) the error is
+`CanonicalError::Syntax`; on export (`to_canonical_vec`) it is `CanonicalError::Serialize`; both
+messages name the code point (`U+XXXX`). The input check is an iterative walk of the parsed tree.
+**Rationale.** The input is not acceptable I-JSON, which the `Syntax` variant documents; on
+export the value cannot be represented, which is what `Serialize` means. No variant is added
+because the Independent Tester's spec tests match `CanonicalError` exhaustively.
+**Alternatives.** A new `Noncharacter` variant (rejected: breaks exhaustive matches, a public API
+change); accepting noncharacters (rejected: RFC 7493 §2.1).
+
+## #11 FP-010 — One depth budget: MAX_DEPTH = 127
+
+**Decision.** `canonical::MAX_DEPTH = 127` is the largest nesting depth (simultaneously open
+arrays and objects; a scalar adds none) accepted by loading, hashing and export. The checked
+serializer errors with `CanonicalError::Serialize("nesting depth exceeds 127")` the moment a
+container would exceed it, before recursing. For a card the definition object, `faces`, a face
+and `abilities` use four levels. The parser limit is not relaxed.
+**Rationale.** The value was read from serde_json 1.0.154's parser (`remaining_depth` starts at
+128 and is decremented on every `[`/`{`, failing when it reaches 0, so 127 levels pass and 128 do
+not) and is pinned by a unit test that `canonicalize` accepts 127 nested arrays and rejects 128,
+so the constant cannot drift from the parser. Checking before recursion means a pathologically
+deep value (tested at 100 000 levels) cannot overflow the stack.
+**Alternatives.** Raising the parser limit (rejected: weakens the untrusted-input bound); a
+smaller separate export limit (rejected: two budgets are what produced the defect).
+
+## #11 FP-010 — No explicit null for optional members
+
+**Decision.** Every optional, non-nullable member (`manaCost`, `colorIndicator`, `loyalty`,
+`defense`, `handModifier`, `lifeModifier`, `knownGaps`, `meldPartner`, `commanderEligibility`,
+`relatedTokens`, `parserVersion`, `overrideSource`, `verifiedBy`) uses
+`deserialize_with = "present"`: omission gives `None`, a present `null` is an error (also for
+plain serde `Deserialize`). `power` and `toughness` keep `Some(Value::Null)` for `null`.
+**Rationale.** The SRS marks these members `?:`, never `| null`, and the canonical form omits
+them; accepting `null` made two documents with different bytes decode to one value.
+**Alternatives.** Rejecting `null` only in `from_json` (rejected: the type's own decoder should
+match the schema; the lossless check would catch it anyway).
+
+## #11 FP-010 — Lossless decode and hash over the checked input
+
+**Decision.** `CardDefinitionDSL::from_json` takes the checked document in its canonical form
+(parsed back from the JCS bytes, so `1.0`, `-0.0` and `1` load as the integer value), checks
+`dslVersion` first as before, decodes the typed struct (`Schema` on failure), then requires the
+decoded value re-serialised with the checked serializer to equal that document exactly
+(`Schema`: "decoding changed the content ..."), and finally compares `definitionHash` with
+SHA-256 of the RFC 8785 bytes of the checked document with only `definitionHash` removed
+(`HashMismatch`). The string enums now decode only from strings (hand-written `Deserialize` in
+`string_enum!`). Plain serde `Deserialize` stays the documented unchecked building block (it may
+still accept positional arrays).
+**Rationale.** The digest must cover what the file says, not what decoding kept: a positional
+array, a `null` member or a singleton-object enum decoded to the same struct and passed the old
+re-serialised-hash check. One equality check rejects every lossy decode, including ones not yet
+imagined, without per-type map-only deserializers; the error order of the contract is unchanged.
+**Alternatives.** Map-only deserializers per struct (rejected: covers only the listed cases);
+hashing the input while skipping the lossless check (rejected: a decoded value could still differ
+from the hashed document).
+
+## #11 FP-010 — Sealing normalises placeholder numbers
+
+**Decision.** `seal` replaces the value with the decode of its own canonical JSON before storing
+the hash, so a placeholder holding `-0.0` or `1.0` is stored as `0` or `1`. The canonical bytes
+and the hash are unchanged; only sealed values carry the guarantee
+`from_json(&v.to_canonical_json()?) == Ok(v)`.
+**Rationale.** JCS writes `-0.0` as `0`; without normalising, the loaded value would not equal the
+sealed one although the hash agreed.
+**Alternatives.** Rejecting non-canonical number spellings in placeholders (rejected: valid JSON
+the JCS defines; normalising is lossless for the hash).
+
+## #11 FP-010 — ManaCostDSL::new validates with the parser's rule
+
+**Decision.** `ManaSymbol::is_valid` (new public method) states the parser's rules
+(`Generic` 0..=1 000 000, `GenericHybrid` 1..=1 000 000, two different colours for `Hybrid` and
+`HybridPhyrexian`); the parser filters every candidate symbol through it and `ManaCostDSL::new`
+rejects the first invalid symbol with the existing `ManaParseError::UnknownSymbol { offset,
+symbol }`, `offset` being its byte offset in the cost's canonical text. The parser's
+`symbol_from_inner` no longer allocates (it takes at most four `/`-parts from the iterator).
+**Rationale.** A constructed cost must print as text the loader accepts. Reusing `UnknownSymbol`
+keeps `ManaParseError` unchanged (the spec tests match it exhaustively) and is what the parser
+reports for the same text. One shared predicate means parser and constructor cannot disagree
+(an equivalence unit test covers a spread of symbols).
+**Alternatives.** A new error variant (rejected: public API change); a private check duplicated
+in `new` (rejected: could drift from the parser).

@@ -11,8 +11,18 @@
 //!   (RFC 8785 requires I-JSON input; `serde_json::Value` would silently keep the last one).
 //! - **Unsafe integers** (magnitude above [`MAX_SAFE_INTEGER`]) are rejected, because JCS would
 //!   serialise them as rounded doubles without any error. Large values must travel as strings.
+//! - **Noncharacters** (U+FDD0..=U+FDEF and every code point ending in FFFE or FFFF) are rejected
+//!   in decoded member names and string values, whether written literally or escaped
+//!   (RFC 7493 §2.1).
+//! - **Nesting** is limited to [`MAX_DEPTH`] open arrays and objects, the same budget for
+//!   loading, hashing and export.
 //!
-//! No floating-point type is named here (REQ-CORE-006): number syntax is validated by
+//! [`to_canonical_vec`] uses a checked serializer instead of `serde_json::to_value`, so a Rust
+//! value is refused for the same reasons as input bytes (plus non-finite floats, which
+//! `serde_json::to_value` would silently turn into `null`): what is exported can be loaded.
+//!
+//! No floating-point type is named here (REQ-CORE-006) except in the checked serializer's two
+//! float methods, the boundary that rejects non-finite values: number syntax is validated by
 //! `serde_json`, and integer literals are range-checked lexically on the input bytes.
 
 use std::collections::BTreeSet;
@@ -21,11 +31,21 @@ use std::fmt;
 use serde::Serialize;
 use serde_json::Value;
 
+mod ser;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use ser::to_checked_value;
+
 /// The largest integer magnitude that survives JCS unchanged: 2^53 − 1.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// The largest document nesting depth accepted everywhere: the count of simultaneously open
+/// arrays and objects (a scalar adds none, so `[[1]]` has depth 2). It equals the largest depth
+/// `serde_json`'s parser accepts, so [`canonicalize`] and [`parse_checked`] (loading),
+/// [`to_canonical_vec`] (export) and every content hash share one budget: whatever can be
+/// exported can be loaded again.
+pub const MAX_DEPTH: usize = 127;
 
 /// Why a JSON document could not be canonicalised.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,43 +93,60 @@ impl std::error::Error for CanonicalError {}
 /// the integer literal `100000000000000000000`).
 ///
 /// # Errors
-/// [`CanonicalError::Syntax`] for invalid JSON, [`CanonicalError::DuplicateKey`] for a repeated
-/// member name in any object, [`CanonicalError::UnsafeInteger`] for an out-of-range integer.
+/// [`CanonicalError::Syntax`] for invalid JSON (including nesting deeper than [`MAX_DEPTH`]) and
+/// for a noncharacter in any decoded member name or string value,
+/// [`CanonicalError::DuplicateKey`] for a repeated member name in any object,
+/// [`CanonicalError::UnsafeInteger`] for an out-of-range integer.
 pub fn canonicalize(json: &[u8]) -> Result<Vec<u8>, CanonicalError> {
     checked(json).map(|(_, bytes)| bytes)
 }
 
-/// Serialises `value` to RFC 8785 canonical JSON bytes.
+/// Serialises `value` to RFC 8785 canonical JSON bytes. The output is always accepted by
+/// [`canonicalize`], which returns it unchanged.
 ///
 /// # Errors
-/// [`CanonicalError::Serialize`] if serde cannot represent the value as JSON,
-/// [`CanonicalError::UnsafeInteger`] if it contains an integer outside ±[`MAX_SAFE_INTEGER`].
+/// [`CanonicalError::Serialize`] if serde cannot represent the value as JSON (for example a map
+/// with non-string keys), for a NaN or infinite float at any depth, for a noncharacter in a
+/// string value or member name, and for nesting deeper than [`MAX_DEPTH`] (detected before
+/// recursing further); [`CanonicalError::DuplicateKey`] if a struct or map emits the same member
+/// name twice; [`CanonicalError::UnsafeInteger`] if it contains an integer outside
+/// ±[`MAX_SAFE_INTEGER`].
 pub fn to_canonical_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, CanonicalError> {
-    let value =
-        serde_json::to_value(value).map_err(|e| CanonicalError::Serialize(e.to_string()))?;
-    check_value_integers(&value)?;
+    let value = to_checked_value(value)?;
     let bytes = jcs(&value)?;
     scan_valid_json(&bytes, Pass::Canonical)?;
     Ok(bytes)
 }
 
-/// Parses untrusted JSON into a [`Value`] after the syntax, duplicate-key and safe-integer
-/// checks of [`canonicalize`]. Used by checked loaders that need the tree, not the bytes.
+/// Parses untrusted JSON into a [`Value`] after the syntax, depth, duplicate-key,
+/// safe-integer and noncharacter checks of [`canonicalize`]. Used by checked loaders that need
+/// the tree, not the bytes.
 ///
 /// # Errors
-/// The same errors as [`canonicalize`], except [`CanonicalError::Serialize`].
+/// The same errors as [`canonicalize`] (a noncharacter in a member name or string value is
+/// [`CanonicalError::Syntax`]), except [`CanonicalError::Serialize`].
 pub fn parse_checked(json: &[u8]) -> Result<Value, CanonicalError> {
     checked(json).map(|(value, _)| value)
 }
 
+/// [`parse_checked`], but the returned tree is parsed from the canonical bytes, so every
+/// number has its canonical form: `1.0`, `1e0` and `1` all give the integer `1`, `-0.0` gives
+/// `0`; non-integral numbers keep their value. Used by loaders whose result must equal a
+/// re-serialisation of what they decoded.
+pub(crate) fn parse_normalized(json: &[u8]) -> Result<Value, CanonicalError> {
+    let (_, bytes) = checked(json)?;
+    serde_json::from_slice(&bytes).map_err(|e| CanonicalError::Syntax(e.to_string()))
+}
+
 /// Shared body of [`canonicalize`] and [`parse_checked`]: the checked value and its JCS bytes.
 fn checked(json: &[u8]) -> Result<(Value, Vec<u8>), CanonicalError> {
-    // Syntax first: serde_json enforces its recursion limit, rejects trailing bytes, invalid
-    // UTF-8, lone surrogates and numbers outside the double range.
+    // Syntax first: serde_json enforces its recursion limit (MAX_DEPTH), rejects trailing
+    // bytes, invalid UTF-8, lone surrogates and numbers outside the double range.
     let value: Value =
         serde_json::from_slice(json).map_err(|e| CanonicalError::Syntax(e.to_string()))?;
     // The input is now known to be valid JSON; the scan only checks member names and integers.
     scan_valid_json(json, Pass::Input)?;
+    check_noncharacters(&value)?;
     let bytes = jcs(&value)?;
     // Numbers spelled with a fraction or exponent can still have a large integer value; their
     // ECMAScript form in the output shows it.
@@ -122,28 +159,41 @@ fn jcs(value: &Value) -> Result<Vec<u8>, CanonicalError> {
     serde_json_canonicalizer::to_vec(value).map_err(|e| CanonicalError::Serialize(e.to_string()))
 }
 
-/// Returns an error if any integer in `value` lies outside ±[`MAX_SAFE_INTEGER`]. Iterative, so
-/// arbitrarily deep values cannot overflow the stack here.
-fn check_value_integers(value: &Value) -> Result<(), CanonicalError> {
+/// Whether `c` is a Unicode noncharacter: U+FDD0..=U+FDEF, or a code point whose low 16 bits
+/// are FFFE or FFFF (in every plane).
+fn is_noncharacter(c: char) -> bool {
+    let c = u32::from(c);
+    (0xFDD0..=0xFDEF).contains(&c) || c & 0xFFFE == 0xFFFE
+}
+
+/// The first noncharacter in `text`, if any.
+fn first_noncharacter(text: &str) -> Option<char> {
+    text.chars().find(|&c| is_noncharacter(c))
+}
+
+/// Rejects a noncharacter in any decoded member name or string value of `value` (RFC 7493
+/// §2.1). Iterative, so the walk cannot overflow the stack.
+fn check_noncharacters(value: &Value) -> Result<(), CanonicalError> {
+    let found = |text: &str, what: &str| {
+        first_noncharacter(text).map_or(Ok(()), |c| {
+            Err(CanonicalError::Syntax(format!(
+                "{what} contains the noncharacter U+{:04X}",
+                u32::from(c)
+            )))
+        })
+    };
     let mut stack: Vec<&Value> = vec![value];
     while let Some(v) = stack.pop() {
         match v {
-            Value::Number(n) => {
-                let safe = if let Some(i) = n.as_i64() {
-                    i.unsigned_abs() <= MAX_SAFE_INTEGER.unsigned_abs()
-                } else if let Some(u) = n.as_u64() {
-                    u <= MAX_SAFE_INTEGER.unsigned_abs()
-                } else {
-                    // A non-integer number: JCS formats it exactly as ECMAScript does.
-                    true
-                };
-                if !safe {
-                    return Err(CanonicalError::UnsafeInteger(n.to_string()));
+            Value::String(text) => found(text, "string")?,
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Object(map) => {
+                for (key, member) in map {
+                    found(key, "member name")?;
+                    stack.push(member);
                 }
             }
-            Value::Array(items) => stack.extend(items.iter()),
-            Value::Object(map) => stack.extend(map.values()),
-            Value::Null | Value::Bool(_) | Value::String(_) => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
         }
     }
     Ok(())

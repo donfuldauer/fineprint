@@ -5,18 +5,22 @@
 //! Card definition top-level types (REQ-DSL-001, REQ-DSL-002, SRS §14.2).
 //!
 //! Field names are snake_case in Rust and camelCase in JSON, exactly as the SRS schema. Every
-//! struct rejects unknown members (`deny_unknown_fields`): the `definitionHash` is verified over
-//! the re-serialised typed value, so a member the engine does not know could not be covered.
+//! struct rejects unknown members (`deny_unknown_fields`), the string enums accept only their
+//! declared strings, and optional members other than `power` and `toughness` must be omitted
+//! rather than given as `null`.
 //!
-//! Plain serde `Deserialize` performs no version or hash check; it is the building block for
-//! value → JSON → value round trips. [`CardDefinitionDSL::from_json`] is the checked loader for
-//! untrusted input.
+//! Plain serde `Deserialize` performs no version or hash check and is not lossless on its own
+//! (for example it accepts a positional array for a struct); it is the unchecked building block
+//! for value → JSON → value round trips. [`CardDefinitionDSL::from_json`] is the strict loader
+//! for untrusted input: it also requires that decoding lost nothing and verifies the hash over
+//! the checked input. Only sealed values ([`CardDefinitionDSL::seal`]) carry the guarantee
+//! `from_json(&v.to_canonical_json()?) == v`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use fineprint_base::hash::sha256;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::canonical::{self, CanonicalError};
@@ -37,9 +41,21 @@ macro_rules! string_enum {
         $name:ident; $n:literal; $( $(#[$vmeta:meta])* $variant:ident => $text:literal ),+ $(,)?
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
         pub enum $name {
             $( $(#[$vmeta])* #[serde(rename = $text)] $variant, )+
+        }
+
+        // Only a JSON string naming a declared variant is accepted; serde's derived decoder would
+        // also accept a singleton object such as `{"VARIANT":null}`.
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                deserializer.deserialize_str(EnumVisitor {
+                    expecting: stringify!($name),
+                    variants: &[ $( $text ),+ ],
+                    from_str: |text| $name::ALL.into_iter().find(|v| v.as_str() == text),
+                })
+            }
         }
 
         impl $name {
@@ -61,6 +77,28 @@ macro_rules! string_enum {
             }
         }
     };
+}
+
+/// Visitor shared by the [`string_enum!`] types: accepts a string and maps it to a variant.
+struct EnumVisitor<T> {
+    /// Type name for error messages.
+    expecting: &'static str,
+    /// The declared variant strings, for the unknown-variant error.
+    variants: &'static [&'static str],
+    /// Variant for an exact declared string.
+    from_str: fn(&str) -> Option<T>,
+}
+
+impl<T> de::Visitor<'_> for EnumVisitor<T> {
+    type Value = T;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a {} string", self.expecting)
+    }
+
+    fn visit_str<E: de::Error>(self, text: &str) -> Result<T, E> {
+        (self.from_str)(text).ok_or_else(|| E::unknown_variant(text, self.variants))
+    }
 }
 
 string_enum! {
@@ -256,9 +294,11 @@ pub struct PartnerAbilityDSL(pub Value);
 #[serde(transparent)]
 pub struct TextTokenStream(pub Vec<Value>);
 
-/// Deserialises a present member as `Some`, even when its JSON value is `null`, so that
-/// `Some(ValueExpressionAST(Value::Null))` survives a value → JSON → value round trip. An absent
-/// member is `None` through `#[serde(default)]`.
+/// Deserialises a present member as `Some(T)`; an absent member is `None` through
+/// `#[serde(default)]`. A present JSON `null` is decoded by `T` itself: for `power` and
+/// `toughness` that is `Some(ValueExpressionAST(Value::Null))`, which survives a value → JSON →
+/// value round trip; for every other optional member (`manaCost`, `loyalty`, `knownGaps`, ...)
+/// `T` refuses `null`, so `null` is an error rather than a silent `None`.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
@@ -274,13 +314,25 @@ pub struct ProvenanceDSL {
     /// Who produced the definition.
     pub origin: Origin,
     /// Parser version, if parsed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub parser_version: Option<String>,
     /// Client-supplied identifier of the override's author.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub override_source: Option<String>,
     /// Definition hashes of the tests that earned `VERIFIED`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub verified_by: Option<Vec<String>>,
     /// Rules baseline the definition was checked against.
     pub rules_baseline: String,
@@ -305,10 +357,18 @@ pub struct CardFaceDSL {
     /// Face name.
     pub name: String,
     /// Mana cost. `None` = "no mana cost" (member omitted); `Some` cost `{0}` is different.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub mana_cost: Option<ManaCostDSL>,
     /// Color indicator, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub color_indicator: Option<ColorBitmask>,
     /// Supertypes.
     pub supertypes: Vec<String>,
@@ -331,16 +391,32 @@ pub struct CardFaceDSL {
     )]
     pub toughness: Option<ValueExpressionAST>,
     /// Printed loyalty, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub loyalty: Option<i64>,
     /// Printed defense, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub defense: Option<i64>,
     /// Hand modifier, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub hand_modifier: Option<i64>,
     /// Life modifier, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub life_modifier: Option<i64>,
     /// Rules text token stream.
     pub text: TextTokenStream,
@@ -366,26 +442,42 @@ pub struct CardDefinitionDSL {
     /// Support status.
     pub support_status: SupportStatus,
     /// Unimplemented clauses (for `PARTIAL`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub known_gaps: Option<Vec<String>>,
     /// Layout behavior.
     pub layout: LayoutBehavior,
     /// Faces, ordered per layout.
     pub faces: Vec<CardFaceDSL>,
     /// Meld partner reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub meld_partner: Option<String>,
     /// Precomputed color identity.
     pub color_identity: ColorBitmask,
     /// Commander eligibility.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub commander_eligibility: Option<CommanderEligibilityDSL>,
     /// Format → legality (ordered map, REQ-CORE-006).
     pub legalities: BTreeMap<String, Legality>,
     /// Digital-only flag.
     pub digital_only: bool,
     /// Token definitions this card can create.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub related_tokens: Option<Vec<String>>,
 }
 
@@ -413,22 +505,26 @@ impl CardDefinitionDSL {
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised.
     pub fn compute_hash(&self) -> Result<String, CanonicalError> {
-        let mut value =
-            serde_json::to_value(self).map_err(|e| CanonicalError::Serialize(e.to_string()))?;
-        if let Value::Object(map) = &mut value {
-            map.remove(DEFINITION_HASH_MEMBER);
-        }
-        let bytes = canonical::to_canonical_vec(&value)?;
-        Ok(sha256(&bytes).to_hex())
+        hash_without_member(canonical::to_checked_value(self)?)
     }
 
-    /// Returns `self` with `definition_hash` set to [`CardDefinitionDSL::compute_hash`].
+    /// Returns `self` normalised and with `definition_hash` set to
+    /// [`CardDefinitionDSL::compute_hash`].
+    ///
+    /// Normalising means replacing the value by what its canonical JSON decodes to, so numbers
+    /// inside placeholder ASTs take their canonical form (`-0.0` becomes `0`, `1.0` becomes `1`).
+    /// The canonical bytes and the hash are unchanged by this, and the result `v` satisfies
+    /// `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`.
     ///
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised.
-    pub fn seal(mut self) -> Result<CardDefinitionDSL, CanonicalError> {
-        self.definition_hash = self.compute_hash()?;
-        Ok(self)
+    pub fn seal(self) -> Result<CardDefinitionDSL, CanonicalError> {
+        let bytes = self.to_canonical_json()?;
+        let value = canonical::parse_checked(&bytes)?;
+        let mut sealed: CardDefinitionDSL =
+            serde_json::from_value(value).map_err(|e| CanonicalError::Serialize(e.to_string()))?;
+        sealed.definition_hash = sealed.compute_hash()?;
+        Ok(sealed)
     }
 
     /// Checks that `definition_hash` equals [`CardDefinitionDSL::compute_hash`] exactly
@@ -449,16 +545,25 @@ impl CardDefinitionDSL {
         }
     }
 
-    /// Checked loader for untrusted JSON, in this order: (a) valid JSON with no duplicate
-    /// member names and no unsafe integers; (b) a top-level object whose `dslVersion` is a
-    /// string with the engine's major version, checked before anything else is decoded; (c)
-    /// the typed schema, with unknown and missing members rejected; (d) the `definitionHash`.
+    /// Strict loader for untrusted JSON, in this order:
+    ///
+    /// (a) valid JSON with no duplicate member names, no unsafe integers, no noncharacters and
+    /// no nesting deeper than [`canonical::MAX_DEPTH`]; the document is then taken in its
+    /// canonical form (numbers normalised, so `1.0` and `1` load the same);
+    /// (b) a top-level object whose `dslVersion` is a string with the engine's major version,
+    /// checked before anything else is decoded;
+    /// (c) the typed schema, with unknown and missing members rejected, and decoding must be
+    /// lossless: the decoded definition re-serialised must equal the document exactly, which
+    /// rejects `null` for an optional member, a positional array where an object is required,
+    /// a non-string enum and any other content the typed value would not reproduce;
+    /// (d) the `definitionHash`, compared exactly with the SHA-256 of the RFC 8785 bytes of the
+    /// checked document with only the `definitionHash` member removed.
     ///
     /// # Errors
     /// [`CardDefinitionError::Canonical`], [`CardDefinitionError::Schema`],
     /// [`CardDefinitionError::Version`] or [`CardDefinitionError::HashMismatch`].
     pub fn from_json(bytes: &[u8]) -> Result<CardDefinitionDSL, CardDefinitionError> {
-        let value = canonical::parse_checked(bytes)?;
+        let value = canonical::parse_normalized(bytes)?;
         let version = match &value {
             Value::Object(map) => match map.get(DSL_VERSION_MEMBER) {
                 Some(Value::String(text)) => text,
@@ -480,11 +585,34 @@ impl CardDefinitionDSL {
             }
         };
         check_dsl_version(version)?;
-        let definition: CardDefinitionDSL = serde_json::from_value(value)
+        let definition: CardDefinitionDSL = serde_json::from_value(value.clone())
             .map_err(|e| CardDefinitionError::Schema(e.to_string()))?;
-        definition.verify_hash()?;
+        if canonical::to_checked_value(&definition)? != value {
+            return Err(CardDefinitionError::Schema(
+                "decoding changed the content (for example a null member, a positional array \
+                 or a non-object where an object is required, or a non-string enum value)"
+                    .to_owned(),
+            ));
+        }
+        let computed = hash_without_member(value)?;
+        if computed != definition.definition_hash {
+            return Err(CardDefinitionError::HashMismatch {
+                declared: definition.definition_hash,
+                computed,
+            });
+        }
         Ok(definition)
     }
+}
+
+/// SHA-256 (lowercase hex) of the RFC 8785 bytes of `value` with its top-level
+/// `definitionHash` member removed.
+fn hash_without_member(mut value: Value) -> Result<String, CanonicalError> {
+    if let Value::Object(map) = &mut value {
+        map.remove(DEFINITION_HASH_MEMBER);
+    }
+    let bytes = canonical::to_canonical_vec(&value)?;
+    Ok(sha256(&bytes).to_hex())
 }
 
 /// Why [`CardDefinitionDSL::from_json`] rejected a definition.
