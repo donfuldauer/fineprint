@@ -7,11 +7,13 @@ collectible trading card game, targeting full parity with that game's Comprehens
 standalone, UI-agnostic library: a desktop client, a web frontend, a tournament server, an AI
 search agent or a headless test runner can all drive a complete match through one typed API.
 
-> **Status: pre-implementation.** The requirements, including the architecture and platform
-> decisions, are in [`docs/SRS.md`](docs/SRS.md) (§17 holds the nonfunctional requirements).
-> The work is planned as [GitHub issues](https://github.com/donfuldauer/fineprint/issues?q=is%3Aissue+label%3Awork-unit)
-> (label `work-unit`, milestones M1–M3), each one reviewable pull request with its dependencies
-> linked. No engine code exists yet.
+> **Status: foundations in progress.** The requirements, including the architecture and platform
+> decisions, are in [`docs/SRS.md`](docs/SRS.md) (§17 holds the nonfunctional requirements). The
+> work is planned as [GitHub issues](https://github.com/donfuldauer/fineprint/issues?q=is%3Aissue+label%3Awork-unit)
+> (label `work-unit`, milestones M1–M3), one reviewable pull request each, with dependencies
+> linked. The workspace, CI, the deterministic base library and the card DSL's data schema have
+> merged. The rules engine itself (game state, events, layers, turns, casting, combat) has not
+> been started, so Fine Print cannot play a game yet. See [Project status](#project-status).
 
 ## Design in one screen
 
@@ -43,6 +45,99 @@ search agent or a headless test runner can all drive a complete match through on
 | Scenario tests | `*.pzl` |
 | Replays | `*.fpreplay` |
 
+## Project status
+
+As of plan item FP-013, 13 of the 141 `work-unit` issues have merged. They cover the
+workspace and CI (FP-001 to FP-006), the deterministic base library (FP-007 to FP-009) and the
+first four DSL schema units (FP-010 to FP-013). Together that is about 50,000 lines of Rust,
+roughly 700 spec-test functions included.
+
+### Implemented
+
+**Workspace, CI and guards (FP-001 to FP-006)**
+
+- A Cargo workspace of nine crates (`fineprint-base`, `-dsl`, `-core`, `-ingest`, `-ffi`,
+  `-wasm`, `-bot`, `clients/cli`, `xtask`), with Rust pinned to 1.97.0, edition 2024 and
+  MPL-2.0 headers on every source file. Dependencies point downward only (base → dsl → core →
+  bindings and tools). Floats, `HashMap` and `HashSet` are banned in the rules crates through
+  `clippy.toml`, and unsafe code is forbidden everywhere except `fineprint-ffi`.
+- CI on Linux, Windows and macOS: `cargo fmt`, `clippy -D warnings` and `cargo test`. It also
+  enforces per-crate line-coverage floors (`cargo xtask coverage`) and runs repository guards
+  (`cargo xtask guard all`: license headers, no card data, no card-specific branches). A
+  requirement-traceability check (`scripts/req_coverage.py`) confirms that a work-unit issue
+  covers every SRS requirement.
+- Comprehensive Rules citation checking (`cargo xtask cr fetch|index|check`, the
+  `CR citations` workflow). CI fetches the official rules text and caches it outside the
+  repository. Every CR number cited in the SRS or the code is checked against it, and
+  `docs/cr-citations.json` stores only rule numbers and SHA-256 hashes, never rule text.
+- Spikes that de-risked the library choices and the bindings (`spikes/libs`, `spikes/bindings`):
+  PRNG, hashing, canonical JSON, MessagePack and `pest`, plus cbindgen, .NET 10 P/Invoke,
+  wasm-bindgen and headless browsers.
+
+**`fineprint-base`: deterministic primitives (FP-007 to FP-009)**
+
+- Checked integer arithmetic, scale-2 fixed-point numbers, identifier newtypes with monotonic
+  generators, and ordered collections with a stable `(ObjectId, Timestamp)` sort.
+- A PCG64-DXSM generator with SplitMix64 seed expansion, unbiased sampling and shuffles, pinned
+  by test vectors.
+- An injective canonical binary encoding, SHA-256, and an incremental Merkle state-hash
+  framework. These are the basis of replay and loop detection.
+
+**`fineprint-dsl`: the card definition schema (FP-010 to FP-013)**
+
+- Card definitions and faces, structured mana costs, support status, provenance, `dslVersion`
+  checks and a `definitionHash` computed over RFC 8785 canonical JSON.
+- References, selectors, predicates, integer value expressions, rules text as rewritable text
+  tokens, and `ChoiceSpec` decision descriptions.
+- The ability envelope and all six ability kinds: triggered abilities and their events,
+  activated abilities and costs, static abilities and replacement effects.
+- Effect instructions: a closed set of 72 ops covering durations, control flow, delayed and
+  reflexive triggers and the `NATIVE_EFFECT` node. Decoding is strict, nesting depth is
+  bounded, and every type round-trips through the canonical wire format.
+
+These are **data types and wire contracts only**. Nothing executes a card definition yet.
+
+### Still to do
+
+The crates `fineprint-core`, `-ingest`, `-ffi`, `-wasm`, `-bot` and `clients/cli` are still
+empty stubs. The remaining 128 issues, by phase:
+
+| Phase | Plan items | What it delivers |
+|---|---|---|
+| 01 Foundations (finishing) | FP-014 to FP-016, FP-140, FP-141 | Rules vocabulary artifact, definition lints, synthetic test-card library, wiring the full AST into card definitions |
+| 02 State and objects | FP-017 to FP-025 | Game state tree, zones, permanents, characteristics, card layouts, last known information, knowledge/redaction core, checkpoints and rollback |
+| 03 Events | FP-026 to FP-030 | Game events and history ledger, choice protocol, replacement/prevention bus, trigger detection, delayed and reflexive triggers |
+| 04 Layers | FP-031 to FP-039 | Layer pipeline, timestamps and dependencies, lock-in, RuleSet view, layer cache, text-changing, copy and face-down effects, ETB look-ahead |
+| 05 State-based actions | FP-040 to FP-042 | The SBA registry and every SBA family |
+| 06 Turn structure | FP-043 to FP-049 | Priority, turn sequencer, deck validation, game start and mulligans, legal-action generation, extra turns, the `.pzl` scenario runner |
+| 07 Casting | FP-050 to FP-054 | Casting procedure, cost determination, mana payment, auto-tap solver, activated and loyalty abilities |
+| 08 DSL runtime | FP-055 to FP-064 | The DSL interpreter, resolution, every effect family, designations, native-effect registry, copies of spells and abilities |
+| 09 Combat | FP-065 to FP-067 | Attack and block constraint solvers, combat damage |
+| 10 Keywords | FP-068 to FP-074 | Keyword macro registry, keyword families, keyword actions, coverage audit |
+| 11 Loops | FP-075 to FP-076 | Loop detection and the shortcut protocol |
+| 12 Engine API | FP-077 to FP-084 | `IRulesEngine` facade, redacted views and wire schema, event stream, inspection, replays, sandbox, determinized forking, card support reports and overrides |
+| 13 Card toolchain | FP-085 to FP-099 | Card-data import, Oracle text tokenizer, grammar templates, status assignment, smoke tests, `*.fpdb` build and coverage report |
+| 14 Bindings | FP-100 to FP-102, FP-104 | C ABI and `fineprint.h`, .NET 10 package, WebAssembly npm package, cross-binding golden-replay determinism CI |
+| 15 Clients | FP-103, FP-105 to FP-109 | Random-legal player, synthetic demo decks, terminal, C, .NET and web demo clients |
+| 16 Regression | FP-110 to FP-116 | `.pzl` regression suites for layers, replacement and triggers, casting, combat, layouts, SBAs and loops |
+| 17 Hardening | FP-117 to FP-121 | Fuzzer, benchmarks, no-card-branch audit, release packaging, **Milestone M1 acceptance** (two-player constructed) |
+| 18 Multiplayer | FP-122 to FP-130 | N-player turns, leaving the game, monarch and initiative, Commander, community formats |
+| 19 Variants | FP-131 to FP-139 | Subgames, Two-Headed Giant, Planechase, Archenemy, Vanguard, Conspiracy, ante, the Un-set and digital extensions |
+
+The issue tracker is the source of truth. Issues labelled `ready` can start now (currently
+FP-017, FP-140 and FP-141), and FP-014 is in progress.
+
+## Building and testing
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo xtask guard all
+```
+
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists every command, CI job, coverage floor and
+repository guard.
+
 ## Repository layout
 
 ```
@@ -52,6 +147,18 @@ docs/BRIEF_TEMPLATE.md    the self-contained delegation brief every agent receiv
 docs/DECISIONS.md         decisions made during the run, with rationale
 docs/HUMAN_QUEUE.md       items only a person can do (PROCESS.md P8)
 docs/RUN_LOG.md           one row per unit of work
+docs/DEVELOPMENT.md       workspace layout, commands, CI gates, coverage floors, owned paths
+docs/cr-citations.json    index of cited CR rule numbers and hashes (no rule text)
+crates/fineprint-base     deterministic primitives: numbers, ids, PRNG, encoding, hashing
+crates/fineprint-dsl      card definition schema and canonical JSON
+crates/fineprint-core     the rules engine (stub)
+crates/fineprint-ingest   offline card toolchain (stub)
+crates/fineprint-ffi      C ABI binding (stub)
+crates/fineprint-wasm     WebAssembly binding (stub)
+crates/fineprint-bot      reference bots (stub)
+clients/cli               terminal client (stub)
+xtask/                    repository automation: coverage, guards, CR citation check
+spikes/                   throwaway spikes that chose the libraries and binding toolchains
 contracts/                change requests for shared contracts
 scripts/req_coverage.py   checks every SRS requirement is traced by the work-unit issues and tests
 .claude/agents/           work-classifier, task-executor, fixture-author, work-verifier,
@@ -83,12 +190,27 @@ Fine Print's own files must stay available under MPL-2.0 with the original notic
 
 ## Legal
 
-Fine Print is unofficial Fan Content permitted under the Fan Content Policy. Not approved/endorsed
-by Wizards. Portions of the materials used are property of Wizards of the Coast. ©Wizards of the
-Coast LLC.
+Fine Print is an independent project. Wizards of the Coast has not approved, endorsed or
+sponsored it and is not affiliated with it.
 
-This repository and Fine Print's packages contain no card names, rules text, card definitions,
-art or set symbols. Clients obtain card data themselves (for example from Scryfall, under its
-terms of use) and build their own card databases with the toolchain; anyone who redistributes a
-card database is responsible for those terms and the Fan Content Policy. Commercial distribution
-of anything that bundles card data requires legal review first (SRS §1.3).
+**What this repository contains.** Original code and documentation only: no card names, Oracle or
+rules text, card definitions, art, set symbols or logos. The game, its formats and its mechanics
+are named only descriptively, to say what the engine is compatible with. The Comprehensive Rules
+text is not committed. CI downloads the official file at build time to check citations and keeps
+only rule numbers and hashes (`docs/cr-citations.json`). Fine Print's name and branding use no
+third-party trademark. The test suite uses invented synthetic cards.
+
+**Fan Content Policy notice.** The requirements and documentation name the supported game, and
+SRS §1.3 requires this notice wherever the game is named. It is kept even though the project
+distributes no Wizards of the Coast materials:
+
+> Fine Print is unofficial Fan Content permitted under the Fan Content Policy. Not
+> approved/endorsed by Wizards. Portions of the materials used are property of Wizards of the
+> Coast. ©Wizards of the Coast LLC.
+
+**Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
+of use) and build their own card databases with the toolchain. Anyone who redistributes a card
+database is responsible for those terms and the Fan Content Policy. Commercial distribution of
+anything that bundles card data requires legal review first (SRS §1.3).
+
+This section is not legal advice.
