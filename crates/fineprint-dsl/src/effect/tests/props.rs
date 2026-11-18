@@ -638,25 +638,214 @@ fn req_dsl_010_property_round_trip_parts() {
     }
 }
 
+/// One row of the independent member table: op, required members, optional members and
+/// exactly-one groups. Written from the wire catalogue (docs/DECISIONS.md "#14 FP-013 — Wire
+/// catalogue as implemented" and the op docs), not from the decoder. `op` itself is required
+/// for every row and is added by the lookup.
+type Shape = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [[&'static str; 2]],
+);
+
+/// The independent table (REQ-DSL-010).
+const SHAPES: [Shape; 72] = [
+    ("DRAW", &["player", "count"], &[], &[]),
+    ("MILL", &["player", "count"], &[], &[]),
+    ("DISCARD", &["player", "count"], &["choice"], &[]),
+    (
+        "MOVE",
+        &["objects", "toZone"],
+        &[
+            "position",
+            "faceDown",
+            "tapped",
+            "underControlOf",
+            "transformed",
+            "choice",
+        ],
+        &[],
+    ),
+    (
+        "SEARCH_LIBRARY",
+        &["player", "selector", "count", "toZone"],
+        &["position", "choice"],
+        &[],
+    ),
+    ("SHUFFLE", &["player"], &[], &[]),
+    ("REVEAL", &["objects"], &["to", "choice"], &[]),
+    ("LOOK_AT", &["objects", "player"], &[], &[]),
+    (
+        "PUT_ON_TOP_OR_BOTTOM",
+        &["objects", "player"],
+        &["choice"],
+        &[],
+    ),
+    ("EXILE_UNTIL", &["objects", "duration"], &["faceDown"], &[]),
+    (
+        "PLAY_PERMISSION_GRANT",
+        &["objects", "duration", "who"],
+        &["alsoAs"],
+        &[],
+    ),
+    (
+        "DEAL_DAMAGE",
+        &["source", "recipients", "amount"],
+        &["divided", "choice"],
+        &[],
+    ),
+    ("FIGHT", &["first", "second"], &[], &[]),
+    ("BITE", &["source", "target"], &[], &[]),
+    ("GAIN_LIFE", &["player", "amount"], &[], &[]),
+    ("LOSE_LIFE", &["player", "amount"], &[], &[]),
+    ("SET_LIFE", &["player", "amount"], &[], &[]),
+    (
+        "PREVENT",
+        &["duration"],
+        &["source", "recipients", "amount", "combatOnly"],
+        &[],
+    ),
+    ("DESTROY", &["objects"], &["noRegeneration"], &[]),
+    (
+        "SACRIFICE",
+        &["player", "selector", "count"],
+        &["choice"],
+        &[],
+    ),
+    ("REGENERATE", &["objects"], &[], &[]),
+    ("COUNTER_SPELL", &["objects"], &["unless"], &[]),
+    ("PUT_COUNTERS", &["objects", "kind", "count"], &[], &[]),
+    ("REMOVE_COUNTERS", &["objects", "kind", "count"], &[], &[]),
+    ("MOVE_COUNTERS", &["from", "to", "kind", "count"], &[], &[]),
+    ("PROLIFERATE", &[], &["choice"], &[]),
+    (
+        "CREATE_TOKEN",
+        &["count"],
+        &["modifiers", "controller"],
+        &[["tokenDef", "inline"]],
+    ),
+    ("CREATE_PREDEFINED_TOKEN", &["kind"], &["count"], &[]),
+    ("CREATE_COPY_TOKEN", &["of"], &["except"], &[]),
+    ("POPULATE", &[], &[], &[]),
+    ("AMASS", &["n"], &[], &[]),
+    ("INCUBATE", &["n"], &[], &[]),
+    ("COPY_SPELL_OR_ABILITY", &["objects"], &["newTargets"], &[]),
+    ("CHANGE_TARGETS", &["objects"], &["choice"], &[]),
+    (
+        "CAST_FROM",
+        &["objects"],
+        &["withoutPaying", "altCost"],
+        &[],
+    ),
+    ("TAP_OR_UNTAP", &["objects", "action"], &[], &[]),
+    ("TRANSFORM", &["objects"], &[], &[]),
+    ("CONVERT", &["objects"], &[], &[]),
+    ("TURN_FACE_UP", &["objects"], &["profile"], &[]),
+    ("TURN_FACE_DOWN", &["objects"], &["profile"], &[]),
+    ("PHASE_OUT", &["objects"], &[], &[]),
+    ("ATTACH", &["objects", "to"], &[], &[]),
+    ("GAIN_CONTROL", &["objects", "duration"], &["player"], &[]),
+    ("EXCHANGE_CONTROL", &["first", "second"], &[], &[]),
+    ("GOAD", &["objects"], &[], &[]),
+    ("SET_DESIGNATION", &["kind", "value"], &["to"], &[]),
+    ("VENTURE", &[], &[], &[]),
+    ("RING_TEMPTS", &[], &[], &[]),
+    ("INCREASE_SPEED", &["player"], &["amount"], &[]),
+    ("EMPOWER_JACE", &["n"], &[], &[]),
+    ("MELD", &["objects"], &[], &[]),
+    ("MUTATE_MERGE", &["objects", "onto"], &[], &[]),
+    ("MANIFEST", &["objects"], &[], &[]),
+    ("CLOAK", &["objects"], &[], &[]),
+    ("EXPLORE", &["objects"], &[], &[]),
+    ("CONNIVE", &["objects"], &[], &[]),
+    ("DISCOVER", &["n"], &[], &[]),
+    ("BLIGHT", &["n"], &[], &[]),
+    ("WATERBEND", &["cost"], &[], &[]),
+    (
+        "CREATE_CONTINUOUS_EFFECT",
+        &["effects", "duration"],
+        &["lockAffectedSet"],
+        &[],
+    ),
+    (
+        "CREATE_DELAYED_TRIGGER",
+        &["trigger", "effect", "oneShot"],
+        &["captures"],
+        &[],
+    ),
+    ("REFLEXIVE_TRIGGER", &["ifActionTaken", "effect"], &[], &[]),
+    ("IF", &["cond", "then"], &["else"], &[]),
+    ("FOR_EACH", &["iterator", "body"], &["bind"], &[]),
+    ("REPEAT", &["times", "body"], &[], &[]),
+    ("REPEAT_WHILE", &["cond", "maxIter", "body"], &[], &[]),
+    ("MAY", &["player", "body"], &[], &[]),
+    ("UNLESS", &["payer", "cost", "body"], &[], &[]),
+    ("CHOOSE_MODE", &["chooser", "min", "max", "modes"], &[], &[]),
+    ("VOTE", &["voters", "choice", "store"], &[], &[]),
+    ("REMEMBER", &["key", "into"], &[], &[["value", "objects"]]),
+    (
+        "NATIVE_EFFECT",
+        &["id", "version", "params"],
+        &["layers", "ruleKinds"],
+        &[],
+    ),
+];
+
 /// REQ-DSL-010: removing any one member of a generated instruction's top-level object is
-/// rejected, except a member that is optional (and then the result must still round-trip).
+/// classified from the independent [`SHAPES`] table. Removing a required member, or the present
+/// arm of an exactly-one pair, is rejected; removing an optional member is accepted and the
+/// canonical re-encoding equals the edited document. Nulling any member and adding an unknown
+/// one are rejected.
 #[test]
 fn req_dsl_010_property_member_removal() {
+    // The table covers every op exactly once, in catalogue order.
+    for (row, name) in SHAPES.iter().zip(Instruction::NAMES) {
+        assert_eq!(row.0, name, "table row out of step with Instruction::NAMES");
+    }
     let mut rng = Pcg64Dxsm::from_u64_seed(0x0f13_0014_0004);
     for _ in 0..3 {
         for op in 0..Instruction::NAMES.len() {
             let i = gen_op(&mut rng, op, 1);
             let v = serde_json::to_value(&i).expect("encode");
             let map = v.as_object().expect("object");
+            let name = map["op"].as_str().expect("op name");
+            let (_, required, optional, groups) = SHAPES
+                .iter()
+                .find(|row| row.0 == name)
+                .unwrap_or_else(|| panic!("{name} missing from the table"));
             for key in map.keys() {
+                let k = key.as_str();
+                let is_group = groups.iter().any(|g| g.contains(&k));
+                assert!(
+                    k == "op" || required.contains(&k) || optional.contains(&k) || is_group,
+                    "{name}: member {k} is not in the table"
+                );
+            }
+            for key in map.keys() {
+                let k = key.as_str();
                 let mut m = map.clone();
                 m.remove(key);
-                if let Ok(other) = serde_json::from_value::<Instruction>(Value::Object(m.clone())) {
-                    assert_ne!(other, i, "{key} removal kept the value");
-                    let back: Instruction =
-                        serde_json::from_slice(&serde_json::to_vec(&other).expect("encode"))
-                            .expect("decode");
-                    assert_eq!(back, other);
+                let edited = Value::Object(m.clone());
+                let result = serde_json::from_value::<Instruction>(edited.clone());
+                let arm_removed = groups
+                    .iter()
+                    .any(|g| g.contains(&k) && g.iter().all(|a| *a == k || !map.contains_key(*a)));
+                if k == "op" || required.contains(&k) || arm_removed {
+                    assert!(result.is_err(), "{name}: removing {k} was accepted");
+                } else {
+                    assert!(
+                        optional.contains(&k),
+                        "{name}: {k} is neither required nor optional"
+                    );
+                    let other = result
+                        .unwrap_or_else(|e| panic!("{name}: removing optional {k} failed: {e}"));
+                    let bytes = crate::canonical::to_canonical_vec(&other).expect("encode");
+                    let back: Value = serde_json::from_slice(&bytes).expect("json");
+                    assert_eq!(
+                        back, edited,
+                        "{name}: {k} removal did not re-encode as edited"
+                    );
                 }
                 m.insert(key.clone(), Value::Null);
                 assert!(
