@@ -1763,3 +1763,17 @@ abilities, which use their own envelope, so it does not apply to a resolving ins
 
 **Alternatives.** Keep accepting `false` and make the helper return true for CHAR: rejected, the
 wire value would still misstate the rule. Drop the member: deferred, it is a wire-contract change.
+
+## Repository — README legal section keeps the Fan Content Policy notice
+
+**Decision.** The README keeps the Fan Content Policy disclaimer verbatim and puts a statement
+ahead of it: the repository distributes no Wizards of the Coast materials (no card names, Oracle
+or rules text, card definitions, art or logos), names the game only descriptively, and does not
+commit the Comprehensive Rules text (CI fetches it and stores only rule numbers and hashes).
+**Rationale.** The SRS and the docs name the supported game, CI downloads the CR from Wizards of
+the Coast, and SRS §1.3 and line 1430 require the notice wherever the game is named. Dropping
+the notice would contradict the SRS (an SRS change is a person's decision). The clarification
+is accurate for the repository as it stands.
+**Alternatives.** Remove the notice: rejected, because the repository does reference the game
+and the SRS requires the notice. Reword the notice: rejected, because the policy prescribes its
+wording.
