@@ -1422,6 +1422,8 @@ where
     }
 }
 
+/// Round-trips every successful `T` decode through the `from_slice`, `from_str` and
+/// `from_value` routes (the last via a parsed `serde_json::Value` of `bytes`).
 fn roundtrip_type<T>(bytes: &[u8])
 where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -1430,10 +1432,13 @@ where
     if let Ok(s) = std::str::from_utf8(bytes) {
         roundtrip_ok(serde_json::from_str::<T>(s));
     }
+    if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
+        roundtrip_ok(serde_json::from_value::<T>(v));
+    }
 }
 
-/// Like `try_all`, and every successful decode of each supported type re-encodes and decodes
-/// back equal.
+/// Like `try_all`, and every successful decode of each supported type through the
+/// `from_slice`, `from_str` and `from_value` routes re-encodes and decodes back equal.
 fn try_roundtrip(bytes: &[u8]) {
     try_all(bytes);
     roundtrip_type::<Instruction>(bytes);
