@@ -23,9 +23,12 @@ check once on the head; check 1 traces each group's requirements; check 9 compar
 
 **Docs-only round.** If the only changes are to `docs/DECISIONS.md`, `docs/RUN_LOG.md` or
 `docs/HUMAN_QUEUE.md` (for example the entry for a deferred finding), run check 9 (the diff
-touches only those files), confirm each deferred finding has its entry, and verify each brief
-requirement that applies to the changed files by check 1's file:line evidence method. Report the
-real `requirements: <n met / n total>` count (never a default 0/0); `pass` if all hold.
+touches only those files), confirm each deferred finding has its entry, and verify every brief
+requirement by check 1's file:line evidence method: a requirement that applies to the changed
+files is checked in this round; a requirement outside them counts as met only if your last
+report for this branch showed it met at an earlier head and the files it depends on are
+unchanged since that head. Report the real `requirements: <n met / n total>` count over all
+brief requirements (never a default 0/0); `pass` only if every requirement is met.
 
 ## Checks (all must pass)
 
