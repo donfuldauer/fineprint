@@ -1287,15 +1287,15 @@ fn req_nfr_006_stale_hash_excluded_from_hash_input() {
 fn req_nfr_006_compute_hash_deep_value_is_an_error() {
     let mut def = definition();
     def.faces[0].abilities = vec![AbilityAST(nested(100_000))];
+    let hash = def.compute_hash();
+    let verified = def.verify_hash();
+    // Forget before asserting: a failed assertion must not unwind into a recursive drop.
+    std::mem::forget(def);
+    assert!(matches!(hash, Err(CanonicalError::Serialize(_))));
     assert!(matches!(
-        def.compute_hash(),
-        Err(CanonicalError::Serialize(_))
-    ));
-    assert!(matches!(
-        def.verify_hash(),
+        verified,
         Err(CardDefinitionError::Canonical(CanonicalError::Serialize(_)))
     ));
-    std::mem::forget(def);
 }
 
 /// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: `seal` on a definition nested past the budget is a
