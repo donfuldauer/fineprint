@@ -49,15 +49,15 @@ search agent or a headless test runner can all drive a complete match through on
 
 As of plan item FP-013, 13 of the 141 `work-unit` issues have merged. They cover the
 workspace and CI (FP-001 to FP-006), the deterministic base library (FP-007 to FP-009) and the
-first four DSL schema units (FP-010 to FP-013). Together that is about 50,000 lines of Rust,
-roughly 700 spec-test functions included.
+first four DSL schema units (FP-010 to FP-013). Together that is about 50,000 lines of Rust
+and about 700 tests (368 of them black-box spec tests).
 
 ### Implemented
 
 **Workspace, CI and guards (FP-001 to FP-006)**
 
-- A Cargo workspace of nine crates (`fineprint-base`, `-dsl`, `-core`, `-ingest`, `-ffi`,
-  `-wasm`, `-bot`, `clients/cli`, `xtask`), with Rust pinned to 1.97.0, edition 2024 and
+- A Cargo workspace of nine product crates (`fineprint-base`, `-dsl`, `-core`, `-ingest`, `-ffi`,
+  `-wasm`, `-bot`, `clients/cli`, `xtask`) plus the spike crate `spikes/libs`, with Rust pinned to 1.97.0, edition 2024 and
   MPL-2.0 headers on every source file. Dependencies point downward only (base → dsl → core →
   bindings and tools). Floats, `HashMap` and `HashSet` are banned in the rules crates through
   `clippy.toml`, and unsafe code is forbidden everywhere except `fineprint-ffi`.
