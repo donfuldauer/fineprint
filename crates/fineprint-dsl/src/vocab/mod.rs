@@ -171,15 +171,27 @@ pub struct TokenFace {
     /// Subtypes, each a subtype of one of the face's card types.
     #[serde(rename = "subtypes")]
     pub subtypes: Vec<String>,
-    /// Printed power, `null` when absent.
-    #[serde(rename = "power")]
+    /// Printed power, `null` when absent. The member is required on the wire (an explicit
+    /// `null`, never an omitted member).
+    #[serde(rename = "power", deserialize_with = "required_nullable")]
     pub power: Option<i64>,
-    /// Printed toughness, `null` when absent.
-    #[serde(rename = "toughness")]
+    /// Printed toughness, `null` when absent. Required on the wire, as `power`.
+    #[serde(rename = "toughness", deserialize_with = "required_nullable")]
     pub toughness: Option<i64>,
     /// The face's abilities in order: keyword phrases and quoted ability texts without quotes.
     #[serde(rename = "abilities")]
     pub abilities: Vec<String>,
+}
+
+/// Deserialises a nullable integer member. Used through `deserialize_with` (and without
+/// `#[serde(default)]`), it makes the member required: serde treats an `Option` field as optional
+/// only when it has no `deserialize_with`, so an omitted `power` or `toughness` is a missing
+/// field while an explicit `null` is `None`.
+fn required_nullable<'de, D>(d: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(d)
 }
 
 /// Why a vocabulary could not be loaded or serialised.
