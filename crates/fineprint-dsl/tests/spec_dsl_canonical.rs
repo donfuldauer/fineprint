@@ -244,19 +244,24 @@ fn req_nfr_006_ecmascript_number_forms() {
         ("1e-6", "0.000001"),
         ("1e-7", "1e-7"),
         ("-1e-7", "-1e-7"),
-        ("1e21", "1e+21"),
         ("-1.5", "-1.5"),
         ("0.1", "0.1"),
         ("4.35", "4.35"),
-        ("1.5e300", "1.5e+300"),
         ("5e-324", "5e-324"),
         ("2.5E-3", "0.0025"),
         ("100.50", "100.5"),
         ("123e-2", "1.23"),
-        ("1.7976931348623157e308", "1.7976931348623157e+308"),
         ("333333333.33333329", "333333333.3333333"),
         ("42", "42"),
         ("-42", "-42"),
+        ("-0.5", "-0.5"),
+        ("1.5e-300", "1.5e-300"),
+        ("1e15", "1000000000000000"),
+        ("4503599627370495.5", "4503599627370495.5"),
+        // Integral values at the safe limit are accepted whatever their spelling.
+        ("9007199254740991.0", "9007199254740991"),
+        ("-9007199254740991e0", "-9007199254740991"),
+        ("9.007199254740991e15", "9007199254740991"),
     ];
     for (input, expected) in vectors {
         assert_canon(input, expected);
@@ -268,21 +273,39 @@ fn req_nfr_006_ecmascript_number_forms() {
     }
 }
 
-/// REQ-NFR-006: non-integer number tokens whose value is >= 1e21 print in exponent form, and
-/// below that in plain integer digits (ECMAScript, checked with node). A plain-digit output
-/// beyond 2^53-1 is itself an unsafe integer token, so re-canonicalising it is UnsafeInteger:
-/// idempotence cannot hold for these two vectors (see docs/DECISIONS.md
-/// "#11 FP-010 tests — idempotence vs. unsafe-integer output").
+/// REQ-NFR-006 / REQ-CORE-006: a number whose VALUE is integral with magnitude above 2^53-1 is
+/// UnsafeInteger whatever its spelling (exponent, fraction digits), at every position
+/// (docs/DECISIONS.md "#11 FP-010 — Safe integer range for hashed JSON").
 #[test]
-fn req_nfr_006_large_non_integer_tokens() {
-    let vectors: &[(&str, &str)] = &[
-        ("1e20", "100000000000000000000"),
-        ("1.2345678901234568e20", "123456789012345680000"),
+fn req_nfr_006_unsafe_integer_values_in_any_spelling() {
+    let unsafe_values = [
+        "9007199254740992.0",
+        "9007199254740992e0",
+        "9.007199254740992e15",
+        "1e16",
+        "1e20",
+        "1e21",
+        "1E21",
+        "1.2345678901234568e20",
+        "123456789012345680000.0",
+        "1.5e300",
+        "1.7976931348623157e308",
+        "9007199254740993.5",
     ];
-    for (input, expected) in vectors {
-        assert_eq!(canon_ok(input), *expected, "{input}");
-        assert_eq!(canon_ok(&format!("[{input}]")), format!("[{expected}]"));
-        assert!(is_unsafe(&canonicalize(expected.as_bytes())), "{expected}");
+    for v in unsafe_values {
+        for sign in ["", "-"] {
+            let n = format!("{sign}{v}");
+            let docs = [
+                n.clone(),
+                format!("[1.5,{n}]"),
+                format!("{{\"k\":{n}}}"),
+                format!("{{\"a\":[{{\"b\":{n}}}]}}"),
+            ];
+            for d in &docs {
+                let r = canonicalize(d.as_bytes());
+                assert!(is_unsafe(&r), "expected UnsafeInteger for {d}: {r:?}");
+            }
+        }
     }
 }
 

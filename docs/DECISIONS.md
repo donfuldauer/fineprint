@@ -1083,3 +1083,144 @@ lower limit such as 64 (rejected: too close to the depth-64 tests and leaves lit
 **Rationale.** A required status check would block every merge during an outage of the external rules site (the reason recorded in "#7 FP-006 — `cr.yml` is not a required check"); a precondition on the release commit enforces REQ-DOC-001 exactly where it applies, at release time, and the release itself is a P8 action a person triggers.
 
 **Alternatives.** Making `cr` a required status check (rejected: network-dependent merge blocking); leaving the choice open (rejected: R8, judgement calls are decided).
+
+## #11 FP-010 tests — idempotence vs. unsafe-integer output
+
+**Superseded** by "## #11 FP-010 — Safe integer range for hashed JSON": any number whose value is integral with magnitude above 2^53-1 is UnsafeInteger whatever its spelling, and idempotence holds for every accepted vector.
+
+**Decision.** The spec tests assert that a non-integer number token whose value lies between 2^53
+and 1e21 (for example `1e20`, `1.2345678901234568e20`) canonicalises to its ECMAScript plain-digit
+form (`100000000000000000000`, `123456789012345680000`), and that re-canonicalising that output is
+`UnsafeInteger`. The idempotence assertion is applied to every other vector and to all random
+documents, but not to these outputs.
+
+**Rationale.** The brief requires three things that cannot all hold for these inputs: ECMAScript
+number forms including "123456789012345680000 style cases", rejection of integer tokens with
+magnitude above 2^53-1 "anywhere", and idempotence "on every vector". ECMAScript prints these values
+without an exponent, and the result is a plain integer token beyond the safe range. The specific
+clauses (number forms, unsafe-integer rejection, both quoted from RFC 8785 / I-JSON practice in
+REQ-NFR-006) are kept over the general one; definitions are unaffected because every typed
+integer field is limited to the safe range.
+
+**Alternatives.** Rejecting any number whose value is an integer beyond 2^53-1 whatever its
+spelling (rejected: also rejects `1e21`, which the brief requires to canonicalise to `1e+21`);
+dropping the large-value vectors (rejected: weakens the test, R10).
+
+## #11 FP-010 — serde, serde_json and serde_json_canonicalizer in fineprint-dsl
+
+**Decision.** `fineprint-dsl` depends on `serde`, `serde_json` and `serde_json_canonicalizer`
+through the existing `[workspace.dependencies]` pins (`=1.0.229`, `=1.0.154` with `std` and
+`float_roundtrip`, `=0.4.1`), chosen by the FP-004 spike ("FP-004 — RFC 8785 canonical JSON:
+serde_json_canonicalizer"). `serde_json`'s `preserve_order` feature stays off, so
+`serde_json::Map` is a `BTreeMap` (REQ-CORE-006). No other dependency is added.
+**Rationale.** REQ-NFR-006 requires RFC 8785 canonical JSON for `definitionHash`; FP-004 already
+selected and licence-checked these crates. Reusing the pins keeps one version of each.
+**Alternatives.** Depending on the spike crate (rejected: spikes are not product code); a
+hand-written JCS serialiser (rejected: FP-004 measured the library against the RFC vectors).
+
+## #11 FP-010 — Wiring edits outside the owned directories
+
+**Decision.** Besides `src/card/`, `src/mana/` and `src/canonical/`, the unit edits only
+`crates/fineprint-dsl/src/lib.rs` (three `pub mod` declarations with doc comments),
+`crates/fineprint-dsl/Cargo.toml` (the three dependencies above) and `Cargo.lock` (the
+resulting lock entries), as the brief sanctions.
+**Rationale.** The new modules cannot be reached or built without them (R1 minimum wiring).
+**Alternatives.** None that compile.
+
+## #11 FP-010 — definitionHash excludes the definitionHash member
+
+**Decision.** `definitionHash` is the lowercase-hex SHA-256 (`fineprint_base::hash::sha256`) of
+the RFC 8785 bytes of the serialised definition with the `definitionHash` member omitted.
+`verify_hash` compares strings exactly, so uppercase hex is a mismatch. `from_json` checks, in
+order: canonical-level JSON checks, a string `dslVersion` with the engine's major, the typed
+schema, then the hash.
+**Rationale.** SRS §14.2 says "sha256 of canonical JSON of this definition"; a hash cannot cover
+itself, and omitting the member (rather than hashing a placeholder value) leaves no magic value
+in the format. A single spelling of the hex text keeps hash comparison byte-exact.
+**Alternatives.** Hashing with `definitionHash: ""` (rejected: an invented placeholder);
+case-insensitive comparison (rejected: two spellings of one artifact identity).
+
+## #11 FP-010 — ManaCostDSL JSON is the canonical symbol string
+
+**Decision.** `ManaCostDSL` serialises as one JSON string of its canonical text (`"{2}{W}{W}"`).
+An empty or invalid string is a deserialisation error. "No mana cost" is the absence of the
+face's `manaCost` member (`Option::None`); `{0}` is `"{0}"`. Every symbol has exactly one
+accepted spelling, so text and value map one to one and canonical JSON is unique.
+Malformed-bracket offsets: an unterminated `{` and an empty `{}` report the offset of that `{`;
+a nested `{` reports the inner `{`; a stray `}` or text outside braces reports its first byte.
+`UnknownSymbol.symbol` carries the braced text including the braces.
+**Rationale.** The string form is compact, readable in definition diffs and is the same grammar
+the ingestion parser reads (SRS §16). One spelling per symbol keeps `definitionHash` stable.
+**Alternatives.** An array of tagged symbol objects (rejected: verbose, and a second grammar to
+keep in sync); reporting the end of input for an unterminated `{` (rejected: the `{` is the byte
+that lacks its partner).
+
+## #11 FP-010 — ColorBitmask bit assignment
+
+**Decision.** `ColorBitmask(u8)` uses W = 1, U = 2, B = 4, R = 8, G = 16, serialised as a JSON
+integer 0..=31; any other value (32, negative, non-integer) is rejected on input.
+**Rationale.** The bits follow the conventional W U B R G color order, which is also the
+declaration order of `mana::Color`. An integer is the cheapest canonical form.
+**Alternatives.** An array of color letters (rejected: several spellings of one set unless
+sorted, larger JSON).
+
+## #11 FP-010 — Mana symbol set limited to SRS §4.1
+
+**Decision.** The parser accepts exactly the SRS §4.1 symbol classes: generic `{n}`
+(0..=1 000 000, no leading zeros), colored, colorless `{C}`, snow `{S}`, `{X}`/`{Y}`/`{Z}`, two-color
+hybrid `{a/b}` (a ≠ b, written order kept, so `{W/U}` and `{U/W}` are different values),
+monocolored hybrid `{n/c}` (n ≥ 1), Phyrexian `{c/P}` and hybrid Phyrexian `{a/b/P}`.
+Colorless hybrid, half mana, energy and infinity symbols are rejected as unknown symbols.
+**Rationale.** SRS §4.1 is the normative list for `ManaCost`; symbols outside it have no rules
+support in the engine yet, and accepting them would let definitions carry costs nothing can pay.
+Adding a class later is an additive grammar change.
+**Alternatives.** Accepting every symbol seen in bulk data (rejected: outside §4.1, unhandled);
+normalising hybrid order (rejected: the written order is data, and one spelling per value
+already holds).
+
+## #11 FP-010 — Strict deny_unknown_fields on definition types
+
+**Decision.** Every definition struct uses `#[serde(rename_all = "camelCase",
+deny_unknown_fields)]`. A definition with a newer minor `dslVersion` that adds members is
+therefore rejected with `CardDefinitionError::Schema` until this engine learns the member; only
+the major version is gated by `check_dsl_version`. Plain `Deserialize` performs no version or
+hash check; `CardDefinitionDSL::from_json` is the checked loader. A present `power` or
+`toughness` member is decoded as `Some` even when it is JSON `null`, so
+`Some(ValueExpressionAST(Value::Null))` survives a round trip.
+**Rationale.** The hash is verified over the re-serialised typed value; an unknown member would
+be dropped by decoding and the hash would then not cover what the file says, so it cannot be
+tolerated. Failing loudly is also R11 ("never silently runs an incomplete definition").
+**Alternatives.** Ignoring unknown members (rejected: the hash would not cover them); keeping
+unknown members in a catch-all map (rejected: the engine would carry data it cannot interpret).
+
+## #11 FP-010 — Placeholder AST types
+
+**Decision.** `ValueExpressionAST`, `AbilityAST` and `PartnerAbilityDSL` wrap a
+`serde_json::Value` and `TextTokenStream` wraps `Vec<serde_json::Value>`, all
+`#[serde(transparent)]`, until FP-011/012/013 define the real schemas. Their content takes part
+in canonical JSON and the hash.
+**Rationale.** The top-level schema and hash can land and be tested now without inventing AST
+shapes that later issues own (R1).
+**Alternatives.** Empty structs (rejected: definitions with content could not round-trip);
+defining the ASTs here (rejected: owned by later units).
+
+## #11 FP-010 — Safe integer range for hashed JSON
+
+**Decision.** `canonical::canonicalize` and `to_canonical_vec` reject, with
+`CanonicalError::UnsafeInteger`, every number whose value is an integer of magnitude above
+`MAX_SAFE_INTEGER` (2^53 − 1), whatever its spelling: integer literals such as
+`9007199254740992`, and also exponent or fraction spellings with an integral value such as
+`1e20`, `1e21` or `9007199254740992.0`. Non-integer numbers (for example `1.5`, `1e-7`) are
+accepted. The check is lexical, with no floating-point type (REQ-CORE-006): integer literals on
+the input, and the JCS output's ECMAScript number forms (a positive exponent means an integer of
+at least 1e21; no `.` and no exponent means an integer).
+**Rationale.** JCS prints large integral doubles silently rounded ("FP-004 — RFC 8785 canonical
+JSON"), so such values must travel as strings. The brief also requires idempotence
+(`canonicalize(canonicalize(x)) == canonicalize(x)`) and rejection of out-of-range integer
+literals: the canonical form of `1e20` is the integer literal `100000000000000000000`, so
+accepting `1e20` while rejecting that literal would break idempotence. Rejecting by value is the
+only rule that satisfies both.
+**Alternatives.** Rejecting only digit-only literals (rejected: not idempotent, as above);
+accepting exponent-form integers of 1e21 or more because JCS prints them with an exponent
+(rejected: they are still integers beyond the safe range, and it makes the rule depend on a
+printing threshold).
