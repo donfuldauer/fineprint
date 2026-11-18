@@ -27,4 +27,4 @@ every ready issue in plan order.
   without waiting for a person once the P6 merge conditions hold.
 - **Non-negotiables:** determinism (R3), no card-specific branches (R4), no card data anywhere in
   the repo, synthetic test cards only (R5), `VERIFIED` only through passing tests (R11).
-- Record ambiguous choices in `docs/DECISIONS.md` and `docs/HUMAN_QUEUE.md` and continue (R8).
+- Record ambiguous choices and judgement calls in `docs/DECISIONS.md` (your recommendation is the decision) and continue (R8). `docs/HUMAN_QUEUE.md` is only for P8 items a person must do.
