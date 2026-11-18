@@ -29,3 +29,7 @@ pub mod text;
 
 /// Decision descriptions: `ChoiceSpec` (REQ-DSL-011, SRS §14.4.6).
 pub mod choice;
+
+/// Ability envelope and the six ability kinds: triggers and events, activated abilities and
+/// costs, static effects and replacements (REQ-DSL-004..REQ-DSL-009, SRS §14.3–§14.4.4).
+pub mod ability;
