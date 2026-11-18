@@ -1435,13 +1435,23 @@ keys, and cannot express the flat-ref and flat-predicate styles strictly).
 non-integer number (`1.0`, `1e2`, `-0`, `-0.0` all arrive as floats), integers outside
 ±(2^53 − 1), and noncharacters in member names and strings. Hand-written conversion then
 rejects unknown, missing and `null` optional members. Serialize writes directly (no
-`to_value`), so the canonical serializer's depth check also bounds export, and it re-checks
+`to_value`), so `canonical::to_canonical_vec` (which checks depth) also bounds export; a plain
+`serde_json::to_vec` does not check nesting depth, so a hand-built value deeper than 127 can be
+written but will not decode, and callers who need output guaranteed to reload must use
+`to_canonical_vec`. Serialize re-checks (value-level only)
 the invariants a hand-built value can break (empty strings, bad `$var`, empty AND/OR or
 DEVOTION, empty or repeated zones, a filter with neither zones nor a predicate, an invalid
 token, an invalid ChoiceSpec, a LITERAL outside the safe range), failing instead of writing
 JSON that would not decode.
 **Rationale.** G4–G6 and R12 must hold for every deserializer, not only `serde_json::from_str`
-(whose own limit is also 127): `serde_json::Value` as a deserializer has no depth limit. The
+(whose own limit is also 127): `serde_json::Value` as a deserializer has no depth limit. This
+holds with two caveats. The depth limit and the duplicate-name check act while JSON is read, so
+untrusted JSON must be decoded directly from bytes/str/reader into the schema type; once parsed
+into a `serde_json::Value`, duplicate names have already collapsed to one entry and the typed
+decoder cannot see them. And for an in-memory `Value` the caller must bound its depth before
+building or handing over an owned value, because a very deep owned `Value` can overflow the
+stack in `serde_json`'s own recursive drop before this crate returns its error; prefer
+deserialising from a borrowed `&Value`. The
 noncharacter rule is the same as `canonical`'s, so anything that decodes can be exported
 (`to_canonical_vec(&decode(J))` is the RFC 8785 form of J).
 **Alternatives.** Derive with `deny_unknown_fields` (rejected: cannot express the flat styles
@@ -1450,10 +1460,12 @@ nor reject floats in `i64` positions uniformly across deserializers); accept non
 
 ## #12 FP-011 — FP-010 placeholders stay in card/
 
-**Decision.** The `serde(transparent)` placeholders `card::ValueExpressionAST` and
-`card::TextTokenStream` (wrappers of `serde_json::Value`) are left untouched. Swapping the
-card definition over to `expr::ValueExpressionAST` and `text::TextTokenStream` is a follow-up
-unit's work, not this one's.
+**Decision.** The two `serde(transparent)` placeholders are left untouched, and their shapes
+differ: `card::ValueExpressionAST(pub Value)` accepts any JSON value, and
+`card::TextTokenStream(pub Vec<Value>)` accepts a JSON array whose elements are any JSON value.
+The real types (`expr::ValueExpressionAST`, `text::TextTokenStream`) are stricter than either.
+Swapping the card definition over to them is follow-up issue #159 (FP-140)'s work, not this
+one's.
 **Rationale.** The brief limits this unit to the new `expr`, `text`, `choice` directories plus
 three `pub mod` lines; changing `card/` would change FP-010's definition hash inputs and tests.
 **Alternatives.** Re-export the new types from `card` now (rejected: outside owned paths).

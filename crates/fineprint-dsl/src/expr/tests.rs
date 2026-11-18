@@ -1389,7 +1389,7 @@ fn req_nfr_006_strict_buffering() {
     reject::<PredicateAST>(r#"{"pred":"HAS_KEYWORD","keyword":"a￿"}"#);
     reject::<PredicateAST>("{\"pred\":\"TAPPED\",\"\u{fdef}\":1}");
     reject::<PredicateAST>(r#"{"pred":"TAPPED"} x"#);
-    let escaped: ReferenceAST = serde_json::from_str(r#"{"ref":"SELF"}"#).expect("escaped");
+    let escaped = accept::<ReferenceAST>(r#"{"ref":"\u0053ELF"}"#);
     assert_eq!(escaped, ReferenceAST::SelfRef);
     let ok: PredicateAST =
         serde_json::from_value(json!({"pred":"POWER","cmp":"EQ","value":{"LITERAL":3}}))

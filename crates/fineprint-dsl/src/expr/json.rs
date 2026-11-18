@@ -17,6 +17,16 @@
 //! - noncharacters in member names and strings (the same rule as [`crate::canonical`], so every
 //!   decoded value can be exported again).
 //!
+//! Caveats. The depth limit and the duplicate-name check are enforced while the JSON is read, so
+//! untrusted JSON must be decoded directly from bytes, a `str` or a reader
+//! (`serde_json::from_slice`/`from_str`/`from_reader`) into the schema type. Duplicate-name
+//! rejection is available only then: once a caller has parsed into a `serde_json::Value`,
+//! duplicates have already collapsed to one entry and the typed decoder cannot see them. For an
+//! in-memory `Value` the caller must bound its depth before building or handing over an owned
+//! value, because a very deep owned `Value` can overflow the stack in `serde_json`'s own
+//! recursive drop before this crate returns its error; prefer deserialising from a borrowed
+//! `&Value`.
+//!
 //! The buffered value is then converted by hand-written [`FromJson`] impls that reject unknown
 //! and missing members, a present `null` on an optional member, and unknown identifier strings.
 

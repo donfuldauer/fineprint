@@ -308,3 +308,27 @@ fn req_dsl_012_random_and_mutated_never_panic() {
     reject::<TextTokenStream>(&"[".repeat(100_000));
     reject::<TextToken>(&r#"{"a":"#.repeat(100_000));
 }
+
+/// REQ-DSL-012: a token failing validation inside a stream is reported at its array position;
+/// standalone token decoding still validates and reports index 0.
+#[test]
+fn req_dsl_012_stream_decode_error_index() {
+    let bad = |at: usize| {
+        let mut toks: Vec<String> = (0..3)
+            .map(|i| format!(r#"{{"id":"t{i}","kind":"LITERAL","text":"x"}}"#))
+            .collect();
+        toks[at] = r#"{"id":"","kind":"LITERAL","text":"x"}"#.to_owned();
+        format!("[{}]", toks.join(","))
+    };
+    assert_eq!(
+        TextTokenStream::new(vec![lit("a", "x"), lit("", "x")]),
+        Err(TextError::EmptyId { index: 1 })
+    );
+    let err = serde_json::from_str::<TextTokenStream>(&bad(1)).expect_err("empty id");
+    assert!(err.to_string().contains("text token 1"), "{err}");
+    let err = serde_json::from_str::<TextTokenStream>(&bad(2)).expect_err("empty id");
+    assert!(err.to_string().contains("text token 2"), "{err}");
+    let err = serde_json::from_str::<TextToken>(r#"{"id":"","kind":"LITERAL","text":"x"}"#)
+        .expect_err("empty id");
+    assert!(err.to_string().contains("text token 0"), "{err}");
+}
