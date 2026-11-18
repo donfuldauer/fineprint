@@ -1774,3 +1774,51 @@ fn req_nfr_006_serialize_rechecks_parts() {
         no_encode(&op);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// PR #162 review round 1 regressions
+
+/// REQ-DSL-008, REQ-DSL-004: lock-in anchors may come later in the list, and a large list is
+/// handled in one pass (decode and encode); a missing anchor is still rejected.
+#[test]
+fn req_dsl_008_lock_in_forward_reference_and_large_list() {
+    let lock = r#"{"type":"CHAR","layer":"7b","affected":{"sameAsLayer":"6"},"modification":{"op":"SET_BASE_PT","power":1,"toughness":1}}"#;
+    let anchor = r#"{"type":"CHAR","layer":"6","affected":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"modification":{"op":"REMOVE_ALL_ABILITIES"}}"#;
+    let doc = |n: usize, with_anchor: bool| {
+        let mut effects = vec![lock; n];
+        if with_anchor {
+            effects.push(anchor);
+        }
+        format!(
+            r#"{{"abilityId":"s1","kind":"STATIC","functionsIn":["BATTLEFIELD"],"effects":[{}]}}"#,
+            effects.join(",")
+        )
+    };
+    accept::<AbilityAST>(&doc(1, true));
+    accept::<AbilityAST>(&doc(3000, true));
+    reject::<AbilityAST>(&doc(1, false));
+    reject::<AbilityAST>(&doc(3000, false));
+}
+
+/// REQ-DSL-009, REQ-NFR-006: ShieldUses enforces a positive count on both codec paths.
+#[test]
+fn req_dsl_009_shield_uses_codecs_enforce_positive_count() {
+    assert!(serde_json::from_str::<ShieldUses>("0").is_err());
+    assert!(serde_json::to_string(&ShieldUses::Count(0)).is_err());
+    assert_eq!(
+        serde_json::from_str::<ShieldUses>("1").expect("1"),
+        ShieldUses::Count(1)
+    );
+    assert_eq!(
+        serde_json::to_string(&ShieldUses::Count(1)).expect("ser"),
+        "1"
+    );
+    assert_eq!(
+        serde_json::from_str::<ShieldUses>(r#""COUNTER_BACKED""#).expect("cb"),
+        ShieldUses::CounterBacked
+    );
+    assert_eq!(
+        serde_json::to_string(&ShieldUses::CounterBacked).expect("ser"),
+        r#""COUNTER_BACKED""#
+    );
+}

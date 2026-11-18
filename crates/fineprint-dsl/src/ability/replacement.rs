@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use serde::ser::{SerializeMap, Serializer};
+use serde::ser::{self, SerializeMap, Serializer};
 use serde_json::Value;
 
 use super::common::{EffectInstructionAST, check_non_empty, put_opt, vec_of};
@@ -214,7 +214,10 @@ impl FromJson for ShieldUses {
     fn from_json(v: &Value) -> JResult<Self> {
         match v {
             Value::String(s) if s == "COUNTER_BACKED" => Ok(ShieldUses::CounterBacked),
-            Value::Number(_) => Ok(ShieldUses::Count(u32_of(v, "shield uses")?)),
+            Value::Number(_) => match u32_of(v, "shield uses")? {
+                0 => Err("shield uses must be at least 1".to_owned()),
+                n => Ok(ShieldUses::Count(n)),
+            },
             _ => Err("shield uses must be an integer or \"COUNTER_BACKED\"".to_owned()),
         }
     }
@@ -223,6 +226,7 @@ impl FromJson for ShieldUses {
 impl Serialize for ShieldUses {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
+            ShieldUses::Count(0) => Err(ser::Error::custom("shield uses must be at least 1")),
             ShieldUses::Count(n) => s.serialize_u32(*n),
             ShieldUses::CounterBacked => s.serialize_str("COUNTER_BACKED"),
         }
