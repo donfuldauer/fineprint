@@ -21,9 +21,10 @@ check once on the head; check 1 traces each group's requirements; check 9 compar
 `<pre-batch head>..HEAD` against the union of all groups' OWNED PATHS. Report results per item
 (per thread URL where given).
 
-**Queue-only round.** If the only change is a `docs/HUMAN_QUEUE.md` line for deferred findings,
-run check 9 (the diff touches only that file) and confirm each deferred finding has its line.
-Report `requirements: 0/0`; `pass` if both hold.
+**Docs-only round.** A round whose only changes are to `docs/DECISIONS.md`, `docs/RUN_LOG.md` or
+`docs/HUMAN_QUEUE.md` (for example the entry for a deferred finding) has no shortcut: run every
+check below as for any round, and also confirm each deferred finding has its entry. Report the
+real `requirements: <n met / n total>` count over all brief requirements (never a default 0/0).
 
 ## Checks (all must pass)
 
@@ -55,7 +56,10 @@ Report `requirements: 0/0`; `pass` if both hold.
 8. **Card-data and card-branch guards (R4, R5).** Run the guard command in `docs/DEVELOPMENT.md` (or, until it
    exists, grep the whole diff outside `docs/` for string literals that look like real card names
    or Oracle text, for committed Scryfall/MTGJSON data, and for comparisons against `cardDefId` or
-   card names in engine code). Report hits with file:line.
+   card names in engine code). Report hits with file:line. The guard does not scan the content of
+   files under `docs/`, so also read every changed line under `docs/` and confirm it contains no
+   card names, Oracle text, rulings or card definitions (R5; only `docs/SRS.md` may name a card, to
+   identify an interaction); report hits with file:line.
 9. **Owned paths.** From the repository root (`cd "$(git rev-parse --show-toplevel)"`), take the
    union of `git diff --no-renames --name-only <base>...HEAD`, `git diff --no-renames --name-only
    --cached`, `git diff --no-renames --name-only` and `git ls-files --others --exclude-standard`.

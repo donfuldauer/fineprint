@@ -50,7 +50,7 @@ relevant `docs/DECISIONS.md` entries.
 
 | Tier | Model (`model`) | Use for |
 |---|---|---|
-| T0 | Haiku 5.5 (`haiku`) | Docs-only edits, run-log and queue lines, formatting, renames, a nit whose fix the comment spells out exactly |
+| T0 | Haiku 5.5 (`haiku`) | Docs-only edits, run-log lines, formatting, renames, a nit whose fix the comment spells out exactly |
 | T1 | Sonnet 5.5 (`sonnet`) | A well-specified change in one module with clear tests; adding tests; CI tweaks; most review findings; keyword macros and synthetic test cards that follow an existing template; verification runs |
 | T2 | Opus 5.5 (`opus`) | New feature implementations; layers and dependency (CR 613), replacement tiers (CR 616), combat solvers, casting/cost locking (CR 601), loop detection (CR 733), redaction and forking; override validation and the `VERIFIED` check; the Oracle-text grammar; fixtures for linked abilities, copy effects, text changes, face-down or merged layouts; cross-module changes; anything ambiguous; every investigation |
 | T3 | Fable 5.2 (`fable`) | Only under the Fable rule below |
@@ -61,7 +61,7 @@ relevant `docs/DECISIONS.md` entries.
 3. `FABLE_ALLOWANCE` is `sufficient`. `unknown` and `insufficient` both mean no.
 
 If 1 and 2 hold but 3 does not: choose T2, set `fable_wanted: true`, and give a
-`[Fable wanted]` line for `docs/HUMAN_QUEUE.md`. Never wait for allowance.
+`[Fable wanted]` note in the run log line. Never wait for allowance.
 
 When torn between two tiers, take the higher one, but never move up into T3 that way. The
 Independent Tester task of a unit is classified on its own; it is usually T1 or T2.
@@ -112,7 +112,7 @@ agent: task-executor | fixture-author | issue-investigator | rules-researcher | 
 model: haiku | sonnet | opus | fable
 fable check: not considered | wanted, allowance <value>, routed to T2 | granted (<1>, <2>, allowance sufficient)
 rules questions: <for needs-rules: numbered questions> | none
-human queue line: <text or none>
+human queue line: <P8 item text, or none — judgement calls go in DECISIONS.md>
 run log line: <Phase | id | role | model | attempt | routed | — | tier + one-line reason>
 --- BRIEF ---
 <the full delegation brief>
