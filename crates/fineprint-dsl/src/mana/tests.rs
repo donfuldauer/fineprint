@@ -386,6 +386,41 @@ fn req_obj_001_new_validates_symbols() {
     }
 }
 
+/// REQ-OBJ-001: the offset of the first invalid symbol is the byte length of the text before it;
+/// of two invalid symbols the first is reported; valid costs still round-trip.
+#[test]
+fn req_obj_001_new_reports_first_invalid_offset() {
+    use Color::*;
+    assert_eq!(
+        ManaCostDSL::new(vec![
+            ManaSymbol::Generic(10),
+            ManaSymbol::Colored(White),
+            ManaSymbol::Hybrid(Red, Red),
+        ]),
+        Err(ManaParseError::UnknownSymbol {
+            offset: 7,
+            symbol: "{R/R}".into()
+        })
+    );
+    assert_eq!(
+        ManaCostDSL::new(vec![
+            ManaSymbol::Hybrid(Red, Red),
+            ManaSymbol::HybridPhyrexian(Green, Green),
+        ]),
+        Err(ManaParseError::UnknownSymbol {
+            offset: 0,
+            symbol: "{R/R}".into()
+        })
+    );
+    let cost = ManaCostDSL::new(vec![
+        ManaSymbol::Generic(10),
+        ManaSymbol::Colored(White),
+        ManaSymbol::Hybrid(Red, Green),
+    ])
+    .expect("valid");
+    assert_eq!(ManaCostDSL::parse(&cost.to_string()), Ok(cost));
+}
+
 /// REQ-OBJ-001: the parser and the constructor cannot disagree: for a spread of symbols,
 /// parsing the printed symbol succeeds exactly when `new` accepts it, with the same symbol.
 #[test]
