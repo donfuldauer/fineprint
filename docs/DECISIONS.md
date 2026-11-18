@@ -1387,3 +1387,98 @@ a stale hash (noncharacter, wrong length, anything) out of both the hash and the
 check). Serialise `self` unchanged and remove the member afterwards (rejected: a stale hash with a
 noncharacter would fail the check). Note: `serde_json::Value`'s `Drop` is also recursive, so an
 erroring by-value `seal` still drops a deep value; out of scope (no custom `Drop`).
+
+## #12 FP-011 — Spec-test readings of the selector and `$var` rules
+
+**Decision.** The Independent Tester's spec tests read two contract clauses as follows.
+(1) A filter selector whose flat predicate is `SAME_AS` (`{"pred":"SAME_AS","ref":"TARGET","slot":0}`)
+is the filter form: it has a predicate, so the `ref`/`slot` members belong to the predicate and
+the value round-trips exactly (`req_dsl_003_selector_with_flat_same_as`). (2) A `BOUND` var must
+match `$` followed by one or more of `A-Z a-z 0-9 _` over the whole string, so `$$a`, `a$b` and
+`$a-b` are rejected.
+**Rationale.** (1) The wire contract defines the reference form as a ReferenceAST with no other
+member and lets any PredicateAST sit flat in a filter selector; only the filter reading is
+valid, and G5 requires every valid document to round-trip. (2) G3 states the full shape of the
+string; any other reading would allow several spellings of characters outside the class.
+**Alternatives.** Treat any object with `ref` as the reference form (rejected: it would reject a
+valid filter selector). Accept a `$var` prefix match (rejected: G3 gives the whole shape).
+
+## #12 FP-011 — Wire catalogue as implemented
+
+**Decision.** The JSON of `fineprint_dsl::expr`, `text` and `choice` is exactly the FP-011 wire
+contract of the brief (G1–G6). Rust shapes chosen where the contract names only the JSON:
+`ReferenceAST::{SelfRef, …, Target{slot: u32}, Chosen{key}, Bound{var}, Linked{link_id},
+Remembered{key}}`; `PlayerSelectorAST::{Ref, Players(PlayerGroup)}`;
+`ObjectSelectorAST::{Ref(ReferenceAST), Filter(SelectorFilter{zones, count, ordering,
+predicate})}` with `Ordering{by: OrderKey, direction: Direction}`; `PredicateAST` has one variant
+per `pred`/`op` name (`HasCounter{kind, compare: Option<(Cmp, Box<Value>)>}`,
+`SameAs{reference}`, `Controls{selector, player}`); `ValueExpressionAST::{Literal(i64), X,
+Count, Attr{reference, attr}, PlayerAttr{reference, attr}, Math{op, lhs, rhs}, Distinct{attr,
+selector}, History(Box<HistoryQuery>), Memory(String)}`; the JSON member `where` of
+`HistoryQuery` is the Rust field `condition`. `TextToken::{Literal{id, text}, Word{id, category,
+value}, NameRef{id, kind: NameRefKind, name: Option<String>}}` with `NameRefKind::{SelfRef,
+Other}` (strings `SELF`/`OTHER`); `ChoiceSpec` has public fields plus `ChoiceSpec::new(chooser,
+kind)` and `ChoiceSpec::validate()`. Every string enum has `ALL`, `as_str` and `from_wire`.
+**Rationale.** One variant per wire name keeps `decode` injective and lets `match` be
+exhaustive; a fieldless `NameRefKind` mirrors the `ref` member, and the SELF-without-name /
+OTHER-with-name rule is enforced by `TextTokenStream::new` and by Deserialize (`TextError`).
+**Alternatives.** `NameRefKind::Other(String)` (rejected: the `kind` name implies a fieldless
+selector and the standalone JSON of the enum would be unclear); derived serde with
+`#[serde(flatten)]` (rejected: flatten buffers through a map that accepts floats and duplicate
+keys, and cannot express the flat-ref and flat-predicate styles strictly).
+
+## #12 FP-011 — Strict decoding through a depth-checked buffer
+
+**Decision.** Every Deserialize in the three modules first buffers its input into a
+`serde_json::Value` with a private `DeserializeSeed` that counts open containers and fails above
+`canonical::MAX_DEPTH` (127) before recursing, rejects duplicate member names, every
+non-integer number (`1.0`, `1e2`, `-0`, `-0.0` all arrive as floats), integers outside
+±(2^53 − 1), and noncharacters in member names and strings. Hand-written conversion then
+rejects unknown, missing and `null` optional members. Serialize writes directly (no
+`to_value`), so the canonical serializer's depth check also bounds export, and it re-checks
+the invariants a hand-built value can break (empty strings, bad `$var`, empty AND/OR or
+DEVOTION, empty or repeated zones, a filter with neither zones nor a predicate, an invalid
+token, an invalid ChoiceSpec, a LITERAL outside the safe range), failing instead of writing
+JSON that would not decode.
+**Rationale.** G4–G6 and R12 must hold for every deserializer, not only `serde_json::from_str`
+(whose own limit is also 127): `serde_json::Value` as a deserializer has no depth limit. The
+noncharacter rule is the same as `canonical`'s, so anything that decodes can be exported
+(`to_canonical_vec(&decode(J))` is the RFC 8785 form of J).
+**Alternatives.** Derive with `deny_unknown_fields` (rejected: cannot express the flat styles
+nor reject floats in `i64` positions uniformly across deserializers); accept noncharacters
+(rejected: the decoded value could then fail to export).
+
+## #12 FP-011 — FP-010 placeholders stay in card/
+
+**Decision.** The `serde(transparent)` placeholders `card::ValueExpressionAST` and
+`card::TextTokenStream` (wrappers of `serde_json::Value`) are left untouched. Swapping the
+card definition over to `expr::ValueExpressionAST` and `text::TextTokenStream` is a follow-up
+unit's work, not this one's.
+**Rationale.** The brief limits this unit to the new `expr`, `text`, `choice` directories plus
+three `pub mod` lines; changing `card/` would change FP-010's definition hash inputs and tests.
+**Alternatives.** Re-export the new types from `card` now (rejected: outside owned paths).
+
+## #12 FP-011 — SRS shorthand is not a wire form
+
+**Decision.** SRS shorthand and inline spellings (`TARGET(n)`, `CHOSEN(key)`, `BOUND($var)`,
+an AST embedding a rewritable word's literal value) are not accepted. References are
+`{"ref":…}` objects, and a rewritable word is referenced by token id
+(`{"textToken":"t14"}`) or given as a fixed `{"name":…}` (WordRef).
+**Rationale.** SRS §14.5 requires by-id references to rewritable words; G5 requires exactly
+one spelling per value.
+**Alternatives.** Accept the call-style strings as aliases (rejected: two spellings per value).
+
+## #12 FP-011 — Choices where the brief is silent
+
+**Decision.** (1) Selector form detection: an object with `pred` or `op` is the filter form
+(even with `ref`, which then belongs to a flat `SAME_AS`); otherwise an object with `ref` is the
+reference form and any other member is rejected. (2) `WordRef` with both `textToken` and `name`
+is rejected. (3) `ENUM` candidates are free-form strings: non-empty, distinct, order kept.
+(4) `ChoiceSpec` bounds that are not both `LITERAL` are not compared (the toolchain's job).
+(5) A `TextToken` decoded on its own runs the same per-token checks as the stream (everything
+but id uniqueness). (6) `TextError::Noncharacter` reports the token id, or the position for the
+id itself. (7) The `X` expression serialises as the bare string `"X"`; `{"X":…}` is rejected.
+**Rationale.** Each choice keeps decode injective and lossless (G5) and matches the SRS
+examples (`{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"}`, `{"ref":"TARGET","slot":0}`).
+**Alternatives.** Treat any `ref` member as the reference form (rejected: a valid flat
+`SAME_AS` filter would be refused).
