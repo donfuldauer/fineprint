@@ -211,8 +211,16 @@ impl TextToken {
 
 impl TextToken {
     /// Decodes a token and validates it as element `index` of a stream, so an error names the
-    /// token's array position (REQ-DSL-012).
+    /// token's array position (REQ-DSL-012). Field and shape errors are prefixed with the
+    /// position; validation errors already carry it.
     fn from_json_at(v: &Value, index: usize) -> JResult<Self> {
+        let token = Self::decode_fields(v).map_err(|e| format!("text token {index}: {e}"))?;
+        token.validate(index).map_err(|e| e.to_string())?;
+        Ok(token)
+    }
+
+    /// Decodes the members of a token without validating it.
+    fn decode_fields(v: &Value) -> JResult<Self> {
         let mut o = Obj::new(v, "text token")?;
         let id = str_of(o.req("id")?, "id")?.to_owned();
         let token = match str_of(o.req("kind")?, "kind")? {
@@ -237,14 +245,15 @@ impl TextToken {
             other => return Err(format!("unknown text token kind {other:?}")),
         };
         o.finish()?;
-        token.validate(index).map_err(|e| e.to_string())?;
         Ok(token)
     }
 }
 
 impl FromJson for TextToken {
     fn from_json(v: &Value) -> JResult<Self> {
-        TextToken::from_json_at(v, 0)
+        let token = TextToken::decode_fields(v)?;
+        token.validate(0).map_err(|e| e.to_string())?;
+        Ok(token)
     }
 }
 
