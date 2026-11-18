@@ -22,6 +22,12 @@ pub enum ZoneError {
     /// The object id generator has already issued `u64::MAX` (REQ-CORE-002).
     IdExhausted,
     /// A controller was given for, or set on, an object outside the battlefield and the stack.
+    ///
+    /// This is a container rule, not a claim about the CR: only objects on the stack or the
+    /// battlefield have a controller (CR 109.4), but CR 109.4a-g list exceptions (for example
+    /// an emblem in the command zone is controlled by the player who put it there, CR 109.4c).
+    /// The container does not model emblems or variant cards yet, so it rejects an explicit
+    /// controller outside the battlefield and the stack.
     ControllerNotApplicable,
     /// Graveyard reordering is disabled by [`ZonesConfig`](super::ZonesConfig).
     ReorderNotAllowed,
@@ -29,6 +35,10 @@ pub enum ZoneError {
     InvalidOrder,
     /// The card is not in the named outside-the-game pool of that player.
     NoSuchOutsideCard(CardId),
+    /// The identifier generator issued an id that already names a live object in this
+    /// container: the generator passed in is not the one that issued this container's ids
+    /// (REQ-CORE-002).
+    IdCollision(ObjectId),
 }
 
 impl fmt::Display for ZoneError {
@@ -53,6 +63,13 @@ impl fmt::Display for ZoneError {
             }
             ZoneError::NoSuchOutsideCard(id) => {
                 write!(f, "card {} is not in that outside-the-game pool", id.get())
+            }
+            ZoneError::IdCollision(id) => {
+                write!(
+                    f,
+                    "issued object id {} already names a live object",
+                    id.get()
+                )
             }
         }
     }

@@ -4,8 +4,9 @@
 
 //! Spec tests for `fineprint_core::zones`. Black-box: written from the work-item brief only.
 //!
-//! Object identity: every zone change creates a new ObjectId and leaves no reference to the old
-//! one, CardId persistence, owner's-zone routing, error atomicity and snapshot / canonical
+//! Object identity: every zone change (and a same-zone move into exile or the command zone)
+//! creates a new ObjectId and leaves no reference to the old one, a same-zone move elsewhere
+//! keeps the id, CardId persistence, owner's-zone routing, error atomicity and snapshot / canonical
 //! encoding behaviour (REQ-CORE-002, REQ-ZONE-001).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -105,9 +106,13 @@ fn populated() -> (Zones, IdGenerator<ObjectId>) {
 // Item 1: every move creates a new ObjectId.
 // ---------------------------------------------------------------------------------------------
 
-// REQ-CORE-002, CR 400.7, 400.8, 400.10: for every ordered pair of the seven zone kinds
-// (same-kind included) a move issues exactly one fresh id, the old id is gone from every query,
-// the CardId and owner persist, and Moved.from / Moved.to are right.
+// REQ-CORE-002, CR 400.7, 400.8, 406.7, 400.10, 400.5: for every ordered pair of the seven zone
+// kinds (same-kind included). A cross-kind move, and a same-kind move into exile or the command
+// zone, issues exactly one fresh id, the old id is gone from every query, the CardId and owner
+// persist, and Moved.from / Moved.to are right. A same-kind move into the library, hand,
+// graveyard, battlefield or stack is not a zone change: the id is kept and no id is issued.
+// R10 correction for finding F1 (CodeRabbit comment 4621941423): the same-kind pairs used to
+// assert a new id for every kind.
 #[test]
 fn every_move_between_every_pair_of_kinds_creates_a_new_object() {
     let players = [pid(1), pid(2)];
@@ -121,14 +126,26 @@ fn every_move_between_every_pair_of_kinds_creates_a_new_object() {
             let others: Vec<ObjectId> = ids_before.iter().copied().filter(|i| *i != old).collect();
             let last = g.last_issued();
             let moved = z.move_object(&mut g, old, req(to)).unwrap();
-            assert_eq!(g.last_issued(), last + 1, "{from:?} -> {to:?}");
-            assert_eq!(moved.new.get(), last + 1);
             assert_eq!(moved.old, old);
-            assert_ne!(moved.new, old);
-            assert!(ids_before.iter().all(|i| moved.new > *i));
             assert_eq!(moved.from, ZoneId::of(from, pid(2)));
             assert_eq!(moved.to, ZoneId::of(to, pid(2)));
-            assert!(!referenced(&z, old, &players), "{from:?} -> {to:?}");
+            let keeps_id = from == to && !matches!(to, ZoneKind::Exile | ZoneKind::Command);
+            if keeps_id {
+                assert_eq!(g.last_issued(), last, "{from:?} -> {to:?}");
+                assert_eq!(moved.new, old, "{from:?} -> {to:?}");
+                assert_eq!(z.all_object_ids(), ids_before);
+            } else {
+                assert_eq!(g.last_issued(), last + 1, "{from:?} -> {to:?}");
+                assert_eq!(moved.new.get(), last + 1);
+                assert_ne!(moved.new, old);
+                assert!(ids_before.iter().all(|i| moved.new > *i));
+                assert!(!referenced(&z, old, &players), "{from:?} -> {to:?}");
+                // Every other object is untouched.
+                let mut expected = others.clone();
+                expected.push(moved.new);
+                expected.sort();
+                assert_eq!(z.all_object_ids(), expected);
+            }
             assert_eq!(z.object_of_card(card), Some(moved.new));
             let rec = z.object(moved.new).unwrap();
             assert_eq!(rec.id, moved.new);
@@ -136,13 +153,53 @@ fn every_move_between_every_pair_of_kinds_creates_a_new_object() {
             assert_eq!(rec.owner, pid(2));
             assert_eq!(rec.zone, ZoneId::of(to, pid(2)));
             assert!(z.contents(ZoneId::of(to, pid(2))).contains(&moved.new));
-            // Every other object is untouched.
-            let mut expected = others.clone();
-            expected.push(moved.new);
-            expected.sort();
-            assert_eq!(z.all_object_ids(), expected);
         }
     }
+}
+
+// REQ-CORE-002, CR 400.8, 406.7, 400.10: exile to exile and command to command issue a fresh id;
+// the old id is absent from all_object_ids, object and every zone's contents (finding F1).
+#[test]
+fn exile_and_command_same_zone_moves_issue_a_fresh_id() {
+    let players = [pid(1), pid(2)];
+    for kind in [ZoneKind::Exile, ZoneKind::Command] {
+        let (mut z, mut g) = populated();
+        let old = z.create_object(&mut g, cid(7), pid(1), req(kind)).unwrap();
+        let m = z.move_object(&mut g, old, req(kind)).unwrap();
+        assert_eq!(m.new.get(), g.last_issued());
+        assert!(m.new > old);
+        assert_eq!(
+            (m.from, m.to),
+            (ZoneId::of(kind, pid(1)), ZoneId::of(kind, pid(1)))
+        );
+        assert!(!z.all_object_ids().contains(&old));
+        assert_eq!(z.object(old), None);
+        assert!(
+            zone_ids(&players)
+                .into_iter()
+                .all(|zone| !z.contents(zone).contains(&old))
+        );
+        assert_eq!(z.object_of_card(cid(7)), Some(m.new));
+    }
+}
+
+// REQ-CORE-002, REQ-ZONE-001, CR 400.7, 400.5, 109.4, 110.2a: a battlefield-to-battlefield move
+// with a controller change keeps the id and issues none (finding F1).
+#[test]
+fn battlefield_to_battlefield_with_controller_change_keeps_the_id() {
+    let (mut z, mut g) = populated();
+    let a = z
+        .create_object(&mut g, cid(7), pid(1), req(ZoneKind::Battlefield))
+        .unwrap();
+    let last = g.last_issued();
+    let m = z
+        .move_object(&mut g, a, req_ctrl(ZoneKind::Battlefield, pid(2)))
+        .unwrap();
+    assert_eq!((m.old, m.new), (a, a));
+    assert_eq!(g.last_issued(), last);
+    let rec = z.object(a).unwrap();
+    assert_eq!((rec.owner, rec.controller), (pid(1), pid(2)));
+    assert_eq!(rec.rules_controller(), Some(pid(2)));
 }
 
 // REQ-CORE-002, CR 400.7: a chain of moves gives a strictly increasing sequence of ids, none of
@@ -334,11 +391,16 @@ fn check_identity(
     assert_eq!(all.len() + pool_total, holders, "{ctx}: untracked holders");
 }
 
-// REQ-CORE-002, REQ-ZONE-001 item 9, CR 400.7, 400.11: over many seeds and 2-4 players, random
-// creates, moves, outside round trips and failing calls never duplicate an id, never revive a
-// replaced id, keep each CardId in exactly one place and issue strictly increasing ids.
+// REQ-CORE-002, REQ-ZONE-001 item 9, CR 400.7, 400.8, 406.7, 400.10, 400.11: over many seeds and
+// 2-4 players, random creates, moves, outside round trips and failing calls never duplicate an
+// id, never revive a replaced id, keep each CardId in exactly one place and issue strictly
+// increasing ids. A same-zone move into the library, hand, graveyard, battlefield or stack keeps
+// the id and issues none, so it replaces nothing (finding F1, comment 4621941423).
 #[test]
 fn property_ids_are_fresh_and_never_reused() {
+    let mut repositions = 0_usize;
+    let mut fail_checks = 0_usize;
+    let mut fresh_checks = 0_usize;
     for seed in 0..64_u64 {
         let mut rng = Pcg64Dxsm::from_u64_seed(0x1d_0000 + seed);
         let n_players = 2 + pick(&mut rng, 3);
@@ -399,6 +461,7 @@ fn property_ids_are_fresh_and_never_reused() {
                     let bad = retired.iter().next_back().copied().unwrap_or(oid(u64::MAX));
                     assert!(z.move_object(&mut g, bad, req(ZoneKind::Hand)).is_err());
                     if let Some((card, owner)) = cards.iter().next() {
+                        fail_checks += 1;
                         assert_eq!(
                             z.create_object(&mut g, *card, *owner, req(ZoneKind::Exile)),
                             Err(ZoneError::CardAlreadyPresent(*card))
@@ -410,14 +473,22 @@ fn property_ids_are_fresh_and_never_reused() {
                 _ if !live.is_empty() => {
                     let id = live[pick(&mut rng, live.len())];
                     let r = random_request(&mut rng, &players);
+                    let rec = *z.object(id).unwrap();
                     let m = z.move_object(&mut g, id, r).unwrap();
                     assert_eq!(m.old, id);
-                    retired.insert(id);
-                    fresh = Some(m.new);
+                    assert_eq!(m.from, rec.zone);
+                    if m.to == rec.zone && !matches!(m.to, ZoneId::Exile | ZoneId::Command) {
+                        assert_eq!(m.new, id, "{ctx}: reposition changed the id");
+                        repositions += 1;
+                    } else {
+                        retired.insert(id);
+                        fresh = Some(m.new);
+                    }
                 }
                 _ => {}
             }
             if let Some(id) = fresh {
+                fresh_checks += 1;
                 assert!(id.get() > max_issued, "{ctx}: ids not increasing");
                 assert_eq!(id.get(), g.last_issued());
                 assert!(!retired.contains(&id));
@@ -427,14 +498,18 @@ fn property_ids_are_fresh_and_never_reused() {
             check_identity(&z, &players, &cards, &retired, &ctx);
         }
     }
+    // Neither the reposition path, the fresh-id checks nor the duplicate-card check is vacuous.
+    assert!(repositions > 0);
+    assert!(fail_checks > 0);
+    assert!(fresh_checks > 0);
 }
 
 // ---------------------------------------------------------------------------------------------
 // Item 10: error atomicity.
 // ---------------------------------------------------------------------------------------------
 
-// REQ-CORE-002, REQ-ZONE-001, CR 400.3, 400.7: failing calls leave the container and the
-// generator unchanged.
+// REQ-CORE-002, REQ-ZONE-001, CR 400.7, 109.4: failing calls (including the container's
+// controller-eligibility errors) leave the container and the generator unchanged.
 #[test]
 fn failed_calls_change_nothing() {
     let (mut z, mut g) = populated();
@@ -552,11 +627,21 @@ fn id_exhaustion_changes_nothing() {
     );
     assert_eq!(z, before);
     assert_eq!(ex.last_issued(), u64::MAX);
+    let live_zone = z.object(live).unwrap().zone;
     for to in ZoneKind::ALL {
-        assert_eq!(
-            z.move_object(&mut ex, live, req(to)).map(|m| m.new),
-            Err(ZoneError::IdExhausted)
-        );
+        if ZoneId::of(to, pid(1)) == live_zone {
+            // R10 correction for finding F1 (comment 4621941423): a same-zone move in a hand is
+            // a reposition that needs no id, so an exhausted generator does not matter.
+            assert_eq!(
+                z.move_object(&mut ex, live, req(to)).map(|m| m.new),
+                Ok(live)
+            );
+        } else {
+            assert_eq!(
+                z.move_object(&mut ex, live, req(to)).map(|m| m.new),
+                Err(ZoneError::IdExhausted)
+            );
+        }
         assert_eq!(z, before);
         assert!(z.object(live).is_some());
     }

@@ -39,6 +39,20 @@ struct PlayerZones {
 /// Cloning is a cheap snapshot with structural sharing: each component sits behind an `Arc` and
 /// is written with `Arc::make_mut`. Mutating one copy never affects another. Equality compares
 /// values.
+///
+/// **Omniscient state.** `Zones` is the omniscient engine state. [`Zones::contents`],
+/// [`Zones::object`], [`Zones::object_of_card`], [`Zones::all_object_ids`] and the canonical
+/// encoding expose hidden information: library order, hand membership and the `CardId` of
+/// face-down objects. It must stay behind the redacted per-player view and the determinized-fork
+/// boundary (REQ-CORE-004, REQ-API-004) and is never handed to a client directly.
+///
+/// **Stack scope.** In this unit the stack holds only card-backed objects (spells, and copies
+/// that have a `CardId`); every object is created with a `CardId` ([`Zones::create_object`]).
+/// Cardless stack objects (abilities, which go on the stack without a card, CR 405.1, CR 109.1;
+/// copies of spells that are not cards) are out of scope and are the job of the later units that
+/// own them: #31 FP-030 (putting triggered abilities on the stack), #58 FP-056 (resolution of
+/// spells and abilities) and #66 FP-064 (copies of spells and abilities), with activated
+/// abilities in a later stack/ability unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Zones {
     config: ZonesConfig,
@@ -123,8 +137,10 @@ impl Zones {
         self.cards.contains_key(&card) || self.outside_index.contains_key(&card)
     }
 
-    /// The controller the new object gets: the request's (battlefield and stack only) or the
-    /// owner.
+    /// The controller the object gets: the request's (battlefield and stack only, CR 109.4,
+    /// CR 110.2a, CR 405.4) or the owner (the CR 108.4a fallback). An explicit controller
+    /// elsewhere is rejected as a container rule: emblems (CR 109.4c) and variant cards are not
+    /// modelled yet.
     fn resolve_controller(
         &self,
         req: &MoveRequest,
@@ -205,18 +221,36 @@ impl Zones {
         }
     }
 
+    /// Issues the next id from a copy of `ids` and rejects it if it already names a live object
+    /// (REQ-CORE-002). Returns the advanced copy, to be written back only once the operation
+    /// cannot fail any more, and the id.
+    fn issue_fresh(
+        &self,
+        ids: &IdGenerator<ObjectId>,
+    ) -> Result<(IdGenerator<ObjectId>, ObjectId), ZoneError> {
+        let mut probe = ids.clone();
+        let id = probe.issue().map_err(|_| ZoneError::IdExhausted)?;
+        if self.objects.contains_key(&id) {
+            return Err(ZoneError::IdCollision(id));
+        }
+        Ok((probe, id))
+    }
+
     /// Creates a new object for `card` (owned by `owner`) in the zone `req` names; the object
     /// gets a fresh id from `ids` (REQ-CORE-002, CR 400.7). Used for cards entering a zone from
-    /// no zone, such as game setup.
+    /// no zone, such as game setup. Every object needs a `CardId`: cardless stack objects
+    /// (abilities, CR 405.1) cannot be created here (see [`Zones`], "Stack scope").
     ///
-    /// A per-player destination is `owner`'s zone (CR 400.3).
+    /// A per-player destination is `owner`'s zone (CR 400.3). `ids` must be the generator that
+    /// issued every existing `ObjectId` in this container.
     ///
     /// # Errors
     /// [`ZoneError::UnknownPlayer`] if `owner` (or the requested controller) is unknown,
     /// [`ZoneError::CardAlreadyPresent`] if `card` is in a zone or pool,
     /// [`ZoneError::ControllerNotApplicable`] if a controller is requested outside the
-    /// battlefield and the stack, [`ZoneError::IdExhausted`] if `ids` is exhausted. The
-    /// container and `ids` are then unchanged.
+    /// battlefield and the stack, [`ZoneError::IdExhausted`] if `ids` is exhausted,
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that names a live object. The container
+    /// and `ids` are then unchanged.
     pub fn create_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -229,7 +263,8 @@ impl Zones {
             return Err(ZoneError::CardAlreadyPresent(card));
         }
         let controller = self.resolve_controller(&req, owner)?;
-        let id = ids.issue().map_err(|_| ZoneError::IdExhausted)?;
+        let (probe, id) = self.issue_fresh(ids)?;
+        *ids = probe;
         self.place(id, card, owner, controller, &req);
         Ok(id)
     }
@@ -275,25 +310,40 @@ impl Zones {
 
     /// The zone-move primitive (REQ-CORE-002, REQ-ZONE-001, CR 400.7).
     ///
-    /// Moves the object `id` to the zone `req` names. The object becomes a new object: exactly
-    /// one fresh id is issued from `ids`, the old object is removed entirely, and the new one,
-    /// with the same card and owner, is inserted at `req.position` (CR 400.7). No reference to
-    /// the old id remains anywhere in the container; the caller may hand both ids from the
-    /// returned [`Moved`] to the exception registry (CR 400.7a-m).
+    /// Moves the object `id` to the zone `req` names. The destination `ZoneId` is
+    /// `ZoneId::of(req.to, owner)`: a per-player destination is always the owner's zone
+    /// (CR 400.3). Three cases:
     ///
-    /// - A per-player destination is the owner's zone (CR 400.3).
-    /// - A move to the same zone is also a move and creates a new object (CR 400.8, CR 406.7,
-    ///   CR 400.10).
+    /// - **Zone change** (the destination is another zone): the object becomes a new object
+    ///   (CR 400.7). Exactly one fresh id is issued from `ids`, the old object is removed
+    ///   entirely, and the new one, with the same card and owner, is inserted at `req.position`.
+    ///   No reference to the old id remains anywhere in the container; the caller may hand both
+    ///   ids from the returned [`Moved`] to the exception registry (CR 400.7a-m).
+    /// - **Same zone, exile or command zone**: the object doesn't change zones but becomes a new
+    ///   object (CR 400.8, CR 406.7 for exile; CR 400.10 for the command zone), handled exactly
+    ///   like a zone change: a fresh id, the old id forgotten.
+    /// - **Same zone, library, hand, graveyard, battlefield or stack**: not a zone change
+    ///   (CR 400.7 applies to moves "from one zone to another"), so the object keeps its id and
+    ///   `ids` is not touched. It is repositioned within the zone: in an ordered zone it is
+    ///   removed and re-inserted at `req.position` counted in the remaining pile (CR 400.5);
+    ///   in an unordered zone the position is ignored. The returned [`Moved`] has `old == new`.
+    ///   Nothing else about the zone changes (CR 400.12).
+    ///
+    /// In every case:
     /// - Ordered zones keep the relative order of the other objects (CR 400.5); `Index(n)` past
     ///   the bottom means the bottom (CR 401.7). The default request puts the object on top of
     ///   the stack (CR 405.2) or graveyard (CR 404.1).
     /// - `face_down` comes from the request, never from the old object (CR 406.3).
-    /// - The controller is the requested one (battlefield and stack only) or the owner.
+    /// - The controller is the requested one (battlefield and stack only, CR 109.4, CR 110.2a,
+    ///   CR 405.4) or the owner (CR 108.4a fallback).
+    ///
+    /// `ids` must be the generator that issued every existing `ObjectId` in this container.
     ///
     /// # Errors
     /// [`ZoneError::UnknownObject`], [`ZoneError::ControllerNotApplicable`],
-    /// [`ZoneError::UnknownPlayer`] (requested controller), [`ZoneError::IdExhausted`]. The
-    /// container and `ids` are then unchanged.
+    /// [`ZoneError::UnknownPlayer`] (requested controller), and, when a new id is needed,
+    /// [`ZoneError::IdExhausted`] and [`ZoneError::IdCollision`] (the issued id names a live
+    /// object). The container and `ids` are then unchanged.
     pub fn move_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -302,8 +352,27 @@ impl Zones {
     ) -> Result<Moved, ZoneError> {
         let record = self.record(id)?;
         let controller = self.resolve_controller(&req, record.owner)?;
-        // CR 400.7: the moved object is a new object with a new id.
-        let new = ids.issue().map_err(|_| ZoneError::IdExhausted)?;
+        // CR 400.3: a per-player destination is the owner's zone.
+        let dest = ZoneId::of(req.to, record.owner);
+        if dest == record.zone && !matches!(dest, ZoneId::Exile | ZoneId::Command) {
+            // CR 400.7 (no zone change), CR 400.5, CR 400.12: reposition, same object.
+            self.detach(id, dest);
+            self.attach(id, dest, req.position);
+            if let Some(r) = Arc::make_mut(&mut self.objects).get_mut(&id) {
+                r.face_down = req.face_down;
+                r.controller = controller;
+            }
+            return Ok(Moved {
+                old: id,
+                new: id,
+                from: dest,
+                to: dest,
+            });
+        }
+        // CR 400.7 (zone change), CR 400.8, CR 406.7, CR 400.10 (same-zone exile or command):
+        // the moved object is a new object with a new id.
+        let (probe, new) = self.issue_fresh(ids)?;
+        *ids = probe;
         self.remove_object(record);
         let to = self.place(new, record.card, record.owner, controller, &req);
         Ok(Moved {
@@ -340,9 +409,12 @@ impl Zones {
     /// Brings `card` from `owner`'s outside-the-game `pool` into the zone `req` names as a new
     /// object with a fresh id (REQ-ZONE-001 item 9, CR 400.11, CR 400.7).
     ///
+    /// `ids` must be the generator that issued every existing `ObjectId` in this container.
+    ///
     /// # Errors
     /// [`ZoneError::UnknownPlayer`], [`ZoneError::NoSuchOutsideCard`] if the card is not in that
-    /// pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`]. The container
+    /// pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`],
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that names a live object. The container
     /// and `ids` are then unchanged.
     pub fn enter_from_outside(
         &mut self,
@@ -357,7 +429,8 @@ impl Zones {
             return Err(ZoneError::NoSuchOutsideCard(card));
         }
         let controller = self.resolve_controller(&req, owner)?;
-        let id = ids.issue().map_err(|_| ZoneError::IdExhausted)?;
+        let (probe, id) = self.issue_fresh(ids)?;
+        *ids = probe;
         let players = Arc::make_mut(&mut self.players);
         if let Some(pz) = players.get_mut(&owner) {
             let pools = Arc::make_mut(&mut pz.outside);
@@ -404,7 +477,9 @@ impl Zones {
             .unwrap_or_default()
     }
 
-    /// Sets the controller of the object `id` on the battlefield or the stack (REQ-ZONE-001).
+    /// Sets the controller of the object `id` on the battlefield or the stack (REQ-ZONE-001,
+    /// CR 109.4). Elsewhere it is rejected as a container rule (emblems, CR 109.4c, are not
+    /// modelled yet).
     ///
     /// # Errors
     /// [`ZoneError::UnknownObject`], [`ZoneError::ControllerNotApplicable`] if the object is in

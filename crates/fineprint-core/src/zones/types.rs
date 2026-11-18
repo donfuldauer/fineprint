@@ -19,7 +19,8 @@ pub enum ZoneKind {
     Battlefield,
     /// A player's graveyard (CR 404): ordered, public, per player.
     Graveyard,
-    /// The stack (CR 405): ordered, public, shared.
+    /// The stack (CR 405): ordered, public, shared. Holds only card-backed objects in this
+    /// unit; cardless stack objects (abilities, CR 405.1) are later work (see [`ZoneId::Stack`]).
     Stack,
     /// The exile zone (CR 406): unordered, public, shared.
     Exile,
@@ -95,6 +96,11 @@ pub enum ZoneId {
     /// The shared battlefield.
     Battlefield,
     /// The shared stack.
+    ///
+    /// In this unit the stack holds only card-backed objects (spells, and copies that have a
+    /// `CardId`). Cardless stack objects (abilities, which go on the stack without a card,
+    /// CR 405.1, CR 109.1; copies of spells that are not cards) are out of scope here and are
+    /// the job of the later units that own them.
     Stack,
     /// The shared exile zone.
     Exile,
@@ -188,13 +194,20 @@ impl MoveRequest {
 /// The record of one object in a zone (REQ-ZONE-001, REQ-CORE-002).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjectRecord {
-    /// The object's id; a new one on every zone change (CR 400.7).
+    /// The object's id; a new one on every zone change (CR 400.7) and on a same-zone move into
+    /// exile or the command zone (CR 400.8, CR 406.7, CR 400.10).
     pub id: ObjectId,
     /// The physical card the object represents; persists across zone changes.
     pub card: CardId,
     /// The object's owner; never changed by a move.
     pub owner: PlayerId,
-    /// The object's controller; equal to the owner outside the battlefield and the stack.
+    /// The controller the container stores: on the battlefield and the stack the object's
+    /// controller (CR 110.2, CR 110.2a, CR 405.4); elsewhere the owner, as the fallback of
+    /// CR 108.4a.
+    ///
+    /// Outside the battlefield and the stack this is NOT a rules-level controller: such objects
+    /// aren't controlled by any player (CR 109.4). Use [`ObjectRecord::rules_controller`] for the
+    /// rules-facing value.
     pub controller: PlayerId,
     /// Whether the object is face down (CR 406.3).
     pub face_down: bool,
@@ -202,17 +215,42 @@ pub struct ObjectRecord {
     pub zone: ZoneId,
 }
 
+impl ObjectRecord {
+    /// The rules-level controller (CR 109.4): `Some(controller)` on the battlefield and the
+    /// stack, `None` in every other zone, where objects aren't controlled by any player.
+    ///
+    /// The exceptions of CR 109.4a-g (for example an emblem, controlled by the player who puts
+    /// it into the command zone, CR 109.4c) and variant cards are later work; this accessor will
+    /// widen when they are modelled. For "the controller, or else the owner" (CR 108.4a) read
+    /// [`ObjectRecord::controller`].
+    #[must_use]
+    pub fn rules_controller(&self) -> Option<PlayerId> {
+        // CR 109.4
+        match self.zone.kind() {
+            ZoneKind::Battlefield | ZoneKind::Stack => Some(self.controller),
+            _ => None,
+        }
+    }
+}
+
 /// The result of a zone move: the old and the new object id and both zones (REQ-CORE-002,
 /// CR 400.7).
+///
+/// For a real zone change, and for a same-zone move into exile or the command zone (CR 400.8,
+/// CR 406.7, CR 400.10), `new` is a fresh id and `old` is no longer held anywhere in the
+/// container. For a same-zone move in a library, hand, graveyard, the battlefield or the stack
+/// the object does not change zones (CR 400.7) and keeps its id: then `old == new` and `from ==
+/// to`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moved {
-    /// The id the object had before the move; no longer held anywhere in the container.
+    /// The id the object had before the move; no longer held anywhere in the container unless
+    /// `old == new` (a same-zone reposition).
     pub old: ObjectId,
-    /// The new object's id.
+    /// The object's id after the move: a new id, or `old` for a same-zone reposition.
     pub new: ObjectId,
     /// The zone the object left.
     pub from: ZoneId,
-    /// The zone the new object entered.
+    /// The zone the object is in after the move.
     pub to: ZoneId,
 }
 
