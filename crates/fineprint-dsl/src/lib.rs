@@ -5,3 +5,16 @@
 //! Card DSL types and runtime for the Fine Print rules engine (rules crate).
 
 #![forbid(unsafe_code)]
+
+/// RFC 8785 canonical JSON (REQ-NFR-006, REQ-DSL-001): duplicate-key and safe-integer checks
+/// plus the JCS serialisation used for every content hash.
+pub mod canonical;
+
+/// Card definition top-level types (REQ-DSL-001, REQ-DSL-002): `CardDefinitionDSL`,
+/// `CardFaceDSL`, layout and support enums, provenance, `dslVersion` checks and
+/// `definitionHash`.
+pub mod card;
+
+/// Structured mana costs (REQ-OBJ-001, SRS §4.1): `ManaSymbol`, `ManaCostDSL` and the
+/// canonical symbol text grammar.
+pub mod mana;
