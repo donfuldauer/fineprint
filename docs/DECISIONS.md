@@ -1764,6 +1764,31 @@ abilities, which use their own envelope, so it does not apply to a resolving ins
 **Alternatives.** Keep accepting `false` and make the helper return true for CHAR: rejected, the
 wire value would still misstate the rule. Drop the member: deferred, it is a wire-contract change.
 
+## Repository — Trademark notice replaces the Fan Content Policy disclaimer
+
+**Decision.** Made by the maintainer on 2026-11-18. Fine Print's README, package metadata and
+documentation carry a trademark and non-affiliation notice instead of the Fan Content Policy
+disclaimer (SRS §1.3 item 3, REQ-ARCH-003 item 2, REQ-NFR-012, PROCESS.md R5). The policy's
+disclaimer becomes the responsibility of clients that import card data or build or distribute a
+card database. REQ-ARCH-001 (zero hardcoded IP) and REQ-NFR-007 (CR text never committed) are
+unchanged, and so are the references to the game and to the CR.
+**Rationale.** The Fan Content Policy is a permission to use Wizards of the Coast IP, so its
+disclaimer is a condition of that permission. Fine Print contains and distributes none of that IP,
+apart from card names the SRS uses as interaction examples (REQ-NFR-004). It names the game only
+descriptively and cites rule numbers; it does not commit the CR text, which CI fetches into the
+git-ignored `cr-cache/` and its build cache (only rule numbers and hashes are committed, in
+`docs/cr-citations.json`), and design notes quote at most a few words of a rule. Two kinds of
+Wizards of the Coast material are involved. The CR text (Architecture A7) is fetched by CI only to
+check citations, and is neither committed nor distributed; reading it to build a compatible engine
+does not rely on the policy's permission. Card data enters only through clients, under Scryfall's
+terms (which require the policy) when it comes from Scryfall, so the policy's obligations sit with
+those clients. The maintainer made this decision knowing that CI fetches the CR text. This is not
+legal advice.
+**Alternatives.** Keep the disclaimer: rejected, because Fine Print uses none of the policy's
+permission. Scrub every reference to the game and stop fetching the CR: rejected. The CR is the
+specification, the citation check needs the text, and removing the game's name would make the
+documents harder to use without changing the legal position.
+
 ## #15 FP-014 — RulesVocabulary wire shape
 
 **Decision.** The wire shape is the brief's, unchanged in its member names: `vocabularyVersion`
