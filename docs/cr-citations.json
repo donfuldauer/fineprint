@@ -122,6 +122,16 @@
     "111.10": {
       "sha256": "64f02f9955f484966c377dc8cc265a97f465e8e040a93429cd5d9760ea7782ac",
       "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:137",
+        "crates/fineprint-dsl/src/vocab/mod.rs:508",
+        "crates/fineprint-dsl/src/vocab/mod.rs:84",
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:110",
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:18",
+        "crates/fineprint-ingest/src/vocab/mod.rs:35",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:41",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:5",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:58",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:7",
         "docs/SRS.md:36",
         "docs/SRS.md:508",
         "docs/SRS.md:509",
@@ -134,9 +144,31 @@
         "docs/SRS.md:1456"
       ]
     },
+    "111.10d": {
+      "sha256": "a97e939e66447ca7c09befc3dec7172feea558f408cefbc909e690889ecdeeaa",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:74"
+      ]
+    },
+    "111.10i": {
+      "sha256": "7c4d10deeb8b8362c2bfbc892f3cf3d8f591b0d594f73ef4542a400f49a3405b",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:74",
+        "crates/fineprint-ingest/src/vocab/tests.rs:1192",
+        "crates/fineprint-ingest/src/vocab/tests.rs:1228",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:76"
+      ]
+    },
+    "111.10x": {
+      "sha256": "85469926dd03e09c8df2aed9e0d766b60622d3605a3fb2fc013453e5bb942e23",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:74"
+      ]
+    },
     "113.6": {
       "sha256": "49530741e8ee137490154b0167913649d6fcfc47561f2b4287f42c816de1f72f",
       "locations": [
+        "crates/fineprint-dsl/src/ability/mod.rs:76",
         "docs/SRS.md:783"
       ]
     },
@@ -215,9 +247,22 @@
         "docs/SRS.md:516"
       ]
     },
+    "122.1": {
+      "sha256": "04f15412a0afd000608dba4cdda9507fe0d051b6896c820ed59fc3876c603582",
+      "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:122",
+        "crates/fineprint-dsl/src/vocab/mod.rs:517",
+        "crates/fineprint-dsl/src/vocab/mod.rs:81",
+        "crates/fineprint-ingest/src/vocab/mod.rs:31",
+        "crates/fineprint-ingest/src/vocab/mod.rs:390"
+      ]
+    },
     "122.1b": {
       "sha256": "05f69cf3e4ad28f3e21d87987637689457f97e0c63c5bc7f1ece0334145f4e0c",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:175",
+        "crates/fineprint-ingest/src/vocab/mod.rs:31",
+        "crates/fineprint-ingest/src/vocab/mod.rs:390",
         "docs/SRS.md:1455",
         "docs/SRS.md:320",
         "docs/SRS.md:334",
@@ -227,6 +272,7 @@
     "122.1c": {
       "sha256": "3f4ef3fc0d72b00a7ff7e02984062bfac7fcf80ca9ee5da9be702e4588db5fb9",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:175",
         "docs/SRS.md:438",
         "docs/SRS.md:518"
       ]
@@ -234,6 +280,7 @@
     "122.1d": {
       "sha256": "816fe21b426b70d95beaba9590fbbbaf644eaf5217d0fbcd71e3a3654a278b1f",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:175",
         "docs/SRS.md:250",
         "docs/SRS.md:519"
       ]
@@ -241,6 +288,7 @@
     "122.1h": {
       "sha256": "7da8a7a6380ed5300a43a2854af37c2086ea1b00e0de6fedeb6d8ed94f8bea14",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:175",
         "docs/SRS.md:520"
       ]
     },
@@ -260,6 +308,10 @@
     "201.5": {
       "sha256": "f581f277c4b6afeec278394d2e58a165a5af7b392a17c67a2f5d8fe923923e4a",
       "locations": [
+        "crates/fineprint-dsl/src/text/mod.rs:12",
+        "crates/fineprint-dsl/src/text/mod.rs:167",
+        "crates/fineprint-dsl/src/text/mod.rs:53",
+        "crates/fineprint-dsl/src/text/tests.rs:138",
         "docs/SRS.md:991"
       ]
     },
@@ -327,10 +379,95 @@
         "docs/SRS.md:1233"
       ]
     },
+    "205.2a": {
+      "sha256": "d8b1aeb6ec6f41f4ef085ae3e58f7c220ac26a278ab04d960f8979c763017578",
+      "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:66",
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221",
+        "crates/fineprint-ingest/src/vocab/mod.rs:150",
+        "crates/fineprint-ingest/src/vocab/mod.rs:18"
+      ]
+    },
     "205.3": {
       "sha256": "45fec8c22698a6498cc98e93b30bdd3b4d351707ab5a3eb0a6c1dde3352945a6",
       "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:477",
+        "crates/fineprint-dsl/src/vocab/mod.rs:72",
+        "crates/fineprint-dsl/src/vocab/mod.rs:89",
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:372",
+        "crates/fineprint-ingest/src/vocab/mod.rs:165",
+        "crates/fineprint-ingest/src/vocab/mod.rs:21",
         "docs/SRS.md:158"
+      ]
+    },
+    "205.3g": {
+      "sha256": "21cd24ea742c492c059a0c66ddb8d56b3459436c64b9b03b31e31ec5022c168d",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221",
+        "crates/fineprint-ingest/src/vocab/mod.rs:165"
+      ]
+    },
+    "205.3h": {
+      "sha256": "9a1f26b493f8299d44dd0ac375b571cc6e2b58762838e5b8cd8d9e15f53a87a1",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221"
+      ]
+    },
+    "205.3i": {
+      "sha256": "4466319b890f79855f4bf43526da38123b1810526e9e41d043529cdf8a058158",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221"
+      ]
+    },
+    "205.3j": {
+      "sha256": "0c5934860deccb6d1e96141ebe41cfc7d4a01b173f6ae906711af3e39d2eb07f",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221"
+      ]
+    },
+    "205.3k": {
+      "sha256": "8be3f77cf31ae7fe7fd8ca8d97fb9e68edc0182c7c78a4c795a0bfdd9fab701a",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221"
+      ]
+    },
+    "205.3m": {
+      "sha256": "830d5a9168354cdd9465c0b0d789a6fab90638d7787a3896f2c5d2718fa3e9aa",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221"
+      ]
+    },
+    "205.3n": {
+      "sha256": "855998cdf219fd3ce708dac6e4bef680e48d45bce20734990f6c97fabe34ea95",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:222"
+      ]
+    },
+    "205.3p": {
+      "sha256": "a8af3f3b9170553880729649058de1d3c50c73d5cb5f281b0788eaaf816b542e",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:222"
+      ]
+    },
+    "205.3q": {
+      "sha256": "84e736195342aa7c8b92669ffd726809b16b4fd43730659eb288242ed10090e3",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:222"
+      ]
+    },
+    "205.3r": {
+      "sha256": "6092adf428de0e40b7ae0cf5f0a0026fa039fb30f5c04da608d133177379f28a",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:222"
+      ]
+    },
+    "205.4a": {
+      "sha256": "4ee944e45525aa6c648e5b28c0755b102a29e30fdab83f789ec2d21cd646f536",
+      "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:69",
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:221",
+        "crates/fineprint-ingest/src/vocab/mod.rs:150",
+        "crates/fineprint-ingest/src/vocab/mod.rs:20"
       ]
     },
     "207.2c": {
@@ -861,6 +998,8 @@
     "603.4": {
       "sha256": "7ac136f2293f3591b724c61d2685b75513470166d023c081682e87311b15c229",
       "locations": [
+        "crates/fineprint-dsl/src/ability/mod.rs:244",
+        "crates/fineprint-dsl/src/ability/mod.rs:251",
         "docs/SRS.md:394",
         "docs/SRS.md:455",
         "docs/SRS.md:812"
@@ -869,6 +1008,9 @@
     "603.7": {
       "sha256": "a86d3aaab430d1a34d8476747e02512d20c7b252359c7617f0413f0085df3932",
       "locations": [
+        "crates/fineprint-dsl/src/effect/decode.rs:106",
+        "crates/fineprint-dsl/src/effect/mod.rs:776",
+        "crates/fineprint-dsl/src/effect/tests.rs:1417",
         "docs/SRS.md:457",
         "docs/SRS.md:969"
       ]
@@ -876,6 +1018,8 @@
     "603.8": {
       "sha256": "3545f9e8ffc1f9b91793d72b87e55baf85e69f7d5a551cacf456d1a783db4c3f",
       "locations": [
+        "crates/fineprint-dsl/src/ability/event.rs:448",
+        "crates/fineprint-dsl/src/ability/event.rs:461",
         "docs/SRS.md:456",
         "docs/SRS.md:811"
       ]
@@ -934,6 +1078,9 @@
     "603.12": {
       "sha256": "5b6dbaa669d6ca274673d71902ecc3604e230cf9ac11e4e5ce60f2ab5b889738",
       "locations": [
+        "crates/fineprint-dsl/src/effect/decode.rs:116",
+        "crates/fineprint-dsl/src/effect/mod.rs:787",
+        "crates/fineprint-dsl/src/effect/tests.rs:1417",
         "docs/SRS.md:457",
         "docs/SRS.md:969"
       ]
@@ -947,6 +1094,7 @@
     "605.1": {
       "sha256": "18954479ef81599aac41cb624e13c2b7378512f8d16fe31d59e0bd9340ece880",
       "locations": [
+        "crates/fineprint-dsl/src/ability/mod.rs:88",
         "docs/SRS.md:788"
       ]
     },
@@ -985,6 +1133,7 @@
     "607": {
       "sha256": "aed0f8e5d728123c53c510ca99a48a60c7b4ed0cbab24bb89c321cacf323ec1d",
       "locations": [
+        "crates/fineprint-dsl/src/ability/mod.rs:82",
         "docs/SRS.md:107",
         "docs/SRS.md:785",
         "docs/SRS.md:81"
@@ -1050,6 +1199,8 @@
     "611.2b": {
       "sha256": "ca766589d6693ca60ccc6679b1d6d3627f31bb1b9519af871e7d2c2cd8d8a7c2",
       "locations": [
+        "crates/fineprint-dsl/src/effect/duration.rs:36",
+        "crates/fineprint-dsl/src/effect/duration.rs:96",
         "docs/SRS.md:360",
         "docs/SRS.md:971"
       ]
@@ -1057,6 +1208,22 @@
     "611.2c": {
       "sha256": "829cfb8d797ed517b81fb4c83ca8a5cd7ea1ad93a9acc5412e6632a7a1bf3ddf",
       "locations": [
+        "crates/fineprint-dsl/src/effect/decode.rs:443",
+        "crates/fineprint-dsl/src/effect/mod.rs:1040",
+        "crates/fineprint-dsl/src/effect/mod.rs:241",
+        "crates/fineprint-dsl/src/effect/mod.rs:762",
+        "crates/fineprint-dsl/src/effect/tests.rs:1508",
+        "crates/fineprint-dsl/src/effect/tests.rs:1522",
+        "crates/fineprint-dsl/src/effect/tests.rs:1586",
+        "crates/fineprint-dsl/src/effect/tests.rs:1596",
+        "crates/fineprint-dsl/src/effect/tests.rs:1603",
+        "crates/fineprint-dsl/src/effect/tests.rs:1611",
+        "crates/fineprint-dsl/src/effect/tests.rs:1619",
+        "crates/fineprint-dsl/src/effect/tests.rs:1629",
+        "crates/fineprint-dsl/src/effect/tests.rs:1640",
+        "crates/fineprint-dsl/src/effect/tests/props.rs:522",
+        "crates/fineprint-dsl/tests/spec_dsl_effect.rs:1232",
+        "crates/fineprint-dsl/tests/spec_dsl_effect.rs:1356",
         "docs/SRS.md:1443",
         "docs/SRS.md:358",
         "docs/SRS.md:968"
@@ -1072,6 +1239,11 @@
     "612": {
       "sha256": "11044d41824d127a9bf7cf3c8f50c002708e1eeda0b571d3e44649b5377eaa9f",
       "locations": [
+        "crates/fineprint-dsl/src/expr/mod.rs:168",
+        "crates/fineprint-dsl/src/text/mod.rs:10",
+        "crates/fineprint-dsl/src/text/mod.rs:166",
+        "crates/fineprint-dsl/src/text/mod.rs:71",
+        "crates/fineprint-dsl/src/text/tests.rs:138",
         "docs/SRS.md:986"
       ]
     },
@@ -1140,6 +1312,7 @@
     "613.6": {
       "sha256": "c61f4dfb90bd0c2f305c5c3075a6d2e291bff15075d3ad6feba228a10ab047f5",
       "locations": [
+        "crates/fineprint-dsl/src/ability/tests.rs:1781",
         "docs/SRS.md:1443",
         "docs/SRS.md:354",
         "docs/SRS.md:357",
@@ -1302,6 +1475,8 @@
     "614.15": {
       "sha256": "05ff54161f347bbaef80e18138d93482a1d4330682c5cf5683dfdb8f74edb329",
       "locations": [
+        "crates/fineprint-dsl/src/ability/mod.rs:276",
+        "crates/fineprint-dsl/src/ability/mod.rs:282",
         "docs/SRS.md:425",
         "docs/SRS.md:938"
       ]
@@ -1377,8 +1552,20 @@
     "701": {
       "sha256": "03210264e1af5aea4180d9c7e3ea92ef20b7b55246e373e0c90d4503d9de7f48",
       "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:107",
+        "crates/fineprint-dsl/src/vocab/mod.rs:501",
+        "crates/fineprint-dsl/src/vocab/mod.rs:78",
+        "crates/fineprint-ingest/src/vocab/mod.rs:309",
         "docs/SRS.md:1014",
         "docs/SRS.md:967"
+      ]
+    },
+    "701.1": {
+      "sha256": "edf238c225240cfa051947f6fd90c53e80d525181d3aa136058a18956c598912",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
+        "crates/fineprint-ingest/src/vocab/mod.rs:317",
+        "crates/fineprint-ingest/src/vocab/tests.rs:1157"
       ]
     },
     "701.15": {
@@ -1516,6 +1703,12 @@
         "docs/SRS.md:864"
       ]
     },
+    "701.71": {
+      "sha256": "7d4de17e553e076a9e73016dee6a3ad7b5fe966e73715c3b7c83024f81aa20c1",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:110"
+      ]
+    },
     "701.71a": {
       "sha256": "88739acf12539c2badadb7e22bc0750e5501400a6c5c07a6dcdc1deb53491f8f",
       "locations": [
@@ -1526,7 +1719,23 @@
     "702": {
       "sha256": "41c9775e36eb72e51882d44a5eb40296a25206db7ebbfdfaff6ba7dd4852936e",
       "locations": [
+        "crates/fineprint-dsl/src/vocab/mod.rs:107",
+        "crates/fineprint-dsl/src/vocab/mod.rs:495",
+        "crates/fineprint-dsl/src/vocab/mod.rs:75",
+        "crates/fineprint-ingest/src/vocab/mod.rs:309",
+        "crates/fineprint-ingest/src/vocab/tests.rs:1266",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:29",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:345",
+        "crates/fineprint-ingest/src/vocab/tokens.rs:347",
         "docs/SRS.md:1014"
+      ]
+    },
+    "702.1": {
+      "sha256": "41f6c16bdc809c15025be7f0c397bb091f3934e068bccb8ba561973de0c3f381",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
+        "crates/fineprint-ingest/src/vocab/mod.rs:317",
+        "crates/fineprint-ingest/src/vocab/tests.rs:1157"
       ]
     },
     "702.2": {
@@ -1536,9 +1745,16 @@
         "docs/SRS.md:274"
       ]
     },
+    "702.4": {
+      "sha256": "e82e74339e13111cb489bdcc3acd42d262c8cbeead8e674ed47e1f224a13e35b",
+      "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126"
+      ]
+    },
     "702.9": {
       "sha256": "1e7507163813bbefcf12de9164c54fc5d76657e6022e69c45d9fb9e4e89c2e96",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
         "docs/SRS.md:1018",
         "docs/SRS.md:264"
       ]
@@ -1592,6 +1808,7 @@
     "702.19": {
       "sha256": "616cb25ffd627c3b4d5bc8c7b57f3484ba872a32c9efea1949c8987996fc3c1b",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
         "docs/SRS.md:1025"
       ]
     },
@@ -1610,6 +1827,7 @@
     "702.20": {
       "sha256": "bf6cce9e7abfec9b42acdf693d981b498e2f86fdf0510692325d44093bad501e",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
         "docs/SRS.md:1020"
       ]
     },
@@ -1726,6 +1944,7 @@
     "702.111": {
       "sha256": "a06aaed4fe909c7e83be5e807e402df6fa6712e66b2d3f5eb5a2445d2b714798",
       "locations": [
+        "crates/fineprint-dsl/tests/spec_dsl_vocab.rs:126",
         "docs/SRS.md:1019",
         "docs/SRS.md:264"
       ]
@@ -2801,6 +3020,9 @@
     "733.6": {
       "sha256": "107ea07bdf89a7482ee5687aff653ca10c7080721e876b5f886a8a077354fead",
       "locations": [
+        "crates/fineprint-dsl/src/effect/decode.rs:180",
+        "crates/fineprint-dsl/src/effect/mod.rs:839",
+        "crates/fineprint-dsl/src/effect/tests.rs:1466",
         "docs/SRS.md:609",
         "docs/SRS.md:970"
       ]

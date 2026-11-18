@@ -11,8 +11,8 @@ search agent or a headless test runner can all drive a complete match through on
 > decisions, are in [`docs/SRS.md`](docs/SRS.md) (§17 holds the nonfunctional requirements). The
 > work is planned as [GitHub issues](https://github.com/donfuldauer/fineprint/issues?q=is%3Aissue+label%3Awork-unit)
 > (label `work-unit`, milestones M1–M3), one reviewable pull request each, with dependencies
-> linked. The workspace, CI, the deterministic base library and the card DSL's data schema have
-> merged. The rules engine itself (game state, events, layers, turns, casting, combat) has not
+> linked. The workspace, CI, the deterministic base library, the card DSL's data schema and the
+> rules vocabulary have merged. The rules engine itself (game state, events, layers, turns, casting, combat) has not
 > been started, so Fine Print cannot play a game yet. See [Project status](#project-status).
 
 ## Design in one screen
@@ -47,10 +47,10 @@ search agent or a headless test runner can all drive a complete match through on
 
 ## Project status
 
-As of plan item FP-013, 13 of the 141 `work-unit` issues have merged. They cover the
-workspace and CI (FP-001 to FP-006), the deterministic base library (FP-007 to FP-009) and the
-first four DSL schema units (FP-010 to FP-013). Together that is about 50,000 lines of Rust
-and about 700 tests (368 of them black-box spec tests).
+As of plan item FP-014, 14 of the 141 `work-unit` issues have merged. They cover the
+workspace and CI (FP-001 to FP-006), the deterministic base library (FP-007 to FP-009), the
+first four DSL schema units (FP-010 to FP-013) and the rules vocabulary (FP-014). Together that
+is about 55,000 lines of Rust and about 770 tests (382 of them black-box spec tests).
 
 ### Implemented
 
@@ -95,16 +95,24 @@ and about 700 tests (368 of them black-box spec tests).
   reflexive triggers and the `NATIVE_EFFECT` node. Decoding is strict, nesting depth is
   bounded, and every type round-trips through the canonical wire format.
 
+**Rules vocabulary (FP-014)**
+
+- `crates/fineprint-dsl/data/vocab.json`: the game terms the Comprehensive Rules define (card
+  types, supertypes, subtypes, keyword abilities and actions, counter kinds, predefined tokens),
+  each with its rule number and no rule text, plus the `RulesVocabulary` type that loads it.
+- `fineprint-ingest vocab`: regenerates the artifact from the cached rules file. CI checks that
+  the committed artifact still matches the current rules.
+
 These are **data types and wire contracts only**. Nothing executes a card definition yet.
 
 ### Still to do
 
-The crates `fineprint-core`, `-ingest`, `-ffi`, `-wasm`, `-bot` and `clients/cli` are still
-empty stubs. The remaining 128 issues, by phase:
+The crates `fineprint-core`, `-ffi`, `-wasm`, `-bot` and `clients/cli` are still empty stubs,
+and `fineprint-ingest` has only the `vocab` command. The remaining 127 issues, by phase:
 
 | Phase | Plan items | What it delivers |
 |---|---|---|
-| 01 Foundations (finishing) | FP-014 to FP-016, FP-140, FP-141 | Rules vocabulary artifact, definition lints, synthetic test-card library, wiring the full AST into card definitions |
+| 01 Foundations (finishing) | FP-015, FP-016, FP-140, FP-141 | Definition lints, synthetic test-card library, wiring the full AST into card definitions |
 | 02 State and objects | FP-017 to FP-025 | Game state tree, zones, permanents, characteristics, card layouts, last known information, knowledge/redaction core, checkpoints and rollback |
 | 03 Events | FP-026 to FP-030 | Game events and history ledger, choice protocol, replacement/prevention bus, trigger detection, delayed and reflexive triggers |
 | 04 Layers | FP-031 to FP-039 | Layer pipeline, timestamps and dependencies, lock-in, RuleSet view, layer cache, text-changing, copy and face-down effects, ETB look-ahead |
@@ -125,7 +133,7 @@ empty stubs. The remaining 128 issues, by phase:
 | 19 Variants | FP-131 to FP-139 | Subgames, Two-Headed Giant, Planechase, Archenemy, Vanguard, Conspiracy, ante, the Un-set and digital extensions |
 
 The issue tracker is the source of truth. Issues labelled `ready` can start now (currently
-FP-017, FP-140 and FP-141), and FP-014 is in progress.
+FP-017, FP-140 and FP-141).
 
 ## Building and testing
 
@@ -152,7 +160,7 @@ docs/cr-citations.json    index of cited CR rule numbers and hashes (no rule tex
 crates/fineprint-base     deterministic primitives: numbers, ids, PRNG, encoding, hashing
 crates/fineprint-dsl      card definition schema and canonical JSON
 crates/fineprint-core     the rules engine (stub)
-crates/fineprint-ingest   offline card toolchain (stub)
+crates/fineprint-ingest   offline card toolchain (rules-vocabulary generator so far)
 crates/fineprint-ffi      C ABI binding (stub)
 crates/fineprint-wasm     WebAssembly binding (stub)
 crates/fineprint-bot      reference bots (stub)
@@ -196,11 +204,12 @@ and Wizards of the Coast has not approved, endorsed or sponsored it and is not a
 
 **What this repository contains.** Original code and documentation only: no card names, Oracle text,
 card definitions, art, set symbols or logos, and not the Comprehensive Rules text. Design notes
-quote at most a few words of a rule where a decision turns on its wording. Fine Print's name and branding use no
-third-party trademark, and the test suite uses invented synthetic cards. The Comprehensive Rules
-text is never committed. CI downloads the official file into the git-ignored `cr-cache/`
-directory and its build cache to check citations. Only rule numbers and hashes are committed,
-in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
+quote at most a few words of a rule where a decision turns on its wording. The rules vocabulary
+artifact lists only the game terms the rules define, with rule numbers, which SRS §1.3 permits. Fine
+Print's name and branding use no third-party trademark, and the test suite uses invented synthetic
+cards. The Comprehensive Rules text is never committed. CI downloads the official file into the
+git-ignored `cr-cache/` directory and its build cache to check citations. Only rule numbers and
+hashes are committed, in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
 materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
 **Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
