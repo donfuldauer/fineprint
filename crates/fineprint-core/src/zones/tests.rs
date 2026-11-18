@@ -136,6 +136,7 @@ fn error_display_and_error_trait() {
         ZoneError::ReorderNotAllowed,
         ZoneError::InvalidOrder,
         ZoneError::NoSuchOutsideCard(c(6)),
+        ZoneError::IdCollision(ObjectId::new(8)),
     ];
     let texts: BTreeSet<String> = all.iter().map(ToString::to_string).collect();
     assert_eq!(texts.len(), all.len());
@@ -143,6 +144,7 @@ fn error_display_and_error_trait() {
     assert!(all[1].to_string().contains('4'));
     assert!(all[2].to_string().contains('5'));
     assert!(all[7].to_string().contains('6'));
+    assert!(all[8].to_string().contains('8'));
     let e: &dyn std::error::Error = &all[3];
     assert!(e.source().is_none());
 }
@@ -401,26 +403,291 @@ fn move_creates_new_object_and_forgets_old() {
     assert_eq!(z.object_of_card(c(2)), None);
 }
 
-// REQ-CORE-002; CR 400.8, CR 406.7, CR 400.10: a same-zone move is a new object
+// REQ-CORE-002, REQ-ZONE-001; CR 400.7, CR 400.5, CR 400.12: a move into the zone the object is
+// already in (library, hand, graveyard, battlefield, stack) is not a zone change: the object
+// keeps its id and the generator is not touched.
+// R10 correction for finding F1 (CodeRabbit comment 4621941423): this test replaces the former
+// `same_zone_move_creates_new_id`, which asserted a new id for every same-zone move.
 #[test]
-fn same_zone_move_creates_new_id() {
+fn same_zone_move_in_ordinary_zone_keeps_id() {
     let mut z = two_players();
     let mut ids = IdGenerator::new();
-    for kind in ZoneKind::ALL {
+    for kind in [
+        ZoneKind::Library,
+        ZoneKind::Hand,
+        ZoneKind::Graveyard,
+        ZoneKind::Battlefield,
+        ZoneKind::Stack,
+    ] {
         let old = z
             .create_object(&mut ids, c(100 + kind as u64), p(2), req(kind))
             .unwrap();
+        let ids0 = ids.clone();
         let m = z.move_object(&mut ids, old, req(kind)).unwrap();
+        assert_eq!(m.old, old);
+        assert_eq!(m.new, old, "{kind:?}");
+        assert_eq!(m.from, m.to);
+        assert_eq!(m.to, ZoneId::of(kind, p(2)));
+        assert_eq!(ids, ids0, "{kind:?}: generator touched");
+        let r = z.object(old).unwrap();
+        assert_eq!((r.id, r.card, r.zone), (old, c(100 + kind as u64), m.to));
+        assert_eq!(z.object_of_card(r.card), Some(old));
+        assert_eq!(z.contents(m.to), vec![old]);
+        z.send_outside(old, OutsidePool::Sideboard).unwrap();
+    }
+}
+
+// REQ-CORE-002; CR 400.8, CR 406.7 (exile), CR 400.10 (command): exiling an object in exile or
+// putting an object in the command zone into the command zone makes a new object: a fresh id,
+// the old id absent everywhere.
+// R10 correction for finding F1 (CodeRabbit comment 4621941423).
+#[test]
+fn same_zone_move_in_exile_and_command_creates_new_id() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    for kind in [ZoneKind::Exile, ZoneKind::Command] {
+        let old = z
+            .create_object(&mut ids, c(100 + kind as u64), p(2), req(kind))
+            .unwrap();
+        let before = ids.last_issued();
+        let m = z.move_object(&mut ids, old, req(kind)).unwrap();
+        assert_eq!(m.old, old);
         assert_ne!(m.new, old);
+        assert_eq!(m.new.get(), before + 1);
+        assert_eq!(ids.last_issued(), before + 1);
         assert_eq!(m.from, m.to);
         assert_eq!(m.to, ZoneId::of(kind, p(2)));
         assert!(z.object(old).is_none());
+        assert!(!z.all_object_ids().contains(&old));
+        for player in z.players() {
+            for k in ZoneKind::ALL {
+                assert!(!z.contents(ZoneId::of(k, player)).contains(&old));
+            }
+        }
         assert_eq!(z.contents(m.to), vec![m.new]);
+        assert_eq!(z.object_of_card(c(100 + kind as u64)), Some(m.new));
         z.send_outside(m.new, OutsidePool::Sideboard).unwrap();
     }
 }
 
-// REQ-ZONE-001; CR 400.3: per-player destinations are the owner's zones
+// REQ-ZONE-001 items 1,4,5, REQ-CORE-002; CR 400.5, CR 400.7, CR 401.7: Top, Bottom and Index
+// repositions inside the library, graveyard and stack keep the id, move exactly that object and
+// never touch the generator (finding F1, comment 4621941423).
+#[test]
+fn reposition_in_ordered_zones_keeps_id_and_moves_only_that_object() {
+    for kind in [ZoneKind::Library, ZoneKind::Graveyard, ZoneKind::Stack] {
+        let mut z = two_players();
+        let mut ids = IdGenerator::new();
+        let zone = ZoneId::of(kind, p(1));
+        let a: Vec<ObjectId> = (1..=5)
+            .map(|k| {
+                z.create_object(&mut ids, c(k), p(1), at(kind, Position::Bottom))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(z.contents(zone), a);
+        let ids0 = ids.clone();
+        let steps = [
+            (a[0], Position::Index(2), vec![a[1], a[2], a[0], a[3], a[4]]),
+            (a[4], Position::Top, vec![a[4], a[1], a[2], a[0], a[3]]),
+            (a[1], Position::Bottom, vec![a[4], a[2], a[0], a[3], a[1]]),
+            (
+                a[2],
+                Position::Index(usize::MAX),
+                vec![a[4], a[0], a[3], a[1], a[2]],
+            ),
+            (a[3], Position::Index(0), vec![a[3], a[4], a[0], a[1], a[2]]),
+        ];
+        for (id, position, expected) in steps {
+            let m = z.move_object(&mut ids, id, at(kind, position)).unwrap();
+            assert_eq!((m.old, m.new, m.from, m.to), (id, id, zone, zone));
+            assert_eq!(z.contents(zone), expected, "{kind:?} {position:?}");
+            assert_eq!(z.object(id).unwrap().zone, zone);
+        }
+        assert_eq!(ids, ids0);
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(z.all_object_ids(), sorted);
+    }
+}
+
+// REQ-ZONE-001, REQ-CORE-002; CR 400.7, CR 109.4, CR 110.2a, CR 405.4, CR 108.4a: a
+// battlefield-to-battlefield (or stack-to-stack) move with a controller change keeps the id and
+// takes face_down and the controller from the request (finding F1, comment 4621941423).
+#[test]
+fn battlefield_and_stack_reposition_with_controller_change_keeps_id() {
+    for kind in [ZoneKind::Battlefield, ZoneKind::Stack] {
+        let mut z = two_players();
+        let mut ids = IdGenerator::new();
+        let o = z.create_object(&mut ids, c(1), p(1), req(kind)).unwrap();
+        let ids0 = ids.clone();
+        let m = z
+            .move_object(
+                &mut ids,
+                o,
+                MoveRequest {
+                    controller: Some(p(2)),
+                    face_down: true,
+                    ..req(kind)
+                },
+            )
+            .unwrap();
+        assert_eq!((m.old, m.new), (o, o));
+        let r = *z.object(o).unwrap();
+        assert_eq!((r.owner, r.controller, r.face_down), (p(1), p(2), true));
+        assert_eq!(r.rules_controller(), Some(p(2)));
+        // A default request: the controller is the owner again, face up.
+        let m = z.move_object(&mut ids, o, req(kind)).unwrap();
+        assert_eq!(m.new, o);
+        let r = *z.object(o).unwrap();
+        assert_eq!((r.controller, r.face_down), (p(1), false));
+        // The controller check still applies to a same-zone request.
+        assert_atomic_err(
+            &mut z,
+            &mut ids,
+            ZoneError::UnknownPlayer(p(9)),
+            |z, ids| {
+                z.move_object(
+                    ids,
+                    o,
+                    MoveRequest {
+                        controller: Some(p(9)),
+                        ..req(kind)
+                    },
+                )
+            },
+        );
+        assert_eq!(ids, ids0);
+    }
+    // An explicit controller in a same-zone request elsewhere is still rejected (container rule).
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let h = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    assert_atomic_err(
+        &mut z,
+        &mut ids,
+        ZoneError::ControllerNotApplicable,
+        |z, ids| {
+            z.move_object(
+                ids,
+                h,
+                MoveRequest {
+                    controller: Some(p(1)),
+                    ..req(ZoneKind::Hand)
+                },
+            )
+        },
+    );
+}
+
+// REQ-ZONE-001, REQ-CORE-002; CR 400.3, CR 400.7: a library move of an object owned by another
+// player can only go to its owner's library, so a library-to-library move is always a same-ZoneId
+// reposition (finding F1, comment 4621941423).
+#[test]
+fn library_to_library_is_always_the_owners_library() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let o = z
+        .create_object(&mut ids, c(1), p(2), req(ZoneKind::Library))
+        .unwrap();
+    let m = z
+        .move_object(&mut ids, o, at(ZoneKind::Library, Position::Bottom))
+        .unwrap();
+    assert_eq!((m.old, m.new), (o, o));
+    assert_eq!(
+        (m.from, m.to),
+        (ZoneId::Library(p(2)), ZoneId::Library(p(2)))
+    );
+    assert!(z.is_empty(ZoneId::Library(p(1))));
+    assert_eq!(ids.last_issued(), 1);
+}
+
+// REQ-CORE-002; CR 400.7: a generator that is behind the container issues an id that names a
+// live object; every id-issuing call rejects it with IdCollision and changes nothing (finding
+// F3, comment 4621941385). A reposition (finding F1) never touches the generator.
+#[test]
+fn behind_generator_is_rejected_with_id_collision() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let lib = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Library))
+        .unwrap();
+    let hand = z
+        .create_object(&mut ids, c(2), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    let ex = z
+        .create_object(&mut ids, c(3), p(1), req(ZoneKind::Exile))
+        .unwrap();
+    assert_eq!(
+        (lib, hand, ex),
+        (ObjectId::new(1), ObjectId::new(2), ObjectId::new(3))
+    );
+    z.add_outside_card(p(1), OutsidePool::Sideboard, c(4))
+        .unwrap();
+    let mut behind: IdGenerator<ObjectId> = IdGenerator::from_last_issued(0);
+    assert_atomic_err(&mut z, &mut behind, ZoneError::IdCollision(lib), |z, g| {
+        z.create_object(g, c(5), p(1), req(ZoneKind::Hand))
+    });
+    assert_atomic_err(&mut z, &mut behind, ZoneError::IdCollision(lib), |z, g| {
+        z.move_object(g, hand, req(ZoneKind::Battlefield))
+    });
+    assert_atomic_err(&mut z, &mut behind, ZoneError::IdCollision(lib), |z, g| {
+        z.move_object(g, ex, req(ZoneKind::Exile))
+    });
+    assert_atomic_err(&mut z, &mut behind, ZoneError::IdCollision(lib), |z, g| {
+        z.enter_from_outside(g, p(1), c(4), OutsidePool::Sideboard, req(ZoneKind::Hand))
+    });
+    // The issued id would be the moved object's own id: still a collision, so a real zone
+    // change never returns Moved { old == new }.
+    let mut at_one: IdGenerator<ObjectId> = IdGenerator::from_last_issued(1);
+    assert_atomic_err(&mut z, &mut at_one, ZoneError::IdCollision(hand), |z, g| {
+        z.move_object(g, hand, req(ZoneKind::Graveyard))
+    });
+    // A reposition needs no id.
+    let m = z
+        .move_object(&mut behind, lib, req(ZoneKind::Library))
+        .unwrap();
+    assert_eq!((m.old, m.new), (lib, lib));
+    assert_eq!(behind.last_issued(), 0);
+    // The right generator works as before.
+    let m = z.move_object(&mut ids, hand, req(ZoneKind::Exile)).unwrap();
+    assert_eq!(m.new, ObjectId::new(4));
+}
+
+// REQ-ZONE-001, REQ-CORE-002; CR 109.4, CR 108.4a: the rules-level controller exists only on
+// the battlefield and the stack; elsewhere the stored controller is the owner fallback
+// (finding F4, comment 4621941395).
+#[test]
+fn rules_controller_only_on_battlefield_and_stack() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    for kind in ZoneKind::ALL {
+        let r = if matches!(kind, ZoneKind::Battlefield | ZoneKind::Stack) {
+            MoveRequest {
+                controller: Some(p(2)),
+                ..req(kind)
+            }
+        } else {
+            req(kind)
+        };
+        let o = z
+            .create_object(&mut ids, c(kind as u64 + 1), p(1), r)
+            .unwrap();
+        let rec = *z.object(o).unwrap();
+        if matches!(kind, ZoneKind::Battlefield | ZoneKind::Stack) {
+            assert_eq!(rec.rules_controller(), Some(p(2)), "{kind:?}");
+            assert_eq!(rec.controller, p(2));
+        } else {
+            assert_eq!(rec.rules_controller(), None, "{kind:?}");
+            assert_eq!(rec.controller, p(1), "{kind:?}: owner fallback");
+        }
+    }
+}
+
+// REQ-ZONE-001; CR 400.3: per-player destinations are the owner's zones; the stored controller
+// there is the owner (CR 108.4a fallback)
 #[test]
 fn per_player_destination_is_owners_zone() {
     let mut z = two_players();
@@ -543,7 +810,10 @@ fn face_down_and_public_info() {
     assert_eq!(z.is_public_info(ObjectId::new(9999)), None);
 }
 
-// REQ-ZONE-001; owner never changes, controller only on the battlefield and the stack
+// REQ-ZONE-001; CR 109.4, CR 110.2, CR 405.4, CR 108.4a: owner never changes; the container
+// keeps an explicit controller only on the battlefield and the stack (elsewhere the owner, the
+// CR 108.4a fallback). `set_controller` elsewhere is rejected as a container rule: emblems
+// (CR 109.4c) and variant cards are not modelled yet.
 #[test]
 fn controller_bookkeeping() {
     let mut z = two_players();
@@ -888,8 +1158,31 @@ fn pick<T: Copy>(rng: &mut Pcg64Dxsm, v: &[T]) -> Option<T> {
     v.get(usize::try_from(rng.next_u64() % n).unwrap()).copied()
 }
 
+/// How many times each operation of the property loop actually ran: create, zone-changing move
+/// (including the exile / command same-zone new object), same-zone reposition, send outside,
+/// enter from outside. Checked so that no branch is vacuous.
+type OpCounts = [usize; 5];
+
+/// Every zone of the container listed once: each player's library, hand and graveyard, then the
+/// shared zones.
+fn every_zone(z: &Zones) -> Vec<ZoneId> {
+    let mut v = Vec::new();
+    for player in z.players() {
+        v.push(ZoneId::Library(player));
+        v.push(ZoneId::Hand(player));
+        v.push(ZoneId::Graveyard(player));
+    }
+    v.extend([
+        ZoneId::Battlefield,
+        ZoneId::Stack,
+        ZoneId::Exile,
+        ZoneId::Command,
+    ]);
+    v
+}
+
 /// Runs one random operation sequence; returns the encoding after every step.
-fn run_random(seed: u64, steps: usize) -> Vec<Vec<u8>> {
+fn run_random(seed: u64, steps: usize, counts: &mut OpCounts) -> Vec<Vec<u8>> {
     let mut rng = Pcg64Dxsm::from_u64_seed(seed);
     let player_count = 2 + rng.next_u64() % 3;
     let players: Vec<PlayerId> = (1..=player_count).map(p).collect();
@@ -935,12 +1228,25 @@ fn run_random(seed: u64, steps: usize) -> Vec<Vec<u8>> {
                 next_card += 1;
                 assert_eq!(id.get(), last_before + 1);
                 touched.insert(id);
+                counts[0] += 1;
             }
             1 | 2 => {
                 if let Some(old) = pick(&mut rng, &objects) {
+                    let rec = *z.object(old).unwrap();
+                    let dest = ZoneId::of(kind, rec.owner);
                     let m = z.move_object(&mut ids, old, r).unwrap();
-                    assert_eq!(m.new.get(), last_before + 1);
-                    retired.insert(old);
+                    assert_eq!((m.old, m.from, m.to), (old, rec.zone, dest));
+                    if dest == rec.zone && !matches!(dest, ZoneId::Exile | ZoneId::Command) {
+                        // CR 400.7, CR 400.5 (finding F1): a reposition keeps the id.
+                        assert_eq!(m.new, old);
+                        assert_eq!(ids.last_issued(), last_before);
+                        counts[2] += 1;
+                    } else {
+                        // CR 400.7, CR 400.8, CR 406.7, CR 400.10: a new object.
+                        assert_eq!(m.new.get(), last_before + 1);
+                        retired.insert(old);
+                        counts[1] += 1;
+                    }
                     touched.insert(old);
                     touched.insert(m.new);
                 }
@@ -951,6 +1257,7 @@ fn run_random(seed: u64, steps: usize) -> Vec<Vec<u8>> {
                     z.send_outside(old, pool).unwrap();
                     retired.insert(old);
                     touched.insert(old);
+                    counts[3] += 1;
                 }
             }
             _ => {
@@ -968,13 +1275,29 @@ fn run_random(seed: u64, steps: usize) -> Vec<Vec<u8>> {
                         .unwrap();
                     assert_eq!(id.get(), last_before + 1);
                     touched.insert(id);
+                    counts[4] += 1;
                 }
             }
         }
-        // (a) no duplicates, no retired id, ids within the issued range.
+        // (a) no duplicate membership, no retired id, ids within the issued range. The ids are
+        // counted from the raw contents of every zone (finding N2), since `all_object_ids`
+        // deduplicates; every listed id resolves back to a record in that zone and to its card.
         let all = z.all_object_ids();
-        let unique: BTreeSet<ObjectId> = all.iter().copied().collect();
-        assert_eq!(unique.len(), all.len());
+        let mut listed = 0usize;
+        let mut unique: BTreeSet<ObjectId> = BTreeSet::new();
+        for zone in every_zone(&z) {
+            for id in z.contents(zone) {
+                listed += 1;
+                unique.insert(id);
+                let rec = z.object(id).unwrap();
+                assert_eq!(rec.id, id);
+                assert_eq!(rec.zone, zone);
+                assert_eq!(z.object_of_card(rec.card), Some(id));
+            }
+        }
+        assert_eq!(listed, unique.len(), "an id is listed twice");
+        assert_eq!(listed, all.len());
+        assert!(unique.iter().copied().eq(all.iter().copied()));
         assert!(unique.is_disjoint(&retired));
         assert!(all.iter().all(|id| id.get() <= ids.last_issued()));
         // (b) relative order of untouched objects preserved in ordered zones.
@@ -1002,15 +1325,19 @@ fn run_random(seed: u64, steps: usize) -> Vec<Vec<u8>> {
     trace
 }
 
-// REQ-CORE-002, REQ-ZONE-001 items 1,2,4,5,6,7,9; CR 400.7, CR 400.5, CR 400.11
+// REQ-CORE-002, REQ-ZONE-001 items 1,2,4,5,6,7,9; CR 400.7, CR 400.8, CR 406.7, CR 400.10,
+// CR 400.5, CR 400.11
 #[test]
 fn property_random_operation_sequences() {
+    let mut counts: OpCounts = [0; 5];
     for seed in 0..40u64 {
-        let first = run_random(seed, 120);
+        let first = run_random(seed, 120, &mut counts);
         // (e) identical operation sequences give identical bytes.
-        let second = run_random(seed, 120);
+        let second = run_random(seed, 120, &mut [0; 5]);
         assert_eq!(first, second);
     }
+    // No operation branch was vacuous (finding F6 treatment), including the F1 reposition.
+    assert!(counts.iter().all(|&n| n > 0), "{counts:?}");
 }
 
 // ---------------------------------------------------------------------------------------------

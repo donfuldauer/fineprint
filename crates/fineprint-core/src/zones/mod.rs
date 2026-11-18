@@ -12,12 +12,32 @@
 //! [`ObjectId`](fineprint_base::ids::ObjectId) order, so every iteration is deterministic.
 //!
 //! **The zone-move primitive.** [`Zones::move_object`] is the only way an object changes zones.
-//! Per CR 400.7 the moved object becomes a new object: it receives a fresh `ObjectId` from the
-//! caller's generator, and no reference to the old id remains in the container. The returned
-//! [`Moved`] carries both ids so that the caller can hand them to the exception registry
-//! ([`EXCEPTIONS`], CR 400.7a-m). A move to the same zone also creates a new object (CR 400.8,
-//! CR 406.7, CR 400.10). Objects that would go to another player's library, hand or graveyard
-//! go to their owner's (CR 400.3).
+//! Per CR 400.7 an object that moves from one zone to another becomes a new object: it receives
+//! a fresh `ObjectId` from the caller's generator, and no reference to the old id remains in the
+//! container. The returned [`Moved`] carries both ids so that the caller can hand them to the
+//! exception registry ([`EXCEPTIONS`], CR 400.7a-m). A move into the zone the object is already
+//! in is not a zone change: in a library, hand, graveyard, the battlefield or the stack the
+//! object keeps its id and is only repositioned (CR 400.7, CR 400.5, CR 400.12; `Moved` then has
+//! `old == new`), while in exile and the command zone it becomes a new object without changing
+//! zones (CR 400.8, CR 406.7, CR 400.10) and gets a fresh id. Objects that would go to another
+//! player's library, hand or graveyard go to their owner's (CR 400.3). An issued id that already
+//! names a live object is rejected ([`ZoneError::IdCollision`]).
+//!
+//! **Omniscient state.** [`Zones`] is the omniscient engine state: `contents`, `object`,
+//! `object_of_card`, `all_object_ids` and the canonical encoding expose hidden information
+//! (library order, hand membership, the `CardId` of face-down objects). It must stay behind the
+//! redacted per-player view and the determinized-fork boundary (REQ-CORE-004, REQ-API-004) and is
+//! never handed to a client directly.
+//!
+//! **Stack scope.** In this unit the stack holds only card-backed objects (spells, and copies
+//! that have a `CardId`), and [`Zones::create_object`] requires a `CardId`. Cardless stack objects
+//! (abilities, which go on the stack without a card, CR 405.1, CR 109.1; copies of spells that
+//! are not cards) are out of scope and are the job of the later units that own them (#31 FP-030,
+//! #58 FP-056, #66 FP-064, and a later stack/ability unit for activated abilities).
+//!
+//! **Controllers.** [`ObjectRecord::controller`] holds the owner outside the battlefield and the
+//! stack (the CR 108.4a fallback); [`ObjectRecord::rules_controller`] gives the rules-level value
+//! (CR 109.4).
 //!
 //! **Outside the game** (CR 400.11) is not a zone: it is a set of [`OutsidePool`] card pools
 //! per owner, holding [`CardId`](fineprint_base::ids::CardId)s and never object ids.
