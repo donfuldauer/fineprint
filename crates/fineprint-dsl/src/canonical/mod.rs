@@ -35,7 +35,7 @@ mod ser;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use ser::to_checked_value;
+pub(crate) use ser::{to_checked_value, to_checked_value_without_member};
 
 /// The largest integer magnitude that survives JCS unchanged: 2^53 − 1.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;

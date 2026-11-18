@@ -21,7 +21,23 @@ use super::{CanonicalError, MAX_DEPTH, MAX_SAFE_INTEGER, first_noncharacter};
 
 /// Serialises `value` into a [`Value`] with the checks described in the module documentation.
 pub(crate) fn to_checked_value<T: Serialize + ?Sized>(value: &T) -> Result<Value, CanonicalError> {
-    value.serialize(Checked { depth: 0 }).map_err(|e| e.0)
+    value.serialize(Checked::nested(0)).map_err(|e| e.0)
+}
+
+/// As [`to_checked_value`], but a member named `member` of the outermost struct or map is left
+/// out (REQ-DSL-002, REQ-NFR-006). It is skipped before its value is serialised, so its content
+/// is never checked; for duplicate detection it counts as absent. Members of that name nested
+/// at any deeper level are serialised and checked as usual.
+pub(crate) fn to_checked_value_without_member<T: Serialize + ?Sized>(
+    value: &T,
+    member: &'static str,
+) -> Result<Value, CanonicalError> {
+    value
+        .serialize(Checked {
+            depth: 0,
+            skip: Some(member),
+        })
+        .map_err(|e| e.0)
 }
 
 /// The serializer's error: a [`CanonicalError`], so the caller sees the precise kind.
@@ -76,13 +92,20 @@ fn tagged(variant: &'static str, value: Value) -> Result<Value, SerError> {
 }
 
 /// The serializer. `depth` is the number of arrays and objects already open around the value
-/// being serialised (0 at the top of the document).
+/// being serialised (0 at the top of the document). `skip` names a member to leave out of the
+/// outermost struct or map; it is only ever set at depth 0 and never passed to a nested value.
 #[derive(Clone, Copy)]
 struct Checked {
     depth: usize,
+    skip: Option<&'static str>,
 }
 
 impl Checked {
+    /// A serializer for a value inside `depth` open containers, with no member skipped.
+    fn nested(depth: usize) -> Self {
+        Checked { depth, skip: None }
+    }
+
     /// The depth of a container opened here, or an error if it would exceed [`MAX_DEPTH`].
     fn open(self) -> Result<usize, SerError> {
         let depth = self.depth + 1;
@@ -106,7 +129,7 @@ struct SeqBuilder {
 impl SeqBuilder {
     fn push<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
         self.items
-            .push(value.serialize(Checked { depth: self.depth })?);
+            .push(value.serialize(Checked::nested(self.depth))?);
         Ok(())
     }
 
@@ -125,9 +148,18 @@ struct MapBuilder {
     map: Map<String, Value>,
     next_key: Option<String>,
     variant: Option<&'static str>,
+    /// Member name to leave out of this object (set only for the outermost one).
+    skip: Option<&'static str>,
+    /// The key just given to `serialize_key` was `skip`, so the next value is discarded unseen.
+    skipping: bool,
 }
 
 impl MapBuilder {
+    /// Whether the member `key` is to be left out of this object.
+    fn skips(&self, key: &str) -> bool {
+        self.skip == Some(key)
+    }
+
     /// Inserts a member, rejecting a name already present (compared after decoding; the map is
     /// ordered, REQ-CORE-006).
     fn insert(&mut self, key: String, value: Value) -> Result<(), SerError> {
@@ -301,7 +333,7 @@ impl ser::Serializer for Checked {
         value: &T,
     ) -> Result<Value, SerError> {
         let depth = self.open()?;
-        tagged(variant, value.serialize(Checked { depth })?)
+        tagged(variant, value.serialize(Checked::nested(depth))?)
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<SeqBuilder, SerError> {
@@ -332,7 +364,7 @@ impl ser::Serializer for Checked {
         len: usize,
     ) -> Result<SeqBuilder, SerError> {
         let outer = self.open()?;
-        let mut seq = Checked { depth: outer }.serialize_seq(Some(len))?;
+        let mut seq = Checked::nested(outer).serialize_seq(Some(len))?;
         seq.variant = Some(variant);
         Ok(seq)
     }
@@ -343,6 +375,8 @@ impl ser::Serializer for Checked {
             map: Map::new(),
             next_key: None,
             variant: None,
+            skip: self.skip,
+            skipping: false,
         })
     }
 
@@ -358,7 +392,7 @@ impl ser::Serializer for Checked {
         len: usize,
     ) -> Result<MapBuilder, SerError> {
         let outer = self.open()?;
-        let mut map = Checked { depth: outer }.serialize_map(Some(len))?;
+        let mut map = Checked::nested(outer).serialize_map(Some(len))?;
         map.variant = Some(variant);
         Ok(map)
     }
@@ -421,16 +455,26 @@ impl ser::SerializeMap for MapBuilder {
     type Error = SerError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), SerError> {
-        self.next_key = Some(key_string(key)?);
+        let key = key_string(key)?;
+        if self.skips(&key) {
+            self.next_key = None;
+            self.skipping = true;
+        } else {
+            self.next_key = Some(key);
+            self.skipping = false;
+        }
         Ok(())
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
+        if std::mem::take(&mut self.skipping) {
+            return Ok(());
+        }
         let key = self
             .next_key
             .take()
             .ok_or_else(|| ser::Error::custom("map value without a key"))?;
-        let value = value.serialize(Checked { depth: self.depth })?;
+        let value = value.serialize(Checked::nested(self.depth))?;
         self.insert(key, value)
     }
 
@@ -448,7 +492,10 @@ impl ser::SerializeStruct for MapBuilder {
         key: &'static str,
         value: &T,
     ) -> Result<(), SerError> {
-        let value = value.serialize(Checked { depth: self.depth })?;
+        if self.skips(key) {
+            return Ok(());
+        }
+        let value = value.serialize(Checked::nested(self.depth))?;
         self.insert(key.to_owned(), value)
     }
 
@@ -466,7 +513,7 @@ impl ser::SerializeStructVariant for MapBuilder {
         key: &'static str,
         value: &T,
     ) -> Result<(), SerError> {
-        let value = value.serialize(Checked { depth: self.depth })?;
+        let value = value.serialize(Checked::nested(self.depth))?;
         self.insert(key.to_owned(), value)
     }
 

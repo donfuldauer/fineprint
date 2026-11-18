@@ -1273,9 +1273,68 @@ fn req_nfr_006_stale_hash_excluded_from_hash_input() {
         bad.verify_hash(),
         Err(CardDefinitionError::HashMismatch { .. })
     ));
-    for stale in [String::new(), "X".repeat(64)] {
+    for stale in [String::new(), "X".repeat(64), "\u{FFFF}".to_owned()] {
         let mut other = d.clone();
         other.definition_hash = stale;
         assert_eq!(other.compute_hash(), d.compute_hash());
     }
+}
+
+/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: `compute_hash` hashes the borrowed definition, so a
+/// value built in memory far beyond the depth budget is a `Serialize` error rather than a stack
+/// overflow. The value is forgotten, not dropped, because dropping it would itself recurse.
+#[test]
+fn req_nfr_006_compute_hash_deep_value_is_an_error() {
+    let mut def = definition();
+    def.faces[0].abilities = vec![AbilityAST(nested(100_000))];
+    assert!(matches!(
+        def.compute_hash(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    assert!(matches!(
+        def.verify_hash(),
+        Err(CardDefinitionError::Canonical(CanonicalError::Serialize(_)))
+    ));
+    std::mem::forget(def);
+}
+
+/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: `seal` on a definition nested past the budget is a
+/// `Serialize` error (1 000 levels, small enough to drop safely).
+#[test]
+fn req_nfr_006_seal_deep_value_is_an_error() {
+    let mut def = definition();
+    def.faces[0].abilities = vec![AbilityAST(nested(1_000))];
+    assert!(matches!(def.seal(), Err(CanonicalError::Serialize(_))));
+}
+
+/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: only the top-level `definitionHash` is left out of
+/// the hash; a nested member of that name is part of the hash input and is checked.
+#[test]
+fn req_nfr_006_nested_definition_hash_member_is_hashed() {
+    let base = sealed();
+    let mut nested_member = definition();
+    nested_member.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "x"}))];
+    let nested_hash = nested_member.compute_hash().expect("hash");
+    assert_ne!(nested_hash, base.compute_hash().expect("hash"));
+    let mut other = definition();
+    other.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "y"}))];
+    assert_ne!(other.compute_hash().expect("hash"), nested_hash);
+    let mut bad = definition();
+    bad.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "\u{FDD0}"}))];
+    assert!(matches!(
+        bad.compute_hash(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    // The hash input is the canonical definition with only the top-level member removed.
+    let sealed_nested = nested_member.seal().expect("seal");
+    let mut value = serde_json::to_value(&sealed_nested).expect("value");
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("definitionHash");
+    let bytes = canonicalize(&json_bytes(&value)).expect("canonical");
+    assert_eq!(
+        sealed_nested.definition_hash,
+        fineprint_base::hash::sha256(&bytes).to_hex()
+    );
 }
