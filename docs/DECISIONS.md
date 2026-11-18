@@ -1881,3 +1881,17 @@ do not fetch the CR: every mandatory test passes without the cache, and the one 
 names of SRS §10.1; card types and supertypes match SRS §4.1. No `docs/HUMAN_QUEUE.md` line.
 **Rationale.** Verified against the cached text and asserted by `spec_dsl_vocab.rs`.
 **Alternatives.** None needed.
+
+## #15 FP-014 — Citation index regenerated in this PR
+
+**Decision.** The Orchestrator ran `cargo xtask cr index` on this branch (triage T0) and commits
+the regenerated `docs/cr-citations.json`: 113 added lines, nothing removed. Before that, `cargo
+xtask cr check` reported 14 problems: the new code comments cite CR 122.1, 205.2a, 205.3g, 205.4a,
+701.1 and 702.1, and the index did not list them. The Implementer confirmed each of these rules
+exists in the cached 2026-11-06 text. After re-indexing, `cr check` passes (462 cited rules).
+**Rationale.** The check's own remedy is "re-verify the citation, then run `cargo xtask cr index`"
+(#7 FP-006). A unit that adds citations brings the index up to date in the same PR, so the `cr`
+workflow stays green. The file is generated, so this is a mechanical edit outside the unit's
+owned paths.
+**Alternatives.** A separate follow-up issue (rejected: until it merged, the `cr` workflow would
+fail on every pull request).
