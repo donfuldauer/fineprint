@@ -41,7 +41,22 @@ fn accept(doc: &Value) -> Instruction {
 
 fn accept_text(text: &str) -> Instruction {
     let doc: Value = serde_json::from_str(text).unwrap();
-    accept(&doc)
+    let from_text: Instruction = match serde_json::from_str(text) {
+        Ok(i) => i,
+        Err(e) => panic!("expected {text} to decode from_str, got error: {e}"),
+    };
+    let from_bytes: Instruction = match serde_json::from_slice(text.as_bytes()) {
+        Ok(i) => i,
+        Err(e) => panic!("expected {text} to decode from_slice, got error: {e}"),
+    };
+    let from_val: Instruction = match serde_json::from_value(doc.clone()) {
+        Ok(i) => i,
+        Err(e) => panic!("expected {text} to decode from_value, got error: {e}"),
+    };
+    assert_eq!(from_text, from_bytes, "from_str vs from_slice of {text}");
+    assert_eq!(from_text, from_val, "from_str vs from_value of {text}");
+    assert_eq!(accept(&doc), from_text);
+    from_text
 }
 
 /// Rejected by `from_str`, `from_slice` and `from_value`.
