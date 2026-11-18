@@ -2154,8 +2154,9 @@ other check and the copy is written back only on success, so an error leaves the
 the generator unchanged and a real zone change can never return `Moved { old == new }`. The
 container keeps a private high-water mark `max_issued` (the highest ObjectId raw value it has
 ever issued; 0 when none; PR #167 round 2, finding G5); an issued id at or below it is rejected
-as `ZoneError::IdCollision` (it is live or was held earlier; round 1 finding F3 had rejected only
-live ids), so a stale or saved generator cannot silently resurrect a retired id. The mark is part
+as `ZoneError::IdCollision` (a high-water rejection, not proof of reuse: it also rejects ids the
+container never held, e.g. first id 10 from a generator restored at 9, then a generator proposing 5
+gets `IdCollision(5)`; PR #167 round 3, H1; round 1 finding F3 had rejected only live ids), so a stale or saved generator cannot silently resurrect a retired id. The mark is part
 of `PartialEq`/`Eq` and is appended to the canonical encoding as 8 bytes little-endian; a
 reposition never touches it. Rationale: ids are never reused (REQ-CORE-002), and the `GameState`
 integration unit will hold the generator and the container together. Alternative considered:

@@ -145,6 +145,7 @@ fn error_display_and_error_trait() {
     assert!(all[2].to_string().contains('5'));
     assert!(all[7].to_string().contains('6'));
     assert!(all[8].to_string().contains('8'));
+    assert!(all[8].to_string().contains("not above the highest id"));
     let e: &dyn std::error::Error = &all[3];
     assert!(e.source().is_none());
 }
@@ -742,45 +743,82 @@ fn reposition_leaves_mark_and_generator_unchanged() {
         .unwrap();
     z.create_object(&mut ids, c(2), p(1), req(ZoneKind::Library))
         .unwrap();
-    let mark = z.max_issued;
+    let mark = tail8(&z);
     let ids0 = ids.clone();
     z.move_object(&mut ids, a, at(ZoneKind::Library, Position::Bottom))
         .unwrap();
-    assert_eq!(z.max_issued, mark);
+    assert_eq!(tail8(&z), mark);
+    assert_eq!(mark, 2_u64.to_le_bytes());
     assert_eq!(ids, ids0);
+    assert_eq!(ids.last_issued(), 2);
+}
+
+/// The trailing eight bytes of the canonical encoding: the high-water mark, little-endian.
+fn tail8(z: &Zones) -> [u8; 8] {
+    let b = encode_to_vec(z);
+    b[b.len() - 8..].try_into().unwrap()
 }
 
 // REQ-CORE-002, REQ-NFR-006: equal operations give equal values and bytes; the mark is part of
-// both: a move that retires an id changes the encoding, and two containers that differ only in
-// the mark are unequal and encode differently.
+// both: two containers with the same visible contents but different marks are unequal and
+// encode differently.
 #[test]
 fn high_water_mark_is_part_of_equality_and_encoding() {
-    let build = || {
-        let mut z = two_players();
-        let mut ids = IdGenerator::new();
-        let a = z
-            .create_object(&mut ids, c(1), p(1), req(ZoneKind::Hand))
-            .unwrap();
-        (z, ids, a)
-    };
-    let (z1, _, _) = build();
-    let (z2, _, _) = build();
-    assert_eq!(z1, z2);
-    assert_eq!(encode_to_vec(&z1), encode_to_vec(&z2));
-    let mut z3 = z1.clone();
-    z3.max_issued += 1;
-    assert_ne!(z1, z3);
-    let (b1, b3) = (encode_to_vec(&z1), encode_to_vec(&z3));
-    assert_ne!(b1, b3);
-    assert_eq!(b1[b1.len() - 8..], 1_u64.to_le_bytes());
-    assert_eq!(b3[b3.len() - 8..], 2_u64.to_le_bytes());
-    // Out and back to the same zone: same contents shape, a retired id, a different encoding.
-    let (mut z4, mut ids4, a) = build();
+    let mut z1 = two_players();
+    z1.add_outside_card(p(1), OutsidePool::Sideboard, c(1))
+        .unwrap();
+    let mut z2 = two_players();
+    let mut ids = IdGenerator::new();
+    let id = z2
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    z2.send_outside(id, OutsidePool::Sideboard).unwrap();
+    assert_eq!(
+        z1.outside_cards(p(1), OutsidePool::Sideboard),
+        z2.outside_cards(p(1), OutsidePool::Sideboard)
+    );
+    assert!(z2.all_object_ids().is_empty());
+    assert_ne!(z1, z2);
+    assert_ne!(encode_to_vec(&z1), encode_to_vec(&z2));
+    assert_ne!(tail8(&z1), tail8(&z2));
+    assert_eq!(tail8(&z1), 0_u64.to_le_bytes());
+    assert_eq!(tail8(&z2), id.get().to_le_bytes());
+    // Equal operations give equal values and bytes.
+    let mut z3 = two_players();
+    z3.add_outside_card(p(1), OutsidePool::Sideboard, c(1))
+        .unwrap();
+    assert_eq!(z1, z3);
+    assert_eq!(encode_to_vec(&z1), encode_to_vec(&z3));
+    // Out and back to the same zone: a retired id, so the mark is 3.
+    let mut z4 = two_players();
+    let mut ids4 = IdGenerator::new();
+    let a = z4
+        .create_object(&mut ids4, c(1), p(1), req(ZoneKind::Hand))
+        .unwrap();
     let m = z4.move_object(&mut ids4, a, req(ZoneKind::Exile)).unwrap();
     z4.move_object(&mut ids4, m.new, req(ZoneKind::Hand))
         .unwrap();
-    assert_ne!(encode_to_vec(&z4)[..8], [0u8; 8]);
-    assert_eq!(z4.max_issued, 3);
+    assert_eq!(tail8(&z4), 3_u64.to_le_bytes());
+}
+
+// REQ-CORE-002, CR 400.7: IdCollision is a high-water rejection, not proof of reuse: an id below
+// the mark that the container never held is rejected too, atomically.
+#[test]
+fn id_collision_is_a_high_water_rejection_of_never_held_ids() {
+    let mut z = two_players();
+    let mut restored: IdGenerator<ObjectId> = IdGenerator::from_last_issued(9);
+    let first = z
+        .create_object(&mut restored, c(1), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    assert_eq!(first, ObjectId::new(10));
+    let mut later: IdGenerator<ObjectId> = IdGenerator::from_last_issued(4);
+    assert_atomic_err(
+        &mut z,
+        &mut later,
+        ZoneError::IdCollision(ObjectId::new(5)),
+        |z, g| z.create_object(g, c(2), p(1), req(ZoneKind::Hand)),
+    );
+    assert!(z.object(ObjectId::new(5)).is_none());
 }
 
 // REQ-ZONE-001, REQ-CORE-002; CR 109.4, CR 108.4a: the rules-level controller exists only on
