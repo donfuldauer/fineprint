@@ -24,9 +24,10 @@
 //!   every sentence containing `<group> types are ` or `<group> type is ` (after a `:` when the
 //!   sentence has one). Parentheticals are removed first. Other 205.3 sub-rules are ignored.
 //! - **Keyword actions / abilities**: every unlettered rule `701.N` / `702.N` with N >= 2 is a
-//!   heading; 701.1 and 702.1 are introductory and skipped. A heading must be heading-shaped (one
-//!   line, at most 8 words and 64 characters, no `.` at its end or `. ` inside); anything else
-//!   is an input error rather than a keyword. Ids follow [`keyword_id`].
+//!   heading; 701.1 and 702.1 are introductory and skipped; N = 0 is an input error (N is
+//!   compared as an integer, so `702.01` is 702.1). A heading must be heading-shaped (one line,
+//!   at most 8 words and 64 characters, no `.` at its end or `. ` inside); anything else is an
+//!   input error rather than a keyword. Ids follow [`keyword_id`].
 //! - **Counter kinds**: the lettered sub-rules of CR 122.1. CR 122.1b is the keyword-counter
 //!   list (the first sentence starting `The ` with ` are `; class `KEYWORD`); every other
 //!   sub-rule contributes the word before its first ` counter`/` counters` (class
@@ -313,8 +314,18 @@ fn keywords(doc: &CrDoc, section: &str) -> Result<Vec<Keyword>, GenError> {
         .iter()
         .filter(|r| r.section == section && r.letters.is_empty())
     {
-        if rule.number.trim_start_matches('0') == "1" {
-            continue; // CR 701.1, CR 702.1: introductory paragraphs
+        // CR 701.1, CR 702.1: the introductory paragraphs are skipped; there is no rule N = 0,
+        // so a `701.0` / `702.0` heading is malformed input. The parsed integer is compared,
+        // so leading zeros (`702.01`) mean the same rule.
+        match rule.number.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                return Err(input(format!(
+                    "rule {} is not a valid keyword rule number (expected {section}.1,                      {section}.2, ...)",
+                    rule.id()
+                )));
+            }
+            Ok(1) => continue,
+            Ok(_) => {}
         }
         if !is_heading(rule) {
             return Err(input(format!(

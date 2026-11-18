@@ -1895,3 +1895,56 @@ workflow stays green. The file is generated, so this is a mechanical edit outsid
 owned paths.
 **Alternatives.** A separate follow-up issue (rejected: until it merged, the `cr` workflow would
 fail on every pull request).
+
+## #15 FP-014 CR round 1 — double-faced token face order
+
+**Decision.** A CR 111.10 token whose framing description is exactly `double-faced token` needs
+exactly one `Its front face is ...` and one `Its back face is ...` sentence, in that order; the
+faces are emitted front first, back second. A back-face sentence before the front-face sentence
+is an input error (the generator does not reorder). A missing, repeated or unknown label (the
+CR uses the lower-case words `front` and `back`), and any face sentence in a token not declared
+double-faced, are input errors.
+**Rationale.** The current CR text lists the front face first, so rejecting the reversed order
+costs nothing today, keeps the generator simple and makes a changed CR shape visible to the
+maintainer instead of silently reinterpreting it (the generator's rule for unexpected text).
+**Alternatives.** Reordering reversed sentences (accepted input the CR has never used; a
+silent reinterpretation). Keeping the old unlabelled reading (a back-first text would make the
+back the front; CodeRabbit finding r4620683745).
+
+## #15 FP-014 CR round 1 — token ability grammar
+
+**Decision.** Every unquoted fragment of a token's `with ...` ability list (between `,` and
+`and` separators) must be a keyword ability phrase: compared case-insensitively, either a
+keyword-ability name from the generated CR 702 list alone, or that name followed by one space
+and one parameter: a card type from the generated card-type list (`enchant creature`), a number
+of at most six digits or `X`, or a mana cost made of one or more `{...}` symbols of ASCII letters,
+digits and `/`. Anything else is an input error naming the token rule and the fragment. Quoted
+abilities are kept exactly as before. Keyword actions (CR 701) are not accepted. The current CR
+produces two unquoted fragments, `indestructible` and `enchant creature`, which both validate;
+`vocab.json` is unchanged.
+**Rationale.** Unquoted text in a token definition is the CR's keyword shorthand; validating it
+against the keyword list the generator already builds keeps prose out of `vocab.json`
+(REQ-NFR-004) without hard-coding any keyword (the names come from the text). The parameter
+forms cover the shapes the CR uses for keyword parameters without accepting free text.
+**Alternatives.** Accepting only the exact fragments seen today (would break on the next CR
+with a new keyword token). Accepting any phrase that starts with a keyword name (lets prose
+through after a keyword). A full keyword-parameter grammar per keyword (too much for the
+generator; parameters such as `protection from ...` would need it, and the generator fails loudly
+if the CR starts to use one, so it can be extended then).
+
+## #15 FP-014 CR round 1 — CLI details
+
+**Decision.** (1) A missing or unreadable `--out` file in `--check` mode is "restore from git"
+when the path is exactly the default `crates/fineprint-dsl/data/vocab.json` (given or implied),
+and "regenerate it" otherwise. (2) The mismatch hint says "rerun the same command without
+--check (keeping --cr <path> --out <path>)" with the parsed paths, not a literal shell command
+(quoting differs between shells). (3) A file that does not load is described by a fixed category
+(`unparseable JSON`, `wrong shape`, or `field: <path>`); a shape error names no field, because
+serde's message can quote input names or values. (4) The atomic write's temporary file is
+`.<file name>.<pid>.tmp` beside the destination; it is removed after a failure only if this
+call created it. (5) Unit-test scratch directories live under `<workspace>/target/fp-vocab-tests`
+and integration-test ones under `CARGO_TARGET_TMPDIR`.
+**Rationale.** The brief's definitions of fixed for findings r4620683663, r4620683679,
+r4620683700, r4620683631 and r4620683732, applied with the smallest change.
+**Alternatives.** Printing a quoted literal command (shell-specific). Mapping serde shape
+errors to a field name by parsing serde's message (fragile, can echo input).
