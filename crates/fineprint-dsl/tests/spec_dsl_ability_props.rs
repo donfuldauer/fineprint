@@ -1143,13 +1143,19 @@ fn try_all(bytes: &[u8]) {
     where
         T: DeserializeOwned + Serialize + PartialEq + Debug,
     {
-        if let Ok(t) = serde_json::from_slice::<T>(bytes) {
-            let enc = serde_json::to_vec(&t).unwrap();
+        let from_bytes = serde_json::from_slice::<T>(bytes);
+        if let Ok(t) = &from_bytes {
+            let enc = serde_json::to_vec(t).unwrap();
             let t2: T = serde_json::from_slice(&enc).unwrap();
-            assert_eq!(t2, t);
+            assert_eq!(&t2, t);
         }
         if let Ok(s) = std::str::from_utf8(bytes) {
-            let _ = serde_json::from_str::<T>(s);
+            let from_text = serde_json::from_str::<T>(s);
+            match (&from_bytes, &from_text) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "from_slice and from_str decode differently"),
+                (Err(_), Err(_)) => {}
+                _ => panic!("from_slice and from_str disagree on acceptance"),
+            }
         }
     }
     one::<AbilityAST>(bytes);
