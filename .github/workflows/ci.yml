@@ -4,12 +4,17 @@
 
 # Job names below are the required status checks on main (REQ-NFR-011).
 # Do not rename them without updating branch protection; see docs/DEVELOPMENT.md "CI".
+# Triggers: pull requests, and pushes to main only (a push to a PR branch already runs through
+# its pull_request event; see docs/DECISIONS.md "CI — PR load"). On a pull request whose changes
+# are documentation only (job `changes`), fmt, clippy and test still report success but skip
+# their steps, and coverage is skipped; pushes to main always run everything.
 # Third-party actions: actions/checkout and actions/cache only, both first-party,
 # pinned to exact version tags (checkout v4.2.2, cache v4.2.0).
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -23,48 +28,98 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Decide whether anything but documentation changed
+        id: diff
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE...$HEAD")
+          printf '%s\n' "$files"
+          # Documentation only: Markdown files and .claude/ (agent and skill text), which no build,
+          # test or tool reads. docs/SRS.md is read by the xtask cr tests, so it counts as code.
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/SRS.md) code=true ;;
+              *.md|.claude/*) ;;
+              *) code=true ;;
+            esac
+          done <<< "$files"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code changed: $code"
+
   fmt:
     name: fmt (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Formatting does not depend on the OS; test builds on all three (REQ-NFR-003).
+        os: [ubuntu-latest]
     steps:
       - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
       - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
       - name: cargo fmt
+        if: needs.changes.outputs.code == 'true'
         run: cargo fmt --all --check
 
   clippy:
     name: clippy (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Lints run once; test still builds every target on all three platforms (REQ-NFR-003).
+        os: [ubuntu-latest]
     steps:
       - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
       - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
       - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
         uses: actions/cache@v4.2.0
         with:
           path: |
@@ -76,10 +131,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-clippy-
       - name: cargo clippy
+        if: needs.changes.outputs.code == 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -88,16 +145,20 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
       - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
       - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
         uses: actions/cache@v4.2.0
         with:
           path: |
@@ -109,10 +170,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-test-
       - name: cargo test
+        if: needs.changes.outputs.code == 'true'
         run: cargo test --workspace --locked
 
   coverage:
     name: coverage (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
