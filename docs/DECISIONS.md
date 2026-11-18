@@ -1343,3 +1343,14 @@ reports for the same text. One shared predicate means parser and constructor can
 (an equivalence unit test covers a spread of symbols).
 **Alternatives.** A new error variant (rejected: public API change); a private check duplicated
 in `new` (rejected: could drift from the parser).
+
+## #11 FP-010 — seal rejects unsupported dslVersion
+
+**Decision.** `CardDefinitionDSL::seal` calls `check_dsl_version` first and maps its error to
+`CanonicalError::Serialize(e.to_string())`. Supported versions (`1.x[.y]`) seal as before. Seal and
+`compute_hash` also ignore the previous `definitionHash` value (cleared before validation).
+**Rationale.** Every `Ok` sealed value must round-trip through `from_json`, which rejects other
+majors. The signature and the error enums are frozen (exhaustive matches in spec tests); the error
+text carries the `DslVersionError` message.
+**Alternatives.** Returning `CardDefinitionError` (breaking signature change, R2); a new
+`CanonicalError` variant (breaks exhaustive matches).

@@ -1190,7 +1190,7 @@ fn req_nfr_006_definition_noncharacter() {
 #[test]
 fn req_dsl_001_random_review_mutations_never_panic() {
     let mut rng = Pcg64Dxsm::from_u64_seed(0x0dd1_0000_0003);
-    for _ in 0..300 {
+    for iteration in 0..300 {
         let def = random_definition(&mut rng).seal().expect("seal");
         let mut v = serde_json::to_value(&def).expect("ser");
         let pick = |rng: &mut Pcg64Dxsm, n: usize| (rng.next_u64() % n as u64) as usize;
@@ -1217,9 +1217,65 @@ fn req_dsl_001_random_review_mutations_never_panic() {
                 v["definitionHash"] = json!(fineprint_base::hash::sha256(&bytes).to_hex());
             }
         }
-        if let Ok(loaded) = CardDefinitionDSL::from_json(&json_bytes(&v)) {
+        let input = json_bytes(&v);
+        if let Ok(loaded) = CardDefinitionDSL::from_json(&input) {
             let again = loaded.to_canonical_json().expect("export");
+            assert_eq!(
+                canonicalize(&input).expect("canonicalize accepted input"),
+                again,
+                "accepted input not preserved by load and export, iteration {iteration}"
+            );
             assert_eq!(CardDefinitionDSL::from_json(&again), Ok(loaded));
         }
+    }
+}
+
+/// REQ-DSL-001, REQ-DSL-002: seal rejects a `dslVersion` that `from_json` would reject, and every
+/// supported version seals to a value that round-trips.
+#[test]
+fn req_dsl_001_seal_checks_dsl_version() {
+    let mut other = definition();
+    other.dsl_version = "2.0".into();
+    match other.seal() {
+        Err(CanonicalError::Serialize(msg)) => assert!(msg.contains('2'), "{msg}"),
+        r => panic!("unexpected {r:?}"),
+    }
+    let mut bad = definition();
+    bad.dsl_version = "abc".into();
+    assert!(matches!(bad.seal(), Err(CanonicalError::Serialize(_))));
+    for version in ["1.0", "1.7.3", "1.999"] {
+        let mut def = definition();
+        def.dsl_version = version.into();
+        let sealed = def.seal().expect(version);
+        let export = sealed.to_canonical_json().expect("export");
+        assert_eq!(
+            CardDefinitionDSL::from_json(&export),
+            Ok(sealed),
+            "{version}"
+        );
+    }
+}
+
+/// REQ-DSL-002, REQ-NFR-006: a stale `definitionHash` is excluded from the hash input, even when
+/// it holds a noncharacter, but is still validated when the definition is exported.
+#[test]
+fn req_nfr_006_stale_hash_excluded_from_hash_input() {
+    let d = sealed();
+    let mut bad = d.clone();
+    bad.definition_hash = "\u{FDD0}".to_string();
+    assert_eq!(bad.compute_hash(), d.compute_hash());
+    assert_eq!(bad.clone().seal(), Ok(d.clone()));
+    assert!(matches!(
+        bad.to_canonical_json(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    assert!(matches!(
+        bad.verify_hash(),
+        Err(CardDefinitionError::HashMismatch { .. })
+    ));
+    for stale in [String::new(), "X".repeat(64)] {
+        let mut other = d.clone();
+        other.definition_hash = stale;
+        assert_eq!(other.compute_hash(), d.compute_hash());
     }
 }
