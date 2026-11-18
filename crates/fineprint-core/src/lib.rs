@@ -5,3 +5,6 @@
 //! Deterministic rules engine core of Fine Print (rules crate).
 
 #![forbid(unsafe_code)]
+
+/// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
+pub mod state;

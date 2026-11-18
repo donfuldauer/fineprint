@@ -25,7 +25,7 @@ itself is the set of GitHub issues labelled `work-unit` (milestones M1-M3). Proc
 |---|---|---|---|
 | `fineprint-base` | `crates/fineprint-base` | rules crate: shared base types | sha2 (SHA-256, FP-004) |
 | `fineprint-dsl` | `crates/fineprint-dsl` | rules crate: DSL types and runtime | base, serde, serde_json, serde_json_canonicalizer (FP-010) |
-| `fineprint-core` | `crates/fineprint-core` | rules crate: the rules engine | base, dsl |
+| `fineprint-core` | `crates/fineprint-core` | rules crate: the rules engine | base, dsl, serde, rmp-serde (FP-017) |
 | `fineprint-ingest` | `crates/fineprint-ingest` | offline card toolchain | base, dsl (not core: REQ-NFR-005) |
 | `fineprint-ffi` | `crates/fineprint-ffi` | C ABI; the only crate allowed unsafe code | core |
 | `fineprint-wasm` | `crates/fineprint-wasm` | WebAssembly binding | core |
