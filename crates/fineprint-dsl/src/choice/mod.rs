@@ -91,9 +91,11 @@ fn check_enum(items: &[String]) -> JResult<()> {
     if items.is_empty() {
         return Err("ENUM needs at least one candidate".to_owned());
     }
-    for (i, item) in items.iter().enumerate() {
+    // Ordered set (R3: no hash-ordered containers): O(n log n) duplicate detection.
+    let mut seen = std::collections::BTreeSet::<&str>::new();
+    for item in items {
         crate::expr::json::check_free_str(item, "ENUM candidate")?;
-        if items[..i].contains(item) {
+        if !seen.insert(item.as_str()) {
             return Err(format!("ENUM candidate {item:?} is listed twice"));
         }
     }
