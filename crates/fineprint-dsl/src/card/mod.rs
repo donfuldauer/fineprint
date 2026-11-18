@@ -505,10 +505,13 @@ impl CardDefinitionDSL {
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised.
     pub fn compute_hash(&self) -> Result<String, CanonicalError> {
-        // The member is omitted from the hash input, so a stale value is never validated here.
-        let mut copy = self.clone();
-        copy.definition_hash.clear();
-        hash_without_member(canonical::to_checked_value(&copy)?)
+        // The borrowed definition is serialised with the top-level member skipped before its
+        // value is read, so a stale value is never validated here and no unbounded `Clone`
+        // recursion precedes the depth check.
+        hash_without_member(canonical::to_checked_value_without_member(
+            self,
+            DEFINITION_HASH_MEMBER,
+        )?)
     }
 
     /// Returns `self` normalised and with `definition_hash` set to

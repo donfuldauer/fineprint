@@ -715,3 +715,100 @@ fn req_nfr_006_random_review_inputs_consistent() {
     }
     assert!(accepted > 0);
 }
+
+/// A struct with a member `h` and an optional nested struct of the same shape.
+#[derive(Serialize)]
+struct WithH {
+    h: String,
+    v: i64,
+    inner: Option<Box<WithH>>,
+}
+
+/// Emits the member `h` twice (each with a noncharacter) and then `v`, as a map or a struct.
+struct TwiceH {
+    as_struct: bool,
+}
+
+impl Serialize for TwiceH {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        if self.as_struct {
+            let mut s = serializer.serialize_struct("TwiceH", 3)?;
+            s.serialize_field("h", "\u{FDD0}")?;
+            s.serialize_field("h", "\u{FFFF}")?;
+            s.serialize_field("v", &1)?;
+            s.end()
+        } else {
+            let mut m = serializer.serialize_map(Some(3))?;
+            m.serialize_entry("h", "\u{FDD0}")?;
+            m.serialize_entry("h", "\u{FFFF}")?;
+            m.serialize_entry("v", &1)?;
+            m.end()
+        }
+    }
+}
+
+/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: the skipped member is left out of the outermost
+/// struct or map only, before its value is checked, and counts as absent for duplicate
+/// detection; a nested member of the same name is serialised and checked as usual.
+#[test]
+fn req_nfr_006_checked_value_without_member_top_level_only() {
+    let outer = |h: &str, inner: Option<WithH>| WithH {
+        h: h.to_owned(),
+        v: 1,
+        inner: inner.map(Box::new),
+    };
+    let leaf = |h: &str| WithH {
+        h: h.to_owned(),
+        v: 2,
+        inner: None,
+    };
+    // Top level: the stale value is never inspected, whatever it holds.
+    for stale in ["", "\u{FDD0}", "\u{FFFF}", "not hex"] {
+        assert_eq!(
+            to_checked_value_without_member(&outer(stale, None), "h"),
+            Ok(serde_json::json!({"v": 1, "inner": null})),
+            "{stale:?}"
+        );
+    }
+    // Nested: the member is kept and checked.
+    assert_eq!(
+        to_checked_value_without_member(&outer("\u{FDD0}", Some(leaf("x"))), "h"),
+        Ok(serde_json::json!({"v": 1, "inner": {"h": "x", "v": 2, "inner": null}}))
+    );
+    assert!(matches!(
+        to_checked_value_without_member(&outer("", Some(leaf("\u{FDD0}"))), "h"),
+        Err(CanonicalError::Serialize(_))
+    ));
+    // Maps behave like structs, and nested maps keep the member.
+    let mut map = BTreeMap::new();
+    map.insert("h".to_owned(), BTreeMap::from([("h".to_owned(), 3)]));
+    map.insert("w".to_owned(), BTreeMap::from([("h".to_owned(), 4)]));
+    assert_eq!(
+        to_checked_value_without_member(&map, "h"),
+        Ok(serde_json::json!({"w": {"h": 4}}))
+    );
+    // A repeated skipped member is absent, not a duplicate; values are never checked.
+    for as_struct in [false, true] {
+        assert_eq!(
+            to_checked_value_without_member(&TwiceH { as_struct }, "h"),
+            Ok(serde_json::json!({"v": 1})),
+        );
+        assert_eq!(
+            to_checked_value(&TwiceH { as_struct }),
+            Err(CanonicalError::Serialize(
+                "string contains the noncharacter U+FDD0".into()
+            ))
+        );
+    }
+    // Inside a sequence the struct is nested, so nothing is skipped.
+    assert!(matches!(
+        to_checked_value_without_member(&vec![outer("\u{FDD0}", None)], "h"),
+        Err(CanonicalError::Serialize(_))
+    ));
+    // Without the member, the result equals the plain checked value with the member removed.
+    let plain = outer("abc", Some(leaf("def")));
+    let mut expected = to_checked_value(&plain).expect("plain");
+    expected.as_object_mut().expect("object").remove("h");
+    assert_eq!(to_checked_value_without_member(&plain, "h"), Ok(expected));
+}

@@ -1354,3 +1354,36 @@ majors. The signature and the error enums are frozen (exhaustive matches in spec
 text carries the `DslVersionError` message.
 **Alternatives.** Returning `CardDefinitionError` (breaking signature change, R2); a new
 `CanonicalError` variant (breaks exhaustive matches).
+
+## #11 FP-010 — Test-path ownership
+
+**Decision.** The issue's owned paths (src/card, src/mana, src/canonical) are the Implementer's.
+Independent spec tests under crates/fineprint-dsl/tests/spec_dsl_*.rs (including
+spec_dsl_review1.rs) are owned by the Independent Tester role, per docs/DEVELOPMENT.md (Tests:
+crates/<crate>/tests/spec_<area>_*.rs); every classifier brief for this unit names them as the
+Tester's owned paths and lists them as DO NOT TOUCH for the Implementer and Fixer. They are not an
+extension of the issue's owned paths.
+**Rationale.** R1 limits each role to the paths in its brief; CodeRabbit flagged the new file
+against the issue's list only.
+**Alternatives.** Move the tests into src/ (rejected: the Tester must stay independent of src/,
+R9).
+
+## #11 FP-010 — compute_hash hashes the borrowed definition
+
+**Decision.** `compute_hash` serialises `&self` through a crate-private checked-serializer entry
+point, `canonical::to_checked_value_without_member(value, "definitionHash")`, which leaves the
+named member out of the outermost struct or map before its value is serialised or checked (a
+repeated skipped member counts as absent; members of that name at any deeper level are kept and
+checked). The result is hashed exactly as before (`hash_without_member`: RFC 8785 bytes, SHA-256,
+lowercase hex), so every valid card keeps its digest. No clone of the definition or any `Value`
+remains on the hash path. This supersedes the "cleared before validation" mechanism of the entry
+"seal rejects unsupported dslVersion" for `compute_hash`; `seal` still clears the field it owns.
+**Rationale.** Cloning recursed through placeholder `Value`s without a depth bound, so an
+in-memory value nested past `MAX_DEPTH` could overflow the stack before the checked serializer's
+depth check returned `CanonicalError::Serialize`. Skipping the member before serialisation keeps
+a stale hash (noncharacter, wrong length, anything) out of both the hash and the checks
+(REQ-DSL-002, REQ-NFR-006, REQ-CORE-006).
+**Alternatives.** Clone and clear the field (rejected: unbounded `Clone` recursion before the depth
+check). Serialise `self` unchanged and remove the member afterwards (rejected: a stale hash with a
+noncharacter would fail the check). Note: `serde_json::Value`'s `Drop` is also recursive, so an
+erroring by-value `seal` still drops a deep value; out of scope (no custom `Drop`).
