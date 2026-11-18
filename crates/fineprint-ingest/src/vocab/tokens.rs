@@ -9,9 +9,12 @@
 //! [`super::cr::sentences`]) are read as follows:
 //!
 //! - The first sentence is the framing `A|An <Name> token is a|an <description>`.
-//! - When later sentences start `Its ` and contain ` face is a|an `, each is one face
-//!   description (a double-faced token); the framing description is then not a face.
-//!   Otherwise the framing description is the single face.
+//! - When the framing description is exactly `double-faced token`, the token is double-faced
+//!   and needs exactly two later sentences `Its front face is a|an <face>` and
+//!   `Its back face is a|an <face>`, in that order (front, then back). A missing, repeated or
+//!   reversed face sentence or any other label is an input error.
+//!   Otherwise the framing description is the single face, and any `Its <label> face is ...`
+//!   sentence is an input error.
 //! - Sentences starting `See ` are cross-references and are ignored. Any other sentence is an
 //!   input error (never silently dropped).
 //!
@@ -22,7 +25,10 @@
 //! face's card types (longest match first, so two-word subtypes stay whole); an unknown word is
 //! an input error. `abilities` lists, in order, every quoted text without its quotation marks
 //! (and without a trailing `,` the quoting style puts inside the marks) and every unquoted
-//! phrase between `,` and `and` separators (keywords such as `enchant creature`).
+//! phrase between `,` and `and` separators. An unquoted phrase must be a keyword ability
+//! phrase: a CR 702 keyword name (case-insensitive), alone or followed by one parameter (a card
+//! type as in `enchant creature`, a number or `X`, or a `{...}` mana cost); anything else is an
+//! input error.
 //!
 //! The token's name is its first face's name; a face's name is its `named <Name>` if present,
 //! else the framing `<Name>`.
@@ -67,24 +73,51 @@ fn token(rule: &Rule, vocab: &RulesVocabulary) -> Result<PredefinedToken, GenErr
         .ok_or_else(|| err("the first sentence is not `A|An <Name> token is ...`"))?;
     let description =
         strip_article(description).ok_or_else(|| err("the token description has no article"))?;
-    let mut face_texts = Vec::new();
+    // CR 111.10i (the double-faced shape): the framing declares the layout; a double-faced
+    // token has exactly one `Its front face is ...` and one `Its back face is ...` sentence, in
+    // that order. A single-faced token has no face sentence.
+    let double_faced = description == DOUBLE_FACED;
+    let (mut front, mut back) = (None, None);
     for s in rest {
         if s.starts_with("See ") {
             continue;
         }
-        let face = s
+        let (label, face) = s
             .strip_prefix("Its ")
             .and_then(|x| x.split_once(" face is "))
-            .and_then(|(_, d)| strip_article(d))
+            .and_then(|(l, d)| Some((l, strip_article(d)?)))
             .ok_or_else(|| err("unrecognised sentence in the token definition"))?;
-        face_texts.push(face);
+        if !double_faced {
+            return Err(err(
+                "a face sentence in a token that is not declared double-faced",
+            ));
+        }
+        let slot = match label {
+            "front" if back.is_some() => {
+                return Err(err(
+                    "the back face sentence precedes the front face sentence",
+                ));
+            }
+            "front" => &mut front,
+            "back" => &mut back,
+            _ => return Err(err("a face label other than `front` or `back`")),
+        };
+        if slot.replace(face).is_some() {
+            return Err(err("a face label repeats"));
+        }
     }
-    if face_texts.is_empty() {
-        face_texts.push(description);
-    }
-    if face_texts.len() > 2 {
-        return Err(err("a token has at most two faces"));
-    }
+    let face_texts = if double_faced {
+        match (front, back) {
+            (Some(f), Some(b)) => vec![f, b],
+            _ => {
+                return Err(err(
+                    "a double-faced token needs one front and one back face sentence",
+                ));
+            }
+        }
+    } else {
+        vec![description]
+    };
     let faces = face_texts
         .into_iter()
         .map(|d| face(d, framing_name, vocab).map_err(|m| err(&m)))
@@ -96,6 +129,9 @@ fn token(rule: &Rule, vocab: &RulesVocabulary) -> Result<PredefinedToken, GenErr
         faces,
     })
 }
+
+/// The framing description of a double-faced token (`An X token is a double-faced token.`).
+const DOUBLE_FACED: &str = "double-faced token";
 
 fn strip_article(s: &str) -> Option<&str> {
     s.strip_prefix("a ").or_else(|| s.strip_prefix("an "))
@@ -122,7 +158,7 @@ fn split_top_level<'a>(s: &'a str, word: &str) -> Option<(&'a str, &'a str)> {
 
 fn face(desc: &str, framing_name: &str, vocab: &RulesVocabulary) -> Result<TokenFace, String> {
     let (head, abilities) = match split_top_level(desc, "with") {
-        Some((h, a)) => (h, abilities_of(a)?),
+        Some((h, a)) => (h, abilities_of(a, vocab)?),
         None => (desc, Vec::new()),
     };
     let (types_part, name) = match split_top_level(head, "named") {
@@ -232,23 +268,31 @@ fn match_subtypes(
     Ok(out)
 }
 
-/// The ordered ability list of a `with ...` phrase.
-fn abilities_of(s: &str) -> Result<Vec<String>, String> {
+/// The ordered ability list of a `with ...` phrase. Quoted texts are kept as written; every
+/// unquoted fragment must be a keyword phrase ([`is_keyword_phrase`]).
+fn abilities_of(s: &str, vocab: &RulesVocabulary) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut plain = String::new();
     let mut quoted = String::new();
     let mut depth = 0usize;
     let mut straight = false;
-    let flush_plain = |plain: &mut String, out: &mut Vec<String>| {
+    let flush_plain = |plain: &mut String, out: &mut Vec<String>| -> Result<(), String> {
         for piece in plain.split(',') {
             for part in split_and(piece) {
                 let part = part.trim().trim_end_matches('.').trim();
-                if !part.is_empty() {
-                    out.push(part.to_owned());
+                if part.is_empty() {
+                    continue;
                 }
+                if !is_keyword_phrase(part, vocab) {
+                    return Err(format!(
+                        "the unquoted ability `{part}` is not a keyword ability phrase"
+                    ));
+                }
+                out.push(part.to_owned());
             }
         }
         plain.clear();
+        Ok(())
     };
     let flush_quoted = |quoted: &mut String, out: &mut Vec<String>| -> Result<(), String> {
         let text = quoted.trim().trim_end_matches(',').trim();
@@ -263,7 +307,7 @@ fn abilities_of(s: &str) -> Result<Vec<String>, String> {
         match ch {
             '\u{201c}' if !straight => {
                 if depth == 0 {
-                    flush_plain(&mut plain, &mut out);
+                    flush_plain(&mut plain, &mut out)?;
                 } else {
                     quoted.push(ch);
                 }
@@ -283,7 +327,7 @@ fn abilities_of(s: &str) -> Result<Vec<String>, String> {
                 if straight {
                     flush_quoted(&mut quoted, &mut out)?;
                 } else {
-                    flush_plain(&mut plain, &mut out);
+                    flush_plain(&mut plain, &mut out)?;
                 }
                 straight = !straight;
             }
@@ -294,8 +338,43 @@ fn abilities_of(s: &str) -> Result<Vec<String>, String> {
     if depth != 0 || straight {
         return Err("unbalanced quotation marks in abilities".to_owned());
     }
-    flush_plain(&mut plain, &mut out);
+    flush_plain(&mut plain, &mut out)?;
     Ok(out)
+}
+
+// CR 702: an unquoted token ability is a keyword ability. The grammar (#15 FP-014 CR round 1,
+// docs/DECISIONS.md) accepts, case-insensitively, a keyword-ability name from the vocabulary
+// (the CR 702 headings) alone, or followed by one space and one parameter: a card type
+// (`enchant creature`), a number or `X`, or a mana cost made of `{...}` symbols.
+fn is_keyword_phrase(fragment: &str, vocab: &RulesVocabulary) -> bool {
+    let lower = fragment.to_lowercase();
+    vocab.keyword_abilities.iter().any(|k| {
+        let name = k.name.to_lowercase();
+        if lower == name {
+            return true;
+        }
+        lower
+            .strip_prefix(name.as_str())
+            .and_then(|r| r.strip_prefix(' '))
+            .is_some_and(|p| is_keyword_parameter(p, vocab))
+    })
+}
+
+/// A keyword parameter: a card type, a number (at most 6 digits) or `x`, or a mana cost
+/// (`{1}{w}`: one or more brace groups of ASCII letters, digits and `/`). `p` is lower-case.
+fn is_keyword_parameter(p: &str, vocab: &RulesVocabulary) -> bool {
+    if vocab.card_types.iter().any(|c| c.to_lowercase() == p) {
+        return true;
+    }
+    if p == "x" || small_int(p).is_some() {
+        return true;
+    }
+    let Some(inner) = p.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
+        return false;
+    };
+    inner
+        .split("}{")
+        .all(|sym| !sym.is_empty() && sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '/'))
 }
 
 /// Splits on the word `and`.

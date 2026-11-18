@@ -8,6 +8,8 @@
 //! (R5); no line of this file starts with a rule number (card-data guard).
 
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::cr::{self, sentences, split_list, strip_parentheticals};
 use super::*;
@@ -148,6 +150,33 @@ impl Synth {
     }
 }
 
+/// A new, empty scratch directory created exclusively under the private root
+/// `<workspace>/target/fp-vocab-tests` (never a shared, predictable temp path). The leaf name
+/// combines the pid, a process-wide counter and the clock (used only for uniqueness, R7);
+/// `create_dir` fails if the leaf exists, which is retried a bounded number of times with a new
+/// name. Any other error panics.
+pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fp-vocab-tests");
+    std::fs::create_dir_all(&root).expect("create the scratch root");
+    for _ in 0..16 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let leaf = root.join(format!("{tag}-{}-{n}-{nanos}", std::process::id()));
+        match std::fs::create_dir(&leaf) {
+            Ok(()) => return leaf,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("cannot create scratch dir {}: {e}", leaf.display()),
+        }
+    }
+    panic!(
+        "no fresh scratch dir under {} after 16 tries",
+        root.display()
+    );
+}
+
 fn strs(v: &[String]) -> Vec<&str> {
     v.iter().map(String::as_str).collect()
 }
@@ -273,10 +302,13 @@ fn req_sub_001_synthetic_tokens() {
 /// added give exactly that table (no hard-coded letters).
 #[test]
 fn req_sub_001_new_letter_flows_through() {
-    let s = synth().without("111.10b").set(
-        "111.10y",
-        "A Theta token is a white Zeta alpha token with indestructible.",
-    );
+    let s = synth()
+        .without("111.10b")
+        .set("702.5.", "Indestructible")
+        .set(
+            "111.10y",
+            "A Theta token is a white Zeta alpha token with indestructible.",
+        );
     let v = s.generate().unwrap();
     let letters: Vec<&str> = v
         .predefined_tokens
@@ -613,6 +645,7 @@ fn req_obj_001_malformed_rules_are_errors() {
 #[test]
 fn req_obj_001_accepted_variants() {
     let v = synth()
+        .set("702.5.", "Indestructible")
         .set("205.4a", "The supertypes are lofty.")
         .set("122.1c", "A shine counter on a thing; see invented.")
         .set(
@@ -750,8 +783,7 @@ fn req_obj_001_cr_parser_never_panics() {
 /// REQ-OBJ-001: the CLI on synthetic input (exit codes 0/1/2, --out -, --check).
 #[test]
 fn req_obj_001_cli_unit() {
-    let dir = std::env::temp_dir().join(format!("fp-vocab-unit-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("cli-unit");
     let cr_path = dir.join("rules.txt");
     std::fs::write(&cr_path, synth().render()).unwrap();
     let out_path = dir.join("vocab.json");
@@ -889,4 +921,391 @@ fn req_obj_001_first_difference() {
         cli::first_difference(&bytes, &v),
         "first differing section `crEffectiveDate`"
     );
+}
+
+/// Runs the `vocab` CLI in process: (exit code, stdout, stderr).
+fn run_cli(args: &[&std::ffi::OsStr]) -> (i32, String, String) {
+    let args: Vec<OsString> = args.iter().map(|a| (*a).to_owned()).collect();
+    let (mut o, mut e) = (Vec::new(), Vec::new());
+    let code = cli::run(&args, &mut o, &mut e);
+    (
+        code,
+        String::from_utf8(o).unwrap(),
+        String::from_utf8(e).unwrap(),
+    )
+}
+
+/// A scratch dir holding the synthetic CR as `rules.txt`; returns (dir, cr path).
+fn cli_fixture(tag: &str) -> (PathBuf, PathBuf) {
+    let dir = scratch_dir(tag);
+    let cr_path = dir.join("rules.txt");
+    std::fs::write(&cr_path, synth().render()).unwrap();
+    (dir, cr_path)
+}
+
+/// REQ-OBJ-001: a path option followed by one of the CLI's own options is a usage error naming
+/// the option without a value; a path that merely contains an option name is a path.
+#[test]
+fn req_obj_001_cli_path_option_followed_by_option() {
+    let (dir, cr_path) = cli_fixture("cli-flags");
+    let crp = cr_path.as_os_str();
+    let (c, _, e) = run_cli(&["--cr".as_ref(), crp, "--out".as_ref(), "--check".as_ref()]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("--out needs a path"), "{e}");
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        "--check".as_ref(),
+        "--out".as_ref(),
+        "-".as_ref(),
+    ]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("--cr needs a path"), "{e}");
+    let (c, _, e) = run_cli(&["--out".as_ref(), "--cr".as_ref(), "--cr".as_ref(), crp]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("--out needs a path"), "{e}");
+    // `./--check` is a path: with --check it is compared (missing file: exit 1, not usage 2)
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        crp,
+        "--out".as_ref(),
+        "./--check".as_ref(),
+        "--check".as_ref(),
+    ]);
+    assert_eq!(c, 1, "{e}");
+    assert!(e.contains("./--check is missing or unreadable"), "{e}");
+    // and a file named `--check` is written when given as a path
+    let flag_named = dir.join("--check");
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        crp,
+        "--out".as_ref(),
+        flag_named.as_os_str(),
+    ]);
+    assert_eq!(c, 0, "{e}");
+    assert!(flag_named.is_file());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// REQ-OBJ-001: the output is written atomically; a failed write leaves no temporary file and
+/// the destination unchanged, and never follows or overwrites an existing temporary path.
+#[test]
+fn req_obj_001_cli_atomic_write() {
+    let dir = scratch_dir("cli-atomic");
+    let entries = |d: &Path| {
+        let mut v: Vec<OsString> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        v.sort();
+        v
+    };
+    // success: replaces an existing file, no temporary file left
+    let dest = dir.join("vocab.json");
+    std::fs::write(&dest, b"old").unwrap();
+    cli::write_atomic(&dest, b"new").unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+    assert_eq!(entries(&dir), [OsString::from("vocab.json")]);
+    // the destination is a directory: the rename fails, the temp file is removed
+    let as_dir = dir.join("as-dir.json");
+    std::fs::create_dir(&as_dir).unwrap();
+    std::fs::write(as_dir.join("inside"), b"kept").unwrap();
+    assert!(cli::write_atomic(&as_dir, b"new").is_err());
+    assert!(!cli::temp_path_for(&as_dir).unwrap().exists());
+    assert_eq!(std::fs::read(as_dir.join("inside")).unwrap(), b"kept");
+    assert_eq!(
+        entries(&dir),
+        [OsString::from("as-dir.json"), OsString::from("vocab.json")]
+    );
+    // the parent does not exist
+    let orphan = dir.join("no-such-dir").join("vocab.json");
+    assert!(cli::write_atomic(&orphan, b"new").is_err());
+    assert!(!dir.join("no-such-dir").exists());
+    // an existing path at the temporary name is neither followed nor clobbered, and the
+    // destination keeps its bytes
+    let tmp = cli::temp_path_for(&dest).unwrap();
+    std::fs::write(&tmp, b"foreign").unwrap();
+    let e = cli::write_atomic(&dest, b"newer").unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+    assert_eq!(std::fs::read(&tmp).unwrap(), b"foreign");
+    std::fs::remove_file(&tmp).unwrap();
+    // through the CLI: exit 2, the directory destination is untouched
+    let cr_path = dir.join("rules.txt");
+    std::fs::write(&cr_path, synth().render()).unwrap();
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        cr_path.as_os_str(),
+        "--out".as_ref(),
+        as_dir.as_os_str(),
+    ]);
+    assert_eq!(c, 2, "{e}");
+    assert!(as_dir.is_dir());
+    assert!(!cli::temp_path_for(&as_dir).unwrap().exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// REQ-OBJ-001: a missing default (bundled) vocabulary must be restored from git; a missing
+/// custom `--out` file keeps the regenerate instruction.
+#[test]
+fn req_obj_001_cli_missing_file_diagnostics() {
+    let (dir, cr_path) = cli_fixture("cli-missing");
+    let crp = cr_path.as_os_str();
+    // the tests run in the package directory, where the default relative path does not exist
+    assert!(!Path::new(cli::DEFAULT_OUT).exists());
+    let (c, _, e) = run_cli(&["--cr".as_ref(), crp, "--check".as_ref()]);
+    assert_eq!(c, 1, "{e}");
+    assert!(e.contains("missing or unreadable"), "{e}");
+    assert!(
+        e.contains("restore it from git")
+            && e.contains("git checkout -- crates/fineprint-dsl/data/vocab.json"),
+        "{e}"
+    );
+    assert!(!e.contains("cargo run"), "{e}");
+    let custom = dir.join("custom.json");
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        crp,
+        "--out".as_ref(),
+        custom.as_os_str(),
+        "--check".as_ref(),
+    ]);
+    assert_eq!(c, 1, "{e}");
+    assert!(
+        e.contains("missing or unreadable") && e.contains("regenerate it"),
+        "{e}"
+    );
+    assert!(!e.contains("git checkout"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// REQ-OBJ-001: the mismatch hint keeps the selected `--cr` and `--out`.
+#[test]
+fn req_obj_001_cli_mismatch_hint_keeps_paths() {
+    let (dir, cr_path) = cli_fixture("cli-hint");
+    let custom_cr = dir.join("custom-rules.txt");
+    std::fs::rename(&cr_path, &custom_cr).unwrap();
+    let custom_out = dir.join("custom-vocab.json");
+    let mut v = synth().generate().unwrap();
+    v.keyword_actions[0].name = "Frobnicatx".to_owned();
+    v.keyword_actions[0].id = "FROBNICATX".to_owned();
+    std::fs::write(&custom_out, v.to_canonical_bytes().unwrap()).unwrap();
+    let (c, _, e) = run_cli(&[
+        "--cr".as_ref(),
+        custom_cr.as_os_str(),
+        "--out".as_ref(),
+        custom_out.as_os_str(),
+        "--check".as_ref(),
+    ]);
+    assert_eq!(c, 1, "{e}");
+    assert!(e.contains("rerun the same command without --check"), "{e}");
+    assert!(e.contains(&format!("--cr {}", custom_cr.display())), "{e}");
+    assert!(
+        e.contains(&format!("--out {}", custom_out.display())),
+        "{e}"
+    );
+    assert!(!e.contains("<rules.txt>"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// REQ-OBJ-001 (R12): a comparison file that does not load is described by a fixed category
+/// and field name only, never by a value from the file or the loader's error text.
+#[test]
+fn req_obj_001_cli_unloadable_file_never_echoes_values() {
+    const MARKER: &str = "zqx-marker-7731";
+    let v = synth().generate().unwrap();
+    let mut value = serde_json::to_value(&v).unwrap();
+    value["vocabularyVersion"] = serde_json::json!(MARKER);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let d = cli::first_difference(&bytes, &v);
+    assert!(!d.contains(MARKER), "{d}");
+    assert!(
+        d.contains("not a valid RulesVocabulary (field: vocabularyVersion)"),
+        "{d}"
+    );
+    // an unknown member named by the marker (shape error)
+    let mut value = serde_json::to_value(&v).unwrap();
+    value[MARKER] = serde_json::json!(1);
+    let d = cli::first_difference(&serde_json::to_vec(&value).unwrap(), &v);
+    assert!(!d.contains(MARKER), "{d}");
+    assert!(d.contains("wrong shape"), "{d}");
+    // a value that breaks a rule (the marker as a duplicate card type)
+    let mut value = serde_json::to_value(&v).unwrap();
+    value["cardTypes"] = serde_json::json!([MARKER, MARKER]);
+    let d = cli::first_difference(&serde_json::to_vec(&value).unwrap(), &v);
+    assert!(!d.contains(MARKER), "{d}");
+    assert!(d.contains("(field: cardTypes"), "{d}");
+    // unparseable JSON
+    let d = cli::first_difference(format!("{{\"{MARKER}").as_bytes(), &v);
+    assert!(!d.contains(MARKER), "{d}");
+    assert!(d.contains("(unparseable JSON)"), "{d}");
+    // through the CLI
+    let (dir, cr_path) = cli_fixture("cli-echo");
+    let out = dir.join("vocab.json");
+    std::fs::write(&out, &bytes).unwrap();
+    let (c, o, e) = run_cli(&[
+        "--cr".as_ref(),
+        cr_path.as_os_str(),
+        "--out".as_ref(),
+        out.as_os_str(),
+        "--check".as_ref(),
+    ]);
+    assert_eq!(c, 1, "{e}");
+    assert!(!e.contains(MARKER) && !o.contains(MARKER), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// REQ-DSL-014: CR 701.1, CR 702.1: N = 0 is an input error, N = 1 is the skipped
+/// introduction, N >= 2 is a keyword; the number is compared as an integer.
+#[test]
+fn req_dsl_014_keyword_rule_number_guard() {
+    for rule in ["702.0.", "701.0.", "702.00."] {
+        let e = synth().set(rule, "Invented").generate().unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{rule}: {e}");
+        assert!(
+            e.to_string().contains("not a valid keyword rule number"),
+            "{e}"
+        );
+    }
+    // 702.1 is skipped even when heading-shaped; 702.01 is the same rule
+    for rule in ["702.1.", "702.01."] {
+        let v = synth().set(rule, "Shimmerless").generate().unwrap();
+        assert!(
+            v.keyword_abilities.iter().all(|k| k.id != "SHIMMERLESS"),
+            "{rule}"
+        );
+    }
+    let v = synth().set("702.2.", "Gleam").generate().unwrap();
+    assert_eq!(v.keyword_ability("GLEAM").unwrap().rule_ref, "702.2");
+}
+
+/// The synthetic double-faced token rule with the given face sentences.
+fn dfc(sentences: &str) -> Synth {
+    synth().set(
+        "111.10c",
+        &format!("An Eta token is a double-faced token.{sentences}"),
+    )
+}
+
+const FRONT: &str = " Its front face is a colorless Eta alpha with \u{201c}{2}: Flip it.\u{201d}";
+const BACK: &str = " Its back face is a 0/0 colorless Kappa alpha beta named Eta Back.";
+
+/// REQ-SUB-001: CR 111.10i: a double-faced token has one front and one back face sentence,
+/// front first; reversed, repeated, missing or unknown labels are input errors.
+#[test]
+fn req_sub_001_double_faced_labels() {
+    let v = dfc(&format!("{FRONT}{BACK}")).generate().unwrap();
+    let c = v.token("c").unwrap();
+    assert_eq!(c.faces.len(), 2);
+    assert_eq!(
+        (c.faces[0].name.as_str(), c.faces[1].name.as_str()),
+        ("Eta", "Eta Back")
+    );
+    for (what, sentences, needle) in [
+        ("reversed", format!("{BACK}{FRONT}"), "precedes"),
+        ("front only", FRONT.to_owned(), "one front and one back"),
+        ("back only", BACK.to_owned(), "one front and one back"),
+        ("no face", String::new(), "one front and one back"),
+        ("two fronts", format!("{FRONT}{FRONT}{BACK}"), "repeats"),
+        ("two backs", format!("{FRONT}{BACK}{BACK}"), "repeats"),
+        (
+            "unknown label",
+            format!("{FRONT} Its side face is a colorless Eta alpha."),
+            "label",
+        ),
+        (
+            "upper-case label",
+            format!("{FRONT} Its Back face is a colorless Eta alpha."),
+            "label",
+        ),
+    ] {
+        let e = dfc(&sentences).generate().unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{what}: {e}");
+        assert!(e.to_string().contains("111.10c"), "{what}: {e}");
+        assert!(e.to_string().contains(needle), "{what}: {e}");
+    }
+}
+
+/// REQ-SUB-001: CR 111.10i: the face count follows the declared layout: a single-faced token
+/// with a face sentence is an input error; a single-faced token without one has one face.
+#[test]
+fn req_sub_001_face_count_matches_layout() {
+    let e = synth()
+        .set(
+            "111.10a",
+            &format!("A Zeta token is a colorless Zeta alpha token.{BACK}"),
+        )
+        .generate()
+        .unwrap_err();
+    assert_eq!(e.exit_code(), 2);
+    assert!(e.to_string().contains("not declared double-faced"), "{e}");
+    let e = synth()
+        .set(
+            "111.10a",
+            &format!("A Zeta token is a colorless Zeta alpha token.{FRONT}{BACK}"),
+        )
+        .generate()
+        .unwrap_err();
+    assert_eq!(e.exit_code(), 2);
+    let v = synth()
+        .set("111.10a", "A Zeta token is a colorless Zeta alpha token.")
+        .generate()
+        .unwrap();
+    assert_eq!(v.token("a").unwrap().faces.len(), 1);
+}
+
+/// The synthetic single-faced token rule with the given `with ...` phrase.
+fn with_abilities(phrase: &str) -> Result<RulesVocabulary, GenError> {
+    synth()
+        .set(
+            "111.10a",
+            &format!("A Zeta token is a colorless Zeta alpha token with {phrase}"),
+        )
+        .generate()
+}
+
+/// REQ-SUB-001, REQ-DSL-014, REQ-NFR-004: CR 702: an unquoted token ability must be a keyword
+/// ability phrase (a keyword name, alone or with one parameter); quoted abilities are kept
+/// as written.
+#[test]
+fn req_sub_001_token_ability_grammar() {
+    let abilities = |phrase: &str| {
+        let v = with_abilities(phrase).unwrap();
+        v.token("a").unwrap().faces[0].abilities.clone()
+    };
+    // keywords, case-insensitively, including a two-word name
+    assert_eq!(abilities("gleam."), ["gleam"]);
+    assert_eq!(
+        abilities("Gleam and double shimmer."),
+        ["Gleam", "double shimmer"]
+    );
+    // parameterised keywords: a card type, a number or X, a mana cost
+    assert_eq!(abilities("gleam alpha."), ["gleam alpha"]);
+    assert_eq!(abilities("glow 3 and glow X."), ["glow 3", "glow X"]);
+    assert_eq!(abilities("gleam {2}{R/G}."), ["gleam {2}{R/G}"]);
+    // quoted abilities with arbitrary text
+    assert_eq!(
+        abilities("glow and \u{201c}this sentence is not a keyword.\u{201d}"),
+        ["glow", "this sentence is not a keyword."]
+    );
+    // empty fragments are still skipped
+    assert_eq!(abilities("gleam,, and glow."), ["gleam", "glow"]);
+    // anything else is an input error naming the rule
+    for phrase in [
+        "this sentence is not a keyword.",
+        "gleam and invented prose.",
+        "gleamy.",
+        "gleam beyond.",
+        "gleam alpha beta.",
+        "gleam {}.",
+        "gleam {2}x.",
+        "frobnicate.",
+    ] {
+        let e = with_abilities(phrase).unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{phrase}: {e}");
+        let m = e.to_string();
+        assert!(
+            m.contains("111.10a") && m.contains("not a keyword ability phrase"),
+            "{m}"
+        );
+    }
 }
