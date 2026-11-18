@@ -194,11 +194,13 @@ Fine Print's own files must stay available under MPL-2.0 with the original notic
 here only to describe what Fine Print is compatible with. Fine Print is an independent project,
 and Wizards of the Coast has not approved, endorsed or sponsored it and is not affiliated with it.
 
-**What this repository contains.** Original code and documentation only: no card names, Oracle or
-rules text, card definitions, art, set symbols or logos. Fine Print's name and branding use no
+**What this repository contains.** Original code and documentation only: no card names, Oracle text,
+card definitions, art, set symbols or logos, and not the Comprehensive Rules text. Design notes
+quote at most a few words of a rule where a decision turns on its wording. Fine Print's name and branding use no
 third-party trademark, and the test suite uses invented synthetic cards. The Comprehensive Rules
-text is never committed. CI downloads the official file to check citations and keeps only rule
-numbers and hashes (`docs/cr-citations.json`). Because Fine Print uses no Wizards of the Coast
+text is never committed. CI downloads the official file into the git-ignored `cr-cache/`
+directory and its build cache to check citations. Only rule numbers and hashes are committed,
+in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
 materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
 **Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms

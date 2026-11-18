@@ -1774,7 +1774,10 @@ card database. REQ-ARCH-001 (zero hardcoded IP) and REQ-NFR-007 (CR text never c
 unchanged, and so are the references to the game and to the CR.
 **Rationale.** The Fan Content Policy is a permission to use Wizards of the Coast IP, so its
 disclaimer is a condition of that permission. Fine Print contains and distributes none of that
-IP. It names the game only descriptively and cites rule numbers without reproducing their text.
+IP. It names the game only descriptively and cites rule numbers; it does not commit the CR text,
+which CI fetches into the git-ignored `cr-cache/` and its build cache (only rule numbers and
+hashes are committed, in `docs/cr-citations.json`), and design notes quote at most a few words
+of a rule.
 Card data, the only IP in play, enters through clients under Scryfall's terms, which require
 the policy, so the obligation sits with them. This is not legal advice.
 **Alternatives.** Keep the disclaimer: rejected, because Fine Print uses none of the policy's
