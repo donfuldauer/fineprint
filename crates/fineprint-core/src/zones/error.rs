@@ -1,0 +1,81 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
+
+//! Errors of the zone container (REQ-ZONE-001, REQ-CORE-002).
+
+use core::fmt;
+
+use fineprint_base::ids::{CardId, ObjectId, PlayerId};
+
+/// An error from a [`Zones`](super::Zones) operation. An operation that returns an error leaves
+/// the container and the identifier generator unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ZoneError {
+    /// The player id names no player of this container.
+    UnknownPlayer(PlayerId),
+    /// The object id names no object currently in a zone.
+    UnknownObject(ObjectId),
+    /// The card is already in a zone or an outside-the-game pool.
+    CardAlreadyPresent(CardId),
+    /// The object id generator has already issued `u64::MAX` (REQ-CORE-002).
+    IdExhausted,
+    /// A controller was given for, or set on, an object outside the battlefield and the stack.
+    ///
+    /// This is a container rule, not a claim about the CR: only objects on the stack or the
+    /// battlefield have a controller (CR 109.4), but CR 109.4a-g list exceptions (for example
+    /// an emblem in the command zone is controlled by the player who put it there, CR 109.4c).
+    /// The container does not model emblems or variant cards yet, so it rejects an explicit
+    /// controller outside the battlefield and the stack.
+    ControllerNotApplicable,
+    /// Graveyard reordering is disabled by [`ZonesConfig`](super::ZonesConfig).
+    ReorderNotAllowed,
+    /// A new graveyard order that is not a permutation of exactly the current contents.
+    InvalidOrder,
+    /// The card is not in the named outside-the-game pool of that player.
+    NoSuchOutsideCard(CardId),
+    /// The identifier generator issued an id that is not above the highest id this container
+    /// has issued or accepted (its high-water mark). This is a high-water rejection, not proof
+    /// of id reuse: ids below the mark that the container never held are rejected too (for
+    /// example the first object gets id 10 from a generator restored at 9, and a later
+    /// generator proposes 5). The generator passed in is behind the one that issued this
+    /// container's ids (stale, saved or fresh); `ids` must be that generator (REQ-CORE-002).
+    IdCollision(ObjectId),
+}
+
+impl fmt::Display for ZoneError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZoneError::UnknownPlayer(id) => write!(f, "unknown player {}", id.get()),
+            ZoneError::UnknownObject(id) => write!(f, "unknown object {}", id.get()),
+            ZoneError::CardAlreadyPresent(id) => {
+                write!(
+                    f,
+                    "card {} is already in a zone or outside-the-game pool",
+                    id.get()
+                )
+            }
+            ZoneError::IdExhausted => f.write_str("identifier space exhausted"),
+            ZoneError::ControllerNotApplicable => {
+                f.write_str("a controller applies only on the battlefield or the stack")
+            }
+            ZoneError::ReorderNotAllowed => f.write_str("graveyard reordering is not allowed"),
+            ZoneError::InvalidOrder => {
+                f.write_str("the new order is not a permutation of the current contents")
+            }
+            ZoneError::NoSuchOutsideCard(id) => {
+                write!(f, "card {} is not in that outside-the-game pool", id.get())
+            }
+            ZoneError::IdCollision(id) => {
+                write!(
+                    f,
+                    "issued object id {} is not above the highest id this container has issued or accepted",
+                    id.get()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ZoneError {}
