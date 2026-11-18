@@ -47,3 +47,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 00-repository | PR #157 r2 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 2 on PR #157 (docs-only round must verify every requirement) |
 | 00-repository | PR #157 r3 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 3 on PR #157 (docs-only round runs check 1 in full) |
 | 00-repository | PR #157 r4 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 4 on PR #157 (docs-only round runs check 8) |
+| 00-repository | PR #157 r5 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 5 on PR #157 (no docs-only shortcut; check 8 reads docs/ content) |
