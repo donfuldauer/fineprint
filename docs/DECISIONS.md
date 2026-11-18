@@ -1494,3 +1494,118 @@ id itself. (7) The `X` expression serialises as the bare string `"X"`; `{"X":…
 examples (`{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"}`, `{"ref":"TARGET","slot":0}`).
 **Alternatives.** Treat any `ref` member as the reference form (rejected: a valid flat
 `SAME_AS` filter would be refused).
+
+## #13 FP-012 — Wire catalogue as implemented
+
+**Decision.** `fineprint_dsl::ability` implements the FP-012 wire contract of the issue #13
+brief (W1–W7, E5, sections A–J) on top of the FP-011 strict plumbing. Judgement calls fixed by
+that contract and implemented as written: `StepId` has 13 values (UNTAP … CLEANUP) and
+`ActivationTiming` 5 (INSTANT, SORCERY, YOUR_TURN, OPPONENT_TURN, COMBAT_ONLY; absent means
+INSTANT); `TargetSlotAST` is `{slot,selector,min,max}` (min <= max, slots distinct within one
+array) and `ModeSetAST` is `{min,max,modes}` (ids distinct, min <= max <= modes) with
+`ModeAST {id,targets?,effect}`; `EventKind` (57) and `RuleKind` (34) are closed Rust enums that
+grow only by a DSL minor version; `FilterValue` is decided by JSON type (bool, safe integer,
+`"ANY"`, a zone name, any other non-empty string as `Name`, an object as a predicate), so a
+`Name` equal to `"ANY"` or a zone name is refused by `FilterValue::name` and by Serialize;
+`CHOOSE {choice: ChoiceSpec, store}` is the fifth `ReplacementOp`; `Modification` is
+`{op, …flat opaque params}` with typed `power`/`toughness` (`PtValue`: a JSON integer or a
+value-expression object, never the bare `"X"`) only for `SET_BASE_PT` and `MODIFY_PT`, and
+`RuleModification` is `{kind, cost?, …flat opaque params}` where only `cost` is typed (a
+non-empty `CostAST` array); the 613.6 lock-in cross-check (every CHAR `{"sameAsLayer":L}` needs
+another CHAR effect of the same ability in layer L whose `affected` is a selector, so dangling,
+self and chained lock-in fail on decode and encode); rule E5 on `filters`/`bind` keys;
+`functionsIn` optional (absent = toolchain default). Rust shapes chosen where the brief names
+only JSON: each ability struct holds `base: AbilityBase`; `ReplacementAbilityAST::matcher` is
+JSON `match` and `overrides_614_5` is `overrides614_5`; `CostAST::ExileFromZone` holds
+`count` and `min_total_mv` as two options with an exactly-one check; `ReplacementOp::Choose`
+boxes its `ChoiceSpec` (clippy `large_enum_variant`); two public types beyond the catalogue,
+`PtValue` and `ShieldUses` (`Count(u32 >= 1)` | `CounterBacked`). The standalone JSON of each
+ability struct is the whole ability object with its own `kind`, and of each static-effect
+struct the effect object with its own `type`. Helper API: `AbilityAST::{KINDS, kind(), base()}`,
+`AbilityBase::new`, `CostAST::{NAMES, name()}`, `ReplacementOp::name`, `EventMatcher::new`,
+`Modification::new`, `RuleModification::new`, `EffectInstructionAST::new`,
+`KeywordInstanceAST::new`, `FilterValue::name`, `From<PlayerGroup> for EventSubject`.
+**Rationale.** The brief fixes the wire forms so the Independent Tester can compile against
+them; the Rust shapes keep decode injective (one spelling per value) and let Serialize re-check
+every value-level invariant (W3).
+**Alternatives.** An `ExileAmount` enum (rejected: one more public type for one node);
+`Expr(X)` accepted as a power (rejected: the brief says "a ValueExpressionAST object").
+
+## #13 FP-012 — EffectInstructionAST is a placeholder
+
+**Decision.** `EffectInstructionAST` lives in `ability/` as a strict placeholder: required `op`
+matching `[A-Z][A-Z0-9_]*`, any other members stored as opaque JSON (`BTreeMap<String,
+Value>`, non-empty names, no null anywhere, integers only), written back unchanged. FP-013
+(issue #14, owner of `src/effect/`) supplies the real type; swapping it in edits `ability/`
+and is follow-up work together with #159.
+**Rationale.** Abilities need an instruction list now; the real instruction schema is another
+unit's contract. Same pattern as "#11 FP-010 — Placeholder AST types".
+**Alternatives.** Define the instruction schema here (rejected: outside owned paths and
+another unit's contract).
+
+## #13 FP-012 — Wiring edit
+
+**Decision.** The only edit outside `src/ability/` is the single `pub mod ability;` line (with
+its doc comment) in `crates/fineprint-dsl/src/lib.rs`.
+**Rationale.** As in "#11 FP-010 — Wiring edits outside the owned directories": the module must
+be declared to compile, and the brief lists this line as owned.
+**Alternatives.** None that compile.
+
+## #13 FP-012 — Test-path ownership
+
+**Decision.** The Independent spec tests live in `crates/fineprint-dsl/tests/spec_dsl_ability*.rs`
+and belong to the Tester role; they are not an extension of the issue's owned paths for the
+Implementer, whose unit tests are `src/ability/tests.rs` and `src/ability/tests/props.rs`.
+**Rationale.** As in "#11 FP-010 — Test-path ownership": independent tests are written from the
+brief alone.
+**Alternatives.** Implementer-owned integration tests (rejected: no independence).
+
+## #13 FP-012 — Rule E5 covers filters and bind keys only
+
+**Decision.** Rule E5 (a key whose lower-cased form without `_`/`-` starts with `lookback` is an
+error) applies to `filters` keys of `EventMatcher` and `ReplacementMatch` and to `bind` keys,
+on decode and encode. It does not apply to the flat members of the opaque placeholders
+(`EffectInstructionAST` members, `Modification` and `RULE` params, keyword `params`) nor to
+`MODIFY_EVENT.set` keys: those are opaque by contract (brief sections H, I, J), so a member
+named `lookBack` there is plain data and round-trips unchanged. Every typed node (ability,
+trigger, matcher, replacement match, CHAR and PLAYER effects) rejects such a member as unknown
+(W1), so no look-back flag can be set on a trigger.
+**Rationale.** The brief scopes E5 to `filters` and `bind`, and defines the placeholder
+members as "any other members, each an opaque JSON value"; the Independent Tester's spec test
+`req_dsl_006_look_back_name_inside_effect_instruction_is_opaque` reads it the same way. An
+earlier draft extended E5 to opaque members; it was withdrawn as contrary to H/I.
+**Alternatives.** Apply E5 to every flat opaque member name (rejected: contradicts the opaque
+contract of H and I, and the instruction schema of FP-013 will be typed anyway).
+
+## #13 FP-012 — Smaller choices where the brief is silent
+
+**Decision.** (1) Opaque values are re-checked on encode (no null, integers within the safe
+range, no noncharacters, nesting bounded by `MAX_DEPTH`), so a hand-built `serde_json::Value`
+cannot produce JSON that fails to decode. Inside opaque values, empty member names and empty
+strings are allowed; only the flat member names must be non-empty. (2) `EventSubject` is the
+`Players` variant exactly when the object has a `players` member; otherwise it is decoded as an
+`ObjectSelectorAST`. `Affected` is `SameAsLayer` exactly when the object has `sameAsLayer`.
+(3) `bind` values need not be distinct; mode-level target slots are checked for distinctness
+within their own array only. (4) `sameAsLayer` does not have to name an earlier layer than the
+effect's own; the toolchain owns layer-order checks. (5) `ShieldUses::Count` is a `u32` (W7).
+(6) A `MODIFY_EVENT.set` value has the same `FilterValue` form as a filter.
+**Rationale.** Each keeps decode strict, injective and lossless (W1, W4, W5) without adding
+rules the SRS does not state.
+**Alternatives.** Reject empty names inside opaque values (rejected: they are valid JSON and
+the brief says "any JSON value containing no null").
+
+## #13 FP-012 — Spec-test readings of the ability wire contract
+
+**Decision.** The Independent Tester's spec tests read the brief's open points as follows.
+(1) Rule E5 (no look-back keys) is asserted only on `EventMatcher` `filters` and `bind`; the
+`ReplacementMatch.filters` and `MODIFY_EVENT.set` keys are not tested either way. (2) The 613.6
+lock-in self-reference check is tested only when no other effect sits at the referenced layer.
+(3) A player group (`{"players":...}`) is not used as a `TargetSlotAST` selector. (4) An empty
+keyword `params` object is left untested. (5) A bare `"X"` for `SET_BASE_PT`/`MODIFY_PT` power
+or toughness is rejected (the brief requires an integer or an object). (6) Non-integer numbers
+are checked through `from_str`/`from_slice`; nesting limits also through `from_value`. (7) Unsafe
+integers inside opaque values are rejected under W2.
+**Rationale.** Each reading is the narrowest one the brief supports; the untested points are
+left for the units that give them meaning (FP-013 effects, the replacement bus).
+**Alternatives.** Assert behaviour the brief does not state (rejected: R10, tests assert only
+what the brief requires).
