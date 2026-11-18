@@ -1004,6 +1004,10 @@ rejected only to fix one frozen order).
   gained only `sha2 = { workspace = true }`; `Cargo.lock` changed only by cargo (fineprint-base
   gains the dependency `sha2`); `docs/DEVELOPMENT.md` changed only the "Depends on" cell of the
   `fineprint-base` crate-map row.
+- `MerkleTree::set_leaf` rejects any path of more than `MAX_PATH_DEPTH` = 256 labels with
+  `PathError::TooDeep`, before any mutation (CodeRabbit finding, PR #156). The digest, view,
+  comparison, clone and drop code recurses once per level and stays recursive; the bound makes
+  that safe. The limit changes no digest byte layout.
 
 **Rationale.** REQ-NFR-006 asks for a Merkle hash that can locate the first differing component.
 Hashing labels into the parent makes the digest commit to the component names, so two states
@@ -1011,7 +1015,9 @@ that hold the same component bytes under different names (for example a moved ob
 differently, and children can be added or removed without positional ambiguity; the child count
 and the injective length escape make every internal preimage parse uniquely. The distinct
 `0x00`/`0x01` prefixes keep leaves and internal nodes from colliding. Returning `Option` avoids
-inventing a path for equal trees. Keeping the trait in place honours the #8 contract (R2).
+inventing a path for equal trees. Keeping the trait in place honours the #8 contract (R2). The depth bound of 256 levels is far
+deeper than any component tree the engine's zone/object/player hashing needs, and keeps the
+recursion well inside a 2 MiB thread stack (tested on one).
 
 **Alternatives.** Moving the trait into `encode` (rejected: breaks the #8 contract and imports).
 A plain `u32` length that saturates or panics above `u32::MAX` (rejected: not injective or not
@@ -1019,4 +1025,8 @@ panic-free). Positional children without labels as in the FP-004 prototype (reje
 divergence finder needs stable names, and label-free hashing cannot tell renamed components
 apart). Returning the root path for equal trees (rejected: ambiguous with a root-level
 difference). Timing assertions for incremental cost (rejected: R7). proptest (rejected: not an
-approved dependency).
+approved dependency). For the depth finding, option (b), making digest/view/diff/clone/drop
+iterative for any depth (rejected: it adds iterative re-implementations and a custom `Drop` to
+the hash-critical path for depths nothing needs, and a hand-rolled iterative `View` risks
+diverging from the recursive reference); a smaller limit such as 64 (rejected: too close to the
+existing depth-64 test and to plausible state nesting).

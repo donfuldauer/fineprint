@@ -19,6 +19,11 @@
 //! [`MerkleTree::full_root_digest`](crate::hash::MerkleTree::full_root_digest). [`diff_first_divergence`](crate::hash::diff_first_divergence) locates the first differing
 //! component of two trees for divergence debugging.
 //!
+//! **Depth bound.** [`MerkleTree::set_leaf`](crate::hash::MerkleTree::set_leaf) accepts paths of
+//! at most [`MAX_PATH_DEPTH`](crate::hash::MAX_PATH_DEPTH) labels and returns
+//! [`PathError::TooDeep`](crate::hash::PathError::TooDeep) otherwise, before any mutation. The
+//! digest, view, comparison, clone and drop code recurses once per level and relies on this bound.
+//!
 //! The module uses integer arithmetic and ordered containers only, never panics and performs no
 //! I/O (REQ-CORE-006).
 
@@ -33,7 +38,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::encode::{CanonicalEncode, put_bytes, put_len, put_variant};
 
-pub use tree::{MerkleTree, PathError, diff_first_divergence};
+pub use tree::{MAX_PATH_DEPTH, MerkleTree, PathError, diff_first_divergence};
 
 /// The byte that starts every leaf preimage.
 const LEAF_PREFIX: u8 = 0x00;
