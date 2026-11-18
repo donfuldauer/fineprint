@@ -1050,8 +1050,9 @@ a confirmation nobody gave, and the run never waited for them anyway.
 
 **Alternatives.** Keeping informational queue lines (rejected: the owner asked not to). Removing
 the queue entirely (rejected: P8 items such as SRS edits, licensing and branch-protection settings
-can only be done by a person). Existing open judgement-call lines in HUMAN_QUEUE.md are left as
-they are; they are resolved when someone works on them.
+can only be done by a person).
+
+Queue clean-up: every open non-P8 line in HUMAN_QUEUE.md was struck through as decided, citing its existing DECISIONS.md section; the crate-to-floor table of FP-003 (#4) (base, dsl, core at 90%; others at 75%) is confirmed as decided; the only open queue items are P8 (repository settings).
 
 ## #10 FP-009 — Resolution of the queued items
 
@@ -1074,3 +1075,11 @@ raises the constant through a DECISIONS.md entry; the hash layout does not depen
 
 **Alternatives.** Iterative traversal for unbounded depth (rejected in the earlier #10 entry). A
 lower limit such as 64 (rejected: too close to the depth-64 tests and leaves little margin).
+
+## #7 FP-006 — Release gate for a failed `cr` run
+
+**Decision.** A failed `cr` run blocks a release through a release precondition: the release workflow (issue #122, FP-120) requires a successful `cr` run (`cr fetch --force` then `cr check`) on the exact release commit before publishing, and fails otherwise (REQ-DOC-001). `cr` stays a non-required PR check.
+
+**Rationale.** A required status check would block every merge during an outage of the external rules site (the reason recorded in "#7 FP-006 — `cr.yml` is not a required check"); a precondition on the release commit enforces REQ-DOC-001 exactly where it applies, at release time, and the release itself is a P8 action a person triggers.
+
+**Alternatives.** Making `cr` a required status check (rejected: network-dependent merge blocking); leaving the choice open (rejected: R8, judgement calls are decided).
