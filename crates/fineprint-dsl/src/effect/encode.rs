@@ -101,8 +101,9 @@ impl Instruction {
                 min, max, modes, ..
             } => {
                 check_non_empty(modes, "modes")?;
-                for (i, mode) in modes.iter().enumerate() {
-                    if modes[..i].iter().any(|m| m.id == mode.id) {
+                let mut seen = std::collections::BTreeSet::new();
+                for mode in modes {
+                    if !seen.insert(mode.id.as_str()) {
                         return Err(format!("mode id {:?} is listed twice", mode.id));
                     }
                 }

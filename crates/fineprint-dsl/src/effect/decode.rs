@@ -176,7 +176,7 @@ fn take_may(o: &mut Obj<'_>) -> JResult<Instruction> {
     })
 }
 
-/// `UNLESS`: "[A] unless [B]" counts as mandatory for loop detection (CR 733.6).
+/// `UNLESS`: "\[A\] unless \[B\]" counts as mandatory for loop detection (CR 733.6).
 fn take_unless(o: &mut Obj<'_>) -> JResult<Instruction> {
     Ok(Instruction::Unless {
         payer: req(o, "payer")?,
@@ -195,7 +195,7 @@ fn take_choose_mode(o: &mut Obj<'_>) -> JResult<Instruction> {
     })
 }
 
-/// Decodes the members of an op outside [`NESTED_OPS`].
+/// Decodes the members of an op outside the set that [`nested_decoder`] handles.
 #[inline(never)]
 fn take_flat(o: &mut Obj<'_>, op: &str) -> JResult<Instruction> {
     use Instruction as I;
