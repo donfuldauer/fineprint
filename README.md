@@ -99,7 +99,9 @@ is about 55,000 lines of Rust and about 770 tests (382 of them black-box spec te
 
 - `crates/fineprint-dsl/data/vocab.json`: the game terms the Comprehensive Rules define (card
   types, supertypes, subtypes, keyword abilities and actions, counter kinds, predefined tokens),
-  each with its rule number and no rule text, plus the `RulesVocabulary` type that loads it.
+  each with its rule number, plus the `RulesVocabulary` type that loads it. The only rule-derived
+  strings are the short predefined-token ability definitions CR 111.10 gives; it holds no rule
+  prose.
 - `fineprint-ingest vocab`: regenerates the artifact from the cached rules file. CI checks that
   the committed artifact still matches the current rules.
 
@@ -132,8 +134,8 @@ and `fineprint-ingest` has only the `vocab` command. The remaining 127 issues, b
 | 18 Multiplayer | FP-122 to FP-130 | N-player turns, leaving the game, monarch and initiative, Commander, community formats |
 | 19 Variants | FP-131 to FP-139 | Subgames, Two-Headed Giant, Planechase, Archenemy, Vanguard, Conspiracy, ante, the Un-set and digital extensions |
 
-The issue tracker is the source of truth. Issues labelled `ready` can start now (currently
-FP-017, FP-140 and FP-141).
+The issue tracker is the source of truth: issues labelled `ready` can start now, and
+`in-progress` marks work under way.
 
 ## Building and testing
 
@@ -206,12 +208,12 @@ and Wizards of the Coast has not approved, endorsed or sponsored it and is not a
 interaction examples `docs/SRS.md` names (REQ-NFR-004), no Oracle text, no card definitions, art,
 set symbols or logos, and not the Comprehensive Rules text. Design notes quote at most a few words
 of a rule where a decision turns on its wording. The rules vocabulary artifact lists only the game
-terms the rules define, with rule numbers, which SRS §1.3 permits. Fine Print's name and branding
-use no third-party trademark, and the test suite uses invented synthetic cards. The Comprehensive
-Rules text is never committed. CI downloads the official file into the git-ignored `cr-cache/`
-directory and its build cache to check citations. Only rule numbers and hashes are committed, in
-`docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast materials, it does not
-rely on the Fan Content Policy and does not carry that policy's disclaimer.
+terms and predefined tokens the rules define, with rule numbers, which SRS §1.3 permits. Fine
+Print's name and branding use no third-party trademark, and the test suite uses invented synthetic
+cards. The Comprehensive Rules text is never committed. CI downloads the official file into the
+git-ignored `cr-cache/` directory and its build cache to check citations. Only rule numbers and
+hashes are committed, in `docs/cr-citations.json`. Because Fine Print uses no Wizards of the Coast
+materials, it does not rely on the Fan Content Policy and does not carry that policy's disclaimer.
 
 **Card data.** Clients obtain card data themselves (for example from Scryfall, under its terms
 of use) and build their own card databases with the toolchain. A client that does this uses the
