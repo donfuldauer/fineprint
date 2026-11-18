@@ -31,7 +31,8 @@ impl GameState {
     ///   as `u64`;
     /// - `/turn/number`: `u64`; `/turn/active_player` and `/turn/priority_player`:
     ///   `Option<PlayerId>`; `/turn/order`: `Vec<PlayerId>`;
-    /// - `/players/<id>/life`: `i64`; `/players/<id>/counters`: `BTreeMap<String, u64>`;
+    /// - `/players/<id>/life`: `i64`; `/players/<id>/counters`: `BTreeMap<String, i64>`
+    ///   (amounts `1..=i64::MAX`, so the bytes equal the former `u64` encoding);
     ///   `/players/<id>/designations`: `BTreeMap<String, DesignationValue>`, where `<id>` is
     ///   `Label::index(id.get())`;
     /// - `/effects`: the `EffectRegistry`; `/history`: the `HistoryLedger`.

@@ -22,7 +22,7 @@ use super::*;
 // ---------------------------------------------------------------------------------------------
 
 const I64_EDGES: [i64; 5] = [i64::MIN, -1, 0, 1, i64::MAX];
-const U64_EDGES: [u64; 3] = [1, 2, u64::MAX];
+const AMOUNT_EDGES: [i64; 6] = [i64::MIN, -1, 0, 1, 2, i64::MAX];
 const KINDS: [&str; 6] = [
     "",
     "test.counter_a",
@@ -48,11 +48,11 @@ fn any_i64(rng: &mut SplitMix64) -> i64 {
     }
 }
 
-fn any_amount(rng: &mut SplitMix64) -> u64 {
+fn any_amount(rng: &mut SplitMix64) -> i64 {
     match below(rng, 4) {
-        0 => U64_EDGES[idx(rng, U64_EDGES.len())],
-        1 => rng.next_u64(),
-        _ => 1 + below(rng, 20),
+        0 => AMOUNT_EDGES[idx(rng, AMOUNT_EDGES.len())],
+        1 => rng.next_u64().cast_signed(),
+        _ => 1 + below(rng, 20).cast_signed(),
     }
 }
 
@@ -84,7 +84,7 @@ fn gen_state_with(rng: &mut SplitMix64, count: usize) -> GameState {
     let mut s = GameState::new(rng.next_u64(), count, any_i64(rng)).unwrap();
     let ids: Vec<PlayerId> = s.turn_order().to_vec();
     for &id in &ids {
-        let p = s.player_mut(id).unwrap();
+        let mut p = s.player_mut(id).unwrap();
         p.set_life(any_i64(rng));
         for _ in 0..below(rng, 4) {
             let k = any_kind(rng);
@@ -269,12 +269,12 @@ type Mutator = fn(&mut GameState);
 fn mutators() -> Vec<(&'static str, Mutator)> {
     vec![
         ("set_life", |s| {
-            let p = s.player_mut(pid(1)).unwrap();
+            let mut p = s.player_mut(pid(1)).unwrap();
             let l = p.life();
             p.set_life(l.wrapping_add(1));
         }),
         ("set_counter", |s| {
-            let p = s.player_mut(pid(1)).unwrap();
+            let mut p = s.player_mut(pid(1)).unwrap();
             let c = p.counter("test.counter_z");
             p.set_counter("test.counter_z", c + 1);
         }),
@@ -284,7 +284,7 @@ fn mutators() -> Vec<(&'static str, Mutator)> {
                 .set_designation("test.d_new", DesignationValue::Int(5));
         }),
         ("clear_designation", |s| {
-            let p = s.player_mut(pid(1)).unwrap();
+            let mut p = s.player_mut(pid(1)).unwrap();
             p.set_designation("test.d_clear", DesignationValue::Flag);
             assert_eq!(
                 p.clear_designation("test.d_clear"),
@@ -586,12 +586,12 @@ fn hash_per_component_sensitivity() {
         let turn_path = |k: &str| path(&[n("turn"), n(k)]);
         let cases: Vec<(ComponentPath, Mutator)> = vec![
             (path(&[n("players"), p1.clone(), n("life")]), |s| {
-                let p = s.player_mut(pid(1)).unwrap();
+                let mut p = s.player_mut(pid(1)).unwrap();
                 let l = p.life();
                 p.set_life(l.wrapping_add(1));
             }),
             (path(&[n("players"), p1.clone(), n("counters")]), |s| {
-                let p = s.player_mut(pid(1)).unwrap();
+                let mut p = s.player_mut(pid(1)).unwrap();
                 let c = p.counter("test.counter_q");
                 p.set_counter("test.counter_q", c + 1);
             }),
@@ -675,7 +675,7 @@ fn hash_per_component_sensitivity() {
 fn hash_is_order_and_construction_independent() {
     let mut a = GameState::new(5, 2, 20).unwrap();
     {
-        let p = a.player_mut(pid(1)).unwrap();
+        let mut p = a.player_mut(pid(1)).unwrap();
         p.set_counter("test.counter_a", 1);
         p.set_counter("test.counter_b", 2);
         p.set_designation("test.d1", DesignationValue::Flag);
@@ -684,7 +684,7 @@ fn hash_is_order_and_construction_independent() {
     let mut b = GameState::new(5, 1, 20).unwrap();
     b.add_player(20).unwrap();
     {
-        let p = b.player_mut(pid(1)).unwrap();
+        let mut p = b.player_mut(pid(1)).unwrap();
         p.set_designation("test.d2", DesignationValue::Text("tmp".into()));
         p.set_counter("test.counter_c", 7);
         p.set_counter("test.counter_b", 2);
@@ -714,7 +714,7 @@ fn player_subtree_digest_is_location_independent() {
     let mut a = GameState::new(1, 2, 20).unwrap();
     let mut b = GameState::new(2, 4, 20).unwrap();
     for s in [&mut a, &mut b] {
-        let p = s.player_mut(pid(2)).unwrap();
+        let mut p = s.player_mut(pid(2)).unwrap();
         p.set_life(13);
         p.set_counter("test.counter_a", 4);
         p.set_designation("test.d", DesignationValue::Text("v".into()));
@@ -1099,9 +1099,9 @@ fn player_state_accessors() {
     assert_eq!(p.life(), i64::MAX);
     assert_eq!(p.counter("test.counter_a"), 0);
     p.set_counter("test.counter_a", 2);
-    p.set_counter("", u64::MAX);
+    p.set_counter("", i64::MAX);
     assert_eq!(p.counter("test.counter_a"), 2);
-    assert_eq!(p.counter(""), u64::MAX);
+    assert_eq!(p.counter(""), i64::MAX);
     assert_eq!(p.counters().len(), 2);
     p.set_counter("test.counter_a", 0);
     p.set_counter("test.counter_never", 0);
@@ -1217,4 +1217,179 @@ fn state_error_display() {
         assert_eq!(e.clone(), e);
         assert!(!format!("{e:?}").is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// PlayerMut guard and i64 counters (PR #166 review round 1)
+// ---------------------------------------------------------------------------------------------
+
+/// Every stored player's `id()` equals its key and the state round-trips with the same hash.
+fn assert_ids_match_keys_and_round_trip(s: &GameState) {
+    for &id in s.turn_order() {
+        assert_eq!(s.player(id).unwrap().id(), id);
+    }
+    let ids: Vec<PlayerId> = s.players().map(PlayerState::id).collect();
+    assert_eq!(ids, s.players.keys().copied().collect::<Vec<_>>());
+    check_round_trip(s);
+}
+
+// REQ-CORE-001, REQ-CORE-002: after every PlayerMut setter the written player's id still equals
+// its key, and serialize/deserialize round-trips with an identical hash. Deref reads through.
+#[test]
+fn player_mut_setters_keep_id_and_round_trip() {
+    let mut s = GameState::new(7, 3, 20).unwrap();
+    {
+        let mut p = s.player_mut(pid(2)).unwrap();
+        assert_eq!(p.id(), pid(2)); // Deref
+        p.set_life(-5);
+        assert_eq!(p.life(), -5);
+    }
+    assert_ids_match_keys_and_round_trip(&s);
+    {
+        let mut p = s.player_mut(pid(2)).unwrap();
+        p.set_counter("test.counter_a", 4);
+        assert_eq!(p.counter("test.counter_a"), 4);
+        assert_eq!(p.id(), pid(2));
+    }
+    assert_ids_match_keys_and_round_trip(&s);
+    {
+        let mut p = s.player_mut(pid(3)).unwrap();
+        p.set_designation("test.designation_a", DesignationValue::Int(3));
+        assert_eq!(
+            p.designation("test.designation_a"),
+            Some(&DesignationValue::Int(3))
+        );
+        assert_eq!(p.id(), pid(3));
+    }
+    assert_ids_match_keys_and_round_trip(&s);
+    {
+        let mut p = s.player_mut(pid(3)).unwrap();
+        assert_eq!(
+            p.clear_designation("test.designation_a"),
+            Some(DesignationValue::Int(3))
+        );
+        assert_eq!(p.clear_designation("test.designation_a"), None);
+        assert_eq!(p.designation("test.designation_a"), None);
+        assert_eq!(p.id(), pid(3));
+        assert!(format!("{p:?}").contains("PlayerMut"));
+    }
+    assert_ids_match_keys_and_round_trip(&s);
+    assert_eq!(s.player(pid(2)).unwrap().life(), -5);
+    assert_eq!(s.player(pid(2)).unwrap().counter("test.counter_a"), 4);
+}
+
+// REQ-CORE-001, REQ-CORE-002: player_mut on a clone un-shares only the player it is called for
+// (copy-on-write when player_mut is called); an unknown id gives None.
+#[test]
+fn player_mut_unshares_only_that_player() {
+    let base = GameState::new(9, 4, 20).unwrap();
+    for target in 1..=4 {
+        let mut c = base.clone();
+        assert!(c.player_mut(pid(target)).is_some());
+        for id in 1..=4 {
+            assert_eq!(c.shares_player_with(&base, pid(id)), id != target);
+        }
+        assert_eq!(c, base);
+        c.player_mut(pid(target)).unwrap().set_life(1);
+        assert_eq!(base.player(pid(target)).unwrap().life(), 20);
+        assert_eq!(c.player(pid(target)).unwrap().life(), 1);
+    }
+    let mut c = base.clone();
+    assert!(c.player_mut(pid(0)).is_none());
+    assert!(c.player_mut(pid(5)).is_none());
+    assert!(c.player_mut(pid(u64::MAX)).is_none());
+    for id in 1..=4 {
+        assert!(c.shares_player_with(&base, pid(id)));
+    }
+}
+
+// REQ-CORE-006, REQ-CORE-001: counters are signed 64-bit; i64::MAX round-trips with an
+// identical hash; 0, -1 and i64::MIN remove the entry or never insert one.
+#[test]
+fn counters_are_nonnegative_i64() {
+    let mut s = GameState::new(3, 2, 20).unwrap();
+    s.player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_a", i64::MAX);
+    assert_eq!(
+        s.player(pid(1)).unwrap().counter("test.counter_a"),
+        i64::MAX
+    );
+    let back = GameState::deserialize(&s.serialize().unwrap()).unwrap();
+    assert_eq!(back, s);
+    assert_eq!(back.state_hash(), s.state_hash());
+    check_round_trip(&s);
+
+    for removal in [0, -1, i64::MIN] {
+        let mut p = PlayerState::new(pid(1), 20);
+        p.set_counter("test.counter_a", removal);
+        assert!(p.counters().is_empty(), "{removal} never inserts");
+        p.set_counter("test.counter_a", 5);
+        p.set_counter("test.counter_a", removal);
+        assert!(p.counters().is_empty(), "{removal} removes");
+        assert_eq!(p.counter("test.counter_a"), 0);
+
+        let mut t = s.clone();
+        t.player_mut(pid(1))
+            .unwrap()
+            .set_counter("test.counter_a", removal);
+        assert!(t.player(pid(1)).unwrap().counters().is_empty());
+        assert_eq!(
+            t.state_hash(),
+            GameState::new(3, 2, 20).unwrap().state_hash()
+        );
+    }
+}
+
+// REQ-CORE-006, R12: the decoder accepts a counter of exactly i64::MAX and rejects -1, 0 and an
+// unsigned MessagePack value above i64::MAX with a Decode error.
+#[test]
+fn deserialize_counter_bounds() {
+    let base = GameState::new(5, 2, 20).unwrap();
+    let good = wire_of(&base);
+
+    let mut w = good.clone();
+    w.players[1]
+        .counters
+        .insert("test.counter_a".into(), i64::MAX);
+    let s = decode_wire(&w).unwrap();
+    assert_eq!(
+        s.player(pid(2)).unwrap().counter("test.counter_a"),
+        i64::MAX
+    );
+
+    for bad in [-1, 0, i64::MIN] {
+        let mut w = good.clone();
+        w.players[1].counters.insert("test.counter_a".into(), bad);
+        assert_decode_err(decode_wire(&w));
+    }
+
+    // Byte level: replace the encoding of i64::MAX after the counter key with MessagePack
+    // uint64 values above i64::MAX.
+    let mut with_max = base.clone();
+    with_max
+        .player_mut(pid(2))
+        .unwrap()
+        .set_counter("test.counter_z", i64::MAX);
+    let bytes = with_max.serialize().unwrap();
+    let max_enc = rmp_serde::to_vec(&i64::MAX).unwrap();
+    let mut needle = fixstr("test.counter_z");
+    needle.extend_from_slice(&max_enc);
+    let at = find(&bytes, &needle) + fixstr("test.counter_z").len();
+    let spliced = |v: u64| {
+        let mut b = bytes[..at].to_vec();
+        b.push(0xcf);
+        b.extend_from_slice(&v.to_be_bytes());
+        b.extend_from_slice(&bytes[at + max_enc.len()..]);
+        b
+    };
+    for big in [i64::MAX.cast_unsigned() + 1, u64::MAX] {
+        assert_decode_err(GameState::deserialize(&spliced(big)));
+    }
+    // Controls: the unmodified bytes and a uint64 spelling of exactly i64::MAX decode.
+    assert_eq!(GameState::deserialize(&bytes).unwrap(), with_max);
+    assert_eq!(
+        GameState::deserialize(&spliced(i64::MAX.cast_unsigned())).unwrap(),
+        with_max
+    );
 }

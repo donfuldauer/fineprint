@@ -5,6 +5,7 @@
 //! Per-player state: life, counters and designations (REQ-CORE-001, REQ-CORE-002).
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 
 use fineprint_base::encode::{CanonicalEncode, put_bytes, put_variant};
 use fineprint_base::ids::PlayerId;
@@ -45,13 +46,13 @@ impl CanonicalEncode for DesignationValue {
 /// The state of one player (REQ-CORE-001, REQ-CORE-002).
 ///
 /// Counter kinds and designation keys are open-ended strings (SRS §10.2): no kind has built-in
-/// rules here. The counter map never holds a zero amount.
+/// rules here. The counter map never holds an amount below 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PlayerState {
     id: PlayerId,
     life: i64,
-    counters: BTreeMap<String, u64>,
+    counters: BTreeMap<String, i64>,
     designations: BTreeMap<String, DesignationValue>,
 }
 
@@ -84,24 +85,27 @@ impl PlayerState {
         self.life = life;
     }
 
-    /// The number of counters of `kind` on the player (0 if none).
+    /// The number of counters of `kind` on the player (0 if none; never negative).
     #[must_use]
-    pub fn counter(&self, kind: &str) -> u64 {
+    pub fn counter(&self, kind: &str) -> i64 {
         self.counters.get(kind).copied().unwrap_or(0)
     }
 
-    /// Sets the number of counters of `kind` to `amount`; an amount of 0 removes the entry.
-    pub fn set_counter(&mut self, kind: &str, amount: u64) {
-        if amount == 0 {
+    /// Sets the number of counters of `kind` to `amount` (REQ-CORE-006: signed 64-bit).
+    ///
+    /// An amount of 0 or below removes the entry: a count is never negative, so the map only
+    /// ever holds amounts in `1..=i64::MAX`.
+    pub fn set_counter(&mut self, kind: &str, amount: i64) {
+        if amount <= 0 {
             self.counters.remove(kind);
         } else {
             self.counters.insert(kind.to_owned(), amount);
         }
     }
 
-    /// Every counter kind with a non-zero amount, in ascending kind order.
+    /// Every counter kind with an amount of at least 1, in ascending kind order.
     #[must_use]
-    pub fn counters(&self) -> &BTreeMap<String, u64> {
+    pub fn counters(&self) -> &BTreeMap<String, i64> {
         &self.counters
     }
 
@@ -127,11 +131,12 @@ impl PlayerState {
         &self.designations
     }
 
-    /// Rebuilds a player from validated wire parts (the caller checked that no amount is 0).
+    /// Rebuilds a player from validated wire parts (the caller checked that every amount is at
+    /// least 1).
     pub(super) fn from_parts(
         id: PlayerId,
         life: i64,
-        counters: BTreeMap<String, u64>,
+        counters: BTreeMap<String, i64>,
         designations: BTreeMap<String, DesignationValue>,
     ) -> PlayerState {
         PlayerState {
@@ -140,5 +145,53 @@ impl PlayerState {
             counters,
             designations,
         }
+    }
+}
+
+/// Write access to one stored player of a `GameState` (REQ-CORE-001, REQ-CORE-002).
+///
+/// Returned by `GameState::player_mut`. It reads the player through [`Deref`] and changes it
+/// only through the setters below, so the player's id can never be changed or the whole value
+/// replaced: the stored player's [`PlayerState::id`] always equals its key in the state.
+#[derive(Debug)]
+pub struct PlayerMut<'a> {
+    player: &'a mut PlayerState,
+}
+
+impl<'a> PlayerMut<'a> {
+    /// Wraps the (already un-shared) stored player.
+    pub(super) fn new(player: &'a mut PlayerState) -> PlayerMut<'a> {
+        PlayerMut { player }
+    }
+
+    /// Sets the player's life total (see [`PlayerState::set_life`]).
+    pub fn set_life(&mut self, life: i64) {
+        self.player.set_life(life);
+    }
+
+    /// Sets the number of counters of `kind`; 0 or below removes the entry (see
+    /// [`PlayerState::set_counter`]).
+    pub fn set_counter(&mut self, kind: &str, amount: i64) {
+        self.player.set_counter(kind, amount);
+    }
+
+    /// Gives the player designation `key` with `value` (see [`PlayerState::set_designation`]).
+    pub fn set_designation(&mut self, key: &str, value: DesignationValue) {
+        self.player.set_designation(key, value);
+    }
+
+    /// Removes designation `key`, returning its previous value (see
+    /// [`PlayerState::clear_designation`]).
+    pub fn clear_designation(&mut self, key: &str) -> Option<DesignationValue> {
+        self.player.clear_designation(key)
+    }
+}
+
+impl Deref for PlayerMut<'_> {
+    type Target = PlayerState;
+
+    /// Read-only access to the player.
+    fn deref(&self) -> &PlayerState {
+        self.player
     }
 }

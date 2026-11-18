@@ -41,7 +41,7 @@ use fineprint_base::prng::Pcg64Dxsm;
 
 pub use error::StateError;
 pub use placeholders::{EffectRegistry, HistoryLedger};
-pub use player::{DesignationValue, PlayerState};
+pub use player::{DesignationValue, PlayerMut, PlayerState};
 pub use turn::TurnInfo;
 
 /// The largest number of players a game state holds (REQ-CORE-001, REQ-NFR-010).
@@ -136,10 +136,15 @@ impl GameState {
         self.players.get(&id).map(|p| &**p)
     }
 
-    /// Mutable access to the player with id `id`, if any. Copy-on-write: if the player's
-    /// storage is shared with another snapshot, only this player is copied first.
-    pub fn player_mut(&mut self, id: PlayerId) -> Option<&mut PlayerState> {
-        self.players.get_mut(&id).map(Arc::make_mut)
+    /// Write access to the player with id `id`, if any, as a [`PlayerMut`] guard.
+    ///
+    /// Copy-on-write: if the player's storage is shared with another snapshot, only this player
+    /// is copied, when this method is called. The guard exposes field setters only, never
+    /// `&mut PlayerState`, so the stored player's id always equals its key.
+    pub fn player_mut(&mut self, id: PlayerId) -> Option<PlayerMut<'_>> {
+        self.players
+            .get_mut(&id)
+            .map(|p| PlayerMut::new(Arc::make_mut(p)))
     }
 
     /// Every player in ascending [`PlayerId`] order.
