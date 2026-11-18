@@ -130,6 +130,8 @@ version = "0.0.0"
 dependencies = [
  "fineprint-base",
  "fineprint-dsl",
+ "rmp-serde",
+ "serde",
 ]
 
 [[package]]
