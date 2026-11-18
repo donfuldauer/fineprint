@@ -1746,3 +1746,20 @@ stack of a test thread in an unoptimised build; after the split, the deepest leg
 and encodes within 512 KiB in a debug build (measured), so `MAX_DEPTH` input is safe.
 **Alternatives.** Lower the nesting limit for instructions (rejected: changes the FP-011 depth
 contract); spawn a large-stack thread in the decoder (rejected: threads in rules code, R3).
+
+## #14 FP-013 — lockAffectedSet:false rejected for CHAR effects
+
+**Decision.** `CREATE_CONTINUOUS_EFFECT` with `lockAffectedSet:false` is rejected, on decode and on
+encode, when any effect is a CHAR effect (every layer, layer 2 control included). The member stays
+optional: absent and `true` are accepted for every effect mix, and `false` is accepted only for
+RULE/PLAYER-only effects. `Instruction::locks_affected_set()` returns true for any instruction with
+a CHAR effect. Dropping the member is a possible later change.
+
+**Rationale.** Per CR 611.2c the set of objects a resolving characteristic- or control-changing
+effect affects is determined when it begins and never changes; lock status is per part, so a
+RULE/PLAYER-only effect may carry `false` harmlessly. CR 611.3a ("isn't locked in") concerns static
+abilities, which use their own envelope, so it does not apply to a resolving instruction. SRS
+§14.4.5 is silent on `false`, so this fills an omission and does not contradict it.
+
+**Alternatives.** Keep accepting `false` and make the helper return true for CHAR: rejected, the
+wire value would still misstate the rule. Drop the member: deferred, it is a wire-contract change.

@@ -176,7 +176,8 @@ fn take_may(o: &mut Obj<'_>) -> JResult<Instruction> {
     })
 }
 
-/// `UNLESS`: "\[A\] unless \[B\]" counts as mandatory for loop detection (CR 733.6).
+/// `UNLESS`: "\[A\] unless \[B\]" counts as mandatory for loop detection only if no player
+/// chooses to pay B (CR 733.6).
 fn take_unless(o: &mut Obj<'_>) -> JResult<Instruction> {
     Ok(Instruction::Unless {
         payer: req(o, "payer")?,
@@ -439,12 +440,19 @@ fn take_flat(o: &mut Obj<'_>, op: &str) -> JResult<Instruction> {
         },
         // Continuous effects. No sameAsLayer cross-check here (docs/DECISIONS.md "#14 FP-013 —
         // No lock-in cross-check inside CREATE_CONTINUOUS_EFFECT"); absent lockAffectedSet
-        // means true (CR 611.2c).
-        "CREATE_CONTINUOUS_EFFECT" => I::CreateContinuousEffect {
-            effects: non_empty_vec(o.req("effects")?, "effects")?,
-            duration: req(o, "duration")?,
-            lock_affected_set: opt_bool(o, "lockAffectedSet")?,
-        },
+        // means true, and false is rejected when any effect is CHAR (CR 611.2c).
+        "CREATE_CONTINUOUS_EFFECT" => {
+            let effects: Vec<crate::ability::StaticEffect> =
+                non_empty_vec(o.req("effects")?, "effects")?;
+            let duration = req(o, "duration")?;
+            let lock_affected_set = opt_bool(o, "lockAffectedSet")?;
+            super::check_lock_in(&effects, lock_affected_set)?;
+            I::CreateContinuousEffect {
+                effects,
+                duration,
+                lock_affected_set,
+            }
+        }
         "VOTE" => I::Vote {
             voters: req(o, "voters")?,
             choice: req(o, "choice")?,

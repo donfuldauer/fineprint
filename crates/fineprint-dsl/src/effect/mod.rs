@@ -15,6 +15,12 @@
 //! required `op` member (one of [`Instruction::NAMES`], exactly) selects the variant. Every
 //! instruction list is non-empty wherever it appears.
 //!
+//! Caveat: duplicate-member rejection is available only when the effect type is deserialized
+//! directly from bytes, a string or a reader (for example `serde_json::from_slice::<Instruction>`).
+//! A caller that first parses into a `serde_json::Value` has already lost duplicates (they
+//! collapse to one entry), and the `from_json(&Value)` entry points cannot detect them. Same
+//! wording as `crate::expr::json`.
+//!
 //! `Serialize` writes directly and re-checks the value-level invariants a hand-built value
 //! could break, so for every value nested within the depth budget `decode(encode(x)) == x` and
 //! the RFC 8785 form of a decoded document is the canonical form of the value. Nesting depth is
@@ -230,14 +236,29 @@ pub struct InstructionMode {
     pub effect: Vec<Instruction>,
 }
 
+/// Rejects `lockAffectedSet:false` when any effect is a CHAR effect: the set of objects a
+/// characteristic- or control-changing part affects is determined when the effect begins and
+/// does not change (CR 611.2c). PLAYER and RULE parts do not lock.
+fn check_lock_in(effects: &[StaticEffect], lock: Option<bool>) -> JResult<()> {
+    if lock == Some(false) && effects.iter().any(|e| matches!(e, StaticEffect::Char(_))) {
+        return Err(
+            "lockAffectedSet must not be false when an effect is CHAR: a CHAR \
+                    effect's affected set is fixed when the effect begins (CR 611.2c)"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 impl InstructionMode {
     /// Checks the mode rules (id, targets, non-empty effect).
     fn check(&self) -> JResult<()> {
         check_free_str(&self.id, "mode id")?;
         if let Some(t) = &self.targets {
             util::check_non_empty(t, "mode targets")?;
-            for (i, slot) in t.iter().enumerate() {
-                if t[..i].iter().any(|s| s.slot == slot.slot) {
+            let mut seen = std::collections::BTreeSet::new();
+            for slot in t {
+                if !seen.insert(slot.slot) {
                     return Err(format!("target slot {} is listed twice", slot.slot));
                 }
             }
@@ -736,8 +757,12 @@ pub enum Instruction {
 
     // --- Continuous effects ---
     /// `CREATE_CONTINUOUS_EFFECT{effects, duration, lockAffectedSet?}`. An absent
-    /// `lockAffectedSet` means true (CR 611.2c); absent, true and false are three distinct
-    /// values (see [`Instruction::locks_affected_set`]).
+    /// `lockAffectedSet` means true. `false` is rejected whenever any effect is a CHAR effect
+    /// (layer 2 control included), because the set of objects such a part affects is determined
+    /// when the effect begins and does not change (CR 611.2c). Lock status is per part, so
+    /// `false` is accepted only when no part modifies characteristics or changes control (RULE
+    /// and PLAYER effects only). Absent, true and false are three distinct values (see
+    /// [`Instruction::locks_affected_set`]).
     CreateContinuousEffect {
         /// The effects (non-empty).
         effects: Vec<StaticEffect>,
@@ -810,7 +835,8 @@ pub enum Instruction {
         /// Run if they do (non-empty).
         body: Vec<Instruction>,
     },
-    /// `UNLESS{payer, cost, body}`: "[A] unless [B]", mandatory for loop detection (CR 733.6).
+    /// `UNLESS{payer, cost, body}`: "\[A\] unless \[B\]" counts as mandatory for loop
+    /// detection only if no player chooses to pay B (CR 733.6).
     Unless {
         /// Who may pay.
         payer: PlayerSelectorAST,
@@ -1011,15 +1037,24 @@ impl Instruction {
     }
 
     /// Whether this instruction fixes the set of objects its continuous effect affects when the
-    /// effect begins (REQ-DSL-010, CR 611.2c): for `CREATE_CONTINUOUS_EFFECT`, `true` when
-    /// `lockAffectedSet` is absent or `true` and `false` when it is `false`; every other
+    /// effect begins (REQ-DSL-010, REQ-LAYER-003, CR 611.2c): for `CREATE_CONTINUOUS_EFFECT`,
+    /// `true` when `lockAffectedSet` is absent or `true`, or when any effect is a CHAR effect
+    /// (layer 2 control included; `false` is rejected for those at decode and encode); `false`
+    /// only for a RULE/PLAYER-only instruction with `lockAffectedSet:false`. Every other
     /// instruction creates no continuous effect and returns `false`.
     #[must_use]
-    pub const fn locks_affected_set(&self) -> bool {
+    pub fn locks_affected_set(&self) -> bool {
         match self {
             Instruction::CreateContinuousEffect {
-                lock_affected_set, ..
-            } => !matches!(lock_affected_set, Some(false)),
+                effects,
+                lock_affected_set,
+                ..
+            } => {
+                if !matches!(lock_affected_set, Some(false)) {
+                    return true;
+                }
+                effects.iter().any(|e| matches!(e, StaticEffect::Char(_)))
+            }
             _ => false,
         }
     }
