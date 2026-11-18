@@ -1348,7 +1348,7 @@ The engine SHALL NOT silently run a card with a definition that is missing or in
 **REQ-ING-014 — Artifact format & licensing.**
 * A `CardDatabaseArtifact` is content-addressed (a sha256 Merkle root over its sorted definitions) and MAY be signed by the client that built it. It contains definitions (parsed and client overrides), token records, the `RulesVocabulary` (subtypes, predefined tokens and keyword macro IDs extracted from the CR), any client-supplied behavioral tests, and the coverage report.
 * It is built by the client with `fineprint-ingest` and is **never distributed by Fine Print** (REQ-NFR-004). It is always separate from the engine binary (REQ-ARCH-001).
-* Clients that redistribute their databases are responsible for Scryfall's terms and the Fan Content Policy (§1.3). Fine Print's documentation SHALL say so.
+* Clients that redistribute their databases are responsible for the terms that apply to the data in them (§1.3): Scryfall's terms for data obtained from Scryfall, and the Fan Content Policy for Wizards of the Coast card data. Fine Print's documentation SHALL say so.
 
 ### 16.4 Worked Example: Importing One Card End-to-End
 **Input** (Scryfall Oracle Cards record, abridged): an Omen card whose `layout` is `adventure`. Face 0 is `Creature — Dragon {5}{U}` with the text "Flying\nWard {2} (Whenever this creature becomes the target …)". Face 1 is `Instant — Omen {1}{U}` with the text "Tap up to one target creature. Draw a card. (Then shuffle this card into its owner's library.)".
