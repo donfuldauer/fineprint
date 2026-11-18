@@ -55,7 +55,14 @@ impl Instruction {
                 value.check()
             }
             I::Waterbend { cost } => check_non_empty(cost, "cost"),
-            I::CreateContinuousEffect { effects, .. } => check_non_empty(effects, "effects"),
+            I::CreateContinuousEffect {
+                effects,
+                lock_affected_set,
+                ..
+            } => {
+                check_non_empty(effects, "effects")?;
+                super::check_lock_in(effects, *lock_affected_set)
+            }
             I::CreateDelayedTrigger {
                 effect, captures, ..
             } => {
