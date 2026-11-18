@@ -11,3 +11,5 @@ publish.workspace = true
 [dependencies]
 fineprint-base.workspace = true
 fineprint-dsl.workspace = true
+serde = { workspace = true }
+rmp-serde = { workspace = true }
