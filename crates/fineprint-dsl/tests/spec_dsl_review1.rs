@@ -328,23 +328,25 @@ fn req_nfr_006_serialize_duplicate_members_rejected() {
 
 // ---------------------------------------------------------------- T3 noncharacters
 
+/// First column: the JSON escape spelling (backslash-u text, surrogate pair above U+FFFF).
 const NONCHARS: &[(&str, char)] = &[
-    (r"﷐", '\u{FDD0}'),
-    (r"﷯", '\u{FDEF}'),
-    (r"￿", '\u{FFFF}'),
-    (r"￾", '\u{FFFE}'),
-    (r"🿾", '\u{1FFFE}'),
-    (r"􏿿", '\u{10FFFF}'),
+    (r"\uFDD0", '\u{FDD0}'),
+    (r"\uFDEF", '\u{FDEF}'),
+    (r"\uFFFF", '\u{FFFF}'),
+    (r"\uFFFE", '\u{FFFE}'),
+    (r"\uD83F\uDFFE", '\u{1FFFE}'),
+    (r"\uDBFF\uDFFF", '\u{10FFFF}'),
 ];
 
+/// First column: the JSON escape spelling (backslash-u text, surrogate pair above U+FFFF).
 const ALLOWED: &[(&str, char)] = &[
-    (r"é", '\u{E9}'),
-    (r"😂", '\u{1F602}'),
-    (r"﷏", '\u{FDCF}'),
-    (r"ﷰ", '\u{FDF0}'),
-    (r"�", '\u{FFFD}'),
-    (r"", '\u{E000}'),
-    (r"𐀀", '\u{10000}'),
+    (r"\u00E9", '\u{E9}'),
+    (r"\uD83D\uDE02", '\u{1F602}'),
+    (r"\uFDCF", '\u{FDCF}'),
+    (r"\uFDF0", '\u{FDF0}'),
+    (r"\uFFFD", '\u{FFFD}'),
+    (r"\uE000", '\u{E000}'),
+    (r"\uD800\uDC00", '\u{10000}'),
 ];
 
 /// Documents placing `t` as a value (two member orders, and in an array) and as a member name
@@ -1134,4 +1136,219 @@ fn req_dsl_001_mutated_definitions_never_panic_and_accepted_ones_round_trip() {
         }
         check_loaded(&bytes);
     }
+}
+
+// ---------------------------------------------------------------- round 2
+
+/// REQ-NFR-006: the escaped column really is an escape (differs from the literal), and it decodes
+/// to exactly the character in the second column.
+#[test]
+fn req_nfr_006_table_escapes_are_real_escapes() {
+    for (esc, ch) in NONCHARS.iter().chain(ALLOWED.iter()) {
+        let literal = ch.to_string();
+        assert_ne!(*esc, literal.as_str(), "U+{:04X}", *ch as u32);
+        assert!(esc.starts_with("\\u"), "U+{:04X}: {esc}", *ch as u32);
+        let parsed: String = serde_json::from_str(&format!("\"{esc}\""))
+            .unwrap_or_else(|e| panic!("U+{:04X}: {e}", *ch as u32));
+        assert_eq!(parsed, literal, "U+{:04X}", *ch as u32);
+    }
+}
+
+/// REQ-NFR-006: for allowed characters the escaped and literal spellings canonicalise to the same
+/// bytes (RFC 8785 writes them unescaped), in every placement.
+#[test]
+fn req_nfr_006_escaped_and_literal_spellings_canonicalise_identically() {
+    for (esc, ch) in ALLOWED {
+        let literal = ch.to_string();
+        let lit_places = placements(&literal);
+        let esc_places = placements(esc);
+        for ((ld, place), (ed, _)) in lit_places.iter().zip(esc_places.iter()) {
+            let what = format!("U+{:04X} {place}", *ch as u32);
+            assert_ne!(ld, ed, "{what}: documents must differ");
+            let a = canonicalize(ld.as_bytes()).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let b = canonicalize(ed.as_bytes()).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            assert_eq!(a, b, "{what}");
+        }
+    }
+}
+
+fn is_serialize_err<T: std::fmt::Debug>(r: Result<T, CanonicalError>) -> bool {
+    matches!(r, Err(CanonicalError::Serialize(_)))
+}
+
+/// REQ-DSL-001, REQ-DSL-002: `seal` rejects a `dslVersion` that `from_json` would reject.
+#[test]
+fn req_dsl_001_002_seal_rejects_unsupported_versions() {
+    for v in ["2.0", "0.9", "abc", ""] {
+        let mut d = minimal();
+        d.dsl_version = v.to_string();
+        match d.seal() {
+            Err(CanonicalError::Serialize(msg)) => {
+                if v == "2.0" {
+                    assert!(msg.contains('2'), "message: {msg}");
+                }
+            }
+            other => panic!("version {v:?}: expected Serialize error, got {other:?}"),
+        }
+    }
+    for v in ["1.0", "1.7.3", "1.999"] {
+        let mut d = minimal();
+        d.dsl_version = v.to_string();
+        let s = d.seal().unwrap_or_else(|e| panic!("version {v:?}: {e:?}"));
+        assert_eq!(s.dsl_version, v);
+        assert_eq!(load(&canonical_bytes(&s)), Ok(s.clone()), "version {v:?}");
+    }
+}
+
+/// REQ-DSL-001: a 2.0 document with a correct digest is a `Version` error on load.
+#[test]
+fn req_dsl_001_from_json_rejects_major_2_with_valid_digest() {
+    let mut v = to_value(&sealed(minimal()));
+    v["dslVersion"] = json!("2.0");
+    redigest(&mut v);
+    match load_value(&v) {
+        Err(CardDefinitionError::Version(_)) => {}
+        other => panic!("expected Version error, got {other:?}"),
+    }
+}
+
+/// REQ-DSL-001, REQ-DSL-002: `seal` succeeds iff the same definition, correctly digested, is not
+/// a `Version` error on load.
+#[test]
+fn req_dsl_001_002_seal_ok_iff_from_json_not_version_error() {
+    for text in [
+        "1.0", "1.7.3", "1.999", "1", "2.0", "2.1", "0.9", "10.0", "abc", "", "1.", ".1", "1.x",
+        " 1.0",
+    ] {
+        for base in [minimal(), rich()] {
+            let mut d = base;
+            d.dsl_version = text.to_string();
+            let mut v = to_value(&d);
+            redigest(&mut v);
+            let loaded = load_value(&v);
+            let is_version_err = matches!(loaded, Err(CardDefinitionError::Version(_)));
+            let seal_ok = d.seal().is_ok();
+            assert_eq!(
+                seal_ok, !is_version_err,
+                "version {text:?}: load {loaded:?}"
+            );
+        }
+    }
+}
+
+fn with_stale_hash(base: &CardDefinitionDSL, stale: &str) -> CardDefinitionDSL {
+    let mut b = base.clone();
+    b.definition_hash = stale.to_string();
+    b
+}
+
+/// REQ-DSL-002, REQ-NFR-006: a malformed stale `definitionHash` cannot block hashing or sealing,
+/// and is never a `Canonical` error from `verify_hash`.
+#[test]
+fn req_dsl_002_nfr_006_stale_hash_is_ignored_by_hashing_and_sealing() {
+    let xs = "X".repeat(64);
+    let stale_values: [(&str, &str, bool); 4] = [
+        ("(i)", "\u{FDD0}", false),
+        ("(ii)", "\u{FFFF}", false),
+        ("(iii)", "", true),
+        ("(iv)", xs.as_str(), true),
+    ];
+    for (name, base) in [("minimal", minimal()), ("rich", rich())] {
+        let d = sealed(base);
+        let mut v = to_value(&d);
+        v.as_object_mut().unwrap().remove("definitionHash");
+        let oracle = sha256(&canonicalize(&serde_json::to_vec(&v).unwrap()).unwrap()).to_hex();
+        assert_eq!(d.definition_hash, oracle, "{name} sealed digest");
+        for (label, stale, json_ok) in stale_values {
+            if name == "rich" && label != "(i)" {
+                continue;
+            }
+            let what = format!("{name} {label}");
+            let bad = with_stale_hash(&d, stale);
+            assert_eq!(
+                bad.compute_hash(),
+                Ok(oracle.clone()),
+                "{what} compute_hash"
+            );
+            assert_eq!(bad.compute_hash(), d.compute_hash(), "{what} vs sealed");
+            assert_eq!(bad.clone().seal(), Ok(d.clone()), "{what} seal");
+            match bad.verify_hash() {
+                Err(CardDefinitionError::HashMismatch { .. }) => {}
+                other => panic!("{what}: expected HashMismatch, got {other:?}"),
+            }
+            let json = bad.to_canonical_json();
+            if json_ok {
+                let bytes = json.unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let text = String::from_utf8(bytes).expect("utf-8");
+                let member = format!("\"definitionHash\":\"{stale}\"");
+                assert!(text.contains(&member), "{what}: {text}");
+            } else {
+                assert!(
+                    is_serialize_err(json),
+                    "{what}: to_canonical_json must fail"
+                );
+            }
+        }
+    }
+}
+
+fn sym(n: u32) -> ManaSymbol {
+    ManaSymbol::Generic(n)
+}
+
+/// REQ-OBJ-001: `ManaCostDSL::new` reports the byte offset and text of the first invalid symbol.
+#[test]
+fn req_obj_001_mana_new_error_offsets() {
+    use ManaSymbol::*;
+    match ManaCostDSL::new(vec![
+        Generic(10),
+        Colored(Color::White),
+        Hybrid(Color::Red, Color::Red),
+    ]) {
+        Err(ManaParseError::UnknownSymbol { offset, symbol }) => {
+            assert_eq!(offset, 7);
+            assert_eq!(symbol.to_string(), "{R/R}");
+        }
+        other => panic!("expected UnknownSymbol at 7, got {other:?}"),
+    }
+    // Two invalid symbols: the first is reported.
+    match ManaCostDSL::new(vec![
+        Generic(1),
+        Generic(1_000_001),
+        GenericHybrid(0, Color::White),
+    ]) {
+        Err(ManaParseError::UnknownSymbol { offset, symbol }) => {
+            assert_eq!(offset, 3);
+            assert_eq!(symbol.to_string(), "{1000001}");
+        }
+        other => panic!("expected first invalid symbol, got {other:?}"),
+    }
+    // Invalid symbol in position 0.
+    match ManaCostDSL::new(vec![Hybrid(Color::Blue, Color::Blue), Generic(2)]) {
+        Err(ManaParseError::UnknownSymbol { offset, symbol }) => {
+            assert_eq!(offset, 0);
+            assert_eq!(symbol.to_string(), "{U/U}");
+        }
+        other => panic!("expected UnknownSymbol at 0, got {other:?}"),
+    }
+    assert!(matches!(
+        ManaCostDSL::new(vec![]),
+        Err(ManaParseError::Empty)
+    ));
+}
+
+/// REQ-OBJ-001: a long valid cost is accepted and round-trips through its text.
+#[test]
+fn req_obj_001_mana_long_cost_round_trips() {
+    let symbols: Vec<ManaSymbol> = (0..200u32)
+        .map(|i| match i % 4 {
+            0 => sym(i),
+            1 => ManaSymbol::Colored(COLORS[(i % 5) as usize]),
+            2 => ManaSymbol::Snow,
+            _ => ManaSymbol::Phyrexian(COLORS[(i % 5) as usize]),
+        })
+        .collect();
+    let cost = ManaCostDSL::new(symbols).expect("long valid cost");
+    assert_eq!(cost.symbols().len(), 200);
+    assert_eq!(ManaCostDSL::parse(&cost.to_string()), Ok(cost));
 }
