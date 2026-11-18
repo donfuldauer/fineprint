@@ -32,6 +32,8 @@ threads.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
    `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
+   Without an issue number, exclude this candidate instead and continue with the next one under
+   step 0.
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
@@ -61,9 +63,12 @@ threads.
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID
       (`get_session` with no argument returns it).
-   2. Re-read all the issue's comments, its labels and its state. If the issue is now closed or
-      labelled `status:blocked-failure` or `blocked`, or the governing claim is not yours, your
-      claim loses: delete it. With an
+   2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
+      delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
+      if the governing claim is not yours, or (without an issue number) if the issue no longer
+      qualifies as the candidate step 0 chose it as: a ready candidate must still carry `ready`
+      and must not have gained `in-progress` from another session; an abandoned candidate must
+      still have no other governing claim. With an
       issue number, tell the user which session owns the issue and stop. Without one, return to
       step 0 and pick the next candidate.
    3. **Path overlap.** A live claim reserves the issue's owned paths from the moment it is
@@ -74,9 +79,30 @@ threads.
       your claim's ID with that issue's governing claim's ID: the lower ID wins (an `in-progress`
       issue or open PR with no governing claim wins outright, unless your issue also has no
       other governing claim because you are resuming it as abandoned work: then the issue with the
-      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other). If yours loses,
-      delete it and act as in step 2.
-   4. Only after the claim holds, add the `in-progress` label (remove `ready`).
+      lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other).
+      **Re-verify a loss once.** Two sessions can each lose at the same moment: one to the
+      plan-ID tie-break against an abandoned issue, the other to the first one's claim before it
+      is deleted. So before deleting a losing claim, wait about 30 seconds, then repeat with fresh
+      reads the dependency check of §1 step 2 (every dependency still satisfied), the checks of
+      step 4.2 (issue still open and not blocked, governing claim still yours and, without an
+      issue number, the candidate still qualifies) and this overlap check. If all of them pass
+      and you now win against every live overlapping claim, continue. Otherwise delete your
+      claim; if the dependency check failed, act as in §1 step 2 (report the unsatisfied
+      dependencies and which of them are ready, or, without an issue number, move on to the
+      next candidate), and for any other failure act as in step 4.2. This cannot let two
+      overlapping sessions both proceed: a session only proceeds after a check in which its
+      claim beats every live overlapping claim, and the lower comment ID always beats the
+      higher.
+   4. Only after the claim holds, run the §1 step 2 dependency check once more with fresh reads.
+      If a dependency is no longer satisfied, delete your claim and act as in §1 step 2.
+      Otherwise add the `in-progress` label (remove `ready`), then re-read the issue once more:
+      if it is now closed or labelled `status:blocked-failure` or `blocked`, remove
+      `in-progress`, delete your claim and act as in step 4.2. Checking after the label change
+      closes the window between the last check and the change; a block or close after this
+      point is handled like any other blocked or closed issue. The cleanup leaves the issue with
+      neither `ready` nor `in-progress`. The person who clears `blocked` or `status:blocked-failure` replaces it with `ready`
+      (as §7 step 3 does), and the person who reopens a closed issue for more work adds `ready`
+      when reopening it; either makes the issue selectable again.
 
 ## 2. Branch
 
