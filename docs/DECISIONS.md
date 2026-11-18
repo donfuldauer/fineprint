@@ -1973,3 +1973,165 @@ and integration-test ones under `CARGO_TARGET_TMPDIR`.
 r4620683700, r4620683631 and r4620683732, applied with the smallest change.
 **Alternatives.** Printing a quoted literal command (shell-specific). Mapping serde shape
 errors to a field name by parsing serde's message (fragile, can echo input).
+
+## #18 FP-017 — Arc copy-on-write snapshots, no persistent-collection crate
+
+**Decision.** `GameState` holds `players: BTreeMap<PlayerId, Arc<PlayerState>>` and the turn
+order as `Arc<Vec<PlayerId>>`; `player_mut` and the order writers go through `Arc::make_mut`.
+`clone()` copies the small handle structures (the map of `Arc`s, the PRNG, the generators, the
+turn position) and shares every player until it is written. `PartialEq` and the hash compare
+values only; `shares_player_with` (`Arc::ptr_eq`) is the one place pointers are observed.
+Later units add their components the same way: an `Arc`-shared field, a `_mut` accessor through
+`Arc::make_mut`, a leaf group in `merkle_tree` and a member of the wire struct.
+**Rationale.** Meets the "persistent/structurally shared representation with cheap snapshots"
+deliverable with the standard library only (the brief forbids a new dependency), keeps the
+iteration order of a `BTreeMap` (REQ-CORE-006) and needs no `unsafe` code.
+**Alternatives.** `im`/`rpds` persistent maps (new dependency; hash-array-mapped variants
+iterate in hash order). Deep `Clone` (snapshots cost O(state)). Wrapping the whole player map in
+one `Arc` (O(1) clone, but a write copies every handle; can be added later if profiling asks).
+
+## #18 FP-017 — serde and rmp-serde pins reused in fineprint-core
+
+**Decision.** `fineprint-core` depends on the workspace pins `serde = "=1.0.229"` and
+`rmp-serde = "=1.3.1"` chosen by FP-004; no new crate and no version change. Encoding uses
+`rmp_serde::to_vec_named`; decoding uses `rmp_serde::Deserializer::new(Cursor::new(bytes))` and
+rejects input unless the cursor position equals the input length.
+**Rationale.** FP-004 already evaluated, licensed and pinned both crates for transport; the
+`Cursor` reader copies a string or byte field only as far as the input actually holds, so a
+hostile length header cannot cause a large allocation, and `position()` gives the trailing-byte
+check.
+**Alternatives.** `rmp_serde::from_slice` (no way to detect trailing bytes); a hand-written
+MessagePack decoder (more code to make panic-free).
+
+## #18 FP-017 — Game-state wire shape, u128 as [hi, lo], strict decoding
+
+**Decision.** The transport form is the map
+`{format_version, prng_algorithm, prng: {state, increment}, ids: {card, object,
+ability_instance, effect, timestamp, link, player}, turn: {number, active_player,
+priority_player, order}, players: [{id, life, counters, designations}], effects: {}, history: {}}`
+with every identifier as a raw `u64` (the id newtypes do not implement serde), each PRNG
+`u128` word as `[hi, lo]` two `u64`s, and counter amounts as `i64` in `1..=i64::MAX` (see
+"Counters are non-negative i64"; amounts below 1, and unsigned values above `i64::MAX`, are
+rejected). Designations use serde's externally tagged form (`"Flag"`,
+`{"Int": i}`, `{"Text": s}`). Every struct is `deny_unknown_fields`; the two `Option` members of
+`turn` must be present (`nil` for none: serde would otherwise accept a missing `Option` member as
+`None`); `players` must be in strictly ascending id order (the order `serialize` writes). Serializing the
+same state always produces the same bytes, and `serialize(deserialize(b)) == b` for every `b`
+produced by `serialize`. Every failure is `StateError::Decode`.
+**Rationale.** The brief's wire shape; rmp-serde's `u128` support is not guaranteed in other
+clients' MessagePack libraries. Rejecting missing members and unsorted players keeps the player
+list well formed. The decoder accepts any valid MessagePack spelling of the same state
+(non-minimal integers, any member order); this is intended, because the bytes are transport only
+and never a hash input (REQ-NFR-006).
+**Alternatives.** `u128` as MessagePack bin or as a decimal string (less portable / larger).
+Accepting players in any order and sorting.
+
+## #18 FP-017 — Frozen Merkle layout of the game state
+
+**Decision.** Leaves (payload = canonical encoding): `/prng`; `/ids/{card, object,
+ability_instance, effect, timestamp, link, player}` (each `last_issued()` as `u64`);
+`/turn/{number, active_player, priority_player, order}`; `/players/<index id>/{life, counters,
+designations}` (counters as `BTreeMap<String, i64>`; they were `u64` before PR #166 review
+round 1, and the bytes are unchanged because every stored amount is in `1..=i64::MAX`, where
+`i64` and `u64` share the same 8-byte little-endian encoding); `/effects`; `/history`. Pinned golden digests: `GameState::new(42, 2, 20)` =
+`f32bbec462508986efd89ed35f9184bec86a107f774505e19c4f65d3db4fb0d5`; the mutated state in
+`state::tests::golden_mutated` = `7ebe9f5c17abfc986c0168e1722807514fd1372a1e6dcc10dca594afdfa58371`.
+**Rationale.** One leaf per rules-relevant component lets `diff_first_divergence` name the
+component that differs (REQ-NFR-006); keying players by `Label::index(id)` makes a player's
+subtree digest independent of seat and of the other players. Later units add sibling subtrees
+(`/zones`, objects, format config) without moving these leaves; such additions change the
+golden root and are recorded as contract changes.
+**Alternatives.** One leaf per player (coarser divergence reports). Seat-indexed players (a
+turn-order change would move every player subtree).
+
+## #18 FP-017 — MAX_PLAYERS = 256
+
+**Decision.** A game state holds 1 to 256 players (`MAX_PLAYERS`); `new`, `add_player` and
+`deserialize` enforce it.
+**Rationale.** The brief's value; it bounds the work an untrusted serialization can demand while
+staying far above any multiplayer format (REQ-NFR-010 asks for N players, not unbounded).
+**Alternatives.** No bound (unbounded untrusted work); a small bound such as 8 (would exclude
+large multiplayer variants).
+
+## #18 FP-017 — DesignationValue is Flag / Int / Text under a free string key
+
+**Decision.** Player designations are a `BTreeMap<String, DesignationValue>` with
+`DesignationValue = Flag | Int(i64) | Text(String)`, canonical tags `0x00`, `0x01` + 8 bytes LE,
+`0x02` + length-prefixed UTF-8. Counter kinds are likewise free strings (`BTreeMap<String,
+i64>`, never holding an amount below 1).
+**Rationale.** SRS §3.1 / §10.2: new sets add designations and counter kinds without engine
+changes, so neither can be a closed enum. The three value shapes cover presence-only, numeric
+and named designations with integer-only numbers (REQ-CORE-006).
+**Alternatives.** A closed enum of known designations (engine change per set). A
+`serde_json::Value`-like payload (floats and unordered maps would leak into the hash).
+
+## #18 FP-017 — Placeholder effect registry and history ledger
+
+**Decision.** `EffectRegistry` and `HistoryLedger` are empty `#[non_exhaustive]` structs with
+`is_empty() == true`; each hashes as `put_len(0)` (4 zero bytes) at `/effects` and `/history`
+and is the empty map `{}` on the wire. The units that fill them in replace the struct body,
+the payload and the wire member (with a `STATE_FORMAT_VERSION` bump if the wire shape changes).
+**Rationale.** Fixes the leaf positions now, so the effects and history units extend the state
+without moving any other leaf.
+**Alternatives.** Leaving them out until needed (the layout would shift later).
+
+## #18 FP-017 — Wiring edits outside crates/fineprint-core/src/state/
+
+**Decision.** Three authorised wiring edits: `pub mod state;` with a one-line doc comment in
+`crates/fineprint-core/src/lib.rs`; `serde` and `rmp-serde` (workspace pins) under
+`[dependencies]` in `crates/fineprint-core/Cargo.toml` (with the `Cargo.lock` lines cargo
+adds); and the "Depends on" cell of the `fineprint-core` row in `docs/DEVELOPMENT.md`.
+**Rationale.** The module and its dependencies cannot be reached otherwise; the brief grants
+exactly these edits.
+**Alternatives.** None that keep the module compilable.
+
+## #18 FP-017 — PlayerMut guard instead of &mut PlayerState
+
+**Decision.** `GameState::player_mut(id)` returns `Option<PlayerMut<'_>>`, a guard that reads the
+player through `Deref<Target = PlayerState>` (no `DerefMut`) and writes it only through
+`set_life`, `set_counter`, `set_designation` and `clear_designation`. Copy-on-write
+(`Arc::make_mut`) still happens when `player_mut` is called and un-shares only that player.
+`PlayerState`'s own setters stay public for owned values; the id has no setter.
+**Rationale.** A private `id` field with `&mut PlayerState` was unsound: assignment through the
+reference (`*p = PlayerState::new(other_id, ..)`) replaces the whole value, so a stored player's
+`id()` could differ from its map key, and serialization (which writes `id()`) and the Merkle tree
+(which keys `/players/<id>` by `id()`) would then write duplicate ids or collide (REQ-CORE-001,
+REQ-CORE-002). The guard makes that impossible in safe code.
+**Alternatives.** Field setters on `GameState` (one method per player field, n methods growing
+with every new player field). Serializing and hashing by map key instead of `id()` (leaves
+`id()` inconsistent with the key). A closure editor `edit_player(id, |p| ..)` (same problem if the
+closure receives `&mut PlayerState`).
+
+## #18 FP-017 — Counters are non-negative i64
+
+**Decision.** Player counter amounts are `i64` everywhere (`counter`, `set_counter`, `counters`,
+the wire form and the `/players/<id>/counters` leaf). The stored range is `1..=i64::MAX`:
+`set_counter` with an amount of 0 or below removes the entry (a count is never negative), and the
+decoder rejects any amount below 1, and any MessagePack unsigned value above `i64::MAX`, with
+`StateError::Decode`. The frozen Merkle bytes and the golden digests are unchanged.
+**Rationale.** REQ-CORE-006: "Numbers SHALL be signed 64-bit integers." A `u64` amount above
+`i64::MAX` would have no representation in bindings that follow that rule and would break
+cross-binding replay. For amounts in `1..=i64::MAX` the 8-byte little-endian encodings of `i64`
+and `u64` are identical, so no hash changes.
+**Alternatives.** `u64` with a cap check at the boundary (the type would still admit values the
+SRS forbids). `i64` allowing negative amounts (a negative count has no meaning; zero and
+negative entries would also let "no counters" have several distinct hashes). Saturating arithmetic on out-of-range inputs (hides
+caller errors; removal on `<= 0` is the natural floor).
+
+## #18 FP-017 — Full state hash vs the loop-detection hash
+
+**Decision.** `state_hash` is the full canonical hash (REQ-NFR-006, REQ-CORE-006) and includes
+`/ids/*`, the monotonic identifier generators including `/ids/timestamp`, so replays and
+divergence debugging see them. The REQ-LOOP-001 rules-relevant hash (SRS §12.1 item 1: excludes
+the timestamp counter and other monotonic bookkeeping, keeps relative timestamp order, SHALL be
+incremental) is owned by issue #77 (FP-075); it can be derived by omitting the separate `/ids`
+subtree and adding relative timestamp order once objects and effects exist. Incremental retention
+of the `MerkleTree` (`set_leaf` plus the cached `root_digest` from FP-009) is likewise left to
+#77, because where the tree lives (in the state or in the detector) depends on its consumer and
+on the Arc-shared components of #19. `state_hash` stays a correct full recompute.
+**Rationale.** This unit's acceptance criteria ask for the canonical full hash; the loop hash has
+no consumer until #77, and the frozen `/ids` subtree is separate so it can be dropped there
+without changing any other leaf.
+**Alternatives.** Dropping `/ids/timestamp` from the frozen layout now (would hide divergence in
+replays and is not required by this unit's acceptance criteria). A second loop hash now (no
+consumer).
