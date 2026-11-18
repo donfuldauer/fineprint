@@ -1615,7 +1615,7 @@ what the brief requires).
 
 ## #13 FP-012 — SRS §14.4 examples written in shorthand
 
-**Decision.** Three published SRS §14.4 examples use spellings the FP-011 wire contract rejects
+**Decision.** Three published SRS §14.4 examples use four spellings in all that the FP-011 wire contract rejects
 (decision "#12 FP-011 — SRS shorthand is not a wire form"), and are tested in adapted form:
 (1) the activated-ability example (SRS §14.4.2) writes the subtype as
 `{"textToken":"CREATURE_TYPE","value":"…"}`, which `WordRef` rejects (a rewritable word is a token
