@@ -125,6 +125,13 @@ cargo xtask cr index [--cache <dir>] [--root <dir>] [--out <file>]
                                      # parse the CR, scan citations, write docs/cr-citations.json
 cargo xtask cr check [--cache <dir>] [--root <dir>] [--index <file>]
                                      # fail on a cited rule missing from the CR, not indexed, or with changed text
+cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt
+                                     # regenerate crates/fineprint-dsl/data/vocab.json (RulesVocabulary, #15 FP-014)
+cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
+                                     # compare the committed vocab.json with regeneration (writes nothing)
+FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec_ingest_vocab
+                                     # the real-CR vocabulary test; with the variable set a missing
+                                     # cr-cache/rules.txt fails it (without it, the test is skipped)
 cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
                                                    # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
@@ -147,6 +154,21 @@ its file list from `git ls-files`, so new files must be `git add`ed to be checke
 success (one summary line on stdout), 1 violations (`path:line: message` per line on stderr),
 2 usage or input error.
 
+`fineprint-ingest vocab --cr <rules.txt> [--out <file>|-] [--check]` (#15 FP-014; details in
+`crates/fineprint-ingest/src/vocab/mod.rs`): generates the `RulesVocabulary` from the cached CR
+text. `--out` defaults to `crates/fineprint-dsl/data/vocab.json` relative to the current directory
+(run it from the repository root); `--out -` writes the JSON to stdout and the summary line to
+stderr. A file is written atomically (a temporary file next to it, then a rename). `--cr` and
+`--out` never take one of the options as their value (`--out --check` is a usage error; write
+`./--check` for such a file). `--check` writes nothing and compares bytes with the `--out` file;
+a mismatch names the first differing top-level member (never a value from the file) and says to
+rerun the same command without `--check`. A missing default `vocab.json` must be restored from
+git (`git checkout -- crates/fineprint-dsl/data/vocab.json`): `fineprint-dsl` embeds it, so
+nothing builds without it. Exit codes as for xtask: 0 success, 1 violations (check
+mismatch, missing committed file, keyword id collision), 2 usage or input error (unreadable or
+unparseable CR text, a missing required rule). Output is byte-identical for the same CR bytes
+whatever the line endings or BOM.
+
 CI format, lint and test on Linux, Windows and macOS is available now; see "CI" below.
 
 Lands later:
@@ -158,7 +180,8 @@ Lands later:
 - Replay and golden-hash verification: lands with #83 FP-081 and #106 FP-104.
 - Layer cached vs full-recompute differential: lands with #36 FP-035.
 - Benchmarks: lands with #120 FP-118. Fuzzer: lands with #119 FP-117.
-- Toolchain CLI `fineprint-ingest`: lands with #100 FP-098.
+- Toolchain CLI `fineprint-ingest`: the binary and its `vocab` subcommand land with #15 FP-014;
+  the card-database commands land with #100 FP-098.
 - C ABI header check (cbindgen): lands with #102 FP-100.
 - `dotnet test` for FinePrint.Core: lands with #103 FP-101.
 - `wasm-pack test` / wasm-bindgen + npm: lands with #104 FP-102.
@@ -190,7 +213,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
-| `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`; `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
+| `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed), then `cargo test --locked -p fineprint-ingest --test spec_ingest_vocab` with `FINEPRINT_REQUIRE_CR_CACHE=1` (step `env:`; the real-CR test fails instead of skipping when `cr-cache/rules.txt` is missing; also runs even if an earlier check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
 `fmt` and `clippy` run on Linux only: formatting and lints do not depend on the OS, and `test`
 builds and runs the whole workspace on all three systems (REQ-NFR-003). The five job names
@@ -299,7 +322,7 @@ the owning unit merges go through `contracts/CHANGE_REQUESTS.md` (R2). Blast rad
 | Canonical state hash (Merkle framework) | FP-009 (#10) |
 | Replay format `*.fpreplay` and header | FP-081 (#83) |
 | Card database artifact `*.fpdb` | FP-098 (#100) |
-| `RulesVocabulary` artifact | FP-014 (#15) |
+| `RulesVocabulary` artifact (see below) | FP-014 (#15) |
 | Override submission format and card support report | FP-084 (#86) |
 | Synthetic test-card library | FP-016 (#17) |
 | `.pzl` scenario format | FP-049 (#51) |
@@ -307,3 +330,13 @@ the owning unit merges go through `contracts/CHANGE_REQUESTS.md` (R2). Blast rad
 | `PendingChoiceRequest` taxonomy (choice protocol) | FP-027 (#28) |
 | Native-effect registry IDs (`id@version`) | FP-062 (#64) |
 | PRNG algorithm and seed derivation | FP-008 (#9) |
+
+**RulesVocabulary** (owner FP-014, #15; REQ-OBJ-001, REQ-SUB-001, REQ-DSL-014): the rules
+vocabulary the CR defines (card types, supertypes, subtypes by card type, keyword abilities and
+actions with their ids, counter kinds that carry rules, the CR 111.10 predefined tokens) as data.
+Schema and loader: `fineprint_dsl::vocab::RulesVocabulary` (`crates/fineprint-dsl/src/vocab/`,
+wire version `vocabularyVersion` 1). Committed file: `crates/fineprint-dsl/data/vocab.json`
+(RFC 8785 canonical JSON plus one trailing newline; names, ids, rule references and token
+characteristics only, no rules prose), embedded by `RulesVocabulary::bundled()`. Generator:
+`fineprint-ingest vocab` (`crates/fineprint-ingest/src/vocab/`). Regenerate after every CR
+baseline change; the `cr` workflow fails when the file and the regeneration differ.

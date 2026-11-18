@@ -1788,3 +1788,188 @@ that CI fetches the CR text. This is not legal advice.
 permission. Scrub every reference to the game and stop fetching the CR: rejected. The CR is the
 specification, the citation check needs the text, and removing the game's name would make the
 documents harder to use without changing the legal position.
+
+## #15 FP-014 — RulesVocabulary wire shape
+
+**Decision.** The wire shape is the brief's, unchanged in its member names: `vocabularyVersion`
+(1), `crEffectiveDate`, `cardTypes`, `supertypes`, `subtypeGroups` (`group`, `cardTypes`,
+`ruleRef`, `subtypes`), `keywordAbilities` / `keywordActions` (`id`, `name`, `ruleRef`),
+`counterKinds` (`kind`, `class`, `ruleRef`) and `predefinedTokens` (`letter`, `ruleRef`, `name`,
+`faces` with `name`, `colors`, `supertypes`, `cardTypes`, `subtypes`, `power`, `toughness`,
+`abilities`). Every list keeps CR text order (so the creature list starts with the two-word type
+the CR names first). Token `colors` are stored in white, blue, black, red, green order (a set, not
+a CR list). A group's `group` is the word the CR uses in "called ... types": for CR 205.3n that
+is `planar`, not the brief's example `plane`. The counter kind of CR 122.1a is the literal
+`+X/+Y` (class `POWER_TOUGHNESS`), standing for the whole `+X/+Y` / `-X/-Y` family the rule
+describes. Classes other than `KEYWORD` and `POWER_TOUGHNESS` are the keyword-id slug of the kind
+(`SHIELD`, `STUN`, `LOYALTY`, `POISON`, `DEFENSE`, `FINALITY`, `RAD`, `HONE`), so a new CR 122.1
+sub-rule needs no code change. `to_canonical_bytes` returns `Result<Vec<u8>, VocabError>` rather
+than `Vec<u8>`: a hand-built value can hold an integer outside the RFC 8785 safe range, and the
+function must not panic. `bundled()` returns `Result<&'static RulesVocabulary, VocabError>`,
+memoised in a `OnceLock` whose value depends only on the embedded bytes. The loader also checks
+cross-references (group and face card types are card types, face supertypes are supertypes, a
+face's subtypes belong to its card types), a calendar-valid date, and power and toughness both
+present or both null.
+**Rationale.** Field names are fixed by the brief. `planar` is what the text says and is derived
+structurally; mapping it to `plane` would need a hard-coded table. A slug class keeps counter
+classes data-driven. Returning `Result` keeps the no-panic rule for library code.
+**Alternatives.** A fixed class enum (rejected: a new counter rule would need an engine change);
+`group` derived from the card type (rejected: the spell group has no single card type);
+panicking `to_canonical_bytes` (rejected).
+
+## #15 FP-014 — Keyword id slug rule
+
+**Decision.** `id` = the heading name with apostrophes (`'`, U+2019, U+2018, U+02BC) removed,
+Latin-1 letters with diacritics folded to their base letters (`é` to `E`, `Æ` to `AE`, `ß` to
+`SS`), every other character that is not an ASCII letter or digit treated as a separator,
+separator runs collapsed to one `_`, leading and trailing separators dropped, letters
+upper-cased. `Double Strike` gives `DOUBLE_STRIKE`, `For Mirrodin!` gives `FOR_MIRRODIN`, and
+the heading `∞ (Infinity)` gives `INFINITY`. An empty result is an input error (exit 2); an id
+collision within 701, within 702 or between them is exit 1. A keyword is an unlettered
+`701.N` / `702.N` rule with N >= 2 whose text is heading-shaped (one line, at most 8 words and 64
+characters, no `.` at the end or `. ` inside); 701.1 and 702.1 are skipped as introductions, and
+any other prose-shaped rule in that position is an input error rather than a silently skipped or
+invented keyword. In the 2026-11-06 text only 701.1 and 702.1 are prose; 71 actions and 195
+abilities result, with no collision.
+**Rationale.** Matches the SRS macro ids (`FLYING`, `MENACE`, `VIGILANCE`, `TRAMPLE`) and keeps
+ids ASCII. Failing on unexpected prose keeps a CR layout change visible.
+**Alternatives.** Skipping prose headings (rejected: silent partial output); full Unicode
+transliteration (rejected: needs tables, and no heading needs it).
+
+## #15 FP-014 — Token abilities are CR 111.10 token characteristics (R5)
+
+**Decision.** Each token face's `abilities` lists, in order, the quoted ability texts of its
+CR 111.10 definition without the quotation marks (a trailing comma the quoting style puts inside
+the closing mark is dropped) and the unquoted keyword phrases the definition gives (for example
+`enchant creature`, `indestructible`). The framing sentence, cross-reference sentences ("See
+rule ...") and any other prose are not stored. These strings are committed in `vocab.json`.
+**Rationale.** PROCESS.md R5 allows "Rules vocabulary the CR itself defines (keywords, CR 111.10
+tokens, counter kinds, designations)" and SRS §1 item 1 allows "predefined token definitions from
+CR 111.10"; a token's abilities are part of its definition (SRS §10.1 quotes one). A test bounds
+every other string to 48 characters and allows rule numbers only in `ruleRef`.
+**Alternatives.** Storing ability ids only (rejected: there is no ability catalogue yet, and the
+engine needs the definition).
+
+## #15 FP-014 — Card types and supertypes are capitalised
+
+**Decision.** `cardTypes`, `supertypes` and the token faces' type lists store card types and
+supertypes with a leading capital (`Artifact`, `Legendary`); the CR lists them in lower case.
+Subtypes, keyword names and counter kinds keep the CR's exact spelling and Unicode (curly
+apostrophes, hyphens, `Urza’s`, `Time Lord`, `The Abyss`), not normalised.
+**Rationale.** SRS §4.1 spells them capitalised, and lookups are exact-match.
+**Alternatives.** Lower case as in the CR (rejected: every consumer would re-capitalise).
+
+## #15 FP-014 — Wiring edit and path grant
+
+**Decision.** Besides the owned `crates/fineprint-dsl/src/vocab/`,
+`crates/fineprint-ingest/src/vocab/` and `crates/fineprint-dsl/data/vocab.json`, the unit edits
+only what the brief grants: one `pub mod vocab;` line with its doc comment in each of
+`crates/fineprint-dsl/src/lib.rs` and `crates/fineprint-ingest/src/lib.rs`; the new binary
+`crates/fineprint-ingest/src/main.rs` (subcommand dispatch); `crates/fineprint-ingest/Cargo.toml`
+(`serde_json` from the workspace pins and a `[[bin]]` entry) and the resulting `Cargo.lock`
+entry; the two spec test files; `.github/workflows/cr.yml`; `docs/DEVELOPMENT.md`; this file.
+**Rationale.** As in "#14 FP-013 — Wiring edit": the modules must be declared to compile, and
+the generator needs a binary and a CI step.
+**Alternatives.** None that deliver the deliverables.
+
+## #15 FP-014 — Committed file location; generator in fineprint-ingest, not xtask
+
+**Decision.** The vocabulary is committed as `crates/fineprint-dsl/data/vocab.json` and embedded
+with `include_bytes!`, so the rules crate loads it with no runtime I/O. The generator lives in
+`fineprint-ingest` (`fineprint-ingest vocab`), not in xtask. Its default `--out` is that path
+relative to the current directory (every documented command runs from the repository root).
+**Rationale.** The generator must build the `RulesVocabulary` type and use the dsl canonical
+serialiser, so it depends on `fineprint-dsl`; `fineprint-ingest` already depends on dsl (and not
+on core, REQ-NFR-005), while xtask is standard-library only and depends on nothing. The CR text
+parser is therefore a second, independent parser that follows xtask's region rule (last
+`1. Game Concepts` line to last `Glossary` line) without depending on xtask.
+**Alternatives.** Generator in xtask (rejected: would pull serde and dsl into xtask); default
+`--out` from `git rev-parse` (rejected: needs git at run time for no gain).
+
+## #15 FP-014 — CI step in the non-required cr workflow
+
+**Decision.** `.github/workflows/cr.yml` gains the step `cargo run --locked -p fineprint-ingest
+-- vocab --cr cr-cache/rules.txt --check` after `cargo xtask cr check`, with
+`if: ${{ !cancelled() }}` so it reports even when the citation check fails, and path triggers for
+`crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**` and
+`crates/fineprint-ingest/src/vocab/**`. The workflow stays a non-required check. The CI test jobs
+do not fetch the CR: every mandatory test passes without the cache, and the one test that reads
+`cr-cache/rules.txt` returns early when it is absent (it is not `#[ignore]`d).
+**Rationale.** "#7 FP-006 — `cr.yml` is not a required check": the check depends on the network.
+**Alternatives.** A required job (rejected, same reason); committing the CR text (forbidden).
+
+## #15 FP-014 — CR text and SRS agree for this baseline
+
+**Decision.** No erratum. In the 2026-11-06 text the CR 122.1b keyword-counter list is exactly the
+15 kinds of SRS §6.1 (ward is not among them); shield, stun and finality counters are 122.1c,
+122.1d and 122.1h as SRS §10.2 says; CR 111.10 has letters a to x without l and o, with the
+names of SRS §10.1; card types and supertypes match SRS §4.1. No `docs/HUMAN_QUEUE.md` line.
+**Rationale.** Verified against the cached text and asserted by `spec_dsl_vocab.rs`.
+**Alternatives.** None needed.
+
+## #15 FP-014 — Citation index regenerated in this PR
+
+**Decision.** The Orchestrator ran `cargo xtask cr index` on this branch (triage T0) and commits
+the regenerated `docs/cr-citations.json`: 113 added lines, nothing removed. Before that, `cargo
+xtask cr check` reported 14 problems: the new code comments cite CR 122.1, 205.2a, 205.3g, 205.4a,
+701.1 and 702.1, and the index did not list them. The Implementer confirmed each of these rules
+exists in the cached 2026-11-06 text. After re-indexing, `cr check` passes (462 cited rules).
+**Rationale.** The check's own remedy is "re-verify the citation, then run `cargo xtask cr index`"
+(#7 FP-006). A unit that adds citations brings the index up to date in the same PR, so the `cr`
+workflow stays green. The file is generated, so this is a mechanical edit outside the unit's
+owned paths.
+**Alternatives.** A separate follow-up issue (rejected: until it merged, the `cr` workflow would
+fail on every pull request).
+
+## #15 FP-014 CR round 1 — double-faced token face order
+
+**Decision.** A CR 111.10 token whose framing description is exactly `double-faced token` needs
+exactly one `Its front face is ...` and one `Its back face is ...` sentence, in that order; the
+faces are emitted front first, back second. A back-face sentence before the front-face sentence
+is an input error (the generator does not reorder). A missing, repeated or unknown label (the
+CR uses the lower-case words `front` and `back`), and any face sentence in a token not declared
+double-faced, are input errors.
+**Rationale.** The current CR text lists the front face first, so rejecting the reversed order
+costs nothing today, keeps the generator simple and makes a changed CR shape visible to the
+maintainer instead of silently reinterpreting it (the generator's rule for unexpected text).
+**Alternatives.** Reordering reversed sentences (accepted input the CR has never used; a
+silent reinterpretation). Keeping the old unlabelled reading (a back-first text would make the
+back the front; CodeRabbit finding r4620683745).
+
+## #15 FP-014 CR round 1 — token ability grammar
+
+**Decision.** Every unquoted fragment of a token's `with ...` ability list (between `,` and
+`and` separators) must be a keyword ability phrase: compared case-insensitively, either a
+keyword-ability name from the generated CR 702 list alone, or that name followed by one space
+and one parameter: a card type from the generated card-type list (`enchant creature`), a number
+of at most six digits or `X`, or a mana cost made of one or more `{...}` symbols of ASCII letters,
+digits and `/`. Anything else is an input error naming the token rule and the fragment. Quoted
+abilities are kept exactly as before. Keyword actions (CR 701) are not accepted. The current CR
+produces two unquoted fragments, `indestructible` and `enchant creature`, which both validate;
+`vocab.json` is unchanged.
+**Rationale.** Unquoted text in a token definition is the CR's keyword shorthand; validating it
+against the keyword list the generator already builds keeps prose out of `vocab.json`
+(REQ-NFR-004) without hard-coding any keyword (the names come from the text). The parameter
+forms cover the shapes the CR uses for keyword parameters without accepting free text.
+**Alternatives.** Accepting only the exact fragments seen today (would break on the next CR
+with a new keyword token). Accepting any phrase that starts with a keyword name (lets prose
+through after a keyword). A full keyword-parameter grammar per keyword (too much for the
+generator; parameters such as `protection from ...` would need it, and the generator fails loudly
+if the CR starts to use one, so it can be extended then).
+
+## #15 FP-014 CR round 1 — CLI details
+
+**Decision.** (1) A missing or unreadable `--out` file in `--check` mode is "restore from git"
+when the path is exactly the default `crates/fineprint-dsl/data/vocab.json` (given or implied),
+and "regenerate it" otherwise. (2) The mismatch hint says "rerun the same command without
+--check (keeping --cr <path> --out <path>)" with the parsed paths, not a literal shell command
+(quoting differs between shells). (3) A file that does not load is described by a fixed category
+(`unparseable JSON`, `wrong shape`, or `field: <path>`); a shape error names no field, because
+serde's message can quote input names or values. (4) The atomic write's temporary file is
+`.<file name>.<pid>.tmp` beside the destination; it is removed after a failure only if this
+call created it. (5) Unit-test scratch directories live under `<workspace>/target/fp-vocab-tests`
+and integration-test ones under `CARGO_TARGET_TMPDIR`.
+**Rationale.** The brief's definitions of fixed for findings r4620683663, r4620683679,
+r4620683700, r4620683631 and r4620683732, applied with the smallest change.
+**Alternatives.** Printing a quoted literal command (shell-specific). Mapping serde shape
+errors to a field name by parsing serde's message (fragile, can echo input).

@@ -11,3 +11,8 @@ publish.workspace = true
 [dependencies]
 fineprint-base.workspace = true
 fineprint-dsl.workspace = true
+serde_json = { workspace = true }
+
+[[bin]]
+name = "fineprint-ingest"
+path = "src/main.rs"

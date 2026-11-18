@@ -37,3 +37,8 @@ pub mod ability;
 /// Effect instructions a resolving spell or ability runs, their durations and the
 /// `NATIVE_EFFECT` node (REQ-DSL-010, REQ-DSL-015, SRS §14.4.5, §14.8).
 pub mod effect;
+
+/// The `RulesVocabulary` contract (REQ-OBJ-001, REQ-SUB-001, REQ-DSL-014): card types,
+/// supertypes, subtypes, keywords, counter kinds and predefined tokens extracted from the CR,
+/// bundled from `data/vocab.json`.
+pub mod vocab;
