@@ -64,12 +64,18 @@ impl Pcg64Dxsm {
     /// A uniformly random `k`-element subset of `0..n`, as indices in ascending order, by
     /// selection sampling (REQ-CORE-001). Index `i` is chosen when
     /// `next_bounded(n - i) < k - chosen`; sampling stops as soon as `k` indices are chosen.
-    /// Returns `None` when `k > n`; `k == 0` returns an empty set without consuming a draw.
+    ///
+    /// Returns `None` when `k > n`. Returns `None` when the result vector for `k` indices cannot
+    /// be reserved (capacity overflow or allocation failure); the call never panics or aborts on
+    /// a capacity computation overflow. In every `None` case no draw is consumed. `k == 0`
+    /// returns an empty set without consuming a draw.
     pub fn random_subset(&mut self, n: usize, k: usize) -> Option<Vec<usize>> {
         if k > n {
             return None;
         }
-        let mut chosen = Vec::with_capacity(k);
+        // Reserve before the first draw so a failed reservation leaves the generator untouched.
+        let mut chosen: Vec<usize> = Vec::new();
+        chosen.try_reserve_exact(k).ok()?;
         for i in 0..n {
             let remaining_needed = k - chosen.len();
             if remaining_needed == 0 {

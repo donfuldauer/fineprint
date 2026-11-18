@@ -935,6 +935,11 @@ of randomness, in-house, with no new dependency (`fineprint-base` still depends 
 - `random_subset(n, k)` is selection sampling over `0..n` (choose `i` when
   `next_bounded(n - i) < k - chosen`), stopping as soon as `k` indices are chosen, and returns
   the indices in ascending order. `k > n` is `None` and `k == 0` is empty, both with no draw.
+  If the result vector cannot be reserved (`Vec::try_reserve_exact(k)` fails, which includes the
+  capacity overflow of `random_subset(usize::MAX, usize::MAX)`), the result is also `None` with
+  no draw: the reservation is made before the first draw, so the call never panics and the
+  generator is untouched. The public contract is therefore `None` when `k > n` or when `k`
+  indices cannot be reserved; a `Some` result is unchanged.
 - `from_raw(state, increment)` rejects an even increment (`None`) and validates nothing else.
 - `CanonicalEncode` appends 32 bytes: `state` little-endian (16), then `increment`
   little-endian (16); no tag, no length prefix.
@@ -948,7 +953,11 @@ Windows and macOS. Lemire's method is unbiased and needs only integer arithmetic
 from-the-end Fisher-Yates and ascending selection sampling are the textbook forms and make the
 draw count a simple function of the input sizes. An odd increment is the only structural
 invariant of a PCG stream, so it is the only check `from_raw` makes on untrusted saved state
-(R12). Little-endian fixed-width bytes follow the `CanonicalEncode` contract.
+(R12). Little-endian fixed-width bytes follow the `CanonicalEncode` contract. CodeRabbit
+(PR #155) found that `Vec::with_capacity(k)` panics for `k` whose byte size exceeds `isize::MAX`,
+which contradicts the module's non-panicking guarantee; a fallible reservation before any draw
+was chosen over dropping the up-front reservation, because it keeps the single-allocation
+behaviour for normal inputs and keeps draw consumption unchanged.
 
 **Alternatives.** The `rand_pcg`/`rand` crates (rejected: a dependency in the rules crate, and
 `rand_pcg` seeds with the cheap multiplier, which differs from NumPy; see
