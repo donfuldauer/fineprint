@@ -311,6 +311,18 @@ fn req_core_001_next_bounded_edges() {
     }
 }
 
+/// T5, REQ-CORE-001: `random_subset` returns `None` (no panic, no draw) when the result vector
+/// cannot be reserved because its byte size exceeds `isize::MAX`.
+#[test]
+fn req_core_001_random_subset_capacity_overflow_returns_none() {
+    let start = Pcg64Dxsm::from_u64_seed(9);
+    let mut rng = start.clone();
+    assert_eq!(rng.random_subset(usize::MAX, usize::MAX), None);
+    assert_eq!(rng.random_subset(usize::MAX, usize::MAX / 2), None);
+    assert_eq!(rng, start, "no draw is consumed when the reservation fails");
+    assert_eq!(rng.random_subset(5, 5), Some(vec![0, 1, 2, 3, 4]));
+}
+
 /// T5, REQ-CORE-001: random_subset, choose and shuffle edge cases.
 #[test]
 fn req_core_001_sampling_edge_cases() {
