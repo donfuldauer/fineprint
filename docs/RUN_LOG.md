@@ -72,3 +72,5 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 01-foundations | #13 (PR #162 review round 1) | Fixer | Sonnet 5.5 | 1 | done | cargo test -p fineprint-dsl green (lib 150); fmt, clippy, guard clean | triage T1: linear check_lock_in (BTreeSet), ShieldUses rejects 0 on both paths |
 | 01-foundations | #13 (PR #162 review round 1) | Fixer | Sonnet 5.5 | 1 | done | spec_dsl_ability 43 passed; props green | triage T1: from_str/from_slice cross-check; SRS shorthand rejection test |
 | 01-foundations | #13 (PR #162 review round 1) | Orchestrator | Opus 5.5 | 1 | done | docs only | triage T0: DECISIONS "SRS §14.4 examples written in shorthand" + P8 SRS-edit queue line; opaque depth-check scope wording |
+| 01-foundations | #13 (PR #162 review round 2) | Fixer | Haiku 5.5 | 1 | done | fmt clean; lock-in test passes; guard ok | triage T0: CR 613.6 citation on the lock-in regression test doc |
+| 01-foundations | #13 (PR #162 review round 2) | Orchestrator | Opus 5.5 | 1 | done | docs only | triage T0: acceptance-criterion amendment recorded on issue #13; example/spelling count reconciled in DECISIONS.md |
