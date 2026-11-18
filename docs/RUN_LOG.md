@@ -44,3 +44,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 01-foundations | #10 | Fixer (CodeRabbit 4608746460) | Opus 5.5 | 1 | done | fmt, clippy, test (278) clean; guard all ok; build --locked ok; fineprint-base coverage 99.59% | set_leaf depth bound 256, PathError::TooDeep; T2: additive public error variant in canonical-hash module, layout unchanged; no Fable (allowance unknown) |
 | 00-repository | Process: decisions replace queue lines | Implementer | Sonnet 5.5 | 1 | done | docs only | triage T1: owner-requested process change; #10 queue items resolved as decisions |
 | 00-repository | PR #157 r1 | Fixer | Sonnet 5.5 | 1 | done | docs only; fmt, guard all clean | triage T1: CodeRabbit round 1 on PR #157 (4 docs findings) |
+| 00-repository | PR #157 r2 | Fixer | Haiku 5.5 | 1 | done | docs only; guard ok | triage T0: CodeRabbit round 2 on PR #157 (docs-only round must verify every requirement) |
