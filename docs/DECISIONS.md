@@ -872,3 +872,46 @@ while their combined behaviour conflicts. The owner weighs this risk against the
 for now: it adds commits and a cleanup path for every claim). A single orchestrating session
 (`run-plan`) that alone selects work (still available: the race only exists when several sessions
 pick work independently).
+
+## CI — PR load
+
+**Context.** Every push to a pull-request branch ran ci.yml twice, once for `push` and once for
+`pull_request`. The concurrency group is keyed by ref, so neither run cancelled the other. Every
+PR also ran the full matrix, including PRs that change only Markdown or agent/skill text, and
+spikes.yml ran its five binding jobs on every push and PR.
+
+**Decision.**
+1. ci.yml and spikes.yml run on `push` to `main` only, plus `pull_request`. The PR run covers
+   the branch head.
+2. A `changes` job runs first. On a pull request whose changed files are only Markdown other than
+   `docs/SRS.md`, or files under `.claude/`, the `fmt`, `clippy` and `test` jobs report success
+   under their required names with every step skipped, and `coverage` is skipped. The skip is
+   per step because a job-level `if` on a matrix job reports a skipped check under the unexpanded
+   name, which never satisfies a required context. `docs/SRS.md` counts as code because the
+   xtask `cr` tests read it, and so does every non-Markdown file under `docs/` (for example
+   `docs/cr-citations.json`). Nothing compiled or tested includes another Markdown file. `guards`
+   and `req-coverage` always run. Every push to `main` runs everything.
+3. spikes.yml runs only when `spikes/bindings/**`, `rust-toolchain.toml` or the workflow itself
+   changes, and on `workflow_dispatch`. Its workspace is isolated, so nothing else can change its
+   result. Its jobs are not required checks.
+4. `fmt` and `clippy` run on `ubuntu-latest` only. Formatting is OS-independent. Lints differ
+   only for `cfg(target_os)` code, and `test` still compiles and runs the whole workspace on
+   Linux, Windows and macOS. The required checks become `fmt (ubuntu-latest)`,
+   `clippy (ubuntu-latest)` and the three `test` jobs.
+
+**Relation to the SRS.** REQ-NFR-003 requires CI to build, run the full test suite and replay
+the golden corpus on every listed platform. REQ-NFR-011 makes those jobs required checks on
+`main`.
+- `test` still does exactly that on all three systems for every pull request that changes
+  anything that can be built or tested, and on every push to `main`.
+- A documentation-only pull request cannot change a build or test result, so skipping the steps
+  is an interpretation of "every change", not a weakening of the gate. The repository owner
+  confirmed it on 2026-11-18 and removed the Windows and macOS `fmt`/`clippy` checks from the
+  ruleset.
+- Dropping Windows and macOS `fmt`/`clippy` removes no build or test from any platform.
+
+**Residual risk.**
+- A lint that fires only under a Windows or macOS `cfg` is no longer caught in CI. Today the
+  workspace has no such code.
+- If a future test reads another Markdown file, the docs-only classification must be widened in
+  the `changes` job.

@@ -9,7 +9,9 @@
 #
 # Everything runs from the isolated spike workspace spikes/bindings (own [workspace] and
 # Cargo.lock); nothing here touches the root workspace gates. Job names are distinct from the
-# nine required checks in ci.yml, so branch protection is unaffected.
+# required checks in ci.yml, so branch protection is unaffected. Because nothing outside the
+# paths below can change its result, it runs only when they change (pushes to main and pull
+# requests), plus on demand (docs/DECISIONS.md "CI — PR load").
 #
 # Actions: first-party only, pinned to exact tags: actions/checkout v4.2.2, actions/cache v4.2.0,
 # actions/setup-dotnet v4.3.1, actions/setup-node v4.4.0, actions/upload-artifact v4.6.2,
@@ -18,7 +20,16 @@ name: Spikes
 
 on:
   push:
+    branches: [main]
+    paths:
+      - "spikes/bindings/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/spikes.yml"
   pull_request:
+    paths:
+      - "spikes/bindings/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/spikes.yml"
   workflow_dispatch:
 
 permissions:
