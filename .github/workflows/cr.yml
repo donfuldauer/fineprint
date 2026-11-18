@@ -3,7 +3,10 @@
 # https://mozilla.org/MPL/2.0/.
 
 # CR citation check (REQ-DOC-001, REQ-NFR-007): fetches the official Comprehensive Rules text
-# into the git-ignored cr-cache/ and compares every citation with docs/cr-citations.json.
+# into the git-ignored cr-cache/ and compares every citation with docs/cr-citations.json, then
+# checks that crates/fineprint-dsl/data/vocab.json equals its regeneration from that text
+# (`fineprint-ingest vocab --check`, #15 FP-014) and runs the real-CR vocabulary test with
+# FINEPRINT_REQUIRE_CR_CACHE=1, so a missing cache fails it instead of skipping it.
 # This job is NOT a required status check: it depends on the network and on Wizards of the
 # Coast's site. See docs/DEVELOPMENT.md "CI".
 # Third-party actions: actions/checkout and actions/cache only, both first-party,
@@ -16,6 +19,9 @@ on:
       - docs/SRS.md
       - docs/cr-citations.json
       - xtask/src/cr/**
+      - crates/fineprint-dsl/data/vocab.json
+      - crates/fineprint-dsl/src/vocab/**
+      - crates/fineprint-ingest/src/vocab/**
       - "**/*.rs"
       - "**/*.cs"
       - "**/*.c"
@@ -72,3 +78,14 @@ jobs:
         run: cargo xtask cr fetch --force
       - name: Check citations against the verified baseline
         run: cargo xtask cr check
+      - name: Check the committed RulesVocabulary matches regeneration (FP-014)
+        # runs even when the citation check fails, so both results are reported
+        if: ${{ !cancelled() }}
+        run: cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
+      - name: Real-CR vocabulary tests with the cache required (FP-014)
+        # FINEPRINT_REQUIRE_CR_CACHE=1 makes the real-CR test fail when cr-cache/rules.txt is
+        # missing instead of skipping it; without the variable it is skipped (CI test jobs)
+        if: ${{ !cancelled() }}
+        env:
+          FINEPRINT_REQUIRE_CR_CACHE: "1"
+        run: cargo test --locked -p fineprint-ingest --test spec_ingest_vocab
