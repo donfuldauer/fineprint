@@ -798,3 +798,428 @@ fn req_dsl_001_random_bytes_never_panic() {
         }
     }
 }
+
+// ---- Review round 1: strict enums, no explicit nulls, lossless loader, depth, normalising ----
+
+/// Generic strictness check: only the declared strings decode, from a Value and from bytes.
+fn check_enum_strict<T>(all: &[T], as_str: fn(T) -> &'static str)
+where
+    T: Copy + PartialEq + fmt::Debug + serde::de::DeserializeOwned,
+{
+    for &v in all {
+        let text = as_str(v);
+        assert_eq!(serde_json::from_value::<T>(json!(text)).expect("value"), v);
+        let quoted = serde_json::to_string(text).expect("quote");
+        assert_eq!(serde_json::from_str::<T>(&quoted).expect("str"), v);
+        let mut singleton = serde_json::Map::new();
+        singleton.insert(text.to_owned(), Value::Null);
+        for bad in [
+            Value::Object(singleton),
+            json!([text]),
+            json!(1),
+            Value::Null,
+            json!(text.to_lowercase()),
+            json!(format!("{text} ")),
+        ] {
+            assert!(serde_json::from_value::<T>(bad.clone()).is_err(), "{bad}");
+            assert!(
+                serde_json::from_slice::<T>(&json_bytes(&bad)).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}
+
+/// REQ-DSL-001, REQ-DSL-002: the string enums decode only from their declared strings, never
+/// from a singleton object, an array, a number, null or a near-miss string.
+#[test]
+fn req_dsl_001_string_enums_strict() {
+    check_enum_strict(&LayoutBehavior::ALL, LayoutBehavior::as_str);
+    check_enum_strict(&FaceKind::ALL, FaceKind::as_str);
+    check_enum_strict(&SupportStatus::ALL, SupportStatus::as_str);
+    check_enum_strict(&Origin::ALL, Origin::as_str);
+    check_enum_strict(&Legality::ALL, Legality::as_str);
+    let err = serde_json::from_value::<Origin>(json!("OTHER")).expect_err("unknown");
+    assert!(err.to_string().contains("CLIENT_OVERRIDE"), "{err}");
+    let err = serde_json::from_value::<Origin>(json!(3)).expect_err("number");
+    assert!(err.to_string().contains("Origin"), "{err}");
+}
+
+/// A definition with every optional member present (synthetic, R5).
+fn full_definition() -> CardDefinitionDSL {
+    let mut def = definition();
+    def.source.override_source = Some("test.author".into());
+    def.source.verified_by = Some(vec!["0".repeat(64)]);
+    def.known_gaps = Some(vec!["gap".into()]);
+    def.meld_partner = Some("test.partner".into());
+    def.commander_eligibility = Some(CommanderEligibilityDSL {
+        eligible: true,
+        partner_abilities: vec![PartnerAbilityDSL(json!({"p": 1}))],
+    });
+    def.related_tokens = Some(vec!["test.token".into()]);
+    let f = &mut def.faces[0];
+    f.color_indicator = Some(ColorBitmask::GREEN);
+    f.loyalty = Some(3);
+    f.defense = Some(4);
+    f.hand_modifier = Some(-1);
+    f.life_modifier = Some(5);
+    def
+}
+
+/// REQ-OBJ-001, REQ-DSL-002: an explicit `null` is not an omitted optional member: each
+/// non-nullable optional member given as `null` is an error, each omitted one is `None`.
+#[test]
+fn req_obj_001_optional_members_reject_null() {
+    let full = serde_json::to_value(full_definition()).expect("ser");
+    let minimal = serde_json::to_value({
+        let mut d = definition();
+        d.source.parser_version = None;
+        d.faces[0].mana_cost = None;
+        d
+    })
+    .expect("ser");
+    let decoded: CardDefinitionDSL = serde_json::from_value(minimal.clone()).expect("minimal");
+    assert_eq!(decoded.source.parser_version, None);
+    assert_eq!(decoded.faces[0].mana_cost, None);
+    assert_eq!(decoded.known_gaps, None);
+    assert_eq!(decoded.faces[0].loyalty, None);
+    let top = [
+        "knownGaps",
+        "meldPartner",
+        "commanderEligibility",
+        "relatedTokens",
+    ];
+    let source = ["parserVersion", "overrideSource", "verifiedBy"];
+    let face = [
+        "manaCost",
+        "colorIndicator",
+        "loyalty",
+        "defense",
+        "handModifier",
+        "lifeModifier",
+    ];
+    for (member, slot) in top
+        .iter()
+        .map(|m| (*m, 0))
+        .chain(source.iter().map(|m| (*m, 1)))
+        .chain(face.iter().map(|m| (*m, 2)))
+    {
+        for base in [&full, &minimal] {
+            let mut v = base.clone();
+            let target = match slot {
+                0 => &mut v,
+                1 => &mut v["source"],
+                _ => &mut v["faces"][0],
+            };
+            target[member] = Value::Null;
+            assert!(
+                serde_json::from_value::<CardDefinitionDSL>(v).is_err(),
+                "{member}: null"
+            );
+        }
+        let mut omitted = full.clone();
+        let target = match slot {
+            0 => &mut omitted,
+            1 => &mut omitted["source"],
+            _ => &mut omitted["faces"][0],
+        };
+        target.as_object_mut().expect("obj").remove(member);
+        assert!(
+            serde_json::from_value::<CardDefinitionDSL>(omitted).is_ok(),
+            "{member}: omitted"
+        );
+    }
+    // `"{0}"` is a cost; `""` is an error.
+    let mut zero = minimal.clone();
+    zero["faces"][0]["manaCost"] = json!("{0}");
+    let zero: CardDefinitionDSL = serde_json::from_value(zero).expect("zero");
+    assert_eq!(
+        zero.faces[0].mana_cost.as_ref().map(ManaCostDSL::symbols),
+        Some(&[ManaSymbol::Generic(0)][..])
+    );
+    let mut empty = minimal;
+    empty["faces"][0]["manaCost"] = json!("");
+    assert!(serde_json::from_value::<CardDefinitionDSL>(empty).is_err());
+    // power and toughness keep their documented `null` behaviour.
+    let mut null_power = full;
+    null_power["faces"][0]["power"] = Value::Null;
+    let decoded: CardDefinitionDSL = serde_json::from_value(null_power).expect("power null");
+    assert_eq!(
+        decoded.faces[0].power,
+        Some(ValueExpressionAST(Value::Null))
+    );
+}
+
+/// `object` as an array of its members' values in `order` (absent members become null).
+fn positional(object: &Value, order: &[&str]) -> Value {
+    Value::Array(
+        order
+            .iter()
+            .map(|k| object.get(*k).cloned().unwrap_or(Value::Null))
+            .collect(),
+    )
+}
+
+/// Sets `definitionHash` of `v` to the hash of its own checked content, so only the schema
+/// checks can reject it.
+fn rehash(v: &mut Value) {
+    let mut without = v.clone();
+    without
+        .as_object_mut()
+        .expect("obj")
+        .remove("definitionHash");
+    let bytes = canonicalize(&json_bytes(&without)).expect("jcs");
+    v["definitionHash"] = json!(fineprint_base::hash::sha256(&bytes).to_hex());
+}
+
+/// Asserts that `from_json` rejects `v` with `Schema`, both with its current hash and with a
+/// hash recomputed over its own content.
+fn assert_schema_both_ways(mut v: Value, what: &str) {
+    let result = CardDefinitionDSL::from_json(&json_bytes(&v));
+    assert!(
+        matches!(result, Err(CardDefinitionError::Schema(_))),
+        "{what} (original hash): {result:?}"
+    );
+    rehash(&mut v);
+    let result = CardDefinitionDSL::from_json(&json_bytes(&v));
+    assert!(
+        matches!(result, Err(CardDefinitionError::Schema(_))),
+        "{what} (recomputed hash): {result:?}"
+    );
+}
+
+/// REQ-DSL-001, REQ-DSL-002, REQ-NFR-006: the loader accepts only lossless decodes: null
+/// members, positional arrays and singleton-object enums are Schema errors, whatever the hash.
+#[test]
+fn req_dsl_001_from_json_lossless() {
+    let full = full_definition().seal().expect("seal");
+    let good = serde_json::to_value(&full).expect("ser");
+    assert_eq!(
+        CardDefinitionDSL::from_json(&json_bytes(&good)),
+        Ok(full.clone())
+    );
+
+    // A null manaCost added to a sealed face without a cost does not reuse its digest.
+    let mut no_cost = definition();
+    no_cost.faces[0].mana_cost = None;
+    let no_cost = no_cost.seal().expect("seal");
+    let mut with_null = serde_json::to_value(&no_cost).expect("ser");
+    with_null["faces"][0]["manaCost"] = Value::Null;
+    assert!(matches!(
+        CardDefinitionDSL::from_json(&json_bytes(&with_null)),
+        Err(CardDefinitionError::Schema(_))
+    ));
+    let mut loyalty_null = good.clone();
+    loyalty_null["faces"][0]["loyalty"] = Value::Null;
+    assert_schema_both_ways(loyalty_null, "loyalty null");
+
+    // Positional arrays where an object is required.
+    let mut source = good.clone();
+    source["source"] = positional(
+        &good["source"],
+        &[
+            "oracleTextHash",
+            "origin",
+            "parserVersion",
+            "overrideSource",
+            "verifiedBy",
+            "rulesBaseline",
+        ],
+    );
+    assert!(serde_json::from_value::<CardDefinitionDSL>(source.clone()).is_ok());
+    assert_schema_both_ways(source, "positional source");
+    let mut face = good.clone();
+    face["faces"][0] = positional(
+        &good["faces"][0],
+        &[
+            "faceKind",
+            "name",
+            "manaCost",
+            "colorIndicator",
+            "supertypes",
+            "cardTypes",
+            "subtypes",
+            "power",
+            "toughness",
+            "loyalty",
+            "defense",
+            "handModifier",
+            "lifeModifier",
+            "text",
+            "abilities",
+        ],
+    );
+    assert!(serde_json::from_value::<CardDefinitionDSL>(face.clone()).is_ok());
+    assert_schema_both_ways(face, "positional face");
+    let mut commander = good.clone();
+    commander["commanderEligibility"] = positional(
+        &good["commanderEligibility"],
+        &["eligible", "partnerAbilities"],
+    );
+    assert!(serde_json::from_value::<CardDefinitionDSL>(commander.clone()).is_ok());
+    assert_schema_both_ways(commander, "positional commanderEligibility");
+
+    // A singleton-object enum.
+    let mut layout = good.clone();
+    layout["layout"] = json!({"NORMAL": null});
+    assert_schema_both_ways(layout, "singleton layout");
+
+    // Omitted manaCost and "{0}" still load (and keep distinct hashes).
+    let zero = {
+        let mut d = definition();
+        d.faces[0].mana_cost = Some(ManaCostDSL::parse("{0}").expect("zero"));
+        d.seal().expect("seal")
+    };
+    for def in [&no_cost, &zero] {
+        let bytes = def.to_canonical_json().expect("json");
+        assert_eq!(CardDefinitionDSL::from_json(&bytes).as_ref(), Ok(def));
+    }
+
+    // Whitespace and member order still load with the same value and hash.
+    let pretty = serde_json::to_vec_pretty(&full).expect("pretty");
+    let loaded = CardDefinitionDSL::from_json(&pretty).expect("pretty");
+    assert_eq!(loaded, full);
+    assert_eq!(loaded.compute_hash().expect("hash"), full.definition_hash);
+
+    // Tampered and uppercase hashes are still HashMismatch with the computed value.
+    let mut upper = good.clone();
+    upper["definitionHash"] = json!(full.definition_hash.to_uppercase());
+    assert_eq!(
+        CardDefinitionDSL::from_json(&json_bytes(&upper)),
+        Err(CardDefinitionError::HashMismatch {
+            declared: full.definition_hash.to_uppercase(),
+            computed: full.definition_hash.clone(),
+        })
+    );
+}
+
+/// REQ-DSL-001, REQ-NFR-006: sealing normalises placeholder numbers, so a sealed definition
+/// holding `-0.0` or `1.0` loads back equal, and `1.0` and `1` load the same.
+#[test]
+fn req_dsl_001_seal_normalises_numbers() {
+    for spelling in ["-0.0", "1.0", "1e0", "2.5"] {
+        let mut def = definition();
+        def.faces[0].power = Some(ValueExpressionAST(
+            serde_json::from_str::<Value>(spelling).expect("number"),
+        ));
+        def.faces[0].abilities = vec![AbilityAST(
+            serde_json::from_str(&format!("[{spelling}, {{\"n\": {spelling}}}]")).expect("ab"),
+        )];
+        let hash_before = def.compute_hash().expect("hash");
+        let bytes_before = def.to_canonical_json().expect("json");
+        let sealed = def.seal().expect("seal");
+        assert_eq!(sealed.definition_hash, hash_before, "{spelling}");
+        let mut unsealed_bytes = sealed.clone();
+        unsealed_bytes.definition_hash = String::new();
+        assert_eq!(
+            unsealed_bytes.to_canonical_json().expect("json"),
+            bytes_before
+        );
+        let exported = sealed.to_canonical_json().expect("json");
+        assert_eq!(
+            CardDefinitionDSL::from_json(&exported).as_ref(),
+            Ok(&sealed),
+            "{spelling}"
+        );
+    }
+    let mut one = definition();
+    one.faces[0].power = Some(ValueExpressionAST(json!(1)));
+    let one = one.seal().expect("seal");
+    let text = String::from_utf8(one.to_canonical_json().expect("json")).expect("utf8");
+    assert!(text.contains("\"power\":1,"), "{text}");
+    let spelled = text.replace("\"power\":1,", "\"power\":1.0,");
+    assert_eq!(
+        CardDefinitionDSL::from_json(spelled.as_bytes()),
+        CardDefinitionDSL::from_json(text.as_bytes())
+    );
+    assert_eq!(CardDefinitionDSL::from_json(spelled.as_bytes()), Ok(one));
+}
+
+/// `depth` nested arrays around `1`, built iteratively.
+fn nested(depth: usize) -> Value {
+    let mut v = json!(1);
+    for _ in 0..depth {
+        v = Value::Array(vec![v]);
+    }
+    v
+}
+
+/// REQ-DSL-001, REQ-NFR-006: one depth budget for sealing, export, hashing and loading. The
+/// definition object, `faces`, a face and `abilities` take four levels.
+#[test]
+fn req_dsl_001_definition_depth_budget() {
+    use crate::canonical::MAX_DEPTH;
+    let mut deepest = definition();
+    deepest.faces[0].abilities = vec![AbilityAST(nested(MAX_DEPTH - 4))];
+    let sealed = deepest.seal().expect("deepest allowed seals");
+    let exported = sealed.to_canonical_json().expect("export");
+    assert_eq!(CardDefinitionDSL::from_json(&exported), Ok(sealed));
+
+    let too_deep = CanonicalError::Serialize(format!("nesting depth exceeds {MAX_DEPTH}"));
+    for depth in [MAX_DEPTH - 3, 130] {
+        let mut deeper = definition();
+        deeper.faces[0].abilities = vec![AbilityAST(nested(depth))];
+        assert_eq!(deeper.clone().seal(), Err(too_deep.clone()));
+        assert_eq!(deeper.to_canonical_json(), Err(too_deep.clone()));
+        assert_eq!(deeper.compute_hash(), Err(too_deep.clone()));
+    }
+}
+
+/// REQ-DSL-001, REQ-NFR-006: a noncharacter in a definition cannot be sealed or
+/// exported, and a noncharacter in the input is a Canonical error.
+#[test]
+fn req_nfr_006_definition_noncharacter() {
+    let mut def = definition();
+    def.faces[0].name = "test.\u{FFFE}".into();
+    assert!(matches!(
+        def.clone().seal(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    let text = String::from_utf8(sealed().to_canonical_json().expect("json"))
+        .expect("utf8")
+        .replace("\"test.flier_2_2\"", "\"test.\\ufdd0\"");
+    assert!(matches!(
+        CardDefinitionDSL::from_json(text.as_bytes()),
+        Err(CardDefinitionError::Canonical(CanonicalError::Syntax(_)))
+    ));
+}
+
+/// REQ-DSL-001, R12: random structural mutations of valid definitions (null members, positional
+/// arrays, wrapped enums, deep nesting, noncharacters) never panic and are never accepted with
+/// a different value than their canonical decode.
+#[test]
+fn req_dsl_001_random_review_mutations_never_panic() {
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x0dd1_0000_0003);
+    for _ in 0..300 {
+        let def = random_definition(&mut rng).seal().expect("seal");
+        let mut v = serde_json::to_value(&def).expect("ser");
+        let pick = |rng: &mut Pcg64Dxsm, n: usize| (rng.next_u64() % n as u64) as usize;
+        let keys: Vec<String> = v.as_object().expect("obj").keys().cloned().collect();
+        let key = keys[pick(&mut rng, keys.len())].clone();
+        match pick(&mut rng, 5) {
+            0 => v[&key] = Value::Null,
+            1 => {
+                if let Value::Object(m) = &v[&key] {
+                    v[&key] = Value::Array(m.values().cloned().collect());
+                }
+            }
+            2 => v[&key] = json!({ "x": v[&key].clone() }),
+            3 => v["faces"][0]["abilities"] = json!([nested(pick(&mut rng, 140))]),
+            _ => v[&key] = json!("\u{FDD0}"),
+        }
+        if pick(&mut rng, 2) == 1 {
+            let mut without = v.clone();
+            without
+                .as_object_mut()
+                .expect("obj")
+                .remove("definitionHash");
+            if let Ok(bytes) = canonicalize(&json_bytes(&without)) {
+                v["definitionHash"] = json!(fineprint_base::hash::sha256(&bytes).to_hex());
+            }
+        }
+        if let Ok(loaded) = CardDefinitionDSL::from_json(&json_bytes(&v)) {
+            let again = loaded.to_canonical_json().expect("export");
+            assert_eq!(CardDefinitionDSL::from_json(&again), Ok(loaded));
+        }
+    }
+}

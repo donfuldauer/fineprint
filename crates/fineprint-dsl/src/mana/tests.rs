@@ -324,3 +324,112 @@ fn req_obj_001_random_strings_never_panic() {
     }
     assert!(accepted > 0);
 }
+
+/// REQ-OBJ-001: `ManaCostDSL::new` applies the parser's rules and reports the first invalid
+/// symbol as `UnknownSymbol` with its offset in the canonical text.
+#[test]
+fn req_obj_001_new_validates_symbols() {
+    use Color::*;
+    for bad in [
+        ManaSymbol::GenericHybrid(0, White),
+        ManaSymbol::Generic(MAX_GENERIC + 1),
+        ManaSymbol::GenericHybrid(MAX_GENERIC + 1, Blue),
+        ManaSymbol::Hybrid(Red, Red),
+        ManaSymbol::HybridPhyrexian(Green, Green),
+    ] {
+        assert!(!bad.is_valid(), "{bad}");
+        assert_eq!(
+            ManaCostDSL::new(vec![bad]),
+            Err(ManaParseError::UnknownSymbol {
+                offset: 0,
+                symbol: bad.to_string()
+            })
+        );
+    }
+    assert_eq!(
+        ManaCostDSL::new(vec![
+            ManaSymbol::Generic(2),
+            ManaSymbol::GenericHybrid(0, White)
+        ]),
+        Err(ManaParseError::UnknownSymbol {
+            offset: 3,
+            symbol: "{0/W}".into()
+        })
+    );
+    assert_eq!(
+        ManaCostDSL::new(vec![
+            ManaSymbol::Colored(Blue),
+            ManaSymbol::Hybrid(White, Blue),
+            ManaSymbol::Hybrid(Black, Black),
+            ManaSymbol::Generic(MAX_GENERIC + 1),
+        ]),
+        Err(ManaParseError::UnknownSymbol {
+            offset: 8,
+            symbol: "{B/B}".into()
+        })
+    );
+    assert_eq!(ManaCostDSL::new(Vec::new()), Err(ManaParseError::Empty));
+    for good in [
+        ManaSymbol::Generic(0),
+        ManaSymbol::GenericHybrid(1, White),
+        ManaSymbol::Generic(MAX_GENERIC),
+        ManaSymbol::GenericHybrid(MAX_GENERIC, Green),
+    ] {
+        let cost = ManaCostDSL::new(vec![good]).expect("valid");
+        let text = cost.to_string();
+        assert_eq!(ManaCostDSL::parse(&text), Ok(cost.clone()), "{text}");
+        let json = serde_json::to_value(&cost).expect("ser");
+        assert_eq!(
+            serde_json::from_value::<ManaCostDSL>(json).expect("de"),
+            cost
+        );
+    }
+}
+
+/// REQ-OBJ-001: the parser and the constructor cannot disagree: for a spread of symbols,
+/// parsing the printed symbol succeeds exactly when `new` accepts it, with the same symbol.
+#[test]
+fn req_obj_001_new_agrees_with_parser() {
+    let amounts = [
+        0u32,
+        1,
+        2,
+        9,
+        10,
+        999_999,
+        MAX_GENERIC,
+        MAX_GENERIC + 1,
+        u32::MAX,
+    ];
+    let mut symbols = vec![
+        ManaSymbol::Colorless,
+        ManaSymbol::Snow,
+        ManaSymbol::Variable(Variable::X),
+    ];
+    for &n in &amounts {
+        symbols.push(ManaSymbol::Generic(n));
+        for c in Color::ALL {
+            symbols.push(ManaSymbol::GenericHybrid(n, c));
+        }
+    }
+    for a in Color::ALL {
+        symbols.push(ManaSymbol::Colored(a));
+        symbols.push(ManaSymbol::Phyrexian(a));
+        for b in Color::ALL {
+            symbols.push(ManaSymbol::Hybrid(a, b));
+            symbols.push(ManaSymbol::HybridPhyrexian(a, b));
+        }
+    }
+    let mut valid = 0;
+    for symbol in symbols {
+        let parsed = ManaSymbol::parse(&symbol.to_string());
+        let built = ManaCostDSL::new(vec![symbol]);
+        assert_eq!(parsed.is_ok(), built.is_ok(), "{symbol}");
+        assert_eq!(parsed.is_ok(), symbol.is_valid(), "{symbol}");
+        if let Ok(p) = parsed {
+            valid += 1;
+            assert_eq!(p, symbol);
+        }
+    }
+    assert!(valid > 0);
+}
