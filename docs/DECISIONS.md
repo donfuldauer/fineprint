@@ -1635,3 +1635,131 @@ are illustrative JSON, and the SRS text around them (§14.5) is the normative ru
 **Alternatives.** Accept the shorthand as aliases in the decoder (rejected: two spellings per
 value, and a change to the FP-011 contract owned by #12); leave the examples untested
 (rejected: the acceptance criterion would have no evidence).
+
+## #14 FP-013 — Spec-test readings of the effect wire contract
+
+**Decision.** The independent spec tests (`crates/fineprint-dsl/tests/spec_dsl_effect*.rs`) read
+the FP-013 brief as follows, and assert only these readings. (1) "Wrong member type" uses values
+of a different JSON type from the valid one (a number, a bool, an array, an object) and, for number
+and bool members, the same value written as a string; arbitrary strings are not used because STR
+members, VAL (`"X"`) and SET_DESIGNATION `value` accept strings. (2) `PlayerSelectorAST` has
+no `EACH_OPPONENT` group: the brief's "EACH_OPPONENT" is the reference `{"ref":"EACH_OPPONENT"}`.
+(3) The A8 enums' `ALL` is iterated by reference and only `as_str`, the JSON form and the order
+are asserted; the return type of `from_wire` is not fixed by the brief and is not tested.
+(4) `NativeEffectAST` decoded standalone is tested only with `"op":"NATIVE_EFFECT"` present; whether
+a standalone document without `op` is rejected is not stated and is not tested. (5) A `-0`
+spelling is checked only through `from_str`/`from_slice`, since a `serde_json::Value` cannot
+carry it faithfully; `1.0`, `1e2` and unsafe integers are checked through all three entry
+points. (6) The nesting budget counts open containers like the FP-012 tests: a document of
+exactly 127 decodes, 128 is rejected. The at-budget test lives in its own test binary
+(`spec_dsl_effect_depth.rs`) so a stack overflow cannot hide the other results. (7) The
+Serialize re-checks of CHOOSE_MODE also cover max > mode count, duplicate and empty mode ids,
+empty mode effect and empty mode targets, as value-level invariants under A2. (8) No 613.6
+`sameAsLayer` value is used in CREATE_CONTINUOUS_EFFECT, as the brief excludes that check.
+REMEMBER's Rust shape and `RememberSource` are tested through JSON only.
+**Rationale.** Each is the narrowest reading the brief supports (R10, and the FP-012 decision
+"Spec-test readings of the ability wire contract").
+**Alternatives.** Assert the unstated points: standalone NATIVE_EFFECT without `op`, the
+`from_wire` signature, the REMEMBER field layout (rejected: the brief does not fix them).
+
+## #14 FP-013 — Wire catalogue as implemented
+
+**Decision.** `fineprint_dsl::effect::Instruction` implements the 72-op FP-013 catalogue exactly as
+the brief's section C lists it, in that order (`Instruction::NAMES`). Where SRS §14.4.5 names an op
+without members or with `…`, the members are the brief's: e.g. `PREVENT{duration, source?,
+recipients?, amount?, combatOnly?}`, `SET_DESIGNATION{kind, value, to?}`, `FIGHT{first, second}`,
+`BITE{source, target}`, `VOTE{voters, choice, store}`. Further readings: `ifActionTaken`
+(REFLEXIVE_TRIGGER, 603.12) is a non-empty instruction list, not a predicate; REMEMBER has a
+required `into` (`MEMORY` | `LINKED`) and exactly one of `value`/`objects`; `Position` is
+`TOP` | `BOTTOM` only; `modifiers` and `except` are `Option<BTreeMap<String, Value>>` (non-empty
+opaque objects); CHOOSE_MODE `min`/`max` are `u32` with `min <= max <= modes.len()` (so `0,0` is
+legal). Standalone JSON of the helper types: `TokenSource` is `{"tokenDef":…}` or
+`{"inline":{…}}`, `RememberSource` is `{"value":…}` or `{"objects":…}` (exactly one member), and
+`DesignationValue` is a JSON boolean or a non-empty string. `Instruction::locks_affected_set()`
+returns `true` for CREATE_CONTINUOUS_EFFECT with `lockAffectedSet` absent or `true` (611.2c),
+`false` when it is `false`, and `false` for every other op (they create no continuous effect).
+Opaque values are checked with the container holding them at depth 1 (a `params` member value
+starts at depth 2), the same counting as the ability module.
+**Rationale.** These are the narrowest readings consistent with the brief and SRS §14.4.5; the
+standalone forms of the helper types are the flat members they contribute to their instruction,
+so one spelling exists per value.
+**Alternatives.** Type `ifActionTaken` as a predicate (rejected: the brief fixes INSTRS); let
+`locks_affected_set` return `Option<bool>` (rejected: the brief fixes `-> bool`); make the helper
+types unit-less newtypes without a standalone JSON form (rejected: section F requires
+Serialize/Deserialize on every type).
+
+## #14 FP-013 — Ability placeholder stays
+
+**Decision.** `ability::EffectInstructionAST` is not replaced in this unit; the real instruction
+type is `effect::Instruction`. Swapping the placeholder into `SpellAbilityAST`,
+`ActivatedAbilityAST`, `TriggeredAbilityAST`, `ModeAST` and the replacement ops is follow-up work
+(together with #159).
+**Rationale.** The swap edits `src/ability/` (outside this unit's owned paths) and would break the
+#13 spec tests, which accept free-form `op` names in effect lists.
+**Alternatives.** Swap now (rejected: R1 owned paths, and it breaks merged #13 spec tests).
+
+## #14 FP-013 — Wiring edit
+
+**Decision.** The only edit outside `crates/fineprint-dsl/src/effect/` is the single
+`pub mod effect;` line with its `///` doc comment in `crates/fineprint-dsl/src/lib.rs`, after the
+`ability` module; there are no re-exports.
+**Rationale.** Same pattern as "#13 FP-012 — Wiring edit"; the module must be declared to compile.
+**Grant.** The work-classifier's Implementer brief for #14 lists `crates/fineprint-dsl/src/lib.rs`
+(this one line only) under OWNED PATHS. Issue #14's "Owned paths" section now names it too: the
+maintainer approved that amendment during PR #163 review.
+**Alternatives.** Re-export the types at the crate root (rejected: not asked for, widens the diff).
+
+## #14 FP-013 — Test-path ownership
+
+**Decision.** The independent spec tests of this unit live in
+`crates/fineprint-dsl/tests/spec_dsl_effect*.rs` and belong to the Tester role; the Implementer's
+unit tests live in `src/effect/tests.rs` and `src/effect/tests/props.rs`.
+**Rationale.** Same split as "#13 FP-012 — Test-path ownership" (P5 role separation).
+**Alternatives.** None considered.
+
+## #14 FP-013 — No lock-in cross-check inside CREATE_CONTINUOUS_EFFECT
+
+**Decision.** CREATE_CONTINUOUS_EFFECT does not run the 613.6 `sameAsLayer` cross-check that a
+STATIC ability runs: a CHAR effect with a dangling `{"sameAsLayer": L}` is accepted in this node.
+The toolchain owns that check for instruction-created effects.
+**Rationale.** `ability`'s `check_lock_in` is private to `src/ability/` (not an owned path), and
+the brief assigns the check to the toolchain. Each STATIC effect still checks itself.
+**Alternatives.** Duplicate the lock-in logic in `effect/` (rejected: two copies of one rule).
+
+## #14 FP-013 — SRS §14.4.5 tail
+
+**Decision.** "and so on" and the sentence "Every CR 701 keyword action has exactly one
+instruction or macro" are read as: the instruction set is closed (exactly the 72 ops, unknown
+`op` is an error) and grows only by a DSL minor version; completeness against CR 701 is a
+toolchain check, not part of this unit.
+**Rationale.** A closed set gives one spelling per value and strict decoding; the CR 701 list is
+not in the brief, and rules content is never written from memory.
+**Alternatives.** Accept unknown ops as opaque (rejected: the brief's rule A6).
+
+## #14 FP-013 — Small stack frames on the instruction recursion path
+
+**Decision.** Decoding and encoding keep the nine list-holding ops (CREATE_DELAYED_TRIGGER,
+REFLEXIVE_TRIGGER, IF, FOR_EACH, REPEAT, REPEAT_WHILE, MAY, UNLESS, CHOOSE_MODE) in small
+functions of their own, apart from the large flat match, and decode lists with a plain loop.
+**Rationale.** With one large match, a depth-127 document (63 nested MAYs) overflowed the 2 MiB
+stack of a test thread in an unoptimised build; after the split, the deepest legal tree decodes
+and encodes within 512 KiB in a debug build (measured), so `MAX_DEPTH` input is safe.
+**Alternatives.** Lower the nesting limit for instructions (rejected: changes the FP-011 depth
+contract); spawn a large-stack thread in the decoder (rejected: threads in rules code, R3).
+
+## #14 FP-013 — lockAffectedSet:false rejected for CHAR effects
+
+**Decision.** `CREATE_CONTINUOUS_EFFECT` with `lockAffectedSet:false` is rejected, on decode and on
+encode, when any effect is a CHAR effect (every layer, layer 2 control included). The member stays
+optional: absent and `true` are accepted for every effect mix, and `false` is accepted only for
+RULE/PLAYER-only effects. `Instruction::locks_affected_set()` returns true for any instruction with
+a CHAR effect. Dropping the member is a possible later change.
+
+**Rationale.** Per CR 611.2c the set of objects a resolving characteristic- or control-changing
+effect affects is determined when it begins and never changes; lock status is per part, so a
+RULE/PLAYER-only effect may carry `false` harmlessly. CR 611.3a ("isn't locked in") concerns static
+abilities, which use their own envelope, so it does not apply to a resolving instruction. SRS
+§14.4.5 is silent on `false`, so this fills an omission and does not contradict it.
+
+**Alternatives.** Keep accepting `false` and make the helper return true for CHAR: rejected, the
+wire value would still misstate the rule. Drop the member: deferred, it is a wire-contract change.
