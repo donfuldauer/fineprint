@@ -330,6 +330,16 @@ impl Model {
         self.objects.insert(id, (card, owner, k));
     }
 
+    /// The zone the model holds `id` in.
+    fn zone_of(&self, id: ObjectId) -> ZoneId {
+        let (_, owner, (kind_ix, _)) = self.objects[&id];
+        let kind = ZoneKind::ALL
+            .into_iter()
+            .find(|k| kind_index(*k) == kind_ix)
+            .unwrap();
+        ZoneId::of(kind, owner)
+    }
+
     fn remove(&mut self, id: ObjectId) -> (CardId, PlayerId) {
         let (card, owner, k) = self.objects.remove(&id).unwrap();
         let v = self.zones.get_mut(&k).unwrap();
@@ -435,10 +445,18 @@ fn property_zone_order_matches_reference_model() {
                 let to = ZoneKind::ALL[pick(&mut rng, 7)];
                 let p = random_pos(&mut rng);
                 let from = z.object(id).unwrap().zone;
+                let owner_before = m.objects[&id].1;
+                // Expected endpoints from the model's record and the request (CR 400.3).
+                let expected_from = m.zone_of(id);
+                let expected_to = ZoneId::of(to, owner_before);
+                assert_eq!(expected_from, from, "seed {seed} step {step}: model drift");
                 let moved = z.move_object(&mut g, id, request(to, p)).unwrap();
+                assert_eq!(moved.from, expected_from, "seed {seed} step {step}");
+                assert_eq!(moved.to, expected_to, "seed {seed} step {step}");
                 // CR 400.7, 400.8, 406.7, 400.10 (finding F1): only a same-zone move outside exile
                 // and the command zone keeps the id.
-                let keeps = moved.to == from && !matches!(to, ZoneKind::Exile | ZoneKind::Command);
+                let keeps = expected_to == expected_from
+                    && !matches!(to, ZoneKind::Exile | ZoneKind::Command);
                 assert_eq!(moved.new == id, keeps, "seed {seed} step {step}");
                 let (card, owner) = m.remove(id);
                 m.insert(moved.new, card, owner, to, p);

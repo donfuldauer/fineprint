@@ -474,13 +474,24 @@ fn property_ids_are_fresh_and_never_reused() {
                     let id = live[pick(&mut rng, live.len())];
                     let r = random_request(&mut rng, &players);
                     let rec = *z.object(id).unwrap();
+                    // Expected endpoints come from the record and the request (CR 400.3), never
+                    // from what the call reports.
+                    let expected_from = rec.zone;
+                    let expected_to = ZoneId::of(r.to, rec.owner);
+                    let last = g.last_issued();
                     let m = z.move_object(&mut g, id, r).unwrap();
                     assert_eq!(m.old, id);
-                    assert_eq!(m.from, rec.zone);
-                    if m.to == rec.zone && !matches!(m.to, ZoneId::Exile | ZoneId::Command) {
+                    assert_eq!(m.from, expected_from, "{ctx}: wrong source");
+                    assert_eq!(m.to, expected_to, "{ctx}: wrong destination");
+                    if expected_to == expected_from
+                        && !matches!(expected_to, ZoneId::Exile | ZoneId::Command)
+                    {
                         assert_eq!(m.new, id, "{ctx}: reposition changed the id");
+                        assert_eq!(g.last_issued(), last, "{ctx}: reposition advanced ids");
                         repositions += 1;
                     } else {
+                        assert_ne!(m.new, id, "{ctx}: zone change kept the id");
+                        assert!(z.object(id).is_none(), "{ctx}: old id still present");
                         retired.insert(id);
                         fresh = Some(m.new);
                     }
@@ -502,6 +513,40 @@ fn property_ids_are_fresh_and_never_reused() {
     assert!(repositions > 0);
     assert!(fail_checks > 0);
     assert!(fresh_checks > 0);
+}
+
+// REQ-CORE-002, CR 400.7: a saved generator cannot re-issue an id retired by a zone change (PR
+// #167 round 2, finding G5): the container keeps a high-water mark.
+#[test]
+fn stale_generator_cannot_reissue_a_retired_id() {
+    let mut z = two();
+    let mut g = IdGenerator::<ObjectId>::new();
+    z.create_object(&mut g, cid(1), pid(1), req(ZoneKind::Library))
+        .unwrap();
+    let mut saved = g.clone();
+    let obj = z
+        .create_object(&mut g, cid(2), pid(1), req(ZoneKind::Hand))
+        .unwrap();
+    assert_eq!(obj, oid(2));
+    let moved = z
+        .move_object(&mut g, obj, req(ZoneKind::Battlefield))
+        .unwrap();
+    assert_eq!(moved.new, oid(3));
+    let before = z.clone();
+    let bytes = encode_to_vec(&z);
+    let saved_before = saved.clone();
+    assert_eq!(
+        z.create_object(&mut saved, cid(3), pid(1), req(ZoneKind::Hand)),
+        Err(ZoneError::IdCollision(oid(2)))
+    );
+    assert_eq!(z, before);
+    assert_eq!(encode_to_vec(&z), bytes);
+    assert_eq!(saved, saved_before);
+    // The right generator still works.
+    assert_eq!(
+        z.create_object(&mut g, cid(3), pid(1), req(ZoneKind::Hand)),
+        Ok(oid(4))
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -2150,9 +2150,17 @@ order), then the player, then that the order is a permutation of exactly the cur
 (c) `move_object`, `create_object` and `enter_from_outside` take `&mut IdGenerator<ObjectId>`
 because `GameState`'s generators are private; `ids` must be the generator that issued every
 existing `ObjectId` in the container. The id is issued from a copy of the generator after every
-other check, rejected as `ZoneError::IdCollision` if it names a live object (PR #167 round 1,
-finding F3), and the copy is written back only on success, so an error leaves the container and
-the generator unchanged and a real zone change can never return `Moved { old == new }`. (d) A
+other check and the copy is written back only on success, so an error leaves the container and
+the generator unchanged and a real zone change can never return `Moved { old == new }`. The
+container keeps a private high-water mark `max_issued` (the highest ObjectId raw value it has
+ever issued; 0 when none; PR #167 round 2, finding G5); an issued id at or below it is rejected
+as `ZoneError::IdCollision` (it is live or was held earlier; round 1 finding F3 had rejected only
+live ids), so a stale or saved generator cannot silently resurrect a retired id. The mark is part
+of `PartialEq`/`Eq` and is appended to the canonical encoding as 8 bytes little-endian; a
+reposition never touches it. Rationale: ids are never reused (REQ-CORE-002), and the `GameState`
+integration unit will hold the generator and the container together. Alternative considered:
+tracking every retired id, rejected as unbounded. The frozen state hash and wire are unaffected
+(`state/` is not touched). (d) A
 move into the zone the object is already in (same `ZoneId`; a per-player destination is always
 the owner's, CR 400.3, so a library-to-library move is always the same library) depends on the
 zone (PR #167 round 1, finding F1, which corrects the original brief's "a same-zone move also
@@ -2160,7 +2168,8 @@ creates a new ObjectId"): in a library, hand, graveyard, the battlefield or the 
 zone change (CR 400.7 speaks of moving "from one zone to another"), so the object keeps its
 `ObjectId`, the generator is not advanced, `Moved` has `old == new`, and the object is only
 repositioned (ordered zones: removed and re-inserted at the requested position of the remaining
-pile, CR 400.5; unordered zones: position ignored; CR 400.12: the zone itself is not affected),
+pile, CR 400.5; unordered zones: position ignored; a reposition inside one zone is not a move from
+one zone to another, CR 400.7),
 with `face_down` and the controller taken from the request as for any move; in exile and the
 command zone the object becomes a new object without changing zones (CR 400.8, CR 406.7 for
 exile, CR 400.10 for the command zone) and gets a fresh `ObjectId`. CR 400.9 and CR 401.6 are

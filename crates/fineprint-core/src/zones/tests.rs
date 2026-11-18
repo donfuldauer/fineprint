@@ -403,7 +403,7 @@ fn move_creates_new_object_and_forgets_old() {
     assert_eq!(z.object_of_card(c(2)), None);
 }
 
-// REQ-CORE-002, REQ-ZONE-001; CR 400.7, CR 400.5, CR 400.12: a move into the zone the object is
+// REQ-CORE-002, REQ-ZONE-001; CR 400.7, CR 400.5: a move into the zone the object is
 // already in (library, hand, graveyard, battlefield, stack) is not a zone change: the object
 // keeps its id and the generator is not touched.
 // R10 correction for finding F1 (CodeRabbit comment 4621941423): this test replaces the former
@@ -654,6 +654,133 @@ fn behind_generator_is_rejected_with_id_collision() {
     // The right generator works as before.
     let m = z.move_object(&mut ids, hand, req(ZoneKind::Exile)).unwrap();
     assert_eq!(m.new, ObjectId::new(4));
+}
+
+// REQ-CORE-002; CR 400.7: CodeRabbit's scenario (PR #167 round 2, finding G5): a saved generator
+// would re-issue the id retired by a zone change; the high-water mark rejects it.
+#[test]
+fn saved_generator_cannot_reissue_a_retired_id() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    z.create_object(&mut ids, c(1), p(1), req(ZoneKind::Library))
+        .unwrap();
+    let mut saved = ids.clone();
+    let two = z
+        .create_object(&mut ids, c(2), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    let m = z.move_object(&mut ids, two, req(ZoneKind::Exile)).unwrap();
+    assert_eq!((m.old, m.new), (ObjectId::new(2), ObjectId::new(3)));
+    assert!(z.object(ObjectId::new(2)).is_none());
+    assert_atomic_err(
+        &mut z,
+        &mut saved,
+        ZoneError::IdCollision(ObjectId::new(2)),
+        |z, g| z.create_object(g, c(3), p(1), req(ZoneKind::Hand)),
+    );
+    assert_atomic_err(
+        &mut z,
+        &mut saved,
+        ZoneError::IdCollision(ObjectId::new(2)),
+        |z, g| z.move_object(g, ObjectId::new(1), req(ZoneKind::Hand)),
+    );
+}
+
+// REQ-CORE-002: a fresh generator against a container that already issued ids is rejected by
+// every id-issuing call, and nothing changes.
+#[test]
+fn fresh_generator_is_rejected_by_every_issuing_call() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let a = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Library))
+        .unwrap();
+    z.add_outside_card(p(1), OutsidePool::Sideboard, c(2))
+        .unwrap();
+    let mut fresh: IdGenerator<ObjectId> = IdGenerator::new();
+    let want = ZoneError::IdCollision(ObjectId::new(1));
+    assert_atomic_err(&mut z, &mut fresh, want, |z, g| {
+        z.create_object(g, c(3), p(1), req(ZoneKind::Hand))
+    });
+    assert_atomic_err(&mut z, &mut fresh, want, |z, g| {
+        z.move_object(g, a, req(ZoneKind::Hand))
+    });
+    assert_atomic_err(&mut z, &mut fresh, want, |z, g| {
+        z.enter_from_outside(g, p(1), c(2), OutsidePool::Sideboard, req(ZoneKind::Hand))
+    });
+}
+
+// REQ-CORE-002: on the normal path ids strictly increase and nothing is rejected.
+#[test]
+fn normal_paths_issue_strictly_increasing_ids() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let mut last = 0;
+    let mut cur = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Library))
+        .unwrap();
+    for kind in [
+        ZoneKind::Hand,
+        ZoneKind::Exile,
+        ZoneKind::Exile,
+        ZoneKind::Stack,
+    ] {
+        assert!(cur.get() > last);
+        last = cur.get();
+        cur = z.move_object(&mut ids, cur, req(kind)).unwrap().new;
+    }
+    assert!(cur.get() > last);
+    assert_eq!(ids.last_issued(), cur.get());
+}
+
+// REQ-CORE-002, CR 400.7 (no zone change): a reposition leaves the mark and the generator alone.
+#[test]
+fn reposition_leaves_mark_and_generator_unchanged() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let a = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Library))
+        .unwrap();
+    z.create_object(&mut ids, c(2), p(1), req(ZoneKind::Library))
+        .unwrap();
+    let mark = z.max_issued;
+    let ids0 = ids.clone();
+    z.move_object(&mut ids, a, at(ZoneKind::Library, Position::Bottom))
+        .unwrap();
+    assert_eq!(z.max_issued, mark);
+    assert_eq!(ids, ids0);
+}
+
+// REQ-CORE-002, REQ-NFR-006: equal operations give equal values and bytes; the mark is part of
+// both: a move that retires an id changes the encoding, and two containers that differ only in
+// the mark are unequal and encode differently.
+#[test]
+fn high_water_mark_is_part_of_equality_and_encoding() {
+    let build = || {
+        let mut z = two_players();
+        let mut ids = IdGenerator::new();
+        let a = z
+            .create_object(&mut ids, c(1), p(1), req(ZoneKind::Hand))
+            .unwrap();
+        (z, ids, a)
+    };
+    let (z1, _, _) = build();
+    let (z2, _, _) = build();
+    assert_eq!(z1, z2);
+    assert_eq!(encode_to_vec(&z1), encode_to_vec(&z2));
+    let mut z3 = z1.clone();
+    z3.max_issued += 1;
+    assert_ne!(z1, z3);
+    let (b1, b3) = (encode_to_vec(&z1), encode_to_vec(&z3));
+    assert_ne!(b1, b3);
+    assert_eq!(b1[b1.len() - 8..], 1_u64.to_le_bytes());
+    assert_eq!(b3[b3.len() - 8..], 2_u64.to_le_bytes());
+    // Out and back to the same zone: same contents shape, a retired id, a different encoding.
+    let (mut z4, mut ids4, a) = build();
+    let m = z4.move_object(&mut ids4, a, req(ZoneKind::Exile)).unwrap();
+    z4.move_object(&mut ids4, m.new, req(ZoneKind::Hand))
+        .unwrap();
+    assert_ne!(encode_to_vec(&z4)[..8], [0u8; 8]);
+    assert_eq!(z4.max_issued, 3);
 }
 
 // REQ-ZONE-001, REQ-CORE-002; CR 109.4, CR 108.4a: the rules-level controller exists only on
