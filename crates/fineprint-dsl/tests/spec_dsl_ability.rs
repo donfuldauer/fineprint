@@ -405,6 +405,48 @@ fn req_dsl_005_examples_distinct() {
     }
 }
 
+/// REQ-DSL-005, REQ-DSL-007, REQ-DSL-008, REQ-DSL-009: the SRS section 14.4 examples are written
+/// in shorthand; the verbatim spellings are rejected while the adapted forms (EX3, EX8, EX10)
+/// are accepted (decision "#13 FP-012").
+#[test]
+fn req_dsl_005_srs_shorthand_examples_rejected() {
+    let a = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"textToken":"CREATURE_TYPE","value":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","mode":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
+    let b = r#"{"abilityId":"s2","kind":"STATIC","condition":{"pred":"PLAYER_HAS_MAX_SPEED","player":"CONTROLLER"},"effects":[{"type":"CHAR","layer":"7c","affected":{"selector":"OTHER_CREATURES_YOU_CONTROL"},"modification":{"op":"MODIFY_PT","power":2,"toughness":1}}]}"#;
+    let b_player_only = EX8.replace(
+        r#""player":{"ref":"CONTROLLER"}},"effects""#,
+        r#""player":"CONTROLLER"},"effects""#,
+    );
+    let b_affected_only = EX8.replace(
+        r#"{"zones":["BATTLEFIELD"],"op":"AND","conditions":[{"pred":"IS_CREATURE"},{"pred":"CONTROLLED_BY","player":{"ref":"CONTROLLER"}},{"op":"NOT","condition":{"pred":"SAME_AS","ref":"SELF"}}]}"#,
+        r#"{"selector":"OTHER_CREATURES_YOU_CONTROL"}"#,
+    );
+    let c = r#"{"abilityId":"r1","kind":"REPLACEMENT","functionsIn":["STACK","BATTLEFIELD"],"match":{"event":"ENTERS","affected":{"ref":"SELF"}},"replaceWith":[{"op":"CHOOSE","choice":"CREATURE_TYPE","chooser":"CONTROLLER","store":"chosenType"}]}"#;
+    assert_ne!(
+        b_player_only, EX8,
+        "player-only variant must differ from EX8"
+    );
+    assert_ne!(
+        b_affected_only, EX8,
+        "affected-only variant must differ from EX8"
+    );
+    for (name, shorthand, adapted) in [("a", a, EX3), ("b", b, EX8), ("c", c, EX10)] {
+        assert!(
+            serde_json::from_str::<AbilityAST>(shorthand).is_err(),
+            "shorthand ({name}) was accepted"
+        );
+        let _ = accept::<AbilityAST>(adapted);
+    }
+    for (name, s) in [
+        ("b/player", &b_player_only),
+        ("b/affected", &b_affected_only),
+    ] {
+        assert!(
+            serde_json::from_str::<AbilityAST>(s).is_err(),
+            "shorthand ({name}) was accepted"
+        );
+    }
+}
+
 // ---------------------------------------------------------------- 2. closed sets
 
 fn check_closed_set<T>(
