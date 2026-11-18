@@ -9,13 +9,14 @@
 //! Wire catalogue"). Decoding is strict: unknown and missing members, a present `null` on an
 //! optional member, unknown identifier strings, empty free-form strings, non-integer numbers and
 //! input nested deeper than [`crate::canonical::MAX_DEPTH`] are all errors, never panics. Every
-//! value has exactly one JSON spelling, so `decode(encode(x)) == x` and the RFC 8785 form of a
-//! decoded document is the canonical form of the value.
+//! value has exactly one JSON spelling, so, for every value nested within
+//! [`crate::canonical::MAX_DEPTH`], `decode(encode(x)) == x`, and the RFC 8785 form of a decoded
+//! document is the canonical form of the value.
 //!
 //! Serialisation re-checks the invariants a hand-built value could break (empty strings,
 //! duplicate zones, an empty `AND`, a filter selector with neither zones nor a predicate) and
-//! fails instead of writing JSON that would not decode. These re-checks are value-level only;
-//! they do not check nesting depth. A hand-built value nested deeper than
+//! fails instead of writing JSON that would not decode because of those value-level invariants.
+//! Nesting depth is the exception: these re-checks are value-level only and do not check it. A hand-built value nested deeper than
 //! [`crate::canonical::MAX_DEPTH`] (127 open containers) can be written by a plain
 //! `serde_json::to_vec`/`to_string` but will not decode. Callers who need output that is
 //! guaranteed to reload must use [`crate::canonical::to_canonical_vec`], which checks depth.

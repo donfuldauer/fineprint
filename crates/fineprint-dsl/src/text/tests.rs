@@ -332,3 +332,50 @@ fn req_dsl_012_stream_decode_error_index() {
         .expect_err("empty id");
     assert!(err.to_string().contains("text token 0"), "{err}");
 }
+
+/// REQ-DSL-012, REQ-NFR-006: field and shape errors inside a stream name the token's array
+/// position; validation errors are not prefixed twice; standalone decoding is unchanged; the
+/// accept/reject outcome is unchanged and a valid stream still decodes.
+#[test]
+fn req_dsl_012_stream_field_error_positions() {
+    let ok = |i: usize| format!(r#"{{"id":"t{i}","kind":"LITERAL","text":"x"}}"#);
+    let with = |at: usize, tok: &str| {
+        let toks: Vec<String> = (0..3)
+            .map(|i| if i == at { tok.to_owned() } else { ok(i) })
+            .collect();
+        format!("[{}]", toks.join(","))
+    };
+    let cases: [(usize, &str); 6] = [
+        (1, r#"{"id":"t1","kind":"LITERAL","text":""}"#),
+        (2, r#"{"id":"t2","kind":"LITERAL","text":""}"#),
+        (2, r#"{"id":"t2","kind":"BOGUS"}"#),
+        (
+            1,
+            r#"{"id":"t1","kind":"WORD","category":"BOGUS","value":"v"}"#,
+        ),
+        (1, "5"),
+        (2, r#"{"id":"t2","kind":"LITERAL","text":"x","extra":1}"#),
+    ];
+    for (at, tok) in cases {
+        let err = serde_json::from_str::<TextTokenStream>(&with(at, tok)).expect_err(tok);
+        assert!(
+            err.to_string().contains(&format!("text token {at}")),
+            "{err}"
+        );
+    }
+    let err = serde_json::from_str::<TextTokenStream>(&with(
+        1,
+        r#"{"id":"","kind":"LITERAL","text":"x"}"#,
+    ))
+    .expect_err("empty id");
+    let msg = err.to_string();
+    assert!(msg.contains("text token 1 has an empty id"), "{msg}");
+    assert!(!msg.contains("text token 1: text token"), "{msg}");
+    let err = serde_json::from_str::<TextToken>(r#"{"id":"x","kind":"LITERAL","text":""}"#)
+        .expect_err("empty text");
+    assert!(!err.to_string().starts_with("text token 0:"), "{err}");
+    let valid = format!("[{},{},{}]", ok(0), ok(1), ok(2));
+    let s: TextTokenStream = serde_json::from_str(&valid).expect("valid stream");
+    assert_eq!(s.len(), 3);
+    assert_eq!(s.tokens()[1], lit("t1", "x"));
+}
