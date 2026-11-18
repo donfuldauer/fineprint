@@ -1705,8 +1705,8 @@ type is `effect::Instruction`. Swapping the placeholder into `SpellAbilityAST`,
 `ability` module; there are no re-exports.
 **Rationale.** Same pattern as "#13 FP-012 — Wiring edit"; the module must be declared to compile.
 **Grant.** The work-classifier's Implementer brief for #14 lists `crates/fineprint-dsl/src/lib.rs`
-(this one line only) under OWNED PATHS. Issue #14's own "Owned paths" section does not name the
-file; it was not amended (PR #163 review round 1).
+(this one line only) under OWNED PATHS. Issue #14's "Owned paths" section now names it too: the
+maintainer approved that amendment during PR #163 review.
 **Alternatives.** Re-export the types at the crate root (rejected: not asked for, widens the diff).
 
 ## #14 FP-013 — Test-path ownership
