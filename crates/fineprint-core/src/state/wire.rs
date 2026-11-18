@@ -82,7 +82,7 @@ fn required_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>
 pub(super) struct PlayerWire {
     pub(super) id: u64,
     pub(super) life: i64,
-    pub(super) counters: BTreeMap<String, u64>,
+    pub(super) counters: BTreeMap<String, i64>,
     pub(super) designations: BTreeMap<String, DesignationWire>,
 }
 
@@ -212,8 +212,8 @@ impl StateWire {
                 return Err(bad("players not in strictly ascending id order"));
             }
             previous = p.id;
-            if p.counters.values().any(|&n| n == 0) {
-                return Err(bad("counter amount 0"));
+            if p.counters.values().any(|&n| n <= 0) {
+                return Err(bad("counter amount below 1"));
             }
             let id = PlayerId::new(p.id);
             let designations = p
@@ -290,8 +290,8 @@ impl GameState {
     /// version or PRNG algorithm, an even PRNG increment, 0 or more than [`MAX_PLAYERS`]
     /// players, a player id that is 0, repeated, out of ascending order or beyond the player
     /// generator, a turn order that is not a permutation of the player ids, an active or
-    /// priority player that is not a player, a zero counter amount, unknown members, or wrong
-    /// types.
+    /// priority player that is not a player, a counter amount below 1 or above `i64::MAX`,
+    /// unknown members, or wrong types.
     pub fn deserialize(bytes: &[u8]) -> Result<GameState, StateError> {
         StateWire::from_bytes(bytes)?.into_state()
     }

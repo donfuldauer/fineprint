@@ -40,6 +40,14 @@ impl Rng {
             self.next()
         }
     }
+    fn amount(&mut self) -> i64 {
+        const EDGES: [i64; 6] = [i64::MIN, -1, 0, 1, i64::MAX, i64::MAX - 1];
+        if self.below(3) == 0 {
+            EDGES[self.below(6) as usize]
+        } else {
+            self.next() as i64
+        }
+    }
     fn text(&mut self) -> String {
         const KINDS: [&str; 8] = [
             "",
@@ -86,11 +94,17 @@ fn gen_state(rng: &mut Rng) -> GameState {
         let life = rng.i64();
         let counters = rng.below(4);
         let designations = rng.below(4);
-        let mut ops: Vec<(String, u64, u64, i64, String)> = Vec::new();
+        let mut ops: Vec<(String, i64, u64, i64, String)> = Vec::new();
         for _ in 0..counters.max(designations) {
-            ops.push((rng.text(), rng.u64(), rng.below(3), rng.i64(), rng.text()));
+            ops.push((
+                rng.text(),
+                rng.amount(),
+                rng.below(3),
+                rng.i64(),
+                rng.text(),
+            ));
         }
-        let p = s.player_mut(pid(id)).unwrap();
+        let mut p = s.player_mut(pid(id)).unwrap();
         p.set_life(life);
         for (i, (k, v, variant, int, text)) in ops.into_iter().enumerate() {
             if (i as u64) < counters {
@@ -158,9 +172,9 @@ fn corpus() -> Vec<GameState> {
     v.push(GameState::new(1, 1, 20).unwrap());
     let mut two = GameState::new(42, 2, 20).unwrap();
     {
-        let p = two.player_mut(pid(2)).unwrap();
+        let mut p = two.player_mut(pid(2)).unwrap();
         p.set_life(i64::MIN);
-        p.set_counter("test.counter_a", u64::MAX);
+        p.set_counter("test.counter_a", i64::MAX);
         p.set_counter("", 3);
         p.set_designation("test.designation_a", DesignationValue::Flag);
         p.set_designation("test.designation_b", DesignationValue::Int(-7));
