@@ -32,7 +32,7 @@ fn ids(v: &[u64]) -> Vec<PlayerId> {
 /// A three-player state with some content on player 2.
 fn base() -> GameState {
     let mut s = GameState::new(5, 3, 20).unwrap();
-    let p = s.player_mut(pid(2)).unwrap();
+    let mut p = s.player_mut(pid(2)).unwrap();
     p.set_counter("test.counter_a", 3);
     p.set_designation("test.designation_a", DesignationValue::Flag);
     s
@@ -372,14 +372,14 @@ fn player_life_takes_extremes() {
 #[test]
 fn player_counters() {
     let mut s = GameState::new(1, 2, 20).unwrap();
-    let p = s.player_mut(pid(2)).unwrap();
+    let mut p = s.player_mut(pid(2)).unwrap();
     assert_eq!(p.counter("test.counter_a"), 0);
     assert_eq!(p.counter(""), 0);
     p.set_counter("test.counter_a", 5);
-    p.set_counter("", u64::MAX);
+    p.set_counter("", i64::MAX);
     p.set_counter("\u{4e2d}", 1);
     assert_eq!(p.counter("test.counter_a"), 5);
-    assert_eq!(p.counter(""), u64::MAX);
+    assert_eq!(p.counter(""), i64::MAX);
     assert_eq!(p.counters().len(), 3);
     p.set_counter("test.counter_a", 7);
     assert_eq!(p.counter("test.counter_a"), 7);
@@ -402,7 +402,7 @@ fn player_counters() {
 #[test]
 fn player_designations() {
     let mut s = GameState::new(1, 1, 20).unwrap();
-    let p = s.player_mut(pid(1)).unwrap();
+    let mut p = s.player_mut(pid(1)).unwrap();
     assert_eq!(p.designation("test.designation_a"), None);
     assert_eq!(p.clear_designation("test.designation_a"), None);
     p.set_designation("test.designation_a", DesignationValue::Flag);

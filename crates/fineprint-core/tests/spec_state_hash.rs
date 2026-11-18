@@ -141,10 +141,10 @@ fn expected_tree(s: &GameState) -> MerkleTree {
 fn rich(seed: u64, players: usize) -> GameState {
     let mut s = GameState::new(seed, players, 20).unwrap();
     for id in 1..=players as u64 {
-        let p = s.player_mut(pid(id)).unwrap();
+        let mut p = s.player_mut(pid(id)).unwrap();
         p.set_life(i64::MAX - id as i64);
-        p.set_counter("test.counter_a", id);
-        p.set_counter("\u{4e2d}", u64::MAX);
+        p.set_counter("test.counter_a", id as i64);
+        p.set_counter("\u{4e2d}", i64::MAX);
         p.set_designation("test.designation_a", DesignationValue::Flag);
         p.set_designation("test.designation_b", DesignationValue::Int(-(id as i64)));
         p.set_designation(
@@ -219,7 +219,7 @@ const MUTATIONS: usize = 20;
 fn base() -> GameState {
     let mut s = GameState::new(5, 3, 20).unwrap();
     {
-        let p = s.player_mut(pid(2)).unwrap();
+        let mut p = s.player_mut(pid(2)).unwrap();
         p.set_counter("test.counter_a", 3);
         p.set_designation("test.designation_a", DesignationValue::Flag);
         p.set_designation("test.designation_b", DesignationValue::Int(5));
@@ -394,14 +394,14 @@ fn equal_states_have_equal_hashes() {
     let mut a = GameState::new(1, 2, 20).unwrap();
     let mut b = GameState::new(1, 2, 20).unwrap();
     {
-        let p = a.player_mut(pid(1)).unwrap();
+        let mut p = a.player_mut(pid(1)).unwrap();
         p.set_counter("test.counter_a", 1);
         p.set_counter("test.counter_b", 2);
         p.set_designation("test.designation_a", DesignationValue::Flag);
         p.set_designation("test.designation_b", DesignationValue::Int(2));
     }
     {
-        let p = b.player_mut(pid(1)).unwrap();
+        let mut p = b.player_mut(pid(1)).unwrap();
         p.set_designation("test.designation_b", DesignationValue::Int(2));
         p.set_counter("test.counter_b", 2);
         p.set_designation("test.designation_a", DesignationValue::Flag);
