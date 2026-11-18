@@ -36,8 +36,9 @@ URL, or a description), plus any earlier investigations and fix attempts for the
    Separate what you showed from what you inferred.
 5. **Judge** (review findings and reported issues):
    - `valid-defect`: real and in scope; give the fix plan.
-   - `valid-but-deferred`: real but out of the PR's scope, or it needs a person's ruling (SRS
-     change, legal question); give the HUMAN_QUEUE line and the thread reply text.
+   - `valid-but-deferred`: real but out of the PR's scope; give the new-issue text (with
+     `Depends on`) or the `docs/DECISIONS.md` entry that records why it is not done now, and the
+     thread reply text (not a queue line).
    - `not-a-defect`: wrong, or conflicts with the CR, the SRS or a recorded decision; give the
      evidence and a reply text.
    - `pre-existing`: present on `main` before this work; name the commit that introduced it.
@@ -69,5 +70,5 @@ fix plan: <files/functions, change, regression test>
 blast radius: local | module | very-high (<why>)
 suggested difficulty: mechanical | standard | complex | extreme (<evidence>)
 thread reply draft: <reason and evidence first; + "recommend: Orchestrator resolves thread" if not-a-defect>
-human queue line: <text or none>
+human queue line: <P8 item text, or none — judgement calls go in DECISIONS.md>
 ```

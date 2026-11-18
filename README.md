@@ -50,7 +50,7 @@ docs/SRS.md               requirements (normative)
 docs/PROCESS.md           how agents turn the plan into merged PRs (rules R1–R12, P1–P8)
 docs/BRIEF_TEMPLATE.md    the self-contained delegation brief every agent receives
 docs/DECISIONS.md         decisions made during the run, with rationale
-docs/HUMAN_QUEUE.md       items waiting for a person
+docs/HUMAN_QUEUE.md       items only a person can do (PROCESS.md P8)
 docs/RUN_LOG.md           one row per unit of work
 contracts/                change requests for shared contracts
 scripts/req_coverage.py   checks every SRS requirement is traced by the work-unit issues and tests

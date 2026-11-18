@@ -30,7 +30,7 @@ task-executor and checked by the work-verifier. The fast path never routes T2 or
 If validity or cause is unclear, the item goes to the issue-investigator first and is then handled
 by its verdict: `valid-defect` is triaged again from its report (fast path if it now passes every
 check, else the work-classifier); `valid-but-deferred` or `pre-existing` is **Deferred** (commit
-the investigator's HUMAN_QUEUE line, reply with it, resolve; no Fixer), unless it is an unfixed
+the investigator's new issue or DECISIONS.md entry, reply with it, resolve; no Fixer), unless it is an unfixed
 security issue (including any information leak) or a verified unfixed correctness defect, which
 stays unresolved and goes to the work-classifier; `not-a-defect` is **Not a defect** (reply with
 the evidence and resolve; no Fixer). Any other failing check, or doubt, sends the item to the

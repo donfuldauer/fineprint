@@ -133,7 +133,7 @@ If the session may push only to an assigned branch, use it and note that in the 
    `fixture-author` brief. For `type:infra`, `type:toolchain`, `type:client` and `type:docs`,
    an Implementer brief whose TESTS REQUIRED include the issue's acceptance tests.
 3. `needs-rules` → one `rules-researcher` call with all questions, then call the classifier
-   again with the answers. SRS discrepancies go to `docs/HUMAN_QUEUE.md`.
+   again with the answers. SRS discrepancies are recorded in `docs/DECISIONS.md`; the proposed SRS edit is a P8 line in `docs/HUMAN_QUEUE.md`.
 4. Spawn the agents the classifier names with the briefs verbatim and its models as `model`
    overrides; Implementer and Independent Tester in parallel.
 5. Agent reports with `rules questions` → rules-researcher → classifier follow-up brief.
@@ -151,7 +151,7 @@ commit updates the row and is verified again.
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/HUMAN_QUEUE.md` line, and stop.
+(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/RUN_LOG.md` row, and stop.
 
 ## 5. Open the PR
 
@@ -181,7 +181,7 @@ procedure and PROCESS.md P6:
   (`PATCH pulls/<P>`).
 - CI failures go through the same loop (investigator if the cause is unclear).
 - If CodeRabbit has not reviewed the head commit, post `@coderabbitai review` once; at most two
-  more asks, then the HUMAN_QUEUE line of P6 step 4.
+  more asks, then the RUN_LOG row of P6 step 4.
 
 ## 7. Merge
 

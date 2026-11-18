@@ -19,16 +19,17 @@ Section numbers below (P1–P8) are what agents, briefs and replies cite.
 | GitHub issues (`work-unit`) | **The plan.** One issue per reviewable PR: plan ID (`FP-NNN`, also the plan order), summary, `Depends on` list (also linked as GitHub "blocked by" dependencies), REQ IDs, deliverables, acceptance criteria, owned paths, expected tier. Labels: `ready` / `blocked` / `in-progress`, `type:*`, `area:*`, `phase:*`, `tier:*`; milestones M1–M3. | `plan-from-srs`; new issues for discovered work by any Orchestrator, with dependencies filled in. |
 | `docs/DEVELOPMENT.md` | Workspace layout, module ownership, exact commands and environment, coverage floors per crate, contracts and their owners, card-data and fixture paths. | The workspace issue creates it; later issues update it in their own PRs. |
 | `docs/PROCESS.md` | This file. | A person, or a reviewed PR the person asked for. |
-| `docs/DECISIONS.md` | Every ambiguity an agent resolved, with rationale. | Any agent (rule R8). |
-| `docs/HUMAN_QUEUE.md` | Judgement calls a person should see later. Never a request to close a review thread. | Any agent. |
+| `docs/DECISIONS.md` | Every ambiguity or judgement call an agent resolved, with rationale. The recorded recommendation is the decision (R8). | Any agent (rule R8). |
+| `docs/HUMAN_QUEUE.md` | Only the P8 items: things a person must do or decide. Never judgement calls (those are decisions, R8) and never a request to close a review thread. | Any agent. |
 | `docs/RUN_LOG.md` | One row per unit-of-work attempt, plus phase gates and merges. | The Orchestrator. |
 | `contracts/CHANGE_REQUESTS.md` | Requests to change a contract (P3) after its owning unit merged. | Any agent. |
 | `docs/briefs/` | Delegation briefs, when they are worth keeping (phase-wide `COMMON.md`, long briefs). | Work-classifier output, saved by the Orchestrator. |
 
-When the SRS and an issue disagree, the SRS wins and the disagreement goes to
-`docs/HUMAN_QUEUE.md`. When the SRS and the Comprehensive Rules (CR) of the SRS's rules baseline
-disagree, the CR wins, the work follows the CR, and the SRS erratum goes to `docs/HUMAN_QUEUE.md`
-(that is how Appendix A of the SRS was built).
+When the SRS and an issue disagree, the SRS wins and the disagreement is recorded
+in `docs/DECISIONS.md`. When the SRS and the Comprehensive Rules (CR) of the SRS's rules baseline
+disagree, the CR wins, the work follows the CR, the erratum is recorded in `docs/DECISIONS.md`,
+and, because only a person edits the SRS (P8), the proposed SRS edit is one line in
+`docs/HUMAN_QUEUE.md` (that is how Appendix A of the SRS was built).
 
 ## P2. Execution rules (R1–R12)
 
@@ -66,10 +67,12 @@ These apply to every change, by every agent. Briefs inline them in full.
    the `rules-researcher` agent, never from memory.
 7. **R7 — Simulated time.** Tests never sleep and never assert on wall-clock time. Performance
    targets (REQ-LAYER-005) are measured by benchmarks, not asserted in unit tests.
-8. **R8 — Never wait on a person.** When a brief is ambiguous, choose the option most consistent
-   with the SRS, the issue and `docs/DECISIONS.md`; record it in `docs/DECISIONS.md` as
-   `## <work item> — <title>` with **Decision**, **Rationale**, **Alternatives**; add one line to
-   `docs/HUMAN_QUEUE.md`; continue. The only exceptions are listed in P8.
+8. **R8 — Never wait on a person.** When a brief is ambiguous, or a judgement call is needed,
+   choose the option most consistent with the SRS, the issue and `docs/DECISIONS.md`; record it
+   in `docs/DECISIONS.md` as `## <work item> — <title>` with **Decision**, **Rationale**,
+   **Alternatives**; continue. The recommendation is the decision: it is final, needs no
+   confirmation, and is not added to `docs/HUMAN_QUEUE.md`. Only a later `docs/DECISIONS.md`
+   entry (or the repository owner) changes it. The only exceptions are the P8 items.
 9. **R9 — No self-review.** No agent reviews code for style or design, its own or another
    agent's. The work-verifier checks objective facts only. Code review happens on the pull
    request, by CodeRabbit (P6).
@@ -142,8 +145,8 @@ on it, except items that take the `triage` fast path.
    and finds enough Fable allowance for the task, with headroom, without going into overage.
    An allowance that cannot be read counts as not enough.
 
-If 1 and 2 hold but 3 does not, the work runs on Opus 5.5 and a `[Fable wanted]` line goes to
-`docs/HUMAN_QUEUE.md`. The run never waits for allowance. Every Fable use is logged in
+If 1 and 2 hold but 3 does not, the work runs on Opus 5.5 and a `[Fable wanted]` note goes in that
+unit's `docs/RUN_LOG.md` row. The run never waits for allowance. Every Fable use is logged in
 `docs/RUN_LOG.md` with the evidence for 1–3. When torn between two tiers, take the higher one,
 but never move up into T3 that way.
 
@@ -230,8 +233,9 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
    - **Not a defect:** the reply gives the evidence (test output, commit, CR rule and its text,
      SRS requirement, DECISIONS.md section, `.coderabbit.yaml` setting); the thread is resolved.
      A rules disagreement is settled by the `rules-researcher`'s citation, not by argument.
-   - **Deferred:** real but out of scope, or it needs a person's ruling; the reply links the
-     `docs/HUMAN_QUEUE.md` line committed on the PR; the thread is resolved.
+   - **Deferred:** real but out of scope: a new `work-unit` GitHub issue (with `Depends on`
+     filled in) or a `docs/DECISIONS.md` entry that records why it is not done now; the reply
+     links it; the thread is resolved.
 
    **Resolving.** The Orchestrator resolves threads itself, on its own judgment, once the reply
    states the reason and evidence first. It does not wait for CodeRabbit to agree. In Claude Code
@@ -244,8 +248,8 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
    approval is all that is missing, post `@coderabbitai approve`.
 4. **Re-review.** Each push triggers CodeRabbit's incremental review. If it has not reviewed the
    head commit, ask once with `@coderabbitai review`, wait as long as it says, and ask at most
-   twice more. If it still has not reviewed, the PR stays open, a line goes to
-   `docs/HUMAN_QUEUE.md`, and the run continues with independent work.
+   twice more. If it still has not reviewed, the PR stays open, a `docs/RUN_LOG.md` row
+   records it, and the run continues with independent work.
 5. **Merge conditions**, all on the current head commit: every required CI check green;
    CodeRabbit has reviewed the head with nothing actionable unanswered and no outstanding change
    request; every thread has a disposition reply and is resolved (except types that cannot be
@@ -267,7 +271,8 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
    verifier's failures, the investigator's report or the review findings.
 2. Then the issue-investigator makes a fresh pass and the classifier routes one more attempt one
    tier up from a fresh brief plus the failure history (Fable only under P4).
-3. Then the unit is marked `blocked` in `docs/RUN_LOG.md` and added to `docs/HUMAN_QUEUE.md`.
+3. Then the unit is marked `blocked` in `docs/RUN_LOG.md`, and the issue gets the
+   `status:blocked-failure` label and a comment with the failure history.
 4. A blocked issue outside milestone M1 (REQ-NFR-010) is
    skipped with its dependents; the run continues.
 5. A blocked *core* unit halts only its dependents. Independent work continues, and the run
@@ -278,9 +283,11 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
 ## P8. What does wait for a person
 
 The run is unattended except for these, which are queued in `docs/HUMAN_QUEUE.md` and never
-block independent work:
+block independent work. They are the only items ever added to that file; judgement calls are
+decisions (R8):
 
 - architecture and platform decisions, which become `REQ-NFR-*` requirements (`plan-from-srs` §1);
 - changes to `docs/SRS.md` or this file;
 - anything with legal weight: distribution of card data, licensing, commercial use (SRS §1.3);
-- publishing a release (crates, NuGet, npm packages).
+- publishing a release (crates, NuGet, npm packages);
+- repository settings an agent cannot change (for example branch-protection required checks).
