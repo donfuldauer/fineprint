@@ -35,9 +35,10 @@ pub enum ZoneError {
     InvalidOrder,
     /// The card is not in the named outside-the-game pool of that player.
     NoSuchOutsideCard(CardId),
-    /// The identifier generator issued an id that already names a live object in this
-    /// container: the generator passed in is not the one that issued this container's ids
-    /// (REQ-CORE-002).
+    /// The identifier generator issued an id that is live or was ever held by this container
+    /// (at or below its high-water mark): the generator passed in is behind the one that issued
+    /// this container's ids (stale, saved or fresh); `ids` must be the generator that issued
+    /// every id the container ever held (REQ-CORE-002).
     IdCollision(ObjectId),
 }
 
@@ -67,7 +68,7 @@ impl fmt::Display for ZoneError {
             ZoneError::IdCollision(id) => {
                 write!(
                     f,
-                    "issued object id {} already names a live object",
+                    "issued object id {} is live or was already held by this container",
                     id.get()
                 )
             }

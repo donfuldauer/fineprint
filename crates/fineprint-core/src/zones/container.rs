@@ -71,6 +71,10 @@ pub struct Zones {
     cards: Arc<BTreeMap<CardId, ObjectId>>,
     /// Where every outside-the-game card is.
     outside_index: Arc<BTreeMap<CardId, (PlayerId, OutsidePool)>>,
+    /// The highest `ObjectId` raw value this container has ever issued or accepted (0 when none):
+    /// the high-water mark that keeps retired ids from being issued again (REQ-CORE-002). Part
+    /// of equality and of the canonical encoding.
+    pub(super) max_issued: u64,
 }
 
 /// Inserts `id` into the top-first sequence `seq` at `position`; an index past the bottom means
@@ -109,6 +113,7 @@ impl Zones {
             objects: Arc::default(),
             cards: Arc::default(),
             outside_index: Arc::default(),
+            max_issued: 0,
         }
     }
 
@@ -221,19 +226,31 @@ impl Zones {
         }
     }
 
-    /// Issues the next id from a copy of `ids` and rejects it if it already names a live object
-    /// (REQ-CORE-002). Returns the advanced copy, to be written back only once the operation
-    /// cannot fail any more, and the id.
+    /// Issues the next id from a copy of `ids` and rejects it unless it is above the high-water
+    /// mark, so an id that is live or was ever held by this container is never issued again
+    /// (REQ-CORE-002, CR 400.7). Returns the advanced copy, to be written back (with
+    /// [`Zones::commit_issued`]) only once the operation cannot fail any more, and the id.
     fn issue_fresh(
         &self,
         ids: &IdGenerator<ObjectId>,
     ) -> Result<(IdGenerator<ObjectId>, ObjectId), ZoneError> {
         let mut probe = ids.clone();
         let id = probe.issue().map_err(|_| ZoneError::IdExhausted)?;
-        if self.objects.contains_key(&id) {
+        if id.get() <= self.max_issued {
             return Err(ZoneError::IdCollision(id));
         }
         Ok((probe, id))
+    }
+
+    /// Writes back the advanced generator and raises the high-water mark to `id`.
+    fn commit_issued(
+        &mut self,
+        ids: &mut IdGenerator<ObjectId>,
+        probe: IdGenerator<ObjectId>,
+        id: ObjectId,
+    ) {
+        *ids = probe;
+        self.max_issued = id.get();
     }
 
     /// Creates a new object for `card` (owned by `owner`) in the zone `req` names; the object
@@ -242,15 +259,16 @@ impl Zones {
     /// (abilities, CR 405.1) cannot be created here (see [`Zones`], "Stack scope").
     ///
     /// A per-player destination is `owner`'s zone (CR 400.3). `ids` must be the generator that
-    /// issued every existing `ObjectId` in this container.
+    /// issued every id this container ever held; a generator that is behind it (stale, saved or
+    /// fresh) is rejected.
     ///
     /// # Errors
     /// [`ZoneError::UnknownPlayer`] if `owner` (or the requested controller) is unknown,
     /// [`ZoneError::CardAlreadyPresent`] if `card` is in a zone or pool,
     /// [`ZoneError::ControllerNotApplicable`] if a controller is requested outside the
     /// battlefield and the stack, [`ZoneError::IdExhausted`] if `ids` is exhausted,
-    /// [`ZoneError::IdCollision`] if `ids` issues an id that names a live object. The container
-    /// and `ids` are then unchanged.
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that is live or was ever held by this
+    /// container. The container and `ids` are then unchanged.
     pub fn create_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -264,7 +282,7 @@ impl Zones {
         }
         let controller = self.resolve_controller(&req, owner)?;
         let (probe, id) = self.issue_fresh(ids)?;
-        *ids = probe;
+        self.commit_issued(ids, probe, id);
         self.place(id, card, owner, controller, &req);
         Ok(id)
     }
@@ -327,7 +345,7 @@ impl Zones {
     ///   `ids` is not touched. It is repositioned within the zone: in an ordered zone it is
     ///   removed and re-inserted at `req.position` counted in the remaining pile (CR 400.5);
     ///   in an unordered zone the position is ignored. The returned [`Moved`] has `old == new`.
-    ///   Nothing else about the zone changes (CR 400.12).
+    ///   The mark and `ids` are untouched.
     ///
     /// In every case:
     /// - Ordered zones keep the relative order of the other objects (CR 400.5); `Index(n)` past
@@ -337,13 +355,14 @@ impl Zones {
     /// - The controller is the requested one (battlefield and stack only, CR 109.4, CR 110.2a,
     ///   CR 405.4) or the owner (CR 108.4a fallback).
     ///
-    /// `ids` must be the generator that issued every existing `ObjectId` in this container.
+    /// `ids` must be the generator that issued every id this container ever held; a generator
+    /// that is behind it (stale, saved or fresh) is rejected.
     ///
     /// # Errors
     /// [`ZoneError::UnknownObject`], [`ZoneError::ControllerNotApplicable`],
     /// [`ZoneError::UnknownPlayer`] (requested controller), and, when a new id is needed,
-    /// [`ZoneError::IdExhausted`] and [`ZoneError::IdCollision`] (the issued id names a live
-    /// object). The container and `ids` are then unchanged.
+    /// [`ZoneError::IdExhausted`] and [`ZoneError::IdCollision`] (the issued id is live or was
+    /// ever held by this container). The container and `ids` are then unchanged.
     pub fn move_object(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -355,7 +374,7 @@ impl Zones {
         // CR 400.3: a per-player destination is the owner's zone.
         let dest = ZoneId::of(req.to, record.owner);
         if dest == record.zone && !matches!(dest, ZoneId::Exile | ZoneId::Command) {
-            // CR 400.7 (no zone change), CR 400.5, CR 400.12: reposition, same object.
+            // CR 400.7 (no zone change), CR 400.5: reposition, same object.
             self.detach(id, dest);
             self.attach(id, dest, req.position);
             if let Some(r) = Arc::make_mut(&mut self.objects).get_mut(&id) {
@@ -372,7 +391,7 @@ impl Zones {
         // CR 400.7 (zone change), CR 400.8, CR 406.7, CR 400.10 (same-zone exile or command):
         // the moved object is a new object with a new id.
         let (probe, new) = self.issue_fresh(ids)?;
-        *ids = probe;
+        self.commit_issued(ids, probe, new);
         self.remove_object(record);
         let to = self.place(new, record.card, record.owner, controller, &req);
         Ok(Moved {
@@ -409,13 +428,14 @@ impl Zones {
     /// Brings `card` from `owner`'s outside-the-game `pool` into the zone `req` names as a new
     /// object with a fresh id (REQ-ZONE-001 item 9, CR 400.11, CR 400.7).
     ///
-    /// `ids` must be the generator that issued every existing `ObjectId` in this container.
+    /// `ids` must be the generator that issued every id this container ever held; a generator
+    /// that is behind it (stale, saved or fresh) is rejected.
     ///
     /// # Errors
     /// [`ZoneError::UnknownPlayer`], [`ZoneError::NoSuchOutsideCard`] if the card is not in that
     /// pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`],
-    /// [`ZoneError::IdCollision`] if `ids` issues an id that names a live object. The container
-    /// and `ids` are then unchanged.
+    /// [`ZoneError::IdCollision`] if `ids` issues an id that is live or was ever held by this
+    /// container. The container and `ids` are then unchanged.
     pub fn enter_from_outside(
         &mut self,
         ids: &mut IdGenerator<ObjectId>,
@@ -430,7 +450,7 @@ impl Zones {
         }
         let controller = self.resolve_controller(&req, owner)?;
         let (probe, id) = self.issue_fresh(ids)?;
-        *ids = probe;
+        self.commit_issued(ids, probe, id);
         let players = Arc::make_mut(&mut self.players);
         if let Some(pz) = players.get_mut(&owner) {
             let pools = Arc::make_mut(&mut pz.outside);
@@ -645,7 +665,8 @@ impl CanonicalEncode for Zones {
     /// graveyard, outside pools); then the battlefield, stack, exile and command zones. Each
     /// zone is a kind tag, a length and, in contents order, each object's id, card, owner,
     /// controller and face-down flag. Each player's pools are a count and, in ascending pool
-    /// order, a pool tag and the ascending card set (REQ-NFR-006, REQ-CORE-002).
+    /// order, a pool tag and the ascending card set; last the id high-water mark as 8 bytes
+    /// little-endian (REQ-NFR-006, REQ-CORE-002).
     fn encode_canonical(&self, out: &mut Vec<u8>) {
         self.config.free_graveyard_reorder.encode_canonical(out);
         put_len(out, self.players.len());
@@ -664,5 +685,6 @@ impl CanonicalEncode for Zones {
         self.encode_zone(ZoneKind::Stack, self.stack.iter(), out);
         self.encode_zone(ZoneKind::Exile, self.exile.iter(), out);
         self.encode_zone(ZoneKind::Command, self.command.iter(), out);
+        self.max_issued.encode_canonical(out);
     }
 }
