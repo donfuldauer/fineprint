@@ -236,8 +236,9 @@ fn is_public_info_unknown_id_is_none() {
 
 // REQ-ZONE-001 items 2, 5, 6, CR 402.3, 406.3, 400.7, 400.8, 406.7, 400.10: hand, battlefield,
 // exile and command list ascending ObjectId whatever Position is requested. One generator is
-// used throughout; a larger id enters an unordered zone before a smaller one because objects are
-// moved in descending creation order, and a low-id object moved out and back gets a higher id.
+// used throughout; the moves issue the destination ids (5..8) in ascending order, while the
+// SOURCE objects are moved in descending creation order. The test checks that the listing is
+// ascending whatever Position is requested.
 #[test]
 fn unordered_zones_list_ascending_object_ids_whatever_the_position() {
     let positions = [
