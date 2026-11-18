@@ -50,7 +50,8 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only "$BASE...$HEAD")
+          # --no-renames: a rename lists both the old and the new path, so code moved to a .md still counts.
+          files=$(git diff --no-renames --name-only "$BASE...$HEAD")
           printf '%s\n' "$files"
           # Documentation only: Markdown files and .claude/ (agent and skill text), which no build,
           # test or tool reads. docs/SRS.md is read by the xtask cr tests, so it counts as code.
