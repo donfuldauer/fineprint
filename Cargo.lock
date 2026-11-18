@@ -137,6 +137,9 @@ name = "fineprint-dsl"
 version = "0.0.0"
 dependencies = [
  "fineprint-base",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
 ]
 
 [[package]]
