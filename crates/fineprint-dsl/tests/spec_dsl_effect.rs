@@ -1106,6 +1106,8 @@ struct Gen<'a> {
     rng: &'a mut Pcg64Dxsm,
     seen: BTreeSet<&'static str>,
     max_depth_seen: u32,
+    /// Generated CREATE_CONTINUOUS_EFFECT documents with `lockAffectedSet:false`.
+    lock_false: usize,
 }
 
 impl Gen<'_> {
@@ -1227,6 +1229,28 @@ impl Gen<'_> {
             "SET_DESIGNATION" if coin(self.rng) => {
                 m.insert("value".into(), json!("test_designation_name"));
             }
+            // CR 611.2c: a CHAR effect (characteristics or controller change) fixes its
+            // affected set when it begins, so `lockAffectedSet:false` is invalid with any CHAR
+            // effect. Keep `false` exercised by turning the effects into an all-RULE list.
+            "CREATE_CONTINUOUS_EFFECT" if m.get("lockAffectedSet") == Some(&json!(false)) => {
+                let has_char = m["effects"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|e| e["type"] == "CHAR"));
+                if has_char {
+                    if coin(self.rng) {
+                        m.insert("lockAffectedSet".into(), json!(true));
+                    } else {
+                        let n = 1 + below(self.rng, 3);
+                        let rules: Vec<Value> = (0..n)
+                            .map(|_| json!({"type":"RULE","kind":pick(self.rng, &RULE_KINDS)}))
+                            .collect();
+                        m.insert("effects".into(), Value::Array(rules));
+                    }
+                }
+                if m.get("lockAffectedSet") == Some(&json!(false)) {
+                    self.lock_false += 1;
+                }
+            }
             _ => {}
         }
         Value::Object(m)
@@ -1282,6 +1306,7 @@ const TREES_PER_SEED: usize = 500;
 fn req_dsl_010_generated_trees_round_trip() {
     let mut seen_all: BTreeSet<&'static str> = BTreeSet::new();
     let mut deepest = 0;
+    let mut lock_false_total = 0;
     for seed in SEEDS {
         let mut rng = Pcg64Dxsm::from_u64_seed(seed);
         let mut shuffle_rng = Pcg64Dxsm::from_u64_seed(seed ^ 0x5555);
@@ -1289,6 +1314,7 @@ fn req_dsl_010_generated_trees_round_trip() {
             rng: &mut rng,
             seen: BTreeSet::new(),
             max_depth_seen: 0,
+            lock_false: 0,
         };
         for _ in 0..TREES_PER_SEED {
             let doc = g.instr(1);
@@ -1319,9 +1345,52 @@ fn req_dsl_010_generated_trees_round_trip() {
         seen_all.extend(g.seen.iter().copied());
         // Every op appears for each seed.
         assert_eq!(g.seen.len(), 72, "seed {seed:#x} covered {:?}", g.seen);
+        lock_false_total += g.lock_false;
     }
     assert_eq!(seen_all.len(), 72);
+    // `lockAffectedSet:false` (RULE/PLAYER-only effects) stays exercised across the seeds.
+    assert!(lock_false_total > 0, "no lockAffectedSet:false generated");
     assert!(deepest >= 4, "generator should nest, deepest {deepest}");
+}
+
+/// REQ-DSL-010, REQ-LAYER-003 (CR 611.2c: a continuous effect from a resolving spell or ability
+/// that modifies characteristics or changes controller has its affected set fixed when it
+/// begins): CREATE_CONTINUOUS_EFFECT with any CHAR effect (any layer, including layer "2") and
+/// `lockAffectedSet:false` is rejected by all three entry points; the same documents with `true`
+/// or with the member omitted are accepted. `false` stays valid with RULE/PLAYER-only effects.
+#[test]
+fn req_layer_003_lock_affected_set_false_with_char_rejected() {
+    let char_effect = |layer: &str| {
+        json!({"type":"CHAR","layer":layer,"affected":{"pred":"IS_CREATURE"},
+               "modification":{"op":"TEST_OP"}})
+    };
+    let doc = |effects: Vec<Value>, lock: Option<bool>| {
+        let mut m = Map::new();
+        m.insert("op".into(), json!("CREATE_CONTINUOUS_EFFECT"));
+        m.insert("effects".into(), Value::Array(effects));
+        m.insert("duration".into(), json!({"kind":"UNTIL_END_OF_TURN"}));
+        if let Some(b) = lock {
+            m.insert("lockAffectedSet".into(), json!(b));
+        }
+        Value::Object(m)
+    };
+    let rule = || json!({"type":"RULE","kind":"SKIP"});
+    let player =
+        || json!({"type":"PLAYER","affected":{"ref":"CONTROLLER"},"modification":{"op":"TEST_OP"}});
+    for layer in ["6", "2"] {
+        for effects in [
+            vec![char_effect(layer)],
+            vec![rule(), char_effect(layer)],
+            vec![char_effect(layer), player()],
+        ] {
+            reject(&doc(effects.clone(), Some(false)));
+            accept(&doc(effects.clone(), Some(true)));
+            accept(&doc(effects, None));
+        }
+    }
+    // RULE/PLAYER-only effects keep `false` valid.
+    accept(&doc(vec![rule()], Some(false)));
+    accept(&doc(vec![rule(), player()], Some(false)));
 }
 
 // ---------------------------------------------------------------- 10. never panic (R12)
@@ -1440,6 +1509,7 @@ fn req_dsl_010_mutated_documents_never_panic() {
         rng: &mut gen_rng,
         seen: BTreeSet::new(),
         max_depth_seen: 0,
+        lock_false: 0,
     };
     for round in 0..1500 {
         let mut doc = match round % 3 {
