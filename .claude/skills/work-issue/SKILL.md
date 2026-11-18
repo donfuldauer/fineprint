@@ -212,18 +212,24 @@ now ready; say why in the final message instead.
 1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: starting
    successor" or "Self-chained to session" comment from this session already exists, a successor
    was or may have been created: find it with `list_sessions` by the tag
-   `fineprint-chain-<marker comment ID>` (step 2), never by time alone, so another chain's
-   session is never mistaken for this one's. If one exists, post step 3's comment if it is missing and end the turn;
+   `fineprint-chain-<marker comment ID>` (step 3), never by time alone, so another chain's
+   session is never mistaken for this one's. If one exists, post step 4's comment if it is missing and end the turn;
    never create another. If the marker exists but no successor session is found, create none and
    say so in the final message: the backstop scheduled task restarts the chain.
-2. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
+2. **Depth limit.** Otherwise call `get_session` with no argument and read `lineage.depth` and
+   `lineage.limit`. A successor would sit at `depth + 1`. If `depth + 1 >= limit`, create no
+   successor and post no marker: comment on the merged issue "Self-chain stopped: session depth
+   limit reached (depth <d> of <limit>); the backstop scheduled task restarts the chain.", say
+   the same in the final message, and end the turn. (`>=` is deliberate: it may stop one
+   generation early, but never attempts a create that the limit would refuse.)
+3. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
    start one new session with `create_session`: `source_url`
    `https://github.com/donfuldauer/fineprint`, tags `fineprint-chain` and
    `fineprint-chain-<marker comment ID>` (the ID of the marker just posted), a title naming the
    next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
    environment and model to be inherited.
-3. Comment on the merged issue: "Self-chained to session <id>."
-4. End the turn. Never start more than one session per merge, and never chain from a session
+4. Comment on the merged issue: "Self-chained to session <id>."
+5. End the turn. Never start more than one session per merge, and never chain from a session
    whose prompt did not ask for it.
 
 ## Never
