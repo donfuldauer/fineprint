@@ -141,6 +141,24 @@ impl ManaSymbol {
         }
         Ok(symbol)
     }
+
+    /// Whether this symbol is one the parser accepts: `Generic(n)` with `n <= MAX_GENERIC`,
+    /// `GenericHybrid(n, _)` with `1 <= n <= MAX_GENERIC`, `Hybrid` and `HybridPhyrexian` with
+    /// two different colors; every other symbol is always valid. The parser and
+    /// [`ManaCostDSL::new`] both use this rule, so they cannot disagree.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            ManaSymbol::Generic(n) => n <= MAX_GENERIC,
+            ManaSymbol::GenericHybrid(n, _) => (1..=MAX_GENERIC).contains(&n),
+            ManaSymbol::Hybrid(a, b) | ManaSymbol::HybridPhyrexian(a, b) => a != b,
+            ManaSymbol::Colored(_)
+            | ManaSymbol::Colorless
+            | ManaSymbol::Snow
+            | ManaSymbol::Variable(_)
+            | ManaSymbol::Phyrexian(_) => true,
+        }
+    }
 }
 
 impl fmt::Display for ManaSymbol {
@@ -217,13 +235,28 @@ impl std::error::Error for ManaParseError {}
 pub struct ManaCostDSL(Vec<ManaSymbol>);
 
 impl ManaCostDSL {
-    /// Builds a cost from symbols, keeping their order.
+    /// Builds a cost from symbols, keeping their order. Every symbol must satisfy the parser's
+    /// rules ([`ManaSymbol::is_valid`]), so every constructed cost prints as text that
+    /// [`ManaCostDSL::parse`] accepts and maps back to the same cost.
     ///
     /// # Errors
-    /// [`ManaParseError::Empty`] if `symbols` is empty.
+    /// [`ManaParseError::Empty`] if `symbols` is empty; [`ManaParseError::UnknownSymbol`] for
+    /// the first invalid symbol (for example `GenericHybrid(0, _)` or `Hybrid(c, c)`), with
+    /// `offset` its byte offset in the canonical text of the cost and `symbol` its text.
     pub fn new(symbols: Vec<ManaSymbol>) -> Result<ManaCostDSL, ManaParseError> {
         if symbols.is_empty() {
             return Err(ManaParseError::Empty);
+        }
+        let mut offset = 0usize;
+        for symbol in &symbols {
+            let text = symbol.to_string();
+            if !symbol.is_valid() {
+                return Err(ManaParseError::UnknownSymbol {
+                    offset,
+                    symbol: text,
+                });
+            }
+            offset += text.len();
         }
         Ok(ManaCostDSL(symbols))
     }
@@ -333,22 +366,25 @@ fn parse_symbol_at(text: &str, at: usize) -> Result<(ManaSymbol, usize), ManaPar
 }
 
 /// The symbol for the text between the braces, if it is exactly a canonical spelling.
+/// Every shape is first mapped to its candidate symbol and then filtered by
+/// [`ManaSymbol::is_valid`], the same rule [`ManaCostDSL::new`] applies.
 fn symbol_from_inner(inner: &str) -> Option<ManaSymbol> {
-    let parts: Vec<&str> = inner.split('/').collect();
-    match parts.as_slice() {
-        [one] => single(one),
-        [a, "P"] => color(a).map(ManaSymbol::Phyrexian),
-        [a, b] => match (generic(a), color(a), color(b)) {
-            (Some(n), _, Some(c)) if n >= 1 => Some(ManaSymbol::GenericHybrid(n, c)),
-            (_, Some(x), Some(y)) if x != y => Some(ManaSymbol::Hybrid(x, y)),
+    let mut parts = inner.split('/');
+    let candidate = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(one), None, None, None) => single(one),
+        (Some(a), Some("P"), None, None) => color(a).map(ManaSymbol::Phyrexian),
+        (Some(a), Some(b), None, None) => match (generic(a), color(a), color(b)) {
+            (Some(n), _, Some(c)) => Some(ManaSymbol::GenericHybrid(n, c)),
+            (_, Some(x), Some(y)) => Some(ManaSymbol::Hybrid(x, y)),
             _ => None,
         },
-        [a, b, "P"] => match (color(a), color(b)) {
-            (Some(x), Some(y)) if x != y => Some(ManaSymbol::HybridPhyrexian(x, y)),
+        (Some(a), Some(b), Some("P"), None) => match (color(a), color(b)) {
+            (Some(x), Some(y)) => Some(ManaSymbol::HybridPhyrexian(x, y)),
             _ => None,
         },
         _ => None,
-    }
+    };
+    candidate.filter(|symbol| symbol.is_valid())
 }
 
 /// A one-part symbol: generic number, color, `C`, `S`, or a variable.
