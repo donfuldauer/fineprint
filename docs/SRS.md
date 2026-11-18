@@ -22,7 +22,7 @@ The key words **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT** and **MAY** f
 ## 1. Executive Summary & Foundational Principles
 
 ### 1.1 Purpose
-This document specifies the functional, architectural and interface requirements for **Fine Print**, a clean-room, deterministic rules engine that executes the game mechanics, card layouts, continuous-effect interactions and format rules of *Magic: The Gathering*, as defined by the Rules Baseline.
+This document specifies the functional, architectural and interface requirements for **Fine Print**, a clean-room, deterministic rules engine that executes the game mechanics, card layouts, continuous-effect interactions and format rules of *Magic: The Gathering*, as defined by the Rules Baseline. (*Magic: The Gathering* is a trademark of Wizards of the Coast LLC. It is named here only to describe what Fine Print is compatible with. Fine Print is an independent project, and Wizards of the Coast has not approved, endorsed or sponsored it and is not affiliated with it.)
 
 The engine is a **standalone, UI-agnostic library and runtime** with a strictly typed public interface. Any consumer can use it to drive a complete match, inspect omniscient or player-redacted state, and use sandbox control. Consumers include a 3D desktop client, a web frontend, a tournament server, an MCTS agent and a headless test runner.
 
@@ -35,7 +35,7 @@ The engine is a **standalone, UI-agnostic library and runtime** with a strictly 
 ### 1.3 Legal & Architectural Decoupling (`REQ-ARCH-001`)
 1. **Zero hardcoded IP.** The engine binary SHALL contain no card names, Oracle text, flavor text, mana symbol graphics, artwork or set icons. Generic rules vocabulary that the CR itself defines (keyword names, predefined token definitions from CR 111.10, counter kinds, designations) MAY be built into the engine. Card-specific content MAY NOT.
 2. **Data-driven ingestion.** Card definitions, token definitions, format ban lists and FormatConfigs SHALL be supplied at runtime as versioned data artifacts (§14, §16).
-3. **Licensing boundary (non-normative guidance; not legal advice).** Game mechanics are generally not protected by copyright, but card names, Oracle text, art and trademarks belong to Wizards of the Coast. Card data obtained from Scryfall is subject to Scryfall's API terms. These terms allow use for Magic software under the Wizards Fan Content Policy, require that access not be paywalled, and require that the software add value rather than simply republish the data. The Fan Content Policy requires free access and an "unofficial fan content" disclaimer, and it restricts commercial licensing. **Any commercial distribution of a product that bundles card data SHALL receive legal review and, where needed, a license from Wizards of the Coast before release.**
+3. **Licensing boundary (non-normative guidance; not legal advice).** Game mechanics are generally not protected by copyright, but card names, Oracle text, art and trademarks belong to Wizards of the Coast. Card data obtained from Scryfall is subject to Scryfall's API terms. These terms allow use for Magic software under the Wizards Fan Content Policy, require that access not be paywalled, and require that the software add value rather than simply republish the data. The Fan Content Policy requires free access and an "unofficial fan content" disclaimer, and it restricts commercial licensing. Fine Print itself uses no Wizards of the Coast intellectual property under that policy: it contains and distributes no Oracle text, art or logos, and no card names other than the interaction examples this SRS names (REQ-NFR-004), and does not commit the CR text (item 1, REQ-NFR-004, REQ-NFR-007), names the game only descriptively, and cites CR rule numbers, quoting at most a few words of a rule where a requirement turns on its wording. It therefore carries a trademark and non-affiliation notice (REQ-NFR-012) rather than the Fan Content Policy disclaimer. A client that uses card data obtained from Scryfall does so under Scryfall's terms, and a client that uses Wizards of the Coast card data (names, Oracle text, art) in its own fan content can rely only on the Fan Content Policy, which does not cover reposting that material verbatim; each such client is responsible for those terms, including the policy's disclaimer, and for any further permission its use needs. A database built only from client-authored definitions (REQ-ING-007) carries those obligations only to the extent it contains such data. **Any commercial distribution of a product that bundles card data SHALL receive legal review and, where needed, a license from Wizards of the Coast before release.**
 
 ### 1.4 Naming Conventions (`REQ-ARCH-003`)
 1. The product name is **Fine Print** and the machine identifier is `fineprint`. These SHALL be used consistently:
@@ -49,7 +49,7 @@ The engine is a **standalone, UI-agnostic library and runtime** with a strictly 
 | Puzzle/test scenario files (REQ-TEST-001) | `*.pzl` (unchanged) |
 | Replay logs (REQ-API-005) | `*.fpreplay` |
 
-2. The product name, identifiers, logos and UI branding SHALL NOT include third-party game names, trademarks or logos (consistent with REQ-ARCH-001). Descriptive references to the game that the engine supports stay confined to documentation and compatibility notes. Any such reference MUST carry the disclaimer required by §1.3.
+2. The product name, identifiers, logos and UI branding SHALL NOT include third-party game names, trademarks or logos (consistent with REQ-ARCH-001). Descriptive references to the game that the engine supports stay confined to documentation and compatibility notes. Any such reference MUST be accompanied by the trademark and non-affiliation notice required by REQ-NFR-012.
 
 ### 1.5 Foundational Meta-Rules (`REQ-ARCH-002`)
 The engine SHALL enforce the CR 101 "golden rules" as cross-cutting constraints:
@@ -1348,7 +1348,7 @@ The engine SHALL NOT silently run a card with a definition that is missing or in
 **REQ-ING-014 — Artifact format & licensing.**
 * A `CardDatabaseArtifact` is content-addressed (a sha256 Merkle root over its sorted definitions) and MAY be signed by the client that built it. It contains definitions (parsed and client overrides), token records, the `RulesVocabulary` (subtypes, predefined tokens and keyword macro IDs extracted from the CR), any client-supplied behavioral tests, and the coverage report.
 * It is built by the client with `fineprint-ingest` and is **never distributed by Fine Print** (REQ-NFR-004). It is always separate from the engine binary (REQ-ARCH-001).
-* Clients that redistribute their databases are responsible for Scryfall's terms and the Fan Content Policy (§1.3). Fine Print's documentation SHALL say so.
+* Clients that redistribute their databases are responsible for the terms that apply to the data in them (§1.3): Scryfall's terms for data obtained from Scryfall, and the Fan Content Policy for Wizards of the Coast card data. Fine Print's documentation SHALL say so.
 
 ### 16.4 Worked Example: Importing One Card End-to-End
 **Input** (Scryfall Oracle Cards record, abridged): an Omen card whose `layout` is `adventure`. Face 0 is `Creature — Dragon {5}{U}` with the text "Flying\nWard {2} (Whenever this creature becomes the target …)". Face 1 is `Instant — Omen {1}{U}` with the text "Tap up to one target creature. Draw a card. (Then shuffle this card into its owner's library.)".
@@ -1427,7 +1427,7 @@ These requirements record the architecture and platform decisions that the imple
 **REQ-NFR-012 — Licensing.**
 * Fine Print's code SHALL be licensed under the **Mozilla Public License 2.0** (`MPL-2.0`). Distributed modifications to Fine Print's files must remain available under MPL-2.0 with the original notices kept; applications may embed or link Fine Print, statically or dynamically, without being open-sourced themselves. The full text is the repository's `LICENSE` file, and every package (crates, NuGet, npm) SHALL declare the SPDX identifier.
 * Every source file SHALL carry the MPL-2.0 Exhibit A header: "This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/."
-* The README, package metadata and any client-facing documentation that names the supported game SHALL carry the Fan Content Policy disclaimer (§1.3, REQ-ARCH-003).
+* The README, package metadata and any client-facing documentation that names the supported game SHALL carry a trademark and non-affiliation notice: the game's name is a trademark of its owner, used only to describe compatibility, and Fine Print is not affiliated with, approved or endorsed by Wizards of the Coast (§1.3, REQ-ARCH-003). The Fan Content Policy disclaimer is the responsibility of clients that use card data (§1.3).
 
 ---
 
