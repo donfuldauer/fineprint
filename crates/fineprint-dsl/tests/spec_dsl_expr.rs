@@ -1738,3 +1738,91 @@ fn reject_text(kind: &str, s: &str) {
     };
     assert!(failed, "deep document of {} bytes was accepted", s.len());
 }
+
+/// Container depth of a `Value` (recursive; only used at <= 1000 levels).
+fn value_depth(v: &Value) -> usize {
+    match v {
+        Value::Array(a) => 1 + a.iter().map(value_depth).max().unwrap_or(0),
+        Value::Object(o) => 1 + o.values().map(value_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn value_not(levels: usize) -> Value {
+    let mut v = json!({"pred": "TAPPED"});
+    for _ in 0..levels {
+        v = json!({"op": "NOT", "condition": v});
+    }
+    v
+}
+
+fn value_math(levels: usize) -> Value {
+    let mut v = json!({"LITERAL": 1});
+    for _ in 0..levels {
+        v = json!({"MATH": {"op": "ADD", "lhs": v, "rhs": {"LITERAL": 1}}});
+    }
+    v
+}
+
+fn value_count(levels: usize) -> Value {
+    let mut v = json!({"zones": ["HAND"]});
+    for _ in 0..levels {
+        v = json!({"zones": ["HAND"], "count": {"COUNT": v}});
+    }
+    v
+}
+
+/// Largest level count with depth <= 127, and smallest level counts reaching depth >= 128,
+/// >= 200 and >= 1000.
+fn depth_levels(build: fn(usize) -> Value) -> (usize, [usize; 3]) {
+    // Depth grows by a constant step per level; measure it with the helper.
+    let base = value_depth(&build(0));
+    let step = value_depth(&build(1)) - base;
+    assert!(step > 0);
+    assert_eq!(value_depth(&build(7)), base + 7 * step);
+    let first_at = |target: usize| target.saturating_sub(base).div_ceil(step);
+    let over = first_at(128);
+    (over - 1, [over, first_at(200), first_at(1000)])
+}
+
+fn check_borrowed_guard<T>(name: &str, build: fn(usize) -> Value)
+where
+    T: for<'de> serde::Deserialize<'de> + Serialize + PartialEq + Debug,
+{
+    let (ok_levels, over) = depth_levels(build);
+    let ok_value = build(ok_levels);
+    let ok_depth = value_depth(&ok_value);
+    assert!((126..=127).contains(&ok_depth), "{name}: depth {ok_depth}");
+    let t = T::deserialize(&ok_value)
+        .unwrap_or_else(|e| panic!("{name}: depth {ok_depth} rejected: {e}"));
+    let bytes = to_canonical_vec(&t).unwrap();
+    let back: T = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(back, t, "{name}: canonical round trip");
+    let again: T = T::deserialize(&serde_json::from_slice::<Value>(&bytes).unwrap()).unwrap();
+    assert_eq!(again, t);
+    drop(ok_value);
+
+    for levels in [over[0], over[0] + 1, over[1], over[2]] {
+        let v = build(levels);
+        let d = value_depth(&v);
+        assert!(
+            (128..=1002).contains(&d),
+            "{name}: levels {levels} depth {d}"
+        );
+        assert!(
+            T::deserialize(&v).is_err(),
+            "{name}: levels {levels} (depth {d}) was accepted"
+        );
+    }
+}
+
+/// REQ-NFR-006, REQ-DSL-003: the DSL depth guard (G6), exercised through a borrowed `Value`
+/// (the only path that discriminates: `serde_json::from_str` stops at the same limit first).
+/// Documents of at most 127 open containers are accepted and round-trip canonically; 128 or
+/// more is an error, for NOT predicates, MATH values and COUNT-in-selector selectors.
+#[test]
+fn req_nfr_006_borrowed_value_depth_guard() {
+    check_borrowed_guard::<PredicateAST>("not", value_not);
+    check_borrowed_guard::<ValueExpressionAST>("math", value_math);
+    check_borrowed_guard::<ObjectSelectorAST>("count", value_count);
+}
