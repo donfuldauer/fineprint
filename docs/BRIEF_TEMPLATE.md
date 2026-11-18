@@ -51,7 +51,8 @@ GATE / DONE WHEN
 
 WHEN SOMETHING IS UNCLEAR
   Choose the option most consistent with the SRS, the issue and the decision-log excerpts below,
-  record it in docs/DECISIONS.md, add a line to docs/HUMAN_QUEUE.md, and continue. Do not wait.
+  record it in docs/DECISIONS.md (the recommendation is the decision) and continue. Do not wait.
+  Do not add a docs/HUMAN_QUEUE.md line unless it is a PROCESS.md P8 item.
   If the question is what a rule of the game says, stop that item and report it as a
   rules question; the Orchestrator sends it to the rules-researcher.
   <relevant DECISIONS.md excerpts>

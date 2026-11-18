@@ -21,8 +21,9 @@ check once on the head; check 1 traces each group's requirements; check 9 compar
 `<pre-batch head>..HEAD` against the union of all groups' OWNED PATHS. Report results per item
 (per thread URL where given).
 
-**Queue-only round.** If the only change is a `docs/HUMAN_QUEUE.md` line for deferred findings,
-run check 9 (the diff touches only that file) and confirm each deferred finding has its line.
+**Docs-only round.** If the only changes are to `docs/DECISIONS.md`, `docs/RUN_LOG.md` or
+`docs/HUMAN_QUEUE.md` (for example the entry for a deferred finding), run check 9 (the diff
+touches only those files) and confirm each deferred finding has its entry.
 Report `requirements: 0/0`; `pass` if both hold.
 
 ## Checks (all must pass)

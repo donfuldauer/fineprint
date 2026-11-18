@@ -30,7 +30,7 @@ Closes #<!-- issue number -->
 
 - DECISIONS.md:
 - contracts/CHANGE_REQUESTS.md:
-- HUMAN_QUEUE.md:
+- HUMAN_QUEUE.md (P8 items only, else "none"):
 
 ## Model routing
 

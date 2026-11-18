@@ -70,4 +70,4 @@ failure becomes a new issue against the owning area; never pause for a person.
 
 Stop when no issue is ready, no issue is `in-progress`, and no PR is open, or when every remaining
 issue is blocked. End with a short account: phases completed, PRs merged, blocked issues and why, `[Fable wanted]` lines, the
-aggregate parser coverage, and the human-queue items a person should look at first.
+aggregate parser coverage, and the P8 human-queue items a person should look at first.
