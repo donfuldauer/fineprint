@@ -1233,11 +1233,21 @@ fn req_dsl_001_002_seal_ok_iff_from_json_not_version_error() {
             redigest(&mut v);
             let loaded = load_value(&v);
             match sealed_result {
-                Ok(s) => assert_eq!(
-                    loaded,
-                    Ok(s),
-                    "version {text:?} base {which}: seal Ok, load must return the sealed definition"
-                ),
+                Ok(s) => {
+                    let exported = s.to_canonical_json().unwrap_or_else(|e| {
+                        panic!("version {text:?} base {which}: export failed {e:?}")
+                    });
+                    assert_eq!(
+                        CardDefinitionDSL::from_json(&exported),
+                        Ok(s.clone()),
+                        "version {text:?} base {which}: from_json(to_canonical_json(sealed)) must equal sealed"
+                    );
+                    assert_eq!(
+                        loaded,
+                        Ok(s),
+                        "version {text:?} base {which}: seal Ok, load must return the sealed definition"
+                    );
+                }
                 Err(e) => assert!(
                     matches!(loaded, Err(CardDefinitionError::Version(_))),
                     "version {text:?} base {which}: seal Err {e:?}, load must be Version, got {loaded:?}"
