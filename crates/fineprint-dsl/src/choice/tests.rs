@@ -332,15 +332,15 @@ fn req_dsl_011_large_enum_linearithmic() {
     assert_eq!(c, ChoiceCandidates::Enum(labels.clone()));
     let spec_doc =
         format!(r#"{{"chooser":{{"ref":"CONTROLLER"}},"kind":"MODE","candidates":{doc}}}"#);
-    if let Ok(spec) = serde_json::from_str::<ChoiceSpec>(&spec_doc) {
-        let bytes = crate::canonical::to_canonical_vec(&spec).expect("export");
-        let back: ChoiceSpec = serde_json::from_slice(&bytes).expect("reload");
-        assert_eq!(back, spec);
-        assert_eq!(
-            back.candidates,
-            Some(ChoiceCandidates::Enum(labels.clone()))
-        );
-    }
+    let spec =
+        serde_json::from_str::<ChoiceSpec>(&spec_doc).expect("decode ChoiceSpec with large ENUM");
+    let bytes = crate::canonical::to_canonical_vec(&spec).expect("export");
+    let back: ChoiceSpec = serde_json::from_slice(&bytes).expect("reload");
+    assert_eq!(back, spec);
+    assert_eq!(
+        back.candidates,
+        Some(ChoiceCandidates::Enum(labels.clone()))
+    );
     let bytes = crate::canonical::to_canonical_vec(&c).expect("export candidates");
     let back: ChoiceCandidates = serde_json::from_slice(&bytes).expect("reload candidates");
     assert_eq!(back, c);
