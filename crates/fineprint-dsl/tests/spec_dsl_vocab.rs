@@ -15,6 +15,7 @@ fn vocab() -> &'static RulesVocabulary {
 }
 
 /// REQ-SUB-001: exactly the SRS §10.1 token letters and names, in order (no `l`, no `o`).
+/// CR 111.10
 #[test]
 fn req_sub_001_token_letters_and_names() {
     let v = vocab();
@@ -70,6 +71,7 @@ fn req_sub_001_token_letters_and_names() {
 
 /// REQ-SUB-001: the Incubator is double-faced with a 0/0 artifact creature back face; Heartwood
 /// is red and green; Walker is a 2/2 black creature.
+/// CR 111.10d, CR 111.10i, CR 111.10x
 #[test]
 fn req_sub_001_token_characteristics() {
     let v = vocab();
@@ -105,6 +107,7 @@ fn req_sub_001_token_characteristics() {
 }
 
 /// REQ-SUB-001, REQ-DSL-014: Empower Jace is a keyword action only, never a predefined token.
+/// CR 701.71, CR 111.10
 #[test]
 fn req_sub_001_empower_jace_is_not_a_token() {
     let v = vocab();
@@ -120,6 +123,7 @@ fn req_sub_001_empower_jace_is_not_a_token() {
 
 /// REQ-DSL-014: the SRS §14.7 macro ids exist with the SRS rule numbers; ids are unique across
 /// both lists; 701.1/702.1 are not keywords.
+/// CR 702.9, CR 702.111, CR 702.20, CR 702.19, CR 702.4, CR 701.1, CR 702.1
 #[test]
 fn req_dsl_014_keyword_ids() {
     let v = vocab();
@@ -168,6 +172,7 @@ fn req_dsl_014_keyword_ids() {
 
 /// REQ-SUB-002 context (SRS §6.1, §10.2), REQ-OBJ-001: the 15 keyword-counter kinds, no ward,
 /// and the shield / stun / finality classes with their rules.
+/// CR 122.1b, CR 122.1c, CR 122.1d, CR 122.1h
 #[test]
 fn req_obj_001_counter_kinds() {
     let v = vocab();
@@ -213,6 +218,8 @@ fn req_obj_001_counter_kinds() {
 
 /// REQ-OBJ-001: card types and supertypes match SRS §4.1 (capitalised, CR order); creature
 /// and kindred share one subtype list; spell types belong to instants and sorceries.
+/// CR 205.2a, CR 205.4a, CR 205.3g, CR 205.3h, CR 205.3i, CR 205.3j, CR 205.3k, CR 205.3m,
+/// CR 205.3n, CR 205.3p, CR 205.3q, CR 205.3r
 #[test]
 fn req_obj_001_types_and_subtypes() {
     let v = vocab();
@@ -362,6 +369,7 @@ fn req_sub_001_no_card_data_or_prose() {
 
 /// REQ-OBJ-001 (SRS §4.1 "not hardcoded"): no subtype from the bundled vocabulary appears as a
 /// string literal in the non-test source of the vocabulary modules of either crate.
+/// CR 205.3
 #[test]
 fn req_obj_001_no_hardcoded_subtypes() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
