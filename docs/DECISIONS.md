@@ -2135,3 +2135,55 @@ without changing any other leaf.
 **Alternatives.** Dropping `/ids/timestamp` from the frozen layout now (would hide divergence in
 replays and is not required by this unit's acceptance criteria). A second loop hash now (no
 consumer).
+
+## #19 FP-018 — Zones API
+
+**Decision.** (a) `fineprint_core::zones::Zones` is a standalone container: it is not wired into
+`GameState`, its Merkle layout or its wire form (`state/` is not owned by this unit). The next unit
+adds it as an `Arc`-shared component with a `_mut` accessor, a Merkle leaf group and a wire
+member, as the `state` module doc describes; `Zones` already implements `CanonicalEncode` for that
+leaf group. (b) The optional free graveyard reordering flag (REQ-ZONE-001 item 4, the CR 404.2
+tournament option) is `ZonesConfig::free_graveyard_reorder` (default `false`) because
+`FormatConfig` does not exist yet; it moves there when it does. `reorder_graveyard` checks the flag
+first (so a disabled flag reports `ReorderNotAllowed` even for an unknown player or an unchanged
+order), then the player, then that the order is a permutation of exactly the current contents.
+(c) `move_object`, `create_object` and `enter_from_outside` take `&mut IdGenerator<ObjectId>`
+because `GameState`'s generators are private; the id is issued after every check, so an error
+leaves the container and the generator unchanged. (d) A move to the same zone (same `ZoneId`) is
+also a move and creates a new `ObjectId` (CR 400.8, CR 406.7, CR 400.10 are same-zone new-object
+cases; CR 400.9 and CR 401.6 are later work). (e) Outside the game is never a zone (CR 400.11):
+it is a per-owner set of `OutsidePool` pools of `CardId`s with no object ids; a card is in at most
+one place (a zone object or one pool), and empty pools are not stored so equal contents are equal
+values. (f) The SRS REQ-ZONE-001 item 1 clause attributing re-evaluation "including partway
+through casting or resolution" to CR 401.5 is not covered by CR 401.5 (casting, activation and
+special actions only) and is out of scope here, with the rest of top-card reveal statics;
+simultaneous-entry ordering choices (CR 401.4, CR 404.3, CR 405.3), merged permanents, ante and
+subgames are later work. (g) A controller is meaningful only on the battlefield and the stack: a
+request controller elsewhere, or `set_controller` elsewhere, is `ControllerNotApplicable`; on
+entering any other zone the controller is the owner. (h) The CR 400.7 exception registry has 12
+entries (CR 400.7a-k and CR 400.7m) because the CR has no letter l; each is a named stub function
+returning `ExceptionOutcome::NotImplemented` until the unit that needs it fills it in.
+`Position::Index(n)` past the bottom of any ordered zone means the bottom (the CR 401.7 treatment,
+applied to every ordered zone).
+**Rationale.** Keeps the frozen state hash and wire contracts untouched while giving the next
+unit a ready component; follows the issue brief, SRS REQ-ZONE-001 and REQ-CORE-002, and the
+rules-researcher answers for #19.
+**Alternatives.** Wiring into `GameState` now (outside owned paths, would change the frozen Merkle
+layout). Outside the game as a `ZoneKind` (contradicts CR 400.11). A same-zone move that keeps the
+id (contradicts CR 400.8, CR 406.7, CR 400.10). A 13-entry registry with a placeholder for a
+missing letter (no such rule exists).
+
+## #19 FP-018 — Zones spec-test readings
+
+**Decision.** Readings the Independent Tester chose where the brief was silent, all of which the
+implementation meets: (1) a move within one ordered zone (for example library to library at
+`Index(k)`) removes the old object first, then inserts the new one at `k` in the remaining pile;
+(2) `add_outside_card` with an unknown owner is `UnknownPlayer(owner)`; (3) a request controller
+naming the owner is still `ControllerNotApplicable` outside the battlefield and the stack;
+(4) `reorder_graveyard` with an empty list is `InvalidOrder` for a non-empty graveyard and accepted
+for an empty one; (5) `ZonesConfig` is not part of the canonical encoding of `Zones` (it is format
+configuration, not game state).
+**Rationale.** Each is the literal reading of the #19 brief and keeps the zone-move primitive the
+single place an object changes position.
+**Alternatives.** Inserting at `k` counted before removal (makes `Index(k)` depend on where the
+object was); accepting `Some(owner)` everywhere (two spellings for one request).
