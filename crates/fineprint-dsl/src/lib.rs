@@ -33,3 +33,7 @@ pub mod choice;
 /// Ability envelope and the six ability kinds: triggers and events, activated abilities and
 /// costs, static effects and replacements (REQ-DSL-004..REQ-DSL-009, SRS §14.3–§14.4.4).
 pub mod ability;
+
+/// Effect instructions a resolving spell or ability runs, their durations and the
+/// `NATIVE_EFFECT` node (REQ-DSL-010, REQ-DSL-015, SRS §14.4.5, §14.8).
+pub mod effect;
