@@ -965,3 +965,58 @@ behaviour for normal inputs and keeps draw consumption unchanged.
 without rejection" (rejected: biased). Floyd's or reservoir subset sampling (rejected: unordered
 output or more draws for small `k`). Fisher-Yates from the front (equivalent in distribution;
 rejected only to fix one frozen order).
+
+## #10 FP-009 — Canonical encoding and Merkle hash framework
+
+**Decision.**
+- The `CanonicalEncode` trait stays in `crates/fineprint-base/src/ids/encode.rs` (the #8
+  contract) and is re-exported as `fineprint_base::encode::CanonicalEncode`; both paths name the
+  same trait. It is not moved, so the #8 contract and every existing import stay stable.
+- `fineprint-base` depends on `sha2` through the workspace pin `=0.11.1` with
+  `default-features = false`, as authorised by "FP-004 — State hash: SHA-256 Merkle (sha2),
+  budget met".
+- Length prefixes (`put_len`): a length below `u32::MAX` is a `u32` little-endian (4 bytes); any
+  other length, `u32::MAX` included, is the escape `0xFFFF_FFFF` followed by the length as a
+  `u64` little-endian. Every `usize` has exactly one encoding, with no panic and no saturation.
+- Layouts: integers `u8..u64`, `i8..i64` fixed width little-endian; `bool` one byte `0x00`/`0x01`;
+  `str`/`String` length-prefixed UTF-8; `[T]`/`Vec<T>` length then elements; `[T; N]` elements
+  only (N is part of the type); `Option<T>` `0x00` or `0x01` then the value; tuples (2 and 3)
+  fields in order; `BTreeMap`/`BTreeSet` length then entries in ascending key order; `&T`
+  delegates; `Digest` its 32 raw bytes; structs through `impl_canonical_struct!` (listed fields in
+  listed order, no prefix). No impl for `usize`/`isize` or floats.
+- Leaf digest = SHA-256(`0x00` || payload); internal digest = SHA-256(`0x01` ||
+  `put_len(child count)` || for each child in ascending `Label` order: canonical label bytes ||
+  child digest). `Label::Name(s)` encodes as `0x00` + length-prefixed UTF-8, `Label::Index(i)`
+  as `0x01` + 8 bytes little-endian; every Name sorts before every Index.
+- The parent hash covers each child's label and the child count. This extends the FP-004
+  prototype layout (`parent = SHA-256(0x01 || child digests)`), which hashed a fixed child order
+  without labels.
+- `diff_first_divergence(a, b)` returns `Option<ComponentPath>` (`None` when the trees are
+  structurally identical) rather than the bare `ComponentPath` of the issue text.
+- `MerkleTree::hash_operations()` counts the leaf and node digests computed by `root_digest` and
+  `digest_at` (not by `full_root_digest` or `diff_first_divergence`), so the incremental cost is
+  tested exactly without timing (R7).
+- Property tests use a hand-rolled deterministic harness (PCG64-DXSM with literal seeds, at least
+  5 000 iterations, fixed edge values) instead of proptest, which is not an approved dependency
+  ("FP-007").
+- Explicit grants used (exceptions to R1, authorised by the #10 brief): `lib.rs` gained only
+  `pub mod encode;` and `pub mod hash;` with one doc line each; `crates/fineprint-base/Cargo.toml`
+  gained only `sha2 = { workspace = true }`; `Cargo.lock` changed only by cargo (fineprint-base
+  gains the dependency `sha2`); `docs/DEVELOPMENT.md` changed only the "Depends on" cell of the
+  `fineprint-base` crate-map row.
+
+**Rationale.** REQ-NFR-006 asks for a Merkle hash that can locate the first differing component.
+Hashing labels into the parent makes the digest commit to the component names, so two states
+that hold the same component bytes under different names (for example a moved object) hash
+differently, and children can be added or removed without positional ambiguity; the child count
+and the injective length escape make every internal preimage parse uniquely. The distinct
+`0x00`/`0x01` prefixes keep leaves and internal nodes from colliding. Returning `Option` avoids
+inventing a path for equal trees. Keeping the trait in place honours the #8 contract (R2).
+
+**Alternatives.** Moving the trait into `encode` (rejected: breaks the #8 contract and imports).
+A plain `u32` length that saturates or panics above `u32::MAX` (rejected: not injective or not
+panic-free). Positional children without labels as in the FP-004 prototype (rejected: the
+divergence finder needs stable names, and label-free hashing cannot tell renamed components
+apart). Returning the root path for equal trees (rejected: ambiguous with a root-level
+difference). Timing assertions for incremental cost (rejected: R7). proptest (rejected: not an
+approved dependency).
