@@ -22,7 +22,7 @@ The key words **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT** and **MAY** f
 ## 1. Executive Summary & Foundational Principles
 
 ### 1.1 Purpose
-This document specifies the functional, architectural and interface requirements for **Fine Print**, a clean-room, deterministic rules engine that executes the game mechanics, card layouts, continuous-effect interactions and format rules of *Magic: The Gathering*, as defined by the Rules Baseline. (*Magic: The Gathering* is a trademark of Wizards of the Coast LLC, named here only to describe compatibility; Fine Print is an independent project, not affiliated with, approved or endorsed by Wizards of the Coast.)
+This document specifies the functional, architectural and interface requirements for **Fine Print**, a clean-room, deterministic rules engine that executes the game mechanics, card layouts, continuous-effect interactions and format rules of *Magic: The Gathering*, as defined by the Rules Baseline. (*Magic: The Gathering* is a trademark of Wizards of the Coast LLC. It is named here only to describe what Fine Print is compatible with. Fine Print is an independent project, and Wizards of the Coast has not approved, endorsed or sponsored it and is not affiliated with it.)
 
 The engine is a **standalone, UI-agnostic library and runtime** with a strictly typed public interface. Any consumer can use it to drive a complete match, inspect omniscient or player-redacted state, and use sandbox control. Consumers include a 3D desktop client, a web frontend, a tournament server, an MCTS agent and a headless test runner.
 
