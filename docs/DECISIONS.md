@@ -905,8 +905,9 @@ the golden corpus on every listed platform. REQ-NFR-011 makes those jobs require
 - `test` still does exactly that on all three systems for every pull request that changes
   anything that can be built or tested, and on every push to `main`.
 - A documentation-only pull request cannot change a build or test result, so skipping the steps
-  is an interpretation of "every change", not a weakening of the gate. The owner should confirm
-  it (docs/HUMAN_QUEUE.md).
+  is an interpretation of "every change", not a weakening of the gate. The repository owner
+  confirmed it on 2026-11-18 and removed the Windows and macOS `fmt`/`clippy` checks from the
+  ruleset.
 - Dropping Windows and macOS `fmt`/`clippy` removes no build or test from any platform.
 
 **Residual risk.**
