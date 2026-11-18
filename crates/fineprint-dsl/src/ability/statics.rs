@@ -528,23 +528,26 @@ impl Serialize for StaticEffect {
 /// effect with `{"sameAsLayer": L}` needs another CHAR effect of the same ability in layer `L`
 /// whose `affected` is a selector, so lock-in is never dangling, self-referential or chained.
 pub(crate) fn check_lock_in(effects: &[StaticEffect]) -> JResult<()> {
-    for (i, e) in effects.iter().enumerate() {
-        let StaticEffect::Char(CharacteristicEffect {
+    // One pass collects the anchor layers, so a forward reference is fine and the check is
+    // linear in the number of effects.
+    let anchors: std::collections::BTreeSet<Layer> = effects
+        .iter()
+        .filter_map(|e| match e {
+            StaticEffect::Char(CharacteristicEffect {
+                layer,
+                affected: Affected::Selector(_),
+                ..
+            }) => Some(*layer),
+            _ => None,
+        })
+        .collect();
+    for e in effects {
+        if let StaticEffect::Char(CharacteristicEffect {
             affected: Affected::SameAsLayer(l),
             ..
         }) = e
-        else {
-            continue;
-        };
-        let anchored = effects.iter().enumerate().any(|(j, other)| {
-            j != i
-                && matches!(other, StaticEffect::Char(CharacteristicEffect {
-                    layer,
-                    affected: Affected::Selector(_),
-                    ..
-                }) if layer == l)
-        });
-        if !anchored {
+            && !anchors.contains(l)
+        {
             return Err(format!(
                 "sameAsLayer {l} needs another CHAR effect of this ability in layer {l} with a \
                  selector (613.6 lock-in)"
