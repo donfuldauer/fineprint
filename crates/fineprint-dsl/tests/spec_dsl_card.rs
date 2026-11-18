@@ -1129,15 +1129,25 @@ fn req_dsl_001_from_json_wrong_types() {
 #[test]
 fn req_dsl_002_different_major_dsl_version_rejected_with_clear_error() {
     for (ver, found) in [("2.0", 2u64), ("0.9", 0), ("10.0.0", 10), ("2.0.1", 2)] {
+        // Round-2 contract (REQ-DSL-001): `seal` rejects a version `from_json` would reject.
         let mut d = rich();
         d.dsl_version = ver.to_string();
-        // Correct hash for the document as given: the version check alone must reject it.
-        let s = sealed(d);
+        assert!(
+            matches!(d.seal(), Err(CanonicalError::Serialize(_))),
+            "{ver}: seal must reject"
+        );
+        // Build the document at the value level: patch a sealed 1.x document and recompute the
+        // digest with the independent oracle, so the version check alone must reject it.
+        let mut v = to_value(&sealed(rich()));
+        v["dslVersion"] = json!(ver);
+        v.as_object_mut().unwrap().remove("definitionHash");
+        let digest = sha256(&canonicalize(&serde_json::to_vec(&v).unwrap()).unwrap()).to_hex();
+        v["definitionHash"] = json!(digest);
         let docs = [
-            canonical_bytes(&s),
+            canonicalize(&serde_json::to_vec(&v).unwrap()).unwrap(),
             // Hash also wrong: the version error wins over HashMismatch.
             {
-                let mut v = to_value(&s);
+                let mut v = v.clone();
                 v["definitionHash"] = json!("0".repeat(64));
                 serde_json::to_vec(&v).unwrap()
             },
