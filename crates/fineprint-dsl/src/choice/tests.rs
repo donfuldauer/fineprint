@@ -316,3 +316,39 @@ fn req_dsl_011_random_and_mutated_never_panic() {
     reject::<ChoiceSpec>(&r#"{"a":"#.repeat(100_000));
     reject::<ChoiceCandidates>(&"[".repeat(100_000));
 }
+
+fn enum_doc(labels: &[String]) -> String {
+    let items: Vec<String> = labels.iter().map(|l| format!("{l:?}")).collect();
+    format!(r#"{{"ENUM":[{}]}}"#, items.join(","))
+}
+
+/// REQ-DSL-011, REQ-NFR-006: a 50,000-label ENUM decodes (set-based duplicate check), keeps its
+/// order through canonical export, and duplicates at either end are rejected.
+#[test]
+fn req_dsl_011_large_enum_linearithmic() {
+    let labels: Vec<String> = (0..50_000).map(|i| format!("opt{i}")).collect();
+    let doc = enum_doc(&labels);
+    let c: ChoiceCandidates = serde_json::from_str(&doc).expect("candidates");
+    assert_eq!(c, ChoiceCandidates::Enum(labels.clone()));
+    let spec_doc =
+        format!(r#"{{"chooser":{{"ref":"CONTROLLER"}},"kind":"MODE","candidates":{doc}}}"#);
+    if let Ok(spec) = serde_json::from_str::<ChoiceSpec>(&spec_doc) {
+        let bytes = crate::canonical::to_canonical_vec(&spec).expect("export");
+        let back: ChoiceSpec = serde_json::from_slice(&bytes).expect("reload");
+        assert_eq!(back, spec);
+        assert_eq!(
+            back.candidates,
+            Some(ChoiceCandidates::Enum(labels.clone()))
+        );
+    }
+    let bytes = crate::canonical::to_canonical_vec(&c).expect("export candidates");
+    let back: ChoiceCandidates = serde_json::from_slice(&bytes).expect("reload candidates");
+    assert_eq!(back, c);
+
+    let mut last_dup = labels.clone();
+    last_dup[49_999] = "opt7".to_owned();
+    assert!(serde_json::from_str::<ChoiceCandidates>(&enum_doc(&last_dup)).is_err());
+    let mut first_dup = labels;
+    first_dup[1] = "opt0".to_owned();
+    assert!(serde_json::from_str::<ChoiceCandidates>(&enum_doc(&first_dup)).is_err());
+}

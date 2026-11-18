@@ -14,7 +14,11 @@
 //!
 //! Serialisation re-checks the invariants a hand-built value could break (empty strings,
 //! duplicate zones, an empty `AND`, a filter selector with neither zones nor a predicate) and
-//! fails instead of writing JSON that would not decode.
+//! fails instead of writing JSON that would not decode. These re-checks are value-level only;
+//! they do not check nesting depth. A hand-built value nested deeper than
+//! [`crate::canonical::MAX_DEPTH`] (127 open containers) can be written by a plain
+//! `serde_json::to_vec`/`to_string` but will not decode. Callers who need output that is
+//! guaranteed to reload must use [`crate::canonical::to_canonical_vec`], which checks depth.
 //!
 //! Everything numeric is an `i64` within ±(2^53 − 1) or a `u32` slot; nothing here is evaluated
 //! (the interpreter is another unit).

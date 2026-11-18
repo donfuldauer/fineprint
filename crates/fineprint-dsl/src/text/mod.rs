@@ -209,8 +209,10 @@ impl TextToken {
     }
 }
 
-impl FromJson for TextToken {
-    fn from_json(v: &Value) -> JResult<Self> {
+impl TextToken {
+    /// Decodes a token and validates it as element `index` of a stream, so an error names the
+    /// token's array position (REQ-DSL-012).
+    fn from_json_at(v: &Value, index: usize) -> JResult<Self> {
         let mut o = Obj::new(v, "text token")?;
         let id = str_of(o.req("id")?, "id")?.to_owned();
         let token = match str_of(o.req("kind")?, "kind")? {
@@ -235,8 +237,14 @@ impl FromJson for TextToken {
             other => return Err(format!("unknown text token kind {other:?}")),
         };
         o.finish()?;
-        token.validate(0).map_err(|e| e.to_string())?;
+        token.validate(index).map_err(|e| e.to_string())?;
         Ok(token)
+    }
+}
+
+impl FromJson for TextToken {
+    fn from_json(v: &Value) -> JResult<Self> {
+        TextToken::from_json_at(v, 0)
     }
 }
 
@@ -330,7 +338,8 @@ impl FromJson for TextTokenStream {
     fn from_json(v: &Value) -> JResult<Self> {
         let tokens = array_of(v, "text token stream")?
             .iter()
-            .map(TextToken::from_json)
+            .enumerate()
+            .map(|(i, t)| TextToken::from_json_at(t, i))
             .collect::<JResult<Vec<_>>>()?;
         TextTokenStream::new(tokens).map_err(|e| e.to_string())
     }
@@ -342,4 +351,11 @@ impl Serialize for TextTokenStream {
     }
 }
 
+// Decoding caveats (REQ-NFR-006): the depth limit and the duplicate-member check are enforced
+// while the JSON is read, so untrusted JSON must be decoded directly from bytes, a `str` or a
+// reader (`serde_json::from_slice`/`from_str`/`from_reader`) into these types. For an in-memory
+// `serde_json::Value`, the caller must bound its depth before building or handing over an owned
+// value: a very deep owned `Value` can overflow the stack in `serde_json`'s own recursive drop
+// before this crate returns its error. Prefer deserialising from a borrowed `&Value`. Duplicate
+// member names have already collapsed once a `Value` exists, so they cannot be detected then.
 deserialize_via_from_json!(TextToken, TextTokenStream);
