@@ -18,3 +18,14 @@ pub mod card;
 /// Structured mana costs (REQ-OBJ-001, SRS §4.1): `ManaSymbol`, `ManaCostDSL` and the
 /// canonical symbol text grammar.
 pub mod mana;
+
+/// References, selectors, predicates and integer value expressions (REQ-DSL-003,
+/// REQ-CORE-006, SRS §14.4.0).
+pub mod expr;
+
+/// Rules text as a stream of text tokens with rewritable words and name references
+/// (REQ-DSL-012, SRS §14.5).
+pub mod text;
+
+/// Decision descriptions: `ChoiceSpec` (REQ-DSL-011, SRS §14.4.6).
+pub mod choice;
