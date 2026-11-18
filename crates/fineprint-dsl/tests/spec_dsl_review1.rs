@@ -1221,19 +1221,73 @@ fn req_dsl_001_002_seal_ok_iff_from_json_not_version_error() {
         " 1.0",
     ] {
         for base in [minimal(), rich()] {
+            let which = if base.faces.len() == minimal().faces.len() && base == minimal() {
+                "minimal"
+            } else {
+                "rich"
+            };
             let mut d = base;
             d.dsl_version = text.to_string();
+            let sealed_result = d.clone().seal();
             let mut v = to_value(&d);
             redigest(&mut v);
             let loaded = load_value(&v);
-            let is_version_err = matches!(loaded, Err(CardDefinitionError::Version(_)));
-            let seal_ok = d.seal().is_ok();
-            assert_eq!(
-                seal_ok, !is_version_err,
-                "version {text:?}: load {loaded:?}"
-            );
+            match sealed_result {
+                Ok(s) => assert_eq!(
+                    loaded,
+                    Ok(s),
+                    "version {text:?} base {which}: seal Ok, load must return the sealed definition"
+                ),
+                Err(e) => assert!(
+                    matches!(loaded, Err(CardDefinitionError::Version(_))),
+                    "version {text:?} base {which}: seal Err {e:?}, load must be Version, got {loaded:?}"
+                ),
+            }
         }
     }
+}
+
+/// A value nested `depth` deep, built iteratively (no recursion).
+fn deep_value(depth: usize) -> Value {
+    let mut v = json!(1);
+    for _ in 0..depth {
+        v = Value::Array(vec![v]);
+    }
+    v
+}
+
+/// REQ-NFR-006, REQ-DSL-001: a 100_000-deep placeholder makes `compute_hash` and
+/// `to_canonical_json` return `Serialize` without recursing or cloning. Runs on the default
+/// test stack; the definition is forgotten because `Value`'s `Drop` is recursive.
+#[test]
+fn req_nfr_006_deep_value_compute_hash_errors_without_overflow() {
+    let mut d = minimal();
+    d.faces[0].power = Some(ValueExpressionAST(deep_value(100_000)));
+    let h = d.compute_hash();
+    let j = d.to_canonical_json();
+    let h_ok = matches!(h, Err(CanonicalError::Serialize(_)));
+    let j_ok = matches!(j, Err(CanonicalError::Serialize(_)));
+    std::mem::forget(d);
+    assert!(h_ok, "compute_hash must be Serialize error");
+    assert!(j_ok, "to_canonical_json must be Serialize error");
+}
+
+/// REQ-NFR-006, REQ-DSL-002: nesting past MAX_DEPTH is a `Serialize` error for `seal` and
+/// `compute_hash`; a shallow value still hashes.
+#[test]
+fn req_nfr_006_seal_over_max_depth_is_serialize_error() {
+    let mut d = minimal();
+    d.faces[0].power = Some(ValueExpressionAST(deep_value(1_000)));
+    assert!(matches!(d.seal(), Err(CanonicalError::Serialize(_))));
+    let mut d = minimal();
+    d.faces[0].power = Some(ValueExpressionAST(deep_value(128)));
+    assert!(matches!(
+        d.compute_hash(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    let mut d = minimal();
+    d.faces[0].power = Some(ValueExpressionAST(deep_value(100)));
+    assert!(d.compute_hash().is_ok());
 }
 
 fn with_stale_hash(base: &CardDefinitionDSL, stale: &str) -> CardDefinitionDSL {
@@ -1348,7 +1402,8 @@ fn req_obj_001_mana_long_cost_round_trips() {
             _ => ManaSymbol::Phyrexian(COLORS[(i % 5) as usize]),
         })
         .collect();
-    let cost = ManaCostDSL::new(symbols).expect("long valid cost");
+    let cost = ManaCostDSL::new(symbols.clone()).expect("long valid cost");
     assert_eq!(cost.symbols().len(), 200);
+    assert_eq!(cost.symbols(), symbols.as_slice());
     assert_eq!(ManaCostDSL::parse(&cost.to_string()), Ok(cost));
 }
