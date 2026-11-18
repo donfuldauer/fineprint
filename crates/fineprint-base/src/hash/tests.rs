@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use super::tree::Node;
 use super::{
-    ComponentPath, Digest, Label, MerkleTree, PathError, diff_first_divergence, leaf_digest,
-    node_digest, sha256,
+    ComponentPath, Digest, Label, MAX_PATH_DEPTH, MerkleTree, PathError, diff_first_divergence,
+    leaf_digest, node_digest, sha256,
 };
 use crate::encode::{CanonicalEncode, encode_to_vec};
 use crate::prng::Pcg64Dxsm;
@@ -176,9 +176,14 @@ fn req_nfr_006_path_error_display() {
         PathError::EmptyPath,
         PathError::ThroughLeaf,
         PathError::IsInternal,
+        PathError::TooDeep,
     ] {
         assert!(!e.to_string().is_empty());
     }
+    assert_eq!(
+        PathError::TooDeep.to_string(),
+        "the path is deeper than the maximum depth"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -275,6 +280,128 @@ fn req_loop_001_set_leaf_errors_leave_tree_unchanged() {
     let mut fresh = d.clone();
     assert_eq!(d.root_digest(), fresh.root_digest());
     assert_eq!(d.hash_operations(), fresh.hash_operations());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Depth bound (CodeRabbit finding on PR #156)
+// ---------------------------------------------------------------------------------------------
+
+/// A path of `depth` labels, all `Index` labels.
+fn index_path(depth: usize) -> ComponentPath {
+    ComponentPath::new((0..depth as u64).map(ix).collect())
+}
+
+/// A path of `depth` labels, all `Name` labels.
+fn name_path(depth: usize) -> ComponentPath {
+    ComponentPath::new((0..depth).map(|i| n(&format!("n{i}"))).collect())
+}
+
+/// Runs `f` on a thread with a 2 MiB stack and fails if `f` fails.
+fn on_small_stack(f: impl FnOnce() + Send + 'static) {
+    let handle = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(f)
+        .unwrap();
+    // A failure on the thread fails the join; its panic message is printed by the panic hook.
+    assert!(handle.join().is_ok());
+}
+
+// REQ-NFR-006, REQ-CORE-006: a path one label over the limit is rejected on an empty tree and
+// leaves it unchanged, for Index and Name labels alike.
+#[test]
+fn req_nfr_006_req_core_006_too_deep_path_rejected_on_empty_tree() {
+    assert_eq!(MAX_PATH_DEPTH, 256);
+    let empty = MerkleTree::new().full_root_digest();
+    for p in [
+        index_path(MAX_PATH_DEPTH + 1),
+        name_path(MAX_PATH_DEPTH + 1),
+    ] {
+        assert_eq!(p.labels().len(), MAX_PATH_DEPTH + 1);
+        let mut t = MerkleTree::new();
+        assert_eq!(t.set_leaf(&p, vec![1]), Err(PathError::TooDeep));
+        assert_eq!(t.set_leaf_value(&p, &7u8), Err(PathError::TooDeep));
+        assert_eq!(t.child_labels(&ComponentPath::root()), Some(vec![]));
+        assert_eq!(t.root_digest(), MerkleTree::new().root_digest());
+        assert_eq!(t.root_digest(), empty);
+    }
+}
+
+// REQ-NFR-006, REQ-LOOP-001, REQ-CORE-006: on a clean non-empty tree an over-long path changes
+// nothing (digests, operation count, dirtiness), and a 100_000-label path is rejected without
+// panicking or overflowing the stack.
+#[test]
+fn req_nfr_006_req_loop_001_req_core_006_too_deep_path_leaves_clean_tree_unchanged() {
+    let mut t = MerkleTree::new();
+    t.set_leaf(&path(&[n("a")]), vec![1]).unwrap();
+    t.set_leaf(&path(&[ix(0), ix(1)]), vec![2]).unwrap();
+    let root = t.root_digest();
+    let full = t.full_root_digest();
+    let ops = t.hash_operations();
+    let before = snapshot(&t);
+    for p in [
+        index_path(MAX_PATH_DEPTH + 1),
+        name_path(MAX_PATH_DEPTH + 1),
+        index_path(100_000),
+    ] {
+        assert_eq!(t.set_leaf(&p, vec![3]), Err(PathError::TooDeep));
+        assert_eq!(t.set_leaf_value(&p, &3u8), Err(PathError::TooDeep));
+        assert_eq!(t.full_root_digest(), full);
+        assert_eq!(t.hash_operations(), ops);
+        assert_eq!(snapshot(&t), before);
+        // Nothing became dirty: a second root digest adds zero operations.
+        assert_eq!(t.root_digest(), root);
+        assert_eq!(t.hash_operations(), ops);
+    }
+}
+
+// REQ-NFR-006, REQ-LOOP-001, REQ-CORE-006: a path of exactly MAX_PATH_DEPTH labels inserts,
+// digests, compares, clones and drops on a 2 MiB stack.
+#[test]
+fn req_nfr_006_req_loop_001_req_core_006_path_at_limit_is_accepted_on_small_stack() {
+    on_small_stack(|| {
+        for deep in [index_path(MAX_PATH_DEPTH), name_path(MAX_PATH_DEPTH)] {
+            let mut t = MerkleTree::new();
+            assert_eq!(t.set_leaf(&deep, vec![5, 6]), Ok(()));
+            assert_eq!(t.root_digest(), t.full_root_digest());
+            assert_eq!(t.leaf_payload(&deep), Some(&[5u8, 6][..]));
+
+            let copy = t.clone();
+            assert_eq!(diff_first_divergence(&t, &copy), None);
+            let first = ComponentPath::new(deep.labels()[..1].to_vec());
+            assert_eq!(diff_first_divergence(&t, &MerkleTree::new()), Some(first));
+
+            let mut changed = t.clone();
+            assert_eq!(changed.set_leaf(&deep, vec![7]), Ok(()));
+            assert_eq!(diff_first_divergence(&t, &changed), Some(deep.clone()));
+            assert_eq!(changed.root_digest(), changed.full_root_digest());
+            assert_ne!(changed.root_digest(), t.root_digest());
+            drop(changed);
+            drop(copy);
+            drop(t);
+        }
+    });
+}
+
+// REQ-NFR-006, REQ-CORE-006: the depth check precedes the structural checks, and the root path
+// still reports EmptyPath.
+#[test]
+fn req_nfr_006_req_core_006_too_deep_takes_precedence_over_structural_errors() {
+    let mut t = MerkleTree::new();
+    t.set_leaf(&path(&[ix(0)]), vec![1]).unwrap();
+    t.root_digest();
+    let before = snapshot(&t);
+    // Its prefix [0] is an existing leaf, which alone would give ThroughLeaf.
+    let through = index_path(MAX_PATH_DEPTH + 1);
+    assert_eq!(
+        t.set_leaf(&index_path(2), vec![2]),
+        Err(PathError::ThroughLeaf)
+    );
+    assert_eq!(t.set_leaf(&through, vec![2]), Err(PathError::TooDeep));
+    assert_eq!(
+        t.set_leaf(&ComponentPath::root(), vec![2]),
+        Err(PathError::EmptyPath)
+    );
+    assert_eq!(snapshot(&t), before);
 }
 
 // ---------------------------------------------------------------------------------------------

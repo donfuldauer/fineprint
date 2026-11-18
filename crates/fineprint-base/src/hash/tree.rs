@@ -8,6 +8,11 @@
 //! mutation clears the cache of every ancestor of the changed node, and a digest computation
 //! fills the cache of every node it visits, so a node with a cached digest always has only
 //! cached (and correct) descendants.
+//!
+//! **Depth bound.** [`MerkleTree::set_leaf`] rejects any path of more than [`MAX_PATH_DEPTH`]
+//! labels with [`PathError::TooDeep`] before it mutates anything, so every tree that exists has
+//! bounded depth. The digest, view, comparison, clone and drop code recurses once per level and
+//! relies on this bound to stay well inside a small thread stack (REQ-CORE-006).
 
 use core::cmp::Ordering;
 use core::fmt;
@@ -16,7 +21,18 @@ use std::collections::BTreeMap;
 use super::{ComponentPath, Digest, Label, leaf_digest, node_digest_iter};
 use crate::encode::{CanonicalEncode, encode_to_vec};
 
+/// The maximum depth of a leaf path accepted by [`MerkleTree::set_leaf`] (REQ-CORE-006).
+///
+/// Depth is the number of labels in the path, so a leaf at depth N sits N levels below the
+/// root. The limit is inclusive: a path of exactly `MAX_PATH_DEPTH` labels is accepted, a longer
+/// one is rejected with [`PathError::TooDeep`]. The recursive digest, view, comparison, clone
+/// and drop code relies on this bound.
+pub const MAX_PATH_DEPTH: usize = 256;
+
 /// Why [`MerkleTree::set_leaf`] rejected a path. The tree is unchanged in every case.
+///
+/// [`PathError::EmptyPath`] is checked first, then [`PathError::TooDeep`], then the structural
+/// errors.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathError {
     /// The path is the root, which is always an internal node.
@@ -25,6 +41,8 @@ pub enum PathError {
     ThroughLeaf,
     /// The path names an existing internal node.
     IsInternal,
+    /// The path has more than [`MAX_PATH_DEPTH`] labels.
+    TooDeep,
 }
 
 impl fmt::Display for PathError {
@@ -33,6 +51,7 @@ impl fmt::Display for PathError {
             PathError::EmptyPath => "the root path cannot hold a leaf",
             PathError::ThroughLeaf => "a proper prefix of the path is a leaf",
             PathError::IsInternal => "the path names an internal node",
+            PathError::TooDeep => "the path is deeper than the maximum depth",
         })
     }
 }
@@ -178,13 +197,18 @@ impl MerkleTree {
     ///
     /// # Errors
     ///
-    /// [`PathError::EmptyPath`] if `path` is the root, [`PathError::ThroughLeaf`] if a proper
-    /// prefix of `path` is a leaf, [`PathError::IsInternal`] if `path` is an internal node. On
-    /// error the tree is unchanged.
+    /// [`PathError::EmptyPath`] if `path` is the root, [`PathError::TooDeep`] if `path` has more
+    /// than [`MAX_PATH_DEPTH`] labels (checked before the structural errors),
+    /// [`PathError::ThroughLeaf`] if a proper prefix of `path` is a leaf,
+    /// [`PathError::IsInternal`] if `path` is an internal node. On error the tree is unchanged.
     pub fn set_leaf(&mut self, path: &ComponentPath, payload: Vec<u8>) -> Result<(), PathError> {
         let Some((last, prefix)) = path.labels().split_last() else {
             return Err(PathError::EmptyPath);
         };
+        // The depth bound keeps the recursive digest, view, clone and drop code safe.
+        if path.labels().len() > MAX_PATH_DEPTH {
+            return Err(PathError::TooDeep);
+        }
         // Validate first so that an error leaves the tree untouched.
         let mut node = Some(&self.root);
         for label in prefix {
@@ -236,7 +260,8 @@ impl MerkleTree {
     ///
     /// # Errors
     ///
-    /// The same as [`MerkleTree::set_leaf`].
+    /// The same as [`MerkleTree::set_leaf`], including [`PathError::TooDeep`] for a path of more
+    /// than [`MAX_PATH_DEPTH`] labels.
     pub fn set_leaf_value<T: CanonicalEncode + ?Sized>(
         &mut self,
         path: &ComponentPath,
