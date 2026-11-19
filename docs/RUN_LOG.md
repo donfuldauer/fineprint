@@ -191,3 +191,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 02-state-objects | #26 | Classifier | Opus 5.5 | 1 | routed | — | module blast radius, complex; T2 two briefs; no rules questions |
 | 02-state-objects | #26 | Implementer | Opus 5.5 | 1 | done | cargo test --workspace 1835 passed; fmt, clippy, guard clean; fineprint-core coverage 99.67% | txn module + 26 unit tests; 4 decisions; `pub mod txn;` in lib.rs |
 | 02-state-objects | #26 | Independent Tester | Opus 5.5 | 1 | done | spec_txn_* 48 passed; fmt, clippy, guard clean | no suspected defects; 1 decision entry |
+| 02-state-objects | #26 | Work verifier | default | 1 | pass @ 1dbcbe1 | fmt, clippy clean; cargo test --workspace 1835 passed; coverage 99.67%; guard ok | 17/17 requirements traced |
+| 02-state-objects | #26 (PR #175 review round 1) | Classifier | Opus 5.5 | 1 | routed | — | 5 findings: 1, 4, 5 real (delta carry, durable-record dedupe, oracle); 2 docs; 3 docs-only (R3 forbids instance identity); T2 two briefs |
+| 02-state-objects | #26 (PR #175 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | lib tests 335 passed; fmt, clippy, guard clean | delta carry with clamp-at-0; durable commit forwards one covering record; into_state and TxnId docs; DECISIONS.md updated |
+| 02-state-objects | #26 (PR #175 review round 1) | Fixer (spec tests) | Opus 5.5 | 1 | done | cargo test --workspace 1854 passed; coverage 99.67%; guard clean | 1 test corrected under R10; independent Toy oracle; foreign-id test |
