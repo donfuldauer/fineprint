@@ -418,6 +418,20 @@ fn req_net_003_pay_costs_rejects_ineligible_objects() {
     reject(&req, &pay(vec![(1, vec![11])]));
 }
 
+/// REQ-NET-003, R12: a payment method may be listed at most once per PAY_COSTS response; the
+/// objects for a method go in one entry. Repeats are rejected even when every entry is
+/// individually valid. (The request's objects are 11, 12 for method 0 and 13 for method 1.)
+#[test]
+fn req_net_003_pay_costs_rejects_repeated_method_index() {
+    let req = pay_request();
+    reject(&req, &pay(vec![(0, vec![11]), (0, vec![11])]));
+    reject(&req, &pay(vec![(0, vec![11]), (0, vec![12])]));
+    reject(&req, &pay(vec![(1, vec![13]), (0, vec![11]), (1, vec![])]));
+    accept(&req, &pay(vec![(0, vec![11, 12])]));
+    accept(&req, &pay(vec![(0, vec![11]), (1, vec![13])]));
+    reject(&req, &pay(vec![(0, vec![11, 11])]));
+}
+
 /// REQ-NET-003: auto-pay, declining and cancelling still validate against the payment request.
 #[test]
 fn req_net_003_pay_costs_auto_decline_cancel() {
