@@ -3753,34 +3753,42 @@ all contained.
 
 ## #29 FP-028 — CR 704.7 merging of state-based-action batches
 
-**Decision:** With `sba = true`, events form a merge group when they have the same
-`BusEventKind`, the same first-round choosable set (after the contained filter and the tier
-restriction) and the same chooser. The group is formed when its first member is reached in APNAP
-order, from that member and the later not-yet-started members. It makes one choice, asked of the
-group's shared chooser (no request if the set has one effect). The chosen effect is applied to
-every member in that round, consumes one shield use and appears once in
-`BusReport::applications`. Only the first round is merged; later rounds run per event. A
-`Shield::Pool` is drawn down across the members in APNAP order. Members with different choosers
-form separate groups, each asking its own chooser, in APNAP order. With `sba = false` there is no
-merging.
-**Rationale:** CR 704.7 (rules-researcher): "If multiple state-based actions would have the same
-result at the same time, a single replacement effect will replace all of them." The brief
-amendment pins the shared-chooser condition. A pool is an amount, not a use, so drawing it across
-members keeps the "prevent the next N" meaning.
-**Alternatives:** Merging across choosers (rejected by the amendment); merging every round
-(rejected: later rounds may differ per event); one pool application per group (rejected: would
-prevent N per member).
-
+**Decision:** (Review round 1, F2/F5; replaces the round 0 rule.) With `sba = true` only
+`ZoneChange` members merge. Members form a group when they have the same affected object and the
+same destination (`request.to`) at collection time: the same object and the same kind of result.
+The group is the first member in submission order: it makes one collection and one choice (asked
+of that object's chooser; no request if the choosable set has one effect), the chosen effect is
+applied once, consumes one shield use, appears once in `BusReport::applications`, and the group
+is executed as one event (the first member's modified event). The other members are dropped: not
+executed, not logged. Members for different objects never merge, whether or not they share kind,
+candidate set or chooser; each is processed on its own (own request if it has two or more
+candidates, own application, own shield use) in APNAP and submission order. Non-`ZoneChange`
+events never merge. With `sba = false` nothing merges and equal duplicate moves are not coalesced
+(the second fails with `UnknownObject` and the batch rolls back).
+**Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
+event; CR 704.5g and CR 704.5h both "destroy", and CR 701.8a makes destruction one move to the
+owner's graveyard, so two state-based actions destroying one permanent are one result. CR 704.7:
+"If multiple state-based actions would have the same result at the same time, a single
+replacement effect will replace all of them." The CR text does not define the key of "the same
+result"; per R8 this is a judgement call: same object and same destination is the narrowest
+reading that covers the lethal-damage-plus-deathtouch case, and CR 616.1 makes each affected
+object's choice its own, so different permanents are distinct results (the round 0 rule merged
+them and let one shield use exile several permanents).
+**Alternatives:** Grouping by kind, candidate set and chooser (round 0; rejected in review:
+different permanents are not the same result); deduplicating by event kind or destination alone
+(rejected: merges different objects); merging only equal events (rejected: a cause difference
+such as lethal damage versus deathtouch would keep two moves of one object).
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
-**Decision:** CR 704.7 merging here is limited to events of the same `BusEventKind`, the same
-candidate set and the same chooser. Merges across kinds are not implemented, for example two
-different state-based actions that both cause a game loss. There is no game-loss
-`BusEventKind` in this unit.
-**Rationale:** Brief amendment 1; the result comparison needs event kinds this unit does not have.
+**Decision:** CR 704.7 merging here covers only `ZoneChange` events of the same object to the same
+destination. Merges across kinds (for example two different state-based actions that both cause a
+game loss) and merges of non-`ZoneChange` events are out of scope; there is no game-loss
+`BusEventKind` in this unit. Pool prevention across simultaneous damage is not a CR 704.7 merge;
+see "Pool prevention is allocated by the affected player".
+**Rationale:** The result comparison for other kinds needs event kinds this unit does not have;
+the zone-change key is the one review round 1 required.
 **Alternatives:** A result-equivalence relation across kinds (deferred to the unit that adds
 game-loss events).
-
 ## #29 FP-028 — A tier set with one effect is applied without asking
 
 **Decision:** When the choosable set (after the contained filter and the tier restriction) has
@@ -3793,28 +3801,40 @@ round trip and a request id.
 ## #29 FP-028 — Chooser, APNAP order and the turn-order fallback
 
 **Decision:** The chooser of an event: for `CreateToken`, its controller if set, else its owner;
-for an affected object, the controller in the permanent container if it is a permanent, else its
-owner from the zone record (an unknown object is `BusError::Event(UnknownObject)`); for an
-affected player, that player; otherwise the first player of the APNAP order (the active player).
-APNAP order is `GameState::turn_order()` rotated to start at the active player; if the turn order
-is empty, the players in ascending id order; with no active player, unrotated. Events are
-processed in that order of their choosers, submission order within one chooser; choosers outside
-the order come last by ascending id. The chooser is recomputed from the event as modified so far
-at each request (a `SetController` on a token changes who chooses next).
-**Rationale:** SRS 8.1 step [2] and "simultaneous choosers -> APNAP"; `GameState` has a turn-order
-API, so the ascending-id fallback is needed only when the order is empty.
-**Alternatives:** Fixing the chooser at submission time (rejected: the affected object's
-controller can change through an earlier application).
-
+for an affected object, the controller in the permanent container if it is a permanent; else its
+zone record's rules controller (`ObjectRecord::rules_controller`, set on the stack, so a spell
+owned by P1 and controlled by P2 is P2's choice); only an object with no controller falls back to
+its owner (an unknown object is `BusError::Event(UnknownObject)`); for an affected player, that
+player; otherwise the first player of the APNAP order (the active player). APNAP order is
+`GameState::turn_order()` rotated to start at the active player; if the turn order is empty, the
+players in ascending id order; with no active player, unrotated. Events are processed in that
+order of their choosers (as submitted), submission order within one chooser; choosers outside the
+order come last by ascending id. The chooser asked at a request is recomputed from the event as
+modified so far (a `SetController` on a token changes who chooses next).
+**Rationale:** SRS 8.1 step [2]; CR 616.1 "the affected object's controller (or its owner if it
+has no controller)"; CR 112.2 every spell has a controller; CR 109.4 only objects on the stack or
+the battlefield have one (review round 1, F3). `GameState` has a turn-order API, so the
+ascending-id fallback is needed only when the order is empty.
+**Alternatives:** Owner for every non-permanent (round 0; rejected in review: asks the wrong
+player for a spell controlled by another player); fixing the chooser at submission time
+(rejected: the affected object's controller can change through an earlier application).
 ## #29 FP-028 — Bus limits MAX_CHILD_DEPTH and MAX_REPEATS
 
 **Decision:** `MAX_CHILD_DEPTH = 64`: the submitted batch is depth 0 and a child batch at depth
 above 64 is `BusError::DepthExceeded`. `MAX_REPEATS = 256`: an event may receive at most 256
-applications; the next is `BusError::RepeatLimit`. Both errors roll everything back.
+applications; the next is `BusError::RepeatLimit`. Review round 1 (F7) adds
+`MAX_BUS_EVENTS = 4096` and `BusError::WorkLimit`: within one `process_batch`/`process_event`
+call every event instance the bus takes up (the submitted members and every child at every depth)
+is charged against one budget, before the children are queued; exactly 4096 is allowed, one more
+is `WorkLimit`. The budget is a plain counter in the call, not time. All three errors roll
+everything back. The copy of an enters-as-copy entry is executed directly and not charged.
 **Rationale:** Self-feeding `Instead` effects and unbounded CR 614.5 overrides (CR 903.9b-style)
-would otherwise loop forever; the bounds are far above any real chain and keep the bus total.
-**Alternatives:** No bound (non-terminating); a global application budget (harder to explain).
-
+would otherwise loop forever. The depth and repeat bounds alone are not enough: an overriding
+`Instead` that replaces one event with two doubles the work at each level, so it exhausts memory
+(about 740 MB at depth 22) long before depth 64. The budget keeps the bus total in time and space;
+the bounds are far above any real chain.
+**Alternatives:** No bound (non-terminating); depth and repeat bounds only (round 0; rejected in
+review: exponential growth); a time budget (rejected: R3/R7, not deterministic).
 ## #29 FP-028 — API details and additions beyond the fixed API
 
 **Decision:** The fixed API is implemented unchanged. Additions: `AmountOp::apply` (public),
@@ -3824,14 +3844,100 @@ would otherwise loop forever; the bounds are far above any real chain and keep t
 `ReplacementEffect` (the registry encoding is built from them; zone kinds use their one-byte tag).
 The request's enumerated options are `ChoiceOption::Number(i)` for each index `i` of the payload's
 effect list, `min = max = 1`, `reveal_to` empty. `BusReport::executed` lists only batches in which
-an event occurred (as the event log does). `EntersAsCopyOf` emits its `BecomeCopy` child only when
-the executed event's outcome is a token creation or a zone change into the battlefield from
-another zone. `SetDestination` keeps the rest of the request (including any controller). On
+an event occurred (as the event log does). `EntersAsCopyOf` emits its `BecomeCopy` only when the
+executed event's outcome is a token creation or a zone change into the battlefield from another
+zone; review round 1 (F6) executes that copy directly, as its own executed batch right after the
+entry batch, with no replacement collection (see "Enters-as-copy is applied atomically after
+entry; the true same-event entry is deferred"). `SetDestination` keeps the rest of the request,
+except that review round 1 (F9) clears the controller when the new zone is neither the
+battlefield nor the stack (only those zones take a controller, CR 109.4; `Zones` rejects the
+combination with `ControllerNotApplicable`). Review round 1 (F7) adds `pub const
+MAX_BUS_EVENTS: usize = 4096` and `BusError::WorkLimit` to the public API. On
 `BusInterrupt::Pending` the registry and the context are also restored, so a caller outside a
 `ChoiceSession` sees no partial change either.
 **Rationale:** Index options are unambiguous even with equal descriptions; the conversions let
 procedures use `?`; the encodings make the registry hashable.
 **Alternatives:** Text options with the descriptions (ambiguous when two descriptions are equal).
+
+## #29 FP-028 — Instead children inherit the applied set
+
+**Decision:** (Review round 1, F1.) An event produced by `Action::Instead` is the modified event
+that replaces its parent: it carries the parent's applied set as it stands after that
+application, the applying effect included. Events that are independent new events start with an
+empty applied set: `Prevent { then }` follow-ups, the copy of an enters-as-copy entry, and every
+member of the submitted batch (history is per batch member, never shared). `overrides_614_5`
+effects still apply again.
+**Rationale:** CR 614.5: a replacement effect "gets only one opportunity to affect an event or any
+modified events that may replace that event"; CR 614.6: a replaced event never happens and the
+modified event occurs instead. With fresh sets two effects that replace each other's output
+alternate until `DepthExceeded` and roll the event back. CR 615.5: a prevention's additional
+effect takes place immediately afterward; it is a separate event, so it starts fresh. This is the
+conservative reading the rules-researcher gave.
+**Alternatives:** Fresh sets for every child (round 0; rejected in review: ping-pong loops);
+inheriting for `then` children too (rejected: they are new events, not modified events).
+
+## #29 FP-028 — Events that would not happen offer no effects
+
+**Decision:** (Review round 1, F4/F11.) Before collection the bus checks whether the event would
+happen at all: a `Damage` with amount <= 0 and an `Untap` of an object that is not a tapped
+permanent would not. For such an event the choosable set is empty: no request, no application,
+no shield consumption; the event goes unchanged to the executor, which treats it as a no-op. A
+`Tap` of an already tapped permanent is deliberately unchanged (no CR text was obtained for it).
+**Rationale:** CR 614.7: an effect that would replace an event that never happens does nothing;
+CR 614.7a and CR 120.8: a source that would deal 0 damage deals no damage; CR 701.26b: only
+tapped permanents can be untapped, so CR 122.1d's stun counter replaces only a real untap. Round
+0 let 0 damage consume a one-use shield and an untapped permanent lose its stun counter.
+**Alternatives:** Dropping the event in the bus (rejected: the executor already treats it as a
+no-op and logs nothing); treating `Tap` of a tapped permanent the same way (deferred until a
+rules question settles it).
+
+## #29 FP-028 — Pool prevention is allocated by the affected player
+
+**Decision:** (Review round 1, F8.) Before any member of a batch is processed, for each
+`Shield::Pool` effect P (ascending `EffectId`) and each chooser (APNAP order) the bus collects the
+eligible members: `Damage` members of that chooser with `source = Some(_)`, amount > 0, matched
+by P as submitted, without P in their applied set. If they come from at least two distinct
+sources and their amounts sum to more than P's remaining pool, the chooser is asked once with the
+existing `DIVIDE_VALUE` choice (no change to `choice/`): total = the remaining pool, recipients =
+the sources in ascending `ObjectId` order with minimum 0, `min = max` = the number of
+recipients, options `ChoiceOption::Object` per source, reason `CR 615.7`, default the whole pool
+to the first recipient. These requests come before every other request of the batch. The answer
+is an allotment per source: when P applies to an eligible member it prevents the minimum of the
+source's unused allotment, the member's damage and the pool left; the rest is dealt. Events of
+one source use its allotment in submission order. A member whose source's allotment is used up
+(or was 0) is not offered P at all, so it records no application. An allotment above the
+source's damage stays in the shield. Sourceless damage is not in the table and draws on the pool
+in order, as before; with one source, or a pool that covers all eligible damage, nothing is
+asked. `Shield::Uses` shields are unchanged. Known limitations: the allotment table is built
+from the events as submitted, so when P only becomes applicable after another effect modified
+the event, the member has no allotment entry and the sequential drawing applies; and the grouping
+is per chooser, not per shielded object or player.
+**Rationale:** CR 615.7: "If damage would be dealt to the shielded permanent or player by two or
+more applicable sources at the same time, the player or the controller of the permanent chooses
+which damage the shield prevents. ... Such effects count only the amount of damage; the number of
+events or sources dealing it doesn't matter." In round 0 the submission order made that choice.
+Not offering P to a member with no allotment left makes the answers (A:3, B:0) and (A:0, B:3)
+exact mirrors.
+**Alternatives:** Asking per event (rejected: the shield counts amounts, not events); a new choice
+type (rejected: `DIVIDE_VALUE` already validates a division).
+
+## #29 FP-028 — Enters-as-copy is applied atomically after entry; the true same-event entry is deferred
+
+**Decision:** (Review round 1, F6.) `Modification::EntersAsCopyOf` no longer queues a
+`BecomeCopy` child for replacement processing. The copy is executed directly right after the
+entry batch, as its own executed batch (`BusReport::executed` shows the entry batch, then the
+`BecomeCopy` batch with the new object id and an empty applied set), with no replacement
+collection, so a separate effect on `BecomeCopy` cannot undo it. If the copy step fails, the
+whole call rolls back. A `BecomeCopy` submitted on its own (a genuine post-entry copy) still goes
+through replacement. The true same-event entry, where the object is a copy as it enters and the
+ETB look-ahead sees the copied values, needs changes in `events/` and `zones/` outside this unit
+and is deferred to #40 FP-039 / #38 FP-037.
+**Rationale:** CR 614.1c makes "enters as" effects replacement effects; CR 603.6d: such an effect
+"occurs as part of the event that puts the permanent onto the battlefield"; CR 616.1c ranks
+enter-as-copy effects; CR 614.12a: a choice for an enter-modifying effect is made before the
+permanent enters. Running the copy through the bus let a second effect skip it.
+**Alternatives:** Keeping the copy as a bus child (round 0; rejected in review); changing the
+executor so the entry and the copy are one event (outside the owned paths; deferred).
 
 ## #29 FP-028 — Tiers are declarative data
 
