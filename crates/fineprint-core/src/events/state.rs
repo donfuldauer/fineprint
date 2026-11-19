@@ -20,6 +20,10 @@ use super::types::{ExecutedBatch, Phase, Step};
 ///
 /// Counters, marked damage and the copy link of an object cease to exist when it changes zones
 /// (CR 122.2, CR 400.7). Every collection is ordered; cloning is a cheap snapshot.
+///
+/// These markers are the single source of counters on objects for the events module:
+/// `AddCounters`, `RemoveCounters` and last-known-information capture all read them, and a
+/// `CharacteristicsProvider`'s own counters are never consulted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObjectMarkers {
     counters: Arc<BTreeMap<ObjectId, BTreeMap<String, i64>>>,
