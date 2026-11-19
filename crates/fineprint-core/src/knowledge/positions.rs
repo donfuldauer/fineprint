@@ -49,7 +49,7 @@ impl Knowledge {
     /// `index_known_by`: every entry for that library is dropped, because which entries a prune
     /// keeps depends on the side of the hidden change they sit on. For a viewer in
     /// `index_known_by`: an entry for an affected library is kept only if its object is still at
-    /// the recorded index of the live library and `keep_known(object)` holds. In addition every
+    /// the recorded index of the live library. In addition every
     /// entry of every viewer naming `gone` (the moved or removed object) is dropped. Entries for
     /// libraries not in `owners` are otherwise untouched.
     pub(super) fn apply_library_change(
@@ -58,7 +58,6 @@ impl Knowledge {
         owners: &[PlayerId],
         index_known_by: &[PlayerId],
         gone: Option<ObjectId>,
-        keep_known: impl Fn(ObjectId) -> bool,
     ) {
         let live: BTreeMap<PlayerId, Vec<ObjectId>> = owners
             .iter()
@@ -72,7 +71,7 @@ impl Knowledge {
             let Some(live) = live.get(&owner) else {
                 return true;
             };
-            known.contains(&viewer) && live.get(index) == Some(&object) && keep_known(object)
+            known.contains(&viewer) && live.get(index) == Some(&object)
         });
     }
 
@@ -131,7 +130,7 @@ impl Knowledge {
         for &player in index_known_by {
             require_player(zones, player)?;
         }
-        self.apply_library_change(zones, &[owner], index_known_by, None, |_| true);
+        self.apply_library_change(zones, &[owner], index_known_by, None);
         Ok(())
     }
 
@@ -206,60 +205,36 @@ impl Knowledge {
             .collect()
     }
 
-    /// Shuffle of the library of `owner` (REQ-CORE-004) with nobody told which found cards are
-    /// excluded: exactly [`Knowledge::shuffle_library_disclosed`] with an empty `known_by`, so
-    /// every viewer loses every position entry for that library. Never touches `KnownTo`:
-    /// identity knowledge of the library as a set survives the shuffle (SRS 2.4).
+    /// Shuffle of the library of `owner` (CR 701.24a). `excluded` are the CR 701.24b found
+    /// cards: they are validated (they must be in that library) but, since every position
+    /// entry of the library is cleared, they no longer keep any entry.
+    ///
+    /// A shuffle clears ALL position entries of that library for EVERY viewer (SRS 2.4,
+    /// "Shuffling a library clears all position knowledge for that library"); entries of other
+    /// libraries are untouched. It never touches `KnownTo`: identity knowledge of the library as
+    /// a set survives the shuffle (SRS 2.4). A found card whose placement is disclosed
+    /// afterwards (for example CR 401.4, the owner arranges cards and knows their positions) is
+    /// re-established by the caller with [`Knowledge::set_position_known`] after this call (see
+    /// `docs/DECISIONS.md`, "#25 FP-024: A shuffle clears all position knowledge of the library").
     ///
     /// # Errors
-    /// [`KnowledgeError::UnknownPlayer`]`(owner)`; [`KnowledgeError::NotInLibrary`] for an
-    /// excluded id that is unknown or not in that library. The state is then unchanged.
+    /// [`KnowledgeError::UnknownPlayer`]`(owner)`; then [`KnowledgeError::NotInLibrary`] for the
+    /// first excluded id that is unknown or not in that library. The state is then unchanged.
     pub fn shuffle_library(
         &mut self,
         zones: &Zones,
         owner: PlayerId,
         excluded: &[ObjectId],
     ) -> Result<(), KnowledgeError> {
-        self.shuffle_library_disclosed(zones, owner, excluded, &[])
-    }
-
-    /// Shuffle of the library of `owner` (REQ-CORE-004). `excluded` are found cards that are
-    /// not part of the shuffle; `known_by` are the players who know which found cards are
-    /// excluded. Removes the position knowledge of every viewer for that library, except, for a
-    /// viewer in `known_by`, entries whose object is in `excluded` and still at the recorded
-    /// index in `zones` (pass the zones as they are at shuffle time). A viewer not in
-    /// `known_by` keeps nothing: keeping its entry for an excluded card would tell it which card
-    /// was found (a design decision, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge
-    /// survives a library change only for viewers who know the index"). Never touches
-    /// `KnownTo`: identity knowledge of the library as a set survives the shuffle (SRS 2.4).
-    ///
-    /// # Errors
-    /// [`KnowledgeError::UnknownPlayer`]`(owner)`; [`KnowledgeError::NotInLibrary`] for the
-    /// first excluded id that is unknown or not in that library; then
-    /// [`KnowledgeError::UnknownPlayer`] for the first player of `known_by` not in `zones`. The
-    /// state is then unchanged.
-    pub fn shuffle_library_disclosed(
-        &mut self,
-        zones: &Zones,
-        owner: PlayerId,
-        excluded: &[ObjectId],
-        known_by: &[PlayerId],
-    ) -> Result<(), KnowledgeError> {
         // CR 701.24a: after a shuffle no player knows the order of the shuffled cards.
-        // CR 701.24b: found cards are not included in the shuffle.
+        // CR 701.24b: found cards are not included in the shuffle (validated here only).
         require_player(zones, owner)?;
         for &id in excluded {
             if zones.object(id).map(|r| r.zone) != Some(ZoneId::Library(owner)) {
                 return Err(KnowledgeError::NotInLibrary { owner, object: id });
             }
         }
-        for &player in known_by {
-            require_player(zones, player)?;
-        }
-        let excluded: BTreeSet<ObjectId> = excluded.iter().copied().collect();
-        self.apply_library_change(zones, &[owner], known_by, None, |object| {
-            excluded.contains(&object)
-        });
+        self.retain_positions(|_, library_owner, _| library_owner != owner);
         Ok(())
     }
 }

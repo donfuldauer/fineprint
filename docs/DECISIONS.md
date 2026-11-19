@@ -2751,19 +2751,27 @@ remain known as a set and the projection exposes them as `LibraryView::known_car
 set"). Design-level, not CR-derived: CR 701.24a speaks only of order.
 **Alternatives:** Clearing identity knowledge on shuffle (contradicts SRS 2.4).
 
-## #25 FP-024: Shuffles clear position knowledge of the shuffled subset only
+## #25 FP-024: A shuffle clears all position knowledge of the library
 
-**Decision:** `shuffle_library(owner, excluded)` removes every viewer's position entries for
-that library except entries whose object is in `excluded` and still at the recorded index
-(CR 701.24b: found cards are not part of the shuffle). Since PR #174 round 4 those excluded
-entries are kept only for the viewers told which cards were excluded
-(`shuffle_library_disclosed(.., known_by)`); `shuffle_library` keeps them for nobody (see
-"#25 FP-024: Position knowledge survives a library change only for viewers who know the index"). `shuffle_face_down_pile` clears the
-stored `KnownTo` of the shuffled cards, which ends their CR 406.3 look permissions, and removes
-position entries naming them. Every id is validated before anything changes.
-**Rationale:** CR 701.24a/b and CR 406.3 as quoted in the brief.
-**Alternatives:** Clearing every entry including the excluded found cards (loses knowledge the
-player legitimately keeps).
+**Decision:** `shuffle_library(owner, excluded)` clears every viewer's position entries for that
+library, excluded found cards included (CR 701.24a, CR 701.24b). `excluded` is validated only
+(each id must be in that library, else `NotInLibrary`) and keeps no entry. There is no
+disclosure parameter; `shuffle_library_disclosed` is removed. Identity/set knowledge (`KnownTo`)
+is never touched. A found card whose placement is disclosed afterwards (CR 401.4) is
+re-established by the caller with `set_position_known` after the shuffle call.
+`shuffle_face_down_pile` is unchanged: it clears the stored `KnownTo` of the shuffled cards,
+which ends their CR 406.3 look permissions, and removes position entries naming them. Every id
+is validated before anything changes.
+**Rationale:** SRS 2.4: "Shuffling a library clears all position knowledge for that library".
+The CodeRabbit pre-merge Linked Issues check on 6cceea3 found that retaining excluded entries
+deviated from it. With no entry kept for anyone, the excluded-entry channel (a viewer holding
+an entry for A learning whether A or X was the excluded found card) is removed entirely. It is
+conservative: position knowledge may be lost, never leaked; the caller restores found-card
+placements with `set_position_known` (CR 401.4).
+**Alternatives:** Keeping excluded entries for viewers in `known_by`: rejected, it deviates from
+the SRS and added an API. Opening an SRS change request: rejected, not needed when the code
+follows the SRS. Dropping the `excluded` argument: rejected, it keeps the frozen three-argument
+signature and the CR 701.24b validation.
 
 ## #25 FP-024: Identity per CardId, positions per (viewer, library owner), pruned on change
 
@@ -2961,31 +2969,30 @@ mutate Zones, R1/R2).
 ## #25 FP-024: Position knowledge survives a library change only for viewers who know the index
 
 **Decision:** Position knowledge about a library survives a change of that library's contents
-(a card moved out, moved in, removed, inserted, repositioned, or an excluded found card in a
-shuffle) only for the viewers the caller says know the index of the change. Every other viewer
+(a card moved out, moved in, removed, inserted or repositioned) only for the viewers the caller says know the index of the change. Every other viewer
 loses all its position entries for every affected library. Identity/set knowledge is not
 touched by this rule; it stays governed by step 0 and the removal hook, i.e. by `observers`.
 `observers` and `index_known_by` are separate: an announced identity is not an index, and a
 known index does not make a viewer an observer (nor undo step 0). Four methods carry the
 disclosure: `on_move_indexed(zones, before, moved, observers, index_known_by)`,
-`on_removed_from_hidden_zone_indexed(zones, before, observers, index_known_by)`,
-`on_library_changed_indexed(zones, owner, index_known_by)` and
-`shuffle_library_disclosed(zones, owner, excluded, known_by)`. The five existing methods are
-shorthands with an empty set (`on_move` = `on_move_indexed(.., &[], &[])`, `on_move_observed`
+`on_removed_from_hidden_zone_indexed(zones, before, observers, index_known_by)` and
+`on_library_changed_indexed(zones, owner, index_known_by)`. The shorthands pass an empty set
+(`on_move` = `on_move_indexed(.., &[], &[])`, `on_move_observed`
 = `on_move_indexed(.., observers, &[])`, `on_removed_from_hidden_zone` = indexed with `&[]`,
-`on_library_changed` = indexed with `&[]`, `shuffle_library` = disclosed with `&[]`): the
+`on_library_changed` = indexed with `&[]`). A shuffle clears all entries of the library for
+every viewer (see "#25 FP-024: A shuffle clears all position knowledge of the library"); the
+shuffle shorthand relationship is gone. The
 default is that nobody knows the index, so nobody keeps positions for the affected library.
 Affected libraries: `moved.from` and `moved.to` when they are libraries (one library for a
 reposition), the removal source library, the library of `owner`. For a viewer in the set the
 earlier semantics apply (the entry naming the moved or removed object goes, entries whose object
-shifted go, entries still matching the live library stay; for a shuffle, entries of excluded
-objects still at their index stay). All five paths share one private helper
-(`apply_library_change`). Errors, state unchanged: `on_move_indexed` UnknownObject(moved.new),
+shifted go, entries still matching the live library stay). The move, removal and insertion
+paths share one private helper (`apply_library_change`). Errors, state unchanged: `on_move_indexed` UnknownObject(moved.new),
 then the first unknown observer, then the first unknown `index_known_by` player;
 `on_removed_from_hidden_zone_indexed` UnknownPlayer(zone owner), then observers, then
 `index_known_by`; `on_library_changed_indexed` UnknownPlayer(owner), then `index_known_by`;
-`shuffle_library_disclosed` UnknownPlayer(owner), NotInLibrary for the first bad excluded id,
-then the first unknown `known_by` player. `KnowledgeError` is unchanged. Caller contract: pass a
+`shuffle_library` UnknownPlayer(owner), then NotInLibrary for the first bad excluded id.
+`KnowledgeError` is unchanged. Caller contract: pass a
 viewer as knowing the index only when the index is public to it (a draw of a top card the
 viewer knows is on top needs it in both `observers` and `index_known_by`; an insertion announced
 as "third from the top").
@@ -2996,8 +3003,8 @@ comments 4625492354 and 4625492361). The class sweep found six instances of this
 closed here: (a) `on_move` effect (d) for a move out of a library; (b) a move into a library at
 an undisclosed index; (c) a same-zone library reposition; (d) `on_removed_from_hidden_zone`;
 (e) `on_library_changed` after `create_object` / `enter_from_outside`; (f) `shuffle_library`
-with `excluded`, where keeping an excluded card's entry for every viewer told a viewer which
-card was found. Swept and found independent of hidden information: `set_position_known`,
+with `excluded`, where keeping an excluded card's entry told a viewer which card was found
+(closed in round 6 by clearing every entry on a shuffle). Swept and found independent of hidden information: `set_position_known`,
 `on_player_leaves`, `on_game_end`, `shuffle_face_down_pile`, `grant_look`, `add_known`,
 `reveal_to_all`, the projection counts (CR 401.3, CR 402.3) and step-0 identity forgetting. A
 design decision, not CR-derived; the CR context is the hidden ordered library (CR 401.2).
@@ -3026,10 +3033,9 @@ reachable with live position entries).
 
 **Decision:** In `tests/spec_knowledge_leak_property.rs`: (a) `create_object` insertions made by
 the generic step generator count toward the `create_object` counters, separately from
-`enter_from_outside`; (b) a stale excluded position entry is detected with a "resurrection probe"
-(an unannounced move puts the card back at its recorded index and the test asserts the viewer
-still has no entry), because `position_known` filters stale entries lazily and an empty result
-alone cannot show that a stale entry was kept; (c) when `index_known_by` is not empty, the
+`enter_from_outside`; (b) since round 6 a shuffle clears everything, so the spec tests assert every entry gone and a
+restored-order resurrection probe, and the `known_by` / stale-excluded checks (and the
+`stale_excluded` counter) were removed; (c) when `index_known_by` is not empty, the
 MoveOut and Removal index twins sometimes seed an entry for a disclosed viewer on a card other
 than the announced one, so the disclosed-index control stays reachable. Pre-change equivalence of
 twin worlds is decided by the shadow model; a model-equivalent pair is never discarded and must
@@ -3039,3 +3045,16 @@ observe a kept stale entry through the public API; (c) changes only which states
 **Alternatives:** Asserting `position_known` is empty after the shuffle (passes through lazy
 filtering even when the entry is kept); discarding twins whose production views differ (could
 hide a leak).
+
+## #25 FP-024: Leak-property seeds raised to 16 (PR #174 round 6)
+
+**Decision:** `tests/spec_knowledge_leak_property.rs` runs 16 seeds × 250 steps (was 8) for 2 and
+3 players. The disclosed-index control counter (`idx_control > 0`) is not asserted for the
+Shuffle class, because a shuffle now discloses no position to anyone; that class instead asserts
+`idx_twins`, `idx_compared`, `idx_holder_compared` and the shuffle emptiness and
+resurrection-probe counters > 0.
+**Rationale:** Removing the shuffle disclosure shifted the generator's random stream and two
+chance-dependent control counters (Removal, MoveOut) fell to 0 with 8 seeds; more seeds restore
+coverage without weakening any assertion.
+**Alternatives:** Re-tuning the generator's distribution (more fragile); dropping the controls
+(weakens the suite).

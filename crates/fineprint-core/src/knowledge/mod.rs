@@ -18,13 +18,12 @@
 //! library index (0 is the top) to the object the viewer knows is there. Entries are filtered
 //! lazily against the live library ([`Knowledge::position_known`]) and updated when a library
 //! changes through [`Knowledge::on_move_indexed`], [`Knowledge::on_removed_from_hidden_zone_indexed`],
-//! [`Knowledge::on_library_changed_indexed`] or [`Knowledge::shuffle_library_disclosed`] (or
+//! [`Knowledge::on_library_changed_indexed`] or [`Knowledge::shuffle_library`] (or
 //! their shorthands), so a stale entry never reports a position.
 //!
 //! **Index disclosure.** Position knowledge about a library survives a change of its contents
-//! (a card moved out, in or within it, removed, inserted, or an excluded found card in a
-//! shuffle) ONLY for the players the caller passes as knowing the index of that change
-//! (`index_known_by`, or `known_by` for a shuffle); every other player loses all its position
+//! (a card moved out, in or within it, removed or inserted) ONLY for the players the caller
+//! passes as knowing the index of that change (`index_known_by`); every other player loses all its position
 //! entries for each affected library. Otherwise which entries survive would depend on whether
 //! the hidden index was above or below them, and a viewer could tell the two apart (a design
 //! decision, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge survives a library change
@@ -45,10 +44,11 @@
 //! knows needs that viewer in both `observers` (which card left) and `index_known_by` (from
 //! which index) to keep its other position entries.
 //!
-//! **Shuffles.** [`Knowledge::shuffle_library`] clears position knowledge of the shuffled
-//! cards (CR 701.24a, CR 701.24b) but keeps identity knowledge of the library as a set;
-//! [`Knowledge::shuffle_library_disclosed`] keeps the entries of excluded found cards for the
-//! players told which cards were excluded.
+//! **Shuffles.** [`Knowledge::shuffle_library`] clears all position entries of the shuffled
+//! library for every viewer (SRS 2.4, CR 701.24a); `excluded` found cards (CR 701.24b) are
+//! validated only. Identity knowledge of the library as a set survives (SRS 2.4). The caller
+//! re-establishes a disclosed placement afterwards with [`Knowledge::set_position_known`]
+//! (CR 401.4).
 //! [`Knowledge::shuffle_face_down_pile`] ends look permissions on the shuffled face-down cards
 //! (CR 701.24a, CR 406.3).
 //!
