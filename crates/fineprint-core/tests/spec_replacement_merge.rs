@@ -12,7 +12,8 @@
 //! finding F2, round 2). Review round 3 (H2): such a group is handled member-wise: the candidates
 //! are the effects eligible for at least one member; the chosen effect is applied once to every
 //! member it matches; unmatched members still move the object; the object moves at most once, and
-//! where the surviving destinations differ a member modified by an application wins.
+//! where the surviving destinations differ a member whose destination differs from the group's
+//! original destination wins (round 4: J3).
 //! Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
@@ -736,8 +737,9 @@ fn req_event_001_r3_h2_same_cause_duplicates_one_application() {
 }
 
 // REQ-EVENT-001, CR 704.3, 704.7 (H2 f): a one-use exile redirect matching only the Destroy cause:
-// applied once; the modified member wins over the unmodified StateBasedAction member, so the
-// object ends in exile, moved once. Both submission orders.
+// applied once; the member whose destination differs from the group's original destination wins
+// over the StateBasedAction member that stays at the graveyard (round 4), so the object ends in
+// exile, moved once. Both submission orders.
 #[test]
 fn req_event_001_r3_h2_modified_member_wins() {
     let (w, objs) = world(&[P1]);
@@ -756,10 +758,14 @@ fn req_event_001_r3_h2_modified_member_wins() {
     }
 }
 
-// REQ-EVENT-001, CR 704.7, 616.1, 616.1f (H2 g): e1 (Destroy only, exile) and e2
-// (StateBasedAction only, skip), [Destroy, StateBasedAction]: the chooser is asked once with both
-// effects offered. Common ground only: one request, no error, at most one move, `applications`
-// starts with the chosen effect, and for the same answer both submission orders agree.
+// REQ-EVENT-001, CR 704.7, 616.1, 616.1f (H2 g, strengthened in round 4): e1 (Destroy only,
+// exile) and e2 (StateBasedAction only, skip), [Destroy, StateBasedAction]: the chooser is asked
+// once with both effects offered. The chosen effect applies first; the other is then the only
+// candidate left and applies without a request (616.1f), so `applications` is [chosen, other].
+// The StateBasedAction member is skipped and the Destroy member's redirect is the only surviving
+// move (its destination differs from the group's original destination, round-4 survivor rule):
+// exactly one move, to exile; both one-use effects are consumed. For the same answer both
+// submission orders agree.
 #[test]
 fn req_event_001_r3_h2_two_cause_specific_effects_one_request() {
     for pick in [1u64, 2] {
@@ -787,8 +793,14 @@ fn req_event_001_r3_h2_two_cause_specific_effects_one_request() {
             let mut offered = r.offered(0);
             offered.sort();
             assert_eq!(offered, descs(&[1, 2]), "pick {pick}");
-            assert!(moves_of(r, x) <= 1, "pick {pick}");
-            assert_eq!(r.applications().first(), Some(&eid(pick)), "pick {pick}");
+            let other = 3 - pick;
+            assert_eq!(r.applications(), eids(&[pick, other]), "pick {pick}");
+            assert_eq!(moves_of(r, x), 1, "pick {pick}");
+            assert_eq!(destinations(r), vec![ZoneKind::Exile], "pick {pick}");
+            assert_eq!(r.world().zone_of(x), None, "pick {pick}");
+            assert!(r.after.registry.get(eid(1)).is_none(), "pick {pick}");
+            assert!(r.after.registry.get(eid(2)).is_none(), "pick {pick}");
+            assert!(r.after.registry.is_empty(), "pick {pick}");
         }
     }
 }

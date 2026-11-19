@@ -3740,17 +3740,20 @@ than one candidate is left after the tier filter, none otherwise; the chosen eff
 (one `applications` entry, one shield use) to every member it matches, and members it does not
 match are unchanged and still move the object; further effects are then considered again
 (616.1f). The object moves at most once: members left with one destination are one move; when the
-surviving destinations differ, a member modified by an application wins over an unmodified one
-(so a redirect matching only one member's cause still exiles the object). That "modified member
-wins" rule is the brief's reading, not a CR statement. If every member is dropped the object does
+surviving destinations differ, the member whose destination differs from the group's original
+destination wins (so a redirect matching only one member's cause still exiles the object; amended in
+review round 4, (20) and (22), from "a member modified by an application wins"). That rule is the
+brief's reading, not a CR statement. If every member is dropped the object does
 not move (not tested directly; covered only by the property's at-most-once check). Every group test
 runs both submission orders and compares output, registry bytes, world snapshot and state hash.
 `shield_counter_destroy` matches `ZoneChangeCause::Destroy` only (CR 122.1c, 701.8b): with
 [Destroy, StateBasedAction] it is applied once, the counter is removed, and the StateBasedAction
 member moves the object to the graveyard once. In the two-cause-specific-effects case (Destroy-only
-exile, StateBasedAction-only skip) only the common ground is asserted: one request offering both,
-no error, at most one move, `applications` starting with the chosen effect, and order independence
-for the same answer. The H2 property answers by effect-id preference (effect 1, then 2) so the
+exile, StateBasedAction-only skip) the round-4 test asserts: one request offering both, no error,
+`applications` equal to [chosen, other] (the other is then the only candidate and applies without
+a request, 616.1f), exactly one move, to exile (the only surviving move is the redirected Destroy
+member), both one-use effects removed from the registry, and order independence for the same
+answer. The H2 property answers by effect-id preference (effect 1, then 2) so the
 answer does not depend on the option order, and checks that its cases reach requests,
 applications, moved and unmoved outcomes.
 (8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
@@ -3843,6 +3846,39 @@ answered (A:4,B:0), (A:2,B:2) and (A:0,B:4): exactly one request whose recipient
 the pool removed, and the registry bytes agree across the three orders. Sourceless damage with
 only ONE source (no division) has no round-2 test to carry over and none is added (the brief adds
 no new expectation for it).
+(20) J1 (review round 4, CR 704.3, 704.7, 614.6, 614.7): an `Instead` child of the group's
+application that moves the group's object competes with the group's surviving moves; a move whose
+final destination differs from the group's original destination wins, never an error and never a
+rollback, and the object moves exactly once (counted over every executed batch by its old id). The
+child goes through the bus itself and its FINAL destination is used (exile redirected to hand puts
+the card in its owner's hand, `applications` [e1, e2]). A child dropped by a Skip leaves the
+surviving StateBasedAction member to move the object to the graveyard; `applications` is not
+asserted there. "The card ends in zone Z" is asserted as: the new object of the single executed
+move carries the same card and is in `Zones::contents(Z)`, and the old id is in no zone.
+(21) J2 (CR 704.8, 122.1c): the departing object's LKI record is the state before any of the
+group's events: `ctx.lki.get(old id).counters()` holds ("shield", n) for n = 1 and n = 2, while
+the shield removes one counter. The RemoveCounters and the move share ONE executed batch, the
+removal first, and exactly one RemoveCounters is executed. "No other executed batch" is asserted
+over the non-empty executed batches and the non-empty logged batches (whether empty batches are
+listed is not asserted). With a second object Y moved by an unrelated StateBasedAction, Y's LKI
+exists and X's still holds the counter; because different objects are processed in submission
+order, whole-run equality (output, registry bytes, world, hash) is asserted only between the two
+orders of X's members with Y at the same position (Y first, last, and between X's members), not
+across different placements of Y.
+(22) J3 (CR 704.7, 616.1f): a modification that leaves the destination alone (`SetFaceDown(false)`
+on a face-up object, `SetController(P1)`) never beats a redirect: the card ends in exile for both
+answer preferences and both submission orders; only the common ground is asserted (no error, at
+most one request, one move, both effects applied once and consumed; the order of the two
+applications is not asserted). This is the brief's reading, not a CR statement: the CR is silent
+on one object moving to two zones in one event. With two redirects to different zones (exile,
+hand) only exactly one move, a zone in {exile, hand}, no error and order independence for the same
+answer are asserted.
+(23) J4 (CR 704.7, 707.5): of two identical entries hand to battlefield with `sba = true`, the
+member carrying the entry-copy plan (C applied to it) wins over the one whose applied set already
+held C: the card enters once, as a copy, with no `BecomeCopy` event executed or logged, one
+application of C, C consumed, in both orders. This is the brief's reading, not a CR statement.
+Controls: both applied sets empty (one application, a copy); both holding C (no application, C
+kept, not a copy).
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
