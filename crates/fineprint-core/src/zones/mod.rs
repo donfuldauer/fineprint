@@ -52,8 +52,9 @@
 //!
 //! **Out of scope here** (later work): the CR 401.5 top-card reveal re-evaluation,
 //! simultaneous-entry ordering choices (CR 401.4, CR 404.3, CR 405.3), battlefield permanent
-//! state, the ante zone, subgames, merged permanents, the bodies of the CR 400.7 exceptions,
-//! and wiring this container into `GameState`, its Merkle layout and its wire form.
+//! state, the ante zone, subgames, merged permanents, the bodies of the CR 400.7 exceptions
+//! other than CR 400.7d and CR 400.7j (those two return `Applies`; their logic lives in
+//! `fineprint_core::memory`), and wiring this container into `GameState`, its Merkle layout and its wire form.
 
 mod container;
 mod error;
