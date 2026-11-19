@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+/// Base characteristics per card layout and zone, and mana value per layout (REQ-OBJ-002).
+pub mod layouts;
 /// Object characteristics, mana value, colors, color identity and type validation (REQ-OBJ-001).
 pub mod objects;
 /// Permanent state on the battlefield: status, designations, control, attachments, combat (REQ-ZONE-001).
