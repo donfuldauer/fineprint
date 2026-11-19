@@ -404,6 +404,14 @@ fn req_dsl_011_prop_candidate_order() {
             let b = ask_kind(kind, resolved(objects(&shuffled), lo, hi));
             assert_eq!(a, b, "seed {seed} {kind:?}");
             assert_eq!(a.digest(), b.digest());
+            // ORDER has n! answers: n >= 8 reaches the limit and carries a validator contract.
+            if kind == ChoiceKind::Order && n >= 8 {
+                assert!(
+                    is_validator(&a) && is_validator(&b),
+                    "seed {seed} ORDER n={n}"
+                );
+                continue;
+            }
             let mut sorted = ids.clone();
             sorted.sort_unstable();
             assert_eq!(
