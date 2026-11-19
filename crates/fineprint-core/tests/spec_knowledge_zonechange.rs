@@ -256,8 +256,10 @@ fn face_down_non_permanent_moving_is_not_revealed() {
 }
 
 /// REQ-CORE-004, CR 401.2: rule (d) a same-zone reposition in a library keeps the card's
-/// knowledge and id, drops every entry naming the moved card (even at the same index) and
-/// keeps the others.
+/// knowledge and id; for the viewers who know the index (`on_move_indexed` with
+/// `index_known_by` [P1, P2]) it drops every entry naming the moved card (even at the same
+/// index) and keeps the others. With the shorthand `on_move` (index unknown, index-disclosure
+/// rule of the brief) no viewer keeps an entry for that library, and identity is kept.
 #[test]
 fn same_zone_library_reposition_drops_entries_of_moved_card() {
     let mut w = KWorld::three();
@@ -271,9 +273,22 @@ fn same_zone_library_reposition_drops_entries_of_moved_card() {
             .expect("pos");
     }
     w.k.add_known(&w.zones, lib[1], P3).expect("add");
-    let moved = w.mv(
+    // contrast: the shorthand
+    let mut u = w.clone();
+    let um = u.mv(
         lib[1],
         KWorld::req_at(ZoneKind::Library, Position::Index(1)),
+    );
+    assert_eq!(um.old, um.new);
+    for v in [P1, P2, P3] {
+        assert!(u.positions(v, P1).is_empty(), "shorthand {v:?}");
+    }
+    assert_eq!(u.known_to(lib[1]), set(&[P1, P2, P3]), "knowledge kept");
+    let moved = w.mv_idx(
+        lib[1],
+        KWorld::req_at(ZoneKind::Library, Position::Index(1)),
+        &[],
+        &[P1, P2],
     );
     assert_eq!(moved.old, moved.new);
     assert_eq!(w.library(P1), lib, "same order");
@@ -287,7 +302,12 @@ fn same_zone_library_reposition_drops_entries_of_moved_card() {
         );
     }
     // move the top card to the bottom: its entries dropped, the others now stale
-    w.mv(lib[0], KWorld::req_at(ZoneKind::Library, Position::Bottom));
+    w.mv_idx(
+        lib[0],
+        KWorld::req_at(ZoneKind::Library, Position::Bottom),
+        &[],
+        &[P1, P2],
+    );
     assert_eq!(w.library(P1), vec![lib[1], lib[2], lib[0]]);
     for v in [P1, P2] {
         assert!(w.positions(v, P1).is_empty(), "{v:?}");
@@ -1168,12 +1188,18 @@ fn removal_from_hand() {
 
 /// REQ-CORE-004, CR 401.2 (removal and position knowledge): P2 knows the positions of indexes
 /// 0 and 2 of P1's library; P1 knows indexes 0 and 1. Removing index 1 watched by P1 and P2
-/// keeps the entries at index 0, drops P2's shifted entry (old index 2) and P1's entry on the
-/// removed object. Without observers every entry of P1 and P2 for that library is gone. P2
-/// keeps identity knowledge of both cards it knew only as an observer.
+/// who both know the index (`index_known_by` [P1, P2]) keeps the entries at index 0, drops P2's
+/// shifted entry (old index 2) and P1's entry on the removed object. Watched but with the index
+/// undisclosed (the shorthand, index-disclosure rule of the brief), or without observers, every
+/// entry of P1 and P2 for that library is gone. P2 keeps identity knowledge of both cards it
+/// knew only as an observer.
 #[test]
 fn removal_and_position_entries() {
-    for observers in [vec![P1, P2], vec![]] {
+    for (observers, ikb) in [
+        (vec![P1, P2], vec![P1, P2]),
+        (vec![P1, P2], vec![]),
+        (vec![], vec![]),
+    ] {
         let mut w = KWorld::two();
         let lib: Vec<ObjectId> = (0..4)
             .map(|_| w.create_bottom(ZoneKind::Library, P1))
@@ -1186,10 +1212,14 @@ fn removal_and_position_entries() {
             w.k.set_position_known(&w.zones, P1, P1, i, lib[i])
                 .expect("pos");
         }
-        w.send_out(lib[1], &observers);
+        if ikb.is_empty() {
+            w.send_out(lib[1], &observers);
+        } else {
+            w.send_out_idx(lib[1], &observers, &ikb);
+        }
         assert_eq!(w.library(P1), vec![lib[0], lib[2], lib[3]]);
         let watched = !observers.is_empty();
-        if watched {
+        if !ikb.is_empty() {
             let only_top = [(0, lib[0])].into_iter().collect();
             assert_eq!(w.positions(P2, P1), only_top, "shifted entry dropped");
             assert_eq!(w.positions(P1, P1), only_top, "removed object's entry gone");
@@ -1285,4 +1315,378 @@ fn removal_hook_errors_and_public_no_op() {
         .expect("hook");
     assert_ne!(w.k, snapshot);
     assert!(lib_known(&w.view(P2), P1).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// index disclosure (PR #174 review round 4, findings F1/F2 and their class): position
+// knowledge of a library survives a change of its contents only for the viewers the caller
+// says know the index of the change; everyone else loses all entries for that library (the
+// brief's index-disclosure rule, a design decision; no CR). Identity stays governed by
+// `observers`. Twin worlds differ only in the hidden index of the change; the announced card
+// is the same.
+// ---------------------------------------------------------------------------------------------
+
+/// P1's library with X at index 0 (`above` true: X, A, B, Y) or at index 2 (Y, A, X, B); A at
+/// index 1 in both. P2 knows A at index 1 and B as a member of the set; P3 (three players)
+/// knows nothing. Every card has the same ObjectId in both variants.
+fn index_twin(players: &[PlayerId], above: bool) -> KWorld {
+    let mut w = KWorld::with_players(players);
+    let order = if above {
+        [CARD_X, CARD_A, CARD_B, CARD_Y]
+    } else {
+        [CARD_Y, CARD_A, CARD_X, CARD_B]
+    };
+    w.build_library(P1, &order);
+    let a = w.id_of(CARD_A);
+    w.k.set_position_known(&w.zones, P2, P1, 1, a).expect("pos");
+    w.k.add_known(&w.zones, w.id_of(CARD_B), P2).expect("add");
+    w
+}
+
+/// Both index twins, checked indistinguishable for every player.
+fn index_twins(players: &[PlayerId]) -> (KWorld, KWorld) {
+    let w1 = index_twin(players, true);
+    let w2 = index_twin(players, false);
+    assert_twins_equal_for(&w1, &w2, players, "precondition");
+    assert_eq!(w1.id_of(CARD_X), w2.id_of(CARD_X));
+    (w1, w2)
+}
+
+/// P2 still knows A and B as members of the set (identity untouched by the index rule).
+fn p2_knows_a_and_b(w: &KWorld, ctx: &str) {
+    assert!(w.known_to(w.id_of(CARD_A)).contains(&P2), "{ctx}: A");
+    assert!(w.known_to(w.id_of(CARD_B)).contains(&P2), "{ctx}: B");
+}
+
+/// REQ-CORE-004, CR 401.2, 401.3 (PR #174 review finding F1 4625492354; index-disclosure rule
+/// of the brief): P2 knows A at index 1 and B as a set member. The announced card X is removed
+/// (`Zones::send_outside`) from index 0, above A, in world 1 and from index 2, below A, in
+/// world 2, then `on_removed_from_hidden_zone(.., observers [P2])`: P2 knows WHICH card left but
+/// not where it was, so `position_known(P2, P1)` is equal (empty) and every player's whole view
+/// is equal (P3, who knows nothing, too); P2 keeps A and B as set members. Control
+/// (`on_removed_from_hidden_zone_indexed(.., [P2], [P2])`, the index disclosed to P2): above ->
+/// A shifted to index 0 so the entry for A@1 is gone; below -> A@1 kept.
+#[test]
+fn removal_index_twin_above_and_below() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        let (mut w1, mut w2) = index_twins(&players);
+        let x = w1.id_of(CARD_X);
+        let a = w1.id_of(CARD_A);
+        w1.send_out(x, &[P2]);
+        w2.send_out(x, &[P2]);
+        assert_twins_equal_for(&w1, &w2, &players, "removal shorthand");
+        assert!(w1.positions(P2, P1).is_empty());
+        p2_knows_a_and_b(&w1, "removal w1");
+        p2_knows_a_and_b(&w2, "removal w2");
+        // control: the index is disclosed to P2
+        let (mut c1, mut c2) = index_twins(&players);
+        c1.send_out_idx(x, &[P2], &[P2]);
+        c2.send_out_idx(x, &[P2], &[P2]);
+        assert_eq!(c1.library(P1)[0], a, "above: A shifted to 0");
+        assert!(c1.positions(P2, P1).is_empty(), "above: entry gone");
+        assert_eq!(c2.library(P1)[1], a);
+        assert_eq!(
+            c2.positions(P2, P1),
+            [(1, a)].into_iter().collect(),
+            "below: A@1 kept"
+        );
+        assert_eq!(c1.view(P2), c2.view(P2), "positions never projected");
+        let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+        assert_twins_equal_for(&c1, &c2, &others, "removal control, others");
+    }
+}
+
+/// REQ-CORE-004, CR 401.2, 402.3, 406.3 (index-disclosure rule of the brief, finding class
+/// (a)): the announced card X moves OUT of P1's library from index 0 (above A) or index 2
+/// (below A) to P1's hand, to P1's graveyard or to face-down exile, with observers [P2]
+/// (`on_move_observed`): positions equal (empty) and every player's whole view equal (the moved
+/// card and its new id are the same in both worlds). Control (`on_move_indexed(.., [P2],
+/// [P2])`): above -> A's entry gone, below -> A@1 kept.
+#[test]
+fn move_out_index_twin_above_and_below() {
+    let dests = [
+        MoveRequest::new(ZoneKind::Hand),
+        MoveRequest::new(ZoneKind::Graveyard),
+        fd_req(ZoneKind::Exile),
+    ];
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        for req in dests {
+            let ctx = format!("{players:?} {req:?}");
+            let (mut w1, mut w2) = index_twins(&players);
+            let x = w1.id_of(CARD_X);
+            let a = w1.id_of(CARD_A);
+            let m1 = w1.mv_obs(x, req, &[P2]);
+            let m2 = w2.mv_obs(x, req, &[P2]);
+            assert_eq!(m1, m2, "{ctx}");
+            assert_twins_equal_for(&w1, &w2, &players, &ctx);
+            assert!(w1.positions(P2, P1).is_empty(), "{ctx}");
+            p2_knows_a_and_b(&w1, &ctx);
+            p2_knows_a_and_b(&w2, &ctx);
+            // control
+            let (mut c1, mut c2) = index_twins(&players);
+            c1.mv_idx(x, req, &[P2], &[P2]);
+            c2.mv_idx(x, req, &[P2], &[P2]);
+            assert!(c1.positions(P2, P1).is_empty(), "{ctx}: above");
+            assert_eq!(
+                c2.positions(P2, P1),
+                [(1, a)].into_iter().collect(),
+                "{ctx}: below"
+            );
+            let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+            assert_twins_equal_for(&c1, &c2, &others, &ctx);
+        }
+    }
+}
+
+/// P1's library X, A, B (P2 knows A at index 1 and B as a set member), plus a card H in P1's
+/// hand and a face-up card G in P1's graveyard. Returns the world and the ids of A, H and G.
+fn move_in_world(players: &[PlayerId]) -> (KWorld, ObjectId, ObjectId, ObjectId) {
+    let mut w = KWorld::with_players(players);
+    w.build_library(P1, &[CARD_X, CARD_A, CARD_B]);
+    let a = w.id_of(CARD_A);
+    w.k.set_position_known(&w.zones, P2, P1, 1, a).expect("pos");
+    w.k.add_known(&w.zones, w.id_of(CARD_B), P2).expect("add");
+    let h = w.create_card(cid(CARD_Y), P1, MoveRequest::new(ZoneKind::Hand));
+    let g = w.create_card(cid(CARD_Z), P1, MoveRequest::new(ZoneKind::Graveyard));
+    (w, a, h, g)
+}
+
+/// REQ-CORE-004, CR 400.2, 401.2, 402.3 (index-disclosure rule of the brief, finding class
+/// (b)): a card moves INTO P1's library at index 0 (above A) or index 2 (below A), from P1's
+/// hand (unobserved, and observed by P2) and from P1's graveyard (a public source): positions
+/// equal (empty) and every player's whole view equal; P2 keeps A and B as set members (a hand
+/// source's step 0 forgets only the hand's cards). Control (`index_known_by` [P2]): index 0 ->
+/// A's entry gone, index 2 -> A@1 kept.
+#[test]
+fn move_in_index_twin_above_and_below() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        for (from_hand, observers) in [(true, vec![]), (true, vec![P2]), (false, vec![])] {
+            let ctx = format!("{players:?} hand {from_hand} {observers:?}");
+            let (base, a, h, g) = move_in_world(&players);
+            let id = if from_hand { h } else { g };
+            let at = |i: usize| KWorld::req_at(ZoneKind::Library, Position::Index(i));
+            let (mut w1, mut w2) = (base.clone(), base.clone());
+            let m1 = w1.mv_obs(id, at(0), &observers);
+            let m2 = w2.mv_obs(id, at(2), &observers);
+            assert_eq!(m1.new, m2.new, "{ctx}");
+            assert_eq!(w1.library(P1)[0], m1.new);
+            assert_eq!(w2.library(P1)[2], m2.new);
+            assert_twins_equal_for(&w1, &w2, &players, &ctx);
+            assert!(w1.positions(P2, P1).is_empty(), "{ctx}");
+            p2_knows_a_and_b(&w1, &ctx);
+            p2_knows_a_and_b(&w2, &ctx);
+            // control
+            let (mut c1, mut c2) = (base.clone(), base.clone());
+            c1.mv_idx(id, at(0), &observers, &[P2]);
+            c2.mv_idx(id, at(2), &observers, &[P2]);
+            assert!(c1.positions(P2, P1).is_empty(), "{ctx}: above");
+            assert_eq!(
+                c2.positions(P2, P1),
+                [(1, a)].into_iter().collect(),
+                "{ctx}: below"
+            );
+            let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+            assert_twins_equal_for(&c1, &c2, &others, &ctx);
+        }
+    }
+}
+
+/// REQ-CORE-004, CR 401.2 (index-disclosure rule of the brief, finding class (c)): a same-zone
+/// library reposition. P1's library X, Y, B, A; P2 knows A at index 3 and B as a set member.
+/// World 1 moves the top card X to the bottom (A shifts to 2), world 2 to index 2 (A stays at
+/// 3), reported with the shorthand `on_move`: positions equal (empty), every view equal, KnownTo
+/// unchanged (step 0 is skipped for a same-zone move). Control (`index_known_by` [P2]): world 1
+/// loses A's entry, world 2 keeps A@3.
+#[test]
+fn reposition_index_twin() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        let build = || -> KWorld {
+            let mut w = KWorld::with_players(&players);
+            w.build_library(P1, &[CARD_X, CARD_Y, CARD_B, CARD_A]);
+            let a = w.id_of(CARD_A);
+            w.k.set_position_known(&w.zones, P2, P1, 3, a).expect("pos");
+            w.k.add_known(&w.zones, w.id_of(CARD_B), P2).expect("add");
+            w
+        };
+        let base = build();
+        let (x, a) = (base.id_of(CARD_X), base.id_of(CARD_A));
+        let known: Vec<_> = base
+            .library(P1)
+            .iter()
+            .map(|id| base.known_to(*id))
+            .collect();
+        let bottom = KWorld::req_at(ZoneKind::Library, Position::Bottom);
+        let at2 = KWorld::req_at(ZoneKind::Library, Position::Index(2));
+        let (mut w1, mut w2) = (base.clone(), base.clone());
+        w1.mv(x, bottom);
+        w2.mv(x, at2);
+        assert_eq!(w1.library(P1)[2], a, "world 1: A shifted to 2");
+        assert_eq!(w2.library(P1)[3], a, "world 2: A still at 3");
+        assert_twins_equal_for(&w1, &w2, &players, "reposition shorthand");
+        assert!(w1.positions(P2, P1).is_empty());
+        for w in [&w1, &w2] {
+            let k: Vec<_> = base.library(P1).iter().map(|id| w.known_to(*id)).collect();
+            assert_eq!(k, known, "identity kept");
+        }
+        // control
+        let (mut c1, mut c2) = (base.clone(), base.clone());
+        c1.mv_idx(x, bottom, &[], &[P2]);
+        c2.mv_idx(x, at2, &[], &[P2]);
+        assert!(c1.positions(P2, P1).is_empty());
+        assert_eq!(c2.positions(P2, P1), [(3, a)].into_iter().collect());
+        let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+        assert_twins_equal_for(&c1, &c2, &others, "reposition control, others");
+    }
+}
+
+/// REQ-CORE-004, CR 401.2, 402.3 (hidden-source identity rule and index-disclosure rule of the
+/// brief): step 0 runs first. P1's library X, A, B, Y; P2 and P3 both know A at index 1, P3
+/// also knows B. Y (index 3, below A) is drawn into P1's hand with observers [P2] and
+/// `index_known_by` [P2, P3]: P2 (observer, knows the index) keeps A@1 and A and B; P3 knows
+/// the index but did not observe, so step 0 already dropped its entries and its knowledge of
+/// the library cards: P3 keeps no entry and forgets A and B. Passing P3 in `index_known_by`
+/// changes nothing compared with `index_known_by` [P2].
+#[test]
+fn index_known_non_observer_keeps_nothing_after_step0() {
+    let build = || -> KWorld {
+        let mut w = KWorld::three();
+        w.build_library(P1, &[CARD_X, CARD_A, CARD_B, CARD_Y]);
+        let (a, b) = (w.id_of(CARD_A), w.id_of(CARD_B));
+        for v in [P2, P3] {
+            w.k.set_position_known(&w.zones, v, P1, 1, a).expect("pos");
+        }
+        w.k.add_known(&w.zones, b, P3).expect("add");
+        w.k.add_known(&w.zones, b, P2).expect("add");
+        w
+    };
+    let mut w = build();
+    let (a, b, y) = (w.id_of(CARD_A), w.id_of(CARD_B), w.id_of(CARD_Y));
+    let hand = MoveRequest::new(ZoneKind::Hand);
+    w.mv_idx(y, hand, &[P2], &[P2, P3]);
+    assert_eq!(w.positions(P2, P1), [(1, a)].into_iter().collect());
+    assert!(
+        w.positions(P3, P1).is_empty(),
+        "step 0 dropped P3's entries"
+    );
+    assert!(w.can(P2, a) && w.can(P2, b));
+    assert!(!w.can(P3, a), "P3 did not observe: A forgotten");
+    assert!(!w.can(P3, b), "P3 did not observe: B forgotten");
+    assert!(lib_known(&w.view(P3), P1).is_empty());
+    let mut u = build();
+    u.mv_idx(y, hand, &[P2], &[P2]);
+    assert_eq!(u.k, w.k, "index knowledge does not make P3 an observer");
+}
+
+/// REQ-CORE-004, R12: `on_move_indexed` errors: UnknownObject(moved.new) first, then the first
+/// unknown observer, then the first unknown `index_known_by` player;
+/// `on_removed_from_hidden_zone_indexed`: UnknownPlayer(zone owner), then the first unknown
+/// observer, then the first unknown `index_known_by` player. Rejected calls change nothing. The shorthands equal the new
+/// methods with an empty `index_known_by` (and `on_move` with empty observers too).
+#[test]
+fn index_disclosure_move_and_removal_errors_and_shorthands() {
+    // on_move_indexed
+    let (mut w, _) = index_twins(&[P1, P2, P3]);
+    let x = w.id_of(CARD_X);
+    let before = w.rec(x);
+    let moved = w.raw_mv(x, MoveRequest::new(ZoneKind::Hand));
+    let snapshot = w.k.clone();
+    let fake = fineprint_core::zones::Moved {
+        new: oid(987_654),
+        ..moved
+    };
+    let cases: Vec<(
+        fineprint_core::zones::Moved,
+        Vec<PlayerId>,
+        Vec<PlayerId>,
+        KnowledgeError,
+    )> = vec![
+        (
+            fake,
+            vec![NOBODY],
+            vec![pid(77)],
+            KnowledgeError::UnknownObject(oid(987_654)),
+        ),
+        (
+            moved,
+            vec![P2, NOBODY],
+            vec![pid(77)],
+            KnowledgeError::UnknownPlayer(NOBODY),
+        ),
+        (
+            moved,
+            vec![P2],
+            vec![P1, pid(77), NOBODY],
+            KnowledgeError::UnknownPlayer(pid(77)),
+        ),
+        (
+            moved,
+            vec![],
+            vec![pid(u64::MAX)],
+            KnowledgeError::UnknownPlayer(pid(u64::MAX)),
+        ),
+    ];
+    for (m, obs, ikb, err) in cases {
+        assert_eq!(
+            w.k.on_move_indexed(&w.zones, &before, &m, &obs, &ikb),
+            Err(err),
+            "{obs:?} {ikb:?}"
+        );
+        assert_eq!(w.k, snapshot, "rejected call changes nothing");
+    }
+    let (mut a, mut b, mut c, mut d) = (w.clone(), w.clone(), w.clone(), w.clone());
+    a.k.on_move(&a.zones, &before, &moved).expect("a");
+    b.k.on_move_indexed(&b.zones, &before, &moved, &[], &[])
+        .expect("b");
+    assert_eq!(a.k, b.k);
+    c.k.on_move_observed(&c.zones, &before, &moved, &[P2])
+        .expect("c");
+    d.k.on_move_indexed(&d.zones, &before, &moved, &[P2], &[])
+        .expect("d");
+    assert_eq!(c.k, d.k);
+    // on_removed_from_hidden_zone_indexed
+    let (mut w, _) = index_twins(&[P1, P2, P3]);
+    let x = w.id_of(CARD_X);
+    let before = w.rec(x);
+    w.zones
+        .send_outside(x, fineprint_core::zones::OutsidePool::Sideboard)
+        .expect("out");
+    let snapshot = w.k.clone();
+    let with_zone = |zone: ZoneId| ObjectRecord { zone, ..before };
+    let cases: Vec<(ObjectRecord, Vec<PlayerId>, Vec<PlayerId>, PlayerId)> = vec![
+        (
+            with_zone(ZoneId::Library(pid(55))),
+            vec![NOBODY],
+            vec![pid(77)],
+            pid(55),
+        ),
+        (
+            with_zone(ZoneId::Hand(pid(55))),
+            vec![],
+            vec![NOBODY],
+            pid(55),
+        ),
+        (before, vec![P2, NOBODY], vec![pid(77)], NOBODY),
+        (before, vec![P2], vec![P1, pid(77), NOBODY], pid(77)),
+        (
+            with_zone(ZoneId::Hand(P2)),
+            vec![],
+            vec![pid(u64::MAX)],
+            pid(u64::MAX),
+        ),
+    ];
+    for (b, obs, ikb, bad) in cases {
+        assert_eq!(
+            w.k.on_removed_from_hidden_zone_indexed(&w.zones, &b, &obs, &ikb),
+            Err(KnowledgeError::UnknownPlayer(bad)),
+            "{b:?} {obs:?} {ikb:?}"
+        );
+        assert_eq!(w.k, snapshot, "rejected call changes nothing");
+    }
+    let (mut a, mut b) = (w.clone(), w.clone());
+    a.k.on_removed_from_hidden_zone(&a.zones, &before, &[P2])
+        .expect("a");
+    b.k.on_removed_from_hidden_zone_indexed(&b.zones, &before, &[P2], &[])
+        .expect("b");
+    assert_eq!(a.k, b.k);
+    assert!(a.positions(P2, P1).is_empty());
 }
