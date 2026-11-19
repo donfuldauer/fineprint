@@ -6,9 +6,11 @@
 //! of simultaneous events, and the queue they wait in until they are put on the stack.
 //!
 //! **Events.** [`events_from_batch`] normalises an executed batch (read from the executed-event
-//! log) into [`TriggerEvent`]s: one per executed event that a trigger can match, carrying every
-//! [`EventKind`] it is an instance of, the subject object's pre-event and post-event ids, the
-//! subject player and named fields for `filters` and `bind`.
+//! log) into [`TriggerEvent`]s: one or more per executed event that a trigger can match (damage
+//! to a player is also its life loss), carrying every [`EventKind`] it is an instance of, the
+//! subject object's pre-event and post-event ids, the subject player and named fields for
+//! `filters` and `bind`. [`events_from_batch_with_lki`] also reads the batch's last known
+//! information (a sacrifice's controller).
 //!
 //! **Views.** Normally triggers are matched against the state immediately after the event; the
 //! look-back triggers of CR 603.10a-g are matched against the state immediately before it, with
@@ -19,7 +21,9 @@
 //! integration unit implements it on the real state), matches every event-triggered ability's
 //! [`EventMatcher`] (kind, subject, filters, `EACH`/`ONE_OR_MORE` batching, bindings), checks
 //! the intervening "if" clause at trigger time (CR 603.4) and enforces `limit.perTurn` /
-//! `limit.perGame` with counters in the source's Memory. It returns [`WaitingTrigger`]s, which
+//! `limit.perGame` with counters in the source's Memory ([`detect_with_pre_event_memory`]
+//! reads them from the Memory as it was before the batch, so a departing source's used limit
+//! still counts). It returns [`WaitingTrigger`]s, which
 //! a [`WaitingTriggers`] queue holds in creation order.
 //!
 //! **Out of scope** (later units): putting triggers on the stack and their APNAP ordering
@@ -37,8 +41,10 @@ mod queue;
 #[cfg(test)]
 mod tests;
 
-pub use detect::{TriggerEnv, TriggerRegistration, WaitingTrigger, detect};
-pub use event::{EventField, TriggerEvent, events_from_batch};
+pub use detect::{
+    TriggerEnv, TriggerRegistration, WaitingTrigger, detect, detect_with_pre_event_memory,
+};
+pub use event::{EventField, TriggerEvent, events_from_batch, events_from_batch_with_lki};
 pub use lookback::{LookBackKind, StateView, look_back_kind};
 pub use queue::WaitingTriggers;
 

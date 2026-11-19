@@ -5,7 +5,7 @@
 //! Matching event-triggered abilities against one batch of events (REQ-EVENT-002, CR 603.2,
 //! CR 603.10, CR 603.4), with per-ability trigger limits kept in Memory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::ability::{
@@ -20,6 +20,12 @@ use crate::memory::{ChoiceValue, Memory, MemoryTable};
 
 /// A triggered ability as registered on an object (REQ-EVENT-002). Only abilities with a
 /// [`Trigger::Event`] trigger are considered by [`detect`]; others are ignored.
+///
+/// **Ability-instance identity.** An ability instance is identified by (`source`, the
+/// ability's `ability_id`) as supplied by [`TriggerEnv::registrations`]: `ONE_OR_MORE`
+/// grouping and the `limit` counters are keyed by it. A producer that grants two independent
+/// copies of one definition ability to one object must give each registration a distinct
+/// `ability_id`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TriggerRegistration {
     /// The object the ability is on (its id in the view the registration was listed in).
@@ -277,7 +283,8 @@ fn record(
     );
 }
 
-/// A matched (registration, view) with its matching event indices.
+/// A matched ability instance with the view of its first matching event and its matching event
+/// indices.
 struct Candidate<'a> {
     view: StateView,
     reg: &'a EventReg<'a>,
@@ -287,18 +294,51 @@ struct Candidate<'a> {
 /// Detects which event-triggered abilities trigger on `events`, one batch of simultaneous
 /// events in order (REQ-EVENT-002, SRS 8.2).
 ///
+/// Equivalent to [`detect_with_pre_event_memory`] with `pre_memory` a copy of `memory` taken
+/// before the call: correct whenever `memory` has not yet lost the Memory of a source that left
+/// in the batch. See [`detect_with_pre_event_memory`] for the full contract.
+#[must_use]
+pub fn detect(
+    env: &dyn TriggerEnv,
+    memory: &mut MemoryTable,
+    turn: u64,
+    events: &[TriggerEvent],
+) -> Vec<WaitingTrigger> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+    let pre_memory = memory.clone();
+    detect_with_pre_event_memory(env, &pre_memory, memory, turn, events)
+}
+
+/// Detects which event-triggered abilities trigger on `events`, one batch of simultaneous
+/// events in order (REQ-EVENT-002, SRS 8.2), reading trigger limits from the Memory as it was
+/// before the batch.
+///
 /// For each event and registration: the matcher's kind must be one of the event's kinds; the
 /// view is the pre-event state for the look-back categories of CR 603.10a-g (for the hand or
 /// library category only when the object was visible to all) and the post-event state
 /// otherwise (CR 603.10), and the registration must be listed in that view; the subject and
 /// filters must match in that view. `EACH` matchers yield one candidate per matching event and
-/// `ONE_OR_MORE` matchers one per call (CR 603.2c). Candidates are taken in order of (first
-/// event index, source, ability id); each is dropped if its intervening "if" condition is false
-/// at trigger time (CR 603.4), or if its `limit` is reached; otherwise its limit counters in
-/// the source's Memory (keyed by ability id, for `turn`) are incremented and it is returned.
+/// `ONE_OR_MORE` matchers one per ability instance per call (CR 603.2c), whichever view each
+/// event matched in; its view, bindings and look-back category are those of its first matching
+/// event. An ability instance is (source, ability id) as listed by
+/// [`TriggerEnv::registrations`] (see [`TriggerRegistration`]). Candidates are taken in order
+/// of (first event index, source, ability id); each is dropped if its intervening "if"
+/// condition is false at trigger time (CR 603.4), or if its `limit` is reached; otherwise it is
+/// returned and its limit counters (keyed by ability id, for `turn`) are incremented.
+///
+/// **Memory contract.** `pre_memory` is the [`MemoryTable`] as it was immediately before the
+/// batch: it still holds the Memory of a source that left a zone in the batch (CR 400.7), so a
+/// departing source's used limit still counts (CR 603.2h, SRS 8.2 item 8). The counts of an
+/// ability instance are its counts in `pre_memory` plus the candidates of that instance already
+/// accepted in this call. `memory` is the current (post-batch) table: the incremented counters
+/// are written to it only for a source that survives, i.e. whose (source, ability id) is listed
+/// in the post-event registrations; a departing source gets no entry in `memory`.
 #[must_use]
-pub fn detect(
+pub fn detect_with_pre_event_memory(
     env: &dyn TriggerEnv,
+    pre_memory: &MemoryTable,
     memory: &mut MemoryTable,
     turn: u64,
     events: &[TriggerEvent],
@@ -313,10 +353,11 @@ pub fn detect(
 
     // CR 603.2, CR 603.10: match every event against the registrations of its view.
     let mut candidates: Vec<Candidate<'_>> = Vec::new();
-    let mut grouped: BTreeMap<(StateView, usize), usize> = BTreeMap::new();
+    // CR 603.2c, CR 603.10a: ONE_OR_MORE groups by ability instance, across views.
+    let mut grouped: BTreeMap<(ObjectId, &str), usize> = BTreeMap::new();
     for (i, event) in events.iter().enumerate() {
         for (view, regs) in [(StateView::PreEvent, &pre), (StateView::PostEvent, &post)] {
-            for (r, er) in regs.iter().enumerate() {
+            for er in regs {
                 if !event.kinds.contains(&er.matcher.kind)
                     || view_for(env, er.look_back, event) != view
                     || !matches(env, view, er.reg, er.matcher, event)
@@ -325,11 +366,15 @@ pub fn detect(
                 }
                 // CR 603.2c: EACH triggers per occurrence; ONE_OR_MORE once per batch.
                 if er.matcher.batch == Some(DslEventBatch::OneOrMore) {
-                    if let Some(&c) = grouped.get(&(view, r)) {
-                        candidates[c].indices.push(i);
+                    let key = (er.reg.source, er.reg.ability.base.ability_id.as_str());
+                    if let Some(&c) = grouped.get(&key) {
+                        let indices = &mut candidates[c].indices;
+                        if indices.last() != Some(&i) {
+                            indices.push(i);
+                        }
                         continue;
                     }
-                    grouped.insert((view, r), candidates.len());
+                    grouped.insert(key, candidates.len());
                 }
                 candidates.push(Candidate {
                     view,
@@ -353,6 +398,14 @@ pub fn detect(
             ))
     });
 
+    // Ability instances that still exist after the batch (their counters are kept).
+    let survivors: BTreeSet<(ObjectId, &str)> = post_list
+        .iter()
+        .map(|r| (r.source, r.ability.base.ability_id.as_str()))
+        .collect();
+    // Triggerings accepted in this call, per ability instance.
+    let mut tally: BTreeMap<(ObjectId, &str), i64> = BTreeMap::new();
+
     let turn = i64::try_from(turn).unwrap_or(i64::MAX);
     let mut out = Vec::new();
     for cand in candidates {
@@ -368,11 +421,20 @@ pub fn detect(
         }
         // SRS 8.2 item 8: limits per ability instance, tracked in Memory (CR 603.2h).
         if let Some(limit) = &ability.limit {
-            let c = counts(memory, reg.source, ability_id, turn);
+            let key = (reg.source, ability_id.as_str());
+            let earlier = tally.get(&key).copied().unwrap_or(0);
+            let (this_turn, this_game) = counts(pre_memory, reg.source, ability_id, turn);
+            let c = (
+                this_turn.saturating_add(earlier),
+                this_game.saturating_add(earlier),
+            );
             if !within(limit, c) {
                 continue;
             }
-            record(memory, reg.source, ability_id, turn, c);
+            tally.insert(key, earlier.saturating_add(1));
+            if survivors.contains(&key) {
+                record(memory, reg.source, ability_id, turn, c);
+            }
         }
         out.push(WaitingTrigger {
             source: reg.source,

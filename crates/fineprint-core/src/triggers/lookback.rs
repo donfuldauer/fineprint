@@ -83,6 +83,10 @@ pub fn look_back_kind(matcher: &EventMatcher) -> Option<LookBackKind> {
     match matcher.kind {
         // CR 603.10a, CR 603.6c: leaves-the-battlefield abilities.
         EventKind::LeavesBattlefield | EventKind::Dies => Some(LookBackKind::LeavesBattlefield),
+        // CR 701.8a, CR 603.6c, CR 603.10a: to destroy is to move from the battlefield to the
+        // graveyard, so a destroyed trigger is a leaves-the-battlefield ability (an inference:
+        // CR 603.10 does not name "destroyed"). It stays distinct from DIES (CR 701.8b).
+        EventKind::Destroyed => Some(LookBackKind::LeavesBattlefield),
         // CR 603.10a: a player sacrifices a permanent.
         EventKind::Sacrificed => Some(LookBackKind::Sacrificed),
         // CR 603.10a: a card leaves a graveyard.
@@ -114,7 +118,10 @@ pub fn look_back_kind(matcher: &EventMatcher) -> Option<LookBackKind> {
         EventKind::PhasedOut => Some(LookBackKind::PhasedOut),
         // CR 603.10c
         EventKind::Unattached => Some(LookBackKind::Unattached),
-        // CR 603.10d
+        // CR 603.10d: loses-control and opponent-gains-control-from-that-player look back. A
+        // bare gain-of-control matcher is post-event (CR 603.10); the matcher has no direction
+        // yet, so ControlChanged is classified as the look-back side. Direction is added with
+        // the control-change event (see DECISIONS "#30 FP-029 CR round 1").
         EventKind::ControlChanged => Some(LookBackKind::ControlLost),
         // CR 603.10e
         EventKind::Countered => Some(LookBackKind::Countered),
