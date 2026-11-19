@@ -19,7 +19,7 @@
 //! event's applied set (CR 614.5) and are part of the same simultaneous batch, at every
 //! generation (CR 614.6, CR 704.3); they are resolved against the state before the batch, as
 //! soon as the event they replace has resolved, in the same APNAP order at that event's
-//! submission position (CR 101.4). The final events execute together as ONE batch through
+//! position, recursively (CR 101.4). The final events execute together as ONE batch through
 //! [`EventContext::execute_batch_with_entry_copies`](crate::events::EventContext::execute_batch_with_entry_copies)
 //! (the events that are not zone changes first, then at most one zone change per object, except
 //! the `sba` false caller's duplicate below); the [`Action::Prevent`] follow-up events (`then`,
@@ -55,7 +55,7 @@
 //! descendant among them), nothing is reconciled: all are executed, the second fails with
 //! `UnknownObject` and the call rolls back (a caller's duplicate). Results of different
 //! objects or groups are resolved in APNAP order of their choosers, then submission order (an
-//! `Instead` descendant taking the submission position of the event it replaces), and may
+//! `Instead` descendant taking the position of the event it replaces, recursively), and may
 //! compete for a one-use effect, so reversing the submission can change which object such an
 //! effect applies to.
 //!
