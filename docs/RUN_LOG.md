@@ -276,3 +276,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 6c) | Independent Tester | Opus 5.5 | 1 | done | all spec_replacement_* pass; round6 13/13 x3 | pool-resume and execution-order lineage specs |
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (triage T0) | Opus 5.5 | 1 | done | docs only | DECISIONS records the R10 change to req_event_001_r6_lineage_path_grandchild_takes_parent_position (verifier finding at 59c4901) |
+| 03-events | #29 (PR #178 review round 6d) | Orchestrator (R8) | Opus 5.5 | 1 | recorded | docs only | review 5981232036 (phase C descendants after the pool round) recorded as known limitation (h); later unit |
