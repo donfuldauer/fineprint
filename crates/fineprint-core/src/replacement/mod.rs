@@ -15,11 +15,14 @@
 //! [`Tier`] is choosable (CR 616.1a-e). [4] One effect is applied without asking; several are
 //! offered through `CHOOSE_REPLACEMENT_EFFECT` ([`ChoiceContext::ask`](crate::choice::ChoiceContext::ask));
 //! the chosen effect modifies the event and joins its applied set. [5] Repeat on the modified
-//! event (CR 616.1f, CR 616.2). The surviving events execute together through
-//! [`EventContext::execute_batch`](crate::events::EventContext::execute_batch); queued child
-//! events (from [`Action::Instead`], keeping the replaced event's applied set, CR 614.5, and
-//! [`Action::Prevent`]'s `then`, starting fresh, CR 615.5) then form one child batch that goes
-//! through the same bus. A [`Modification::EntersAsCopyOf`] copy is executed right after the
+//! event (CR 616.1f, CR 616.2). The events of an applied [`Action::Instead`] keep the replaced
+//! event's applied set (CR 614.5) and are part of the same simultaneous batch, at every
+//! generation (CR 614.6, CR 704.3); they are resolved against the state before the batch. The
+//! final events execute together as ONE batch through
+//! [`EventContext::execute_batch`](crate::events::EventContext::execute_batch) (the events that
+//! are not zone changes first, then at most one zone change per object); the
+//! [`Action::Prevent`] follow-up events (`then`, starting fresh, CR 615.5) of the whole batch
+//! then form one child batch that goes through the same bus. A [`Modification::EntersAsCopyOf`] copy is executed right after the
 //! entry, without replacement collection (CR 614.1c, CR 616.1c). Events that would not happen
 //! (0 damage, untapping an untapped permanent) offer no effect (CR 614.7, CR 614.7a). One call
 //! takes up at most [`MAX_BUS_EVENTS`] events.
@@ -35,11 +38,14 @@
 //! same destination are one group: the candidates are the union of the members' effects; each
 //! round selects ONE effect (the chooser's pick, or the sole candidate applied without asking)
 //! and applies it once to every member it matches (members it does not match still move the
-//! object); the bus repeats collection until no candidate remains (CR 616.1f). The object moves
-//! at most once. The child events of an application to a group that still moves are part of
-//! the one executed batch and precede the move (CR 704.3, CR 704.8); a child move of the
-//! object competes with the group's move, a redirect winning. Other child events follow as a
-//! child batch. Different objects never merge.
+//! object); the bus repeats collection until no candidate remains (CR 616.1f). Different
+//! objects never merge. Every `Instead` descendant, of a group or not, is part of the one
+//! executed batch (CR 614.6, CR 704.3, CR 704.8: last known information is captured before
+//! it). An object moves at most once: its final zone changes (group members, other members and
+//! `Instead` moves) compete, a move produced or redirected by a replacement winning, then the
+//! least by content; the choice does not depend on submission order. Results of different
+//! objects or groups are resolved in APNAP order, then submission order, and may compete for a
+//! one-use effect.
 //!
 //! **Atomicity and suspension.** Any error restores the registry and every component of the
 //! event context. A pending choice propagates as [`BusInterrupt::Pending`]; the
