@@ -231,3 +231,9 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 | Rules researcher | Opus 5.5 | 1 | answered | — | 616.1g contained filter before tiers: consistent; 704.7 merge must also require the same chooser; classifier amendments 1 and 2 sent to both executors |
 | 03-events | #29 | Implementer | Opus 5.5 | 1 | done | cargo test --workspace 2270 passed; coverage core 99.28%, replacement/ ~96.5%; fmt, clippy, guard clean | 38 unit tests; amendment 1 applied |
 | 03-events | #29 | Independent Tester | Opus 5.5 | 1 | done | 66 spec tests pass; fmt, clippy, guard clean | amendment 2 applied |
+| 03-events | #29 (PR #178 build) | Orchestrator | Opus 5.5 | 1 | pass @ 65c15b5 (work-verifier) | cargo test --workspace 2270 passed; fmt, clippy, guard clean; coverage core 99.28% | PR #178 opened; CI `cr` red (CR 614.1, 615 not indexed) |
+| 03-events | #29 (PR #178 review round 1) | Rules researcher + Issue investigator | Opus 5.5 | 1 | answered | 11 findings reproduced | all valid; 704.7 merge key = same object (R8 judgement); F6 same-event copy entry deferred to #40/#38 |
+| 03-events | #29 (PR #178 review round 1) | Classifier | Opus 5.5 | 1 | routed | — | T2 Fixer (src) + T2 Independent Tester (spec) + T0 CR index |
+| 03-events | #29 (PR #178 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | lib replacement tests 50 passed; fmt, clippy, guard clean; replacement/ 95.91% | F1-F9, F11 fixed; MAX_BUS_EVENTS + BusError::WorkLimit; DECISIONS amended |
+| 03-events | #29 (PR #178 review round 1) | Independent Tester | Opus 5.5 | 1 | done | 101 spec tests pass; fmt, clippy, guard clean | regression specs for every finding; new spec_replacement_pool.rs |
+| 03-events | #29 (PR #178 review round 1) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok (721 cited rules) | docs/cr-citations.json regenerated after the last .rs edit |
