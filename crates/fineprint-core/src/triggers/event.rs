@@ -222,8 +222,16 @@ fn trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<Trigge
             let mut e = moved_event(zone_change_kinds(m.from.kind(), m.to.kind(), *cause), m);
             // CR 701.21a, CR 603.10a: the player who sacrificed it is its controller as it
             // last existed on the battlefield.
-            if *cause == ZoneChangeCause::Sacrifice {
-                e.subject_player = lki.get(m.old).and_then(|r| r.controller());
+            match cause {
+                ZoneChangeCause::Sacrifice => {
+                    e.subject_player = lki.get(m.old).and_then(|r| r.controller());
+                }
+                // CR 701.9a, CR 701.17a: the player who discarded or milled the card owns the
+                // hand or library it left.
+                ZoneChangeCause::Discard | ZoneChangeCause::Mill => {
+                    e.subject_player = m.from.owner();
+                }
+                _ => {}
             }
             e
         }
@@ -309,7 +317,7 @@ fn trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<Trigge
             TriggerEvent::new(vec![EventKind::TurnedFaceUp]).with_same_object(*object)
         }
         // CR 111.2: the creator is the owner; CR 701.7a, CR 603.6a: the token enters the
-        // battlefield (from no zone, so no ZONE_CHANGE).
+        // battlefield (`to` is the battlefield; from no zone, so no `from` and no ZONE_CHANGE).
         GameEvent::CreateToken {
             owner, controller, ..
         } => {
@@ -320,6 +328,10 @@ fn trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<Trigge
             TriggerEvent::new(vec![EventKind::TokenCreated, EventKind::Enters])
                 .with_object(None, token)
                 .with_player(*owner)
+                .with_field(
+                    "to",
+                    EventField::Value(FilterValue::Zone(Zone::Battlefield)),
+                )
                 .with_field(
                     "controller",
                     EventField::Player(controller.unwrap_or(*owner)),
