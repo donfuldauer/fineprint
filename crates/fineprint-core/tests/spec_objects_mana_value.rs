@@ -487,7 +487,7 @@ fn mv_202_3e_copy_on_stack_has_same_x() {
     assert_eq!(original, copy);
 }
 
-/// REQ-OBJ-001, CR 202.3e, CR 202.3d: X inside a split half counts per context.
+/// REQ-OBJ-001, CR 202.3e, CR 202.3d, CR 107.3g: X inside a split half counts per split state.
 #[test]
 fn mv_202_3e_x_in_split_on_stack() {
     let l = cost("{X}{R}");
@@ -516,6 +516,17 @@ fn mv_202_3e_x_in_split_on_stack() {
             Some(&r),
             SplitState::NotOnStack,
             ManaValueContext::OffStack
+        ),
+        4
+    );
+    // CR 202.3e, CR 107.3g: not on the stack, X is 0 even with an on-stack context
+    // (CodeRabbit r1 on PR #170).
+    assert_eq!(
+        split(
+            Some(&l),
+            Some(&r),
+            SplitState::NotOnStack,
+            on_stack(3, 0, 0)
         ),
         4
     );
@@ -840,8 +851,10 @@ fn prop_202_3b_202_3c_copies_always_zero() {
     }
 }
 
-/// REQ-OBJ-001, CR 202.3d: swapping the halves of a NotOnStack or fused split leaves the MV
-/// unchanged, and it equals the sum of both halves.
+/// REQ-OBJ-001, CR 202.3d, CR 202.3e, CR 107.3g: swapping the halves of a NotOnStack or fused
+/// split leaves the MV unchanged. A NotOnStack split is the sum of both halves evaluated off the
+/// stack whatever context is supplied (the state decides); a fused split is the sum of both
+/// halves in the supplied context.
 #[test]
 fn prop_202_3d_split_half_order_irrelevant_when_combined() {
     let costs = generated_costs();
@@ -852,7 +865,13 @@ fn prop_202_3d_split_half_order_irrelevant_when_combined() {
                 let ab = split(Some(a), Some(b), state, ctx);
                 let ba = split(Some(b), Some(a), state, ctx);
                 assert_eq!(ab, ba, "{a:?} {b:?} {state:?} {ctx:?}");
-                assert_eq!(ab, symbol_sum(a, ctx) + symbol_sum(b, ctx));
+                let expected = if state == SplitState::NotOnStack {
+                    symbol_sum(a, ManaValueContext::OffStack)
+                        + symbol_sum(b, ManaValueContext::OffStack)
+                } else {
+                    symbol_sum(a, ctx) + symbol_sum(b, ctx)
+                };
+                assert_eq!(ab, expected, "{a:?} {b:?} {state:?} {ctx:?}");
             }
         }
     }

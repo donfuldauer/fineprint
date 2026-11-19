@@ -44,7 +44,9 @@ mod validation;
 mod tests;
 
 pub use characteristics::Characteristics;
-pub use colors::{base_colors, color_mask, colors_of_mana_cost, symbol_colors, union_colors};
+pub use colors::{
+    CdaColors, base_colors, color_mask, colors_of_mana_cost, symbol_colors, union_colors,
+};
 pub use error::ObjectError;
 pub use identity::{IdentityFace, color_identity};
 pub use mana_value::{

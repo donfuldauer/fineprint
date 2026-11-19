@@ -9,8 +9,8 @@
 //! 202.2, 107.4) and color identity (CR 903.4, 903.4b-e) (REQ-OBJ-001).
 
 use fineprint_core::objects::{
-    IdentityFace, base_colors, color_identity, color_mask, colors_of_mana_cost, symbol_colors,
-    union_colors,
+    CdaColors, IdentityFace, base_colors, color_identity, color_mask, colors_of_mana_cost,
+    symbol_colors, union_colors,
 };
 use fineprint_dsl::card::ColorBitmask;
 use fineprint_dsl::mana::{Color, ManaCostDSL, ManaSymbol, Variable};
@@ -135,27 +135,74 @@ fn color_202_2_symbol_colors_every_variant() {
 fn color_202_2e_indicator_unions_with_cost() {
     let c = cost("{1}{R}");
     assert_eq!(
-        base_colors(Some(&c), Some(mask(U)), ColorBitmask::NONE),
+        base_colors(Some(&c), Some(mask(U)), CdaColors::None),
         mask(R | U)
     );
     // An indicator naming a color already in the cost changes nothing.
     assert_eq!(
-        base_colors(Some(&c), Some(mask(R)), ColorBitmask::NONE),
+        base_colors(Some(&c), Some(mask(R)), CdaColors::None),
         mask(R)
     );
-    assert_eq!(base_colors(Some(&c), None, ColorBitmask::NONE), mask(R));
+    assert_eq!(base_colors(Some(&c), None, CdaColors::None), mask(R));
 }
 
-/// REQ-OBJ-001, CR 105.2: colors defined by a characteristic-defining ability are included.
+/// REQ-OBJ-001, CR 105.2, CR 604.3: colors added by a characteristic-defining ability are included.
 #[test]
 fn color_105_2_cda_colors_are_included() {
     let c = cost("{2}{W}");
-    assert_eq!(base_colors(Some(&c), None, mask(B | G)), mask(W | B | G));
-    assert_eq!(base_colors(None, None, mask(31)), mask(31));
     assert_eq!(
-        base_colors(Some(&c), Some(mask(U)), mask(R)),
+        base_colors(Some(&c), None, CdaColors::Add(mask(B | G))),
+        mask(W | B | G)
+    );
+    assert_eq!(base_colors(None, None, CdaColors::Add(mask(31))), mask(31));
+    assert_eq!(
+        base_colors(Some(&c), Some(mask(U)), CdaColors::Add(mask(R))),
         mask(W | U | R)
     );
+}
+
+/// REQ-OBJ-001, CR 604.3, CR 702.114a, CR 105.2, CR 613.3: a characteristic-defining ability
+/// can override the printed colors; a colorless-defining CDA (`Set(NONE)`, devoid-style) makes a
+/// colored-cost object colorless, while no CDA and an additive CDA keep the printed colors.
+#[test]
+fn color_604_3_cda_can_override_or_add() {
+    let c = cost("{1}{R}");
+    assert_eq!(
+        base_colors(Some(&c), None, CdaColors::Set(ColorBitmask::NONE)),
+        ColorBitmask::NONE
+    );
+    assert_eq!(
+        base_colors(Some(&c), Some(mask(U)), CdaColors::Set(ColorBitmask::NONE)),
+        ColorBitmask::NONE
+    );
+    assert_eq!(
+        base_colors(Some(&c), None, CdaColors::Set(mask(G))),
+        mask(G)
+    );
+    let red = cost("{R}");
+    assert_eq!(
+        base_colors(Some(&red), None, CdaColors::Add(mask(G))),
+        mask(R | G)
+    );
+    assert_eq!(base_colors(Some(&c), None, CdaColors::None), mask(R));
+    assert_eq!(
+        base_colors(None, None, CdaColors::Add(ColorBitmask::NONE)),
+        base_colors(None, None, CdaColors::None)
+    );
+}
+
+/// REQ-OBJ-001, CR 903.4, CR 702.114a: a devoid-style face keeps its cost colors in its color
+/// identity; a colored CDA adds to them.
+#[test]
+fn color_903_4_identity_keeps_cost_colors_with_cda() {
+    let c = cost("{1}{R}");
+    let devoid_like = face(Some(&c));
+    assert_eq!(color_identity(&[devoid_like], None), mask(R));
+    let green_cda = IdentityFace {
+        cda_colors: mask(G),
+        ..face(Some(&c))
+    };
+    assert_eq!(color_identity(&[green_cda], None), mask(R | G));
 }
 
 /// REQ-OBJ-001, CR 202.2e, CR 202.2b: a no-cost face with an indicator has the indicator's
@@ -163,15 +210,12 @@ fn color_105_2_cda_colors_are_included() {
 #[test]
 fn color_202_2e_indicator_on_no_cost_face() {
     assert_eq!(
-        base_colors(None, Some(mask(G | U)), ColorBitmask::NONE),
+        base_colors(None, Some(mask(G | U)), CdaColors::None),
         mask(G | U)
     );
+    assert_eq!(base_colors(None, None, CdaColors::None), ColorBitmask::NONE);
     assert_eq!(
-        base_colors(None, None, ColorBitmask::NONE),
-        ColorBitmask::NONE
-    );
-    assert_eq!(
-        base_colors(None, Some(ColorBitmask::NONE), ColorBitmask::NONE),
+        base_colors(None, Some(ColorBitmask::NONE), CdaColors::None),
         ColorBitmask::NONE
     );
 }

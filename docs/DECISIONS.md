@@ -2334,3 +2334,37 @@ edit `fineprint-dsl`. The follow-up is an additive `ManaSymbol` variant proposed
 change is additive and can land independently.
 **Alternatives:** Encoding `{C/W}` as `GenericHybrid(1, c)` (changes `{1/W}` semantics and the
 DSL validity rule); editing the DSL in this unit (violates R1/R2).
+
+## #21 FP-020 — pt_applies for creatures and printed power/toughness (CodeRabbit r1)
+
+**Decision:** `Characteristics::pt_applies(on_battlefield)` is
+`is_creature || (!on_battlefield && (power.is_some() || toughness.is_some()))`. A creature has
+power and toughness in every zone; a missing value counts as 0 (CR 208.5). A noncreature has them
+only off the battlefield and only when a power or toughness is printed (CR 208.3); a noncreature
+permanent never has them. Either printed field counts (`||`, not both), although CR 208.3 says
+"a power and toughness".
+**Rationale:** CodeRabbit round 1 on PR #170 showed a battlefield creature with no printed P/T
+was reported as having none, contradicting CR 208.5. The DSL permits one-sided printed values,
+and a one-sided noncreature card is not a legal card anyway, so `||` keeps the function total
+without inventing a rejection path.
+**Alternatives:** Require both fields for a noncreature (rejects a DSL-valid shape for no rules
+gain); treat CDA-defined P/T as printed (CDAs are applied by later layer work).
+
+## #21 FP-020 — base_colors takes CdaColors; split NotOnStack ignores the supplied context (CodeRabbit r1)
+
+**Decision:** `base_colors(cost, indicator, CdaColors)` with `CdaColors::None | Add(mask) |
+Set(mask)`. `None` is cost ∪ indicator; `Add(m)` adds `m` (CR 604.3 "add to"); `Set(m)` is
+exactly `m`, overriding cost and indicator (CR 604.3 "override"). A devoid-style CDA is
+`Set(ColorBitmask::NONE)` (CR 702.114a). `Characteristics::from_face` passes `None`.
+`IdentityFace` keeps a plain `cda_colors` mask, passed as `Add(mask)`, so color identity never
+loses cost colors (CR 903.4); `Set` is the only way a CDA overrides cost and indicator, and it is
+not used for identity. Applying CDA colors inside `Characteristics` and other color-changing
+effects stays later layer-5 work (CR 613.3, 613.1e). The API is new in this PR, so no consumer
+breaks. Also: for `SplitState::NotOnStack` the state decides the context — both halves are
+evaluated `OffStack` whatever context is passed (CR 202.3d, 202.3e, 107.3g); `OnStackFused` and
+`OnStackHalf` use the supplied context.
+**Rationale:** CodeRabbit round 1 on PR #170: a plain mask cannot express a colorless-defining
+CDA, and a `NotOnStack` split evaluated with an on-stack context counted X.
+**Alternatives:** `Option<ColorBitmask>` (cannot express add versus override of a non-empty
+mask); a bool `colorless` flag (covers only devoid); keeping a plain mask (rejected by the
+finding); making `NotOnStack` honour `ctx` (contradicts CR 202.3e).

@@ -7,7 +7,7 @@
 use fineprint_dsl::card::ColorBitmask;
 use fineprint_dsl::mana::{ManaCostDSL, ManaSymbol};
 
-use super::colors::{base_colors, symbol_colors, union_colors};
+use super::colors::{CdaColors, base_colors, symbol_colors, union_colors};
 
 /// The color-identity inputs of one face or set of alternative characteristics (CR 903.4).
 ///
@@ -41,8 +41,14 @@ pub fn color_identity(
     // CR 903.4b: a pre-game color choice is part of the identity.
     let start = chosen_color.unwrap_or(ColorBitmask::NONE);
     faces.iter().fold(start, |acc, face| {
-        // CR 903.4: cost symbols, color indicator and CDA colors.
-        let face_colors = base_colors(face.mana_cost, face.color_indicator, face.cda_colors);
+        // CR 903.4: cost symbols, color indicator and CDA colors. The CDA colors are only ever
+        // added, so a CDA never removes cost colors from identity (a devoid-style face defines
+        // no color, CR 702.114a, and keeps its cost colors here).
+        let face_colors = base_colors(
+            face.mana_cost,
+            face.color_indicator,
+            CdaColors::Add(face.cda_colors),
+        );
         // CR 903.4: mana symbols in rules text (reminder text excluded by the caller, 903.4c).
         let text_colors = face
             .rules_text_symbols
