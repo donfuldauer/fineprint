@@ -179,6 +179,38 @@ fn req_event_002_property_apnap_parts_and_order() {
             } else {
                 assert_eq!(st.targets.len(), 1, "seed {seed}");
                 assert_eq!(st.targets[0].len(), 1, "seed {seed}");
+                // CR 603.3d: the target is one of the generator's legal candidates for this
+                // trigger's ability, and is exactly the target accepted in the answer to this
+                // trigger's CHOOSE_TARGETS request (requests are matched by `reason.source`).
+                let key = (st.trigger.ability_id.clone(), None, 0usize);
+                let candidates = case
+                    .env
+                    .legal
+                    .get(&key)
+                    .expect("live trigger has candidates");
+                assert!(
+                    candidates.contains(&st.targets[0][0]),
+                    "seed {seed}: {:?} is not a candidate of {}",
+                    st.targets[0][0],
+                    st.trigger.ability_id
+                );
+                let accepted: Vec<&Vec<Vec<fineprint_core::choice::ChoiceTarget>>> = d
+                    .requests
+                    .iter()
+                    .zip(&d.answers)
+                    .filter(|(r, _)| {
+                        r.choice_type == ChoiceType::ChooseTargets
+                            && r.reason.source == st.trigger.source
+                    })
+                    .map(|(_, a)| match a {
+                        fineprint_core::choice::ChoiceResponse::SelectTargets { targets } => {
+                            targets
+                        }
+                        other => panic!("seed {seed}: CHOOSE_TARGETS answered with {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(accepted.len(), 1, "seed {seed}: one request per trigger");
+                assert_eq!(&st.targets, accepted[0], "seed {seed}");
             }
         }
     }

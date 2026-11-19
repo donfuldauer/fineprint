@@ -15,13 +15,14 @@ use std::collections::BTreeMap;
 use fineprint_base::ids::PlayerId;
 
 use fineprint_core::choice::{
-    ChoiceContext, ChoiceError, ChoiceOptions, ChoicePayload, ChoiceResponse, ChoiceSession,
-    ChoiceType, PendingChoiceRequest, Status, TargetSlot,
+    ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse,
+    ChoiceSession, ChoiceType, PendingChoiceRequest, Status, TargetSlot, ValidatorContract,
+    ValidatorRule,
 };
 use fineprint_core::triggers::{
     EventField, PendingTrigger, RemovedReason, TriggerOrigin, TriggerPlacement, place_triggers,
 };
-use fineprint_dsl::ability::{EventKind, StepId, Trigger};
+use fineprint_dsl::ability::{EventKind, FilterValue, StepId, Trigger};
 use fineprint_dsl::expr::{PlayerGroup, PlayerSelectorAST};
 use support::*;
 
@@ -1070,4 +1071,237 @@ fn req_event_002_description_format() {
     let mut t = pt(12, P3, "sourceless.speed");
     t.source = None;
     assert_eq!(t.description(), "player 3 ability sourceless.speed");
+}
+
+// =============================================================================================
+// 9. ORDER labels disambiguated by public bindings (CR 603.3b, CR 101.4c)
+// =============================================================================================
+
+/// `t` with the bindings `pairs`.
+fn bound(mut t: PendingTrigger, pairs: &[(&str, EventField)]) -> PendingTrigger {
+    t.bindings = pairs.iter().map(|(k, v)| (s(k), v.clone())).collect();
+    t
+}
+
+/// REQ-EVENT-002, REQ-ARCH-002; CR 603.3b, 101.4c: two triggers of one ability and source bound
+/// to different public objects get distinct labels `<label> with <name>=object <n>`; the answer
+/// indices still refer to the payload positions (reversed answer stacks them reversed).
+#[test]
+fn req_event_002_order_labels_show_public_object_bindings() {
+    let env = PublicEnv::new(&[9, 8]);
+    let a = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(9)))]);
+    let b = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(8)))]);
+    for (answer, want) in [(order(&[0, 1]), [9u64, 8]), (order(&[1, 0]), [8, 9])] {
+        let d = drive(&env, &[P1, P2], &[a.clone(), b.clone()], &[answer]);
+        assert_eq!(
+            order_payload(&d.requests[0]),
+            vec![
+                s("object 3 ability a with target=object 9"),
+                s("object 3 ability a with target=object 8"),
+            ]
+        );
+        let got: Vec<EventField> = d
+            .placement()
+            .stacked
+            .iter()
+            .map(|st| st.trigger.bindings["target"].clone())
+            .collect();
+        let want: Vec<EventField> = want.iter().map(|&n| EventField::Object(oid(n))).collect();
+        assert_eq!(got, want);
+    }
+}
+
+/// REQ-EVENT-002; CR 603.3b, 101.4c: with the default `is_public_object` (false) nothing about
+/// the bindings leaks: both labels stay the bare identical label.
+#[test]
+fn req_event_002_order_labels_do_not_leak_non_public_objects() {
+    let env = ScriptEnv::new();
+    let a = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(9)))]);
+    let b = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(8)))]);
+    let d = drive(&env, &[P1], &[a, b], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![desc_obj(3, "a"), desc_obj(3, "a")]
+    );
+    // An object the environment does not call public is hidden even when another is public.
+    let env = PublicEnv::new(&[8]);
+    let a = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(9)))]);
+    let b = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(8)))]);
+    let d = drive(&env, &[P1], &[a, b], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![
+            desc_obj(3, "a"),
+            s("object 3 ability a with target=object 8")
+        ]
+    );
+}
+
+/// REQ-EVENT-002; CR 603.3b, 101.4c: a player binding is shown (`name=player <n>`); Value
+/// bindings are never shown; several public bindings are listed in binding-name order, joined by
+/// `, `.
+#[test]
+fn req_event_002_order_labels_player_and_value_bindings() {
+    let env = PublicEnv::new(&[5]);
+    let a = bound(
+        pt(3, P1, "a"),
+        &[
+            ("who", EventField::Player(P2)),
+            ("amount", EventField::Value(FilterValue::Int(4))),
+            ("obj", EventField::Object(oid(5))),
+        ],
+    );
+    let b = bound(
+        pt(3, P1, "a"),
+        &[
+            ("who", EventField::Player(P3)),
+            ("amount", EventField::Value(FilterValue::Int(4))),
+        ],
+    );
+    let d = drive(&env, &[P1], &[a, b], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![
+            s("object 3 ability a with obj=object 5, who=player 2"),
+            s("object 3 ability a with who=player 3"),
+        ]
+    );
+    // Only Value bindings: nothing to show, the bare label stays.
+    let a = bound(
+        pt(3, P1, "a"),
+        &[("amount", EventField::Value(FilterValue::Int(1)))],
+    );
+    let b = bound(
+        pt(3, P1, "a"),
+        &[("amount", EventField::Value(FilterValue::Int(2)))],
+    );
+    let d = drive(&env, &[P1], &[a, b], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![desc_obj(3, "a"), desc_obj(3, "a")]
+    );
+}
+
+/// REQ-EVENT-002; CR 603.3b, 101.4c: labels that are already unique keep the bare form even when
+/// the triggers have public bindings; a sourceless label gets the same suffix rule.
+#[test]
+fn req_event_002_order_labels_unique_stay_bare() {
+    let env = PublicEnv::new(&[9, 8]);
+    let a = bound(pt(3, P1, "a"), &[("target", EventField::Object(oid(9)))]);
+    let b = bound(pt(4, P1, "a"), &[("target", EventField::Object(oid(8)))]);
+    let d = drive(&env, &[P1], &[a, b], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![desc_obj(3, "a"), desc_obj(4, "a")]
+    );
+    let mut c = bound(pt(3, P1, "a"), &[("who", EventField::Player(P2))]);
+    c.source = None;
+    let mut e = bound(pt(3, P1, "a"), &[("who", EventField::Player(P3))]);
+    e.source = None;
+    let d = drive(&env, &[P1], &[c, e], &[order(&IDENT)]);
+    assert_eq!(
+        order_payload(&d.requests[0]),
+        vec![
+            s("player 1 ability a with who=player 2"),
+            s("player 1 ability a with who=player 3"),
+        ]
+    );
+}
+
+// =============================================================================================
+// 10. CHOOSE_MODES options (CR 603.3c, CR 700.2b)
+// =============================================================================================
+
+fn plain_modes(n: usize) -> Vec<fineprint_dsl::ability::ModeAST> {
+    (0..n).map(|i| mode(&format!("m{i}"), vec![])).collect()
+}
+
+/// REQ-EVENT-002; CR 603.3c, 700.2b: 16 legal modes, exactly 8 chosen (12,870 answers, at least
+/// ENUMERATION_LIMIT): the request carries the Validator contract and the eight chosen indices
+/// land in `StackedTrigger.modes`.
+#[test]
+fn req_event_002_modes_many_answers_use_validator() {
+    let t = modal(
+        pt(30, P1, "test.trigger_modal"),
+        modeset(8, 8, plain_modes(16)),
+    );
+    let chosen = [15u32, 1, 3, 5, 7, 9, 11, 13];
+    let d = drive(&ScriptEnv::new(), &[P1], &[t], &[modes(&chosen)]);
+    let r = &d.requests[0];
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!(r.reason.cr, "CR 603.3c");
+    assert_eq!((r.min, r.max), (8, 8));
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Validator(ValidatorContract {
+            min: 8,
+            max: 8,
+            rule: ValidatorRule::Modes {
+                count: 16,
+                repeats_allowed: false,
+            },
+        })
+    );
+    assert_eq!(d.requests.len(), 1);
+    assert_eq!(
+        d.placement().stacked[0].modes,
+        vec![1, 3, 5, 7, 9, 11, 13, 15]
+    );
+}
+
+/// REQ-EVENT-002; CR 603.3c, 700.2b: of 16 modes two have an unfillable required target, so 14
+/// are legal; min 1 max 14 gives 2^14 - 1 answers: Validator with count 14; the answer's indices
+/// are positions among the legal modes and map back to the original mode indices.
+#[test]
+fn req_event_002_modes_validator_count_is_legal_modes() {
+    let ms: Vec<_> = (0..16)
+        .map(|i| {
+            if i == 3 || i == 10 {
+                mode(&format!("m{i}"), vec![slot(0, 1, 1)])
+            } else {
+                mode(&format!("m{i}"), vec![])
+            }
+        })
+        .collect();
+    let t = modal(pt(30, P1, "test.trigger_modal"), modeset(1, 14, ms));
+    let d = drive(&ScriptEnv::new(), &[P1], &[t], &[modes(&[13, 0, 3])]);
+    let r = &d.requests[0];
+    assert_eq!((r.min, r.max), (1, 14));
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Validator(ValidatorContract {
+            min: 1,
+            max: 14,
+            rule: ValidatorRule::Modes {
+                count: 14,
+                repeats_allowed: false,
+            },
+        })
+    );
+    // Legal originals: 0,1,2,4,5,6,7,8,9,11,12,13,14,15: positions 0, 3, 13 are 0, 4, 15.
+    assert_eq!(d.placement().stacked[0].modes, vec![0, 4, 15]);
+}
+
+/// REQ-EVENT-002; CR 603.3c, 700.2b: a small mode set (3 modes, 1 to 2 chosen) still gets
+/// Enumerated `Mode(0..k)` options.
+#[test]
+fn req_event_002_modes_small_set_stays_enumerated() {
+    let t = modal(
+        pt(30, P1, "test.trigger_modal"),
+        modeset(1, 2, plain_modes(3)),
+    );
+    let d = drive(&ScriptEnv::new(), &[P1], &[t], &[modes(&[2, 0])]);
+    let r = &d.requests[0];
+    match &r.options {
+        ChoiceOptions::Enumerated(items) => {
+            assert!(!items.is_empty());
+            assert!(
+                items
+                    .iter()
+                    .all(|o| matches!(o, ChoiceOption::Mode(i) if *i < 3))
+            );
+        }
+        other => panic!("expected Enumerated, got {other:?}"),
+    }
+    assert_eq!(d.placement().stacked[0].modes, vec![0, 2]);
 }

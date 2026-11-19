@@ -17,6 +17,7 @@ use fineprint_core::triggers::{
     DelayedTriggers, EventField, PendingTrigger, TriggerEvent, TriggerOrigin, TriggerRegistration,
     detect, reflexive_triggers,
 };
+use fineprint_core::triggers::{LookBackKind, StateView};
 use fineprint_dsl::ability::{EventKind, FilterValue, Trigger, TriggeredAbilityAST};
 use support::*;
 
@@ -110,7 +111,7 @@ fn req_event_002_delayed_captured_bindings_win() {
         "delayed#0",
         binds(&[("$P", EventField::Player(P3)), ("$N", vint(4))]),
     )];
-    let out = dt.take_triggered(&waiting);
+    let out = dt.take_triggered(&CondEnv::new(), &waiting);
     assert_eq!(
         out,
         vec![PendingTrigger {
@@ -141,12 +142,12 @@ fn req_event_002_delayed_one_shot_triggers_once() {
         wt(9, P2, "delayed#0", binds(&[("$N", vint(1))])),
         wt(9, P2, "delayed#0", binds(&[("$N", vint(2))])),
     ];
-    let out = dt.take_triggered(&waiting);
+    let out = dt.take_triggered(&CondEnv::new(), &waiting);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].bindings, binds(&[("$N", vint(1))]));
     assert!(dt.is_empty());
     assert!(dt.registrations().is_empty());
-    assert!(dt.take_triggered(&waiting).is_empty());
+    assert!(dt.take_triggered(&CondEnv::new(), &waiting).is_empty());
     assert_eq!(dt.fire(id), None);
     assert!(!dt.cancel(id));
 }
@@ -162,7 +163,7 @@ fn req_event_002_delayed_with_duration_triggers_each_time() {
         wt(9, P2, "delayed#0", binds(&[("$N", vint(2))])),
     ];
     for _ in 0..2 {
-        let out = dt.take_triggered(&waiting);
+        let out = dt.take_triggered(&CondEnv::new(), &waiting);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].bindings, binds(&[("$N", vint(1))]));
         assert_eq!(out[1].bindings, binds(&[("$N", vint(2))]));
@@ -182,14 +183,14 @@ fn req_event_002_delayed_ignores_others_and_keeps_input_order() {
         wt(8, P2, "delayed#0", BTreeMap::new()),
         wt(9, P2, "delayed#5", BTreeMap::new()),
     ];
-    assert!(dt.take_triggered(&others).is_empty());
+    assert!(dt.take_triggered(&CondEnv::new(), &others).is_empty());
     assert_eq!(dt.len(), 2);
     let waiting = vec![
         wt(9, P2, "test.trigger_other", BTreeMap::new()),
         wt(7, P1, "delayed#1", BTreeMap::new()),
         wt(9, P2, "delayed#0", BTreeMap::new()),
     ];
-    let out = dt.take_triggered(&waiting);
+    let out = dt.take_triggered(&CondEnv::new(), &waiting);
     let ids: Vec<(Option<u64>, String)> = out
         .iter()
         .map(|p| (p.source.map(|o| o.get()), p.ability_id.clone()))
@@ -248,7 +249,7 @@ fn req_event_002_delayed_copies_ability_fields() {
     let id = dt.register(oid(9), P2, a, BTreeMap::new(), false);
     for p in [
         dt.fire(id).expect("fires"),
-        dt.take_triggered(&[wt(9, P2, "delayed#0", BTreeMap::new())])
+        dt.take_triggered(&CondEnv::new(), &[wt(9, P2, "delayed#0", BTreeMap::new())])
             .pop()
             .expect("triggers"),
     ] {
@@ -296,7 +297,7 @@ fn req_event_002_delayed_end_to_end_with_detect() {
     let waiting = detect(&env, &mut MemoryTable::new(), 1, &events);
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].ability_id, s("delayed#0"));
-    let out = dt.take_triggered(&waiting);
+    let out = dt.take_triggered(&env, &waiting);
     assert_eq!(out.len(), 1);
     let p = &out[0];
     assert_eq!(p.origin, TriggerOrigin::Delayed);
@@ -318,6 +319,133 @@ fn req_event_002_delayed_end_to_end_with_detect() {
         .map(|r| r.ability.base.ability_id.clone())
         .collect();
     assert_eq!(left, vec![s("delayed#1")]);
+}
+
+// =============================================================================================
+// intervening "if" of delayed triggers (CR 603.4, 603.7, 603.7b)
+// =============================================================================================
+
+fn if_ability() -> TriggeredAbilityAST {
+    with_if(
+        ev_ability("test.trigger_delayed_if", EventKind::Dies),
+        "test.cond",
+    )
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7c: the intervening "if" sees the event bindings overlaid by the
+/// captured ones (captured wins): a condition true only for the captured value lets it fire, and
+/// the pending trigger carries the captured value.
+#[test]
+fn req_event_002_delayed_if_sees_captured_bindings() {
+    let mut dt = DelayedTriggers::new();
+    let captured = binds(&[("x", EventField::Object(oid(1)))]);
+    dt.register(oid(9), P2, if_ability(), captured, true);
+    let env = BindEnv::new().requiring("test.cond", "x", EventField::Object(oid(1)));
+    let waiting = vec![wt(
+        9,
+        P2,
+        "delayed#0",
+        binds(&[("x", EventField::Object(oid(2)))]),
+    )];
+    let out = dt.take_triggered(&env, &waiting);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].bindings, binds(&[("x", EventField::Object(oid(1)))]));
+    assert_eq!(out[0].ability_id, s("delayed#0"));
+    let calls = env.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, s("test.cond"));
+    assert_eq!(calls[0].2, binds(&[("x", EventField::Object(oid(1)))]));
+    assert!(dt.is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7b: the mirror: a condition true only for the event's value
+/// fails (the captured value wins), nothing triggers and the one-shot entry is kept.
+#[test]
+fn req_event_002_delayed_if_false_keeps_one_shot() {
+    let mut dt = DelayedTriggers::new();
+    let captured = binds(&[("x", EventField::Object(oid(1)))]);
+    dt.register(oid(9), P2, if_ability(), captured, true);
+    let env = BindEnv::new().requiring("test.cond", "x", EventField::Object(oid(2)));
+    let waiting = vec![wt(
+        9,
+        P2,
+        "delayed#0",
+        binds(&[("x", EventField::Object(oid(2)))]),
+    )];
+    assert!(dt.take_triggered(&env, &waiting).is_empty());
+    assert_eq!(dt.len(), 1);
+    assert!(!dt.is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7b: a one-shot with two matching elements, the first failing its
+/// condition: exactly one pending trigger, built from the second element, entry removed.
+#[test]
+fn req_event_002_delayed_if_one_shot_second_element_fires() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(oid(9), P2, if_ability(), BTreeMap::new(), true);
+    let env = BindEnv::new().requiring("test.cond", "n", vint(2));
+    let waiting = vec![
+        wt(9, P2, "delayed#0", binds(&[("n", vint(1))])),
+        wt(9, P2, "delayed#0", binds(&[("n", vint(2))])),
+    ];
+    let out = dt.take_triggered(&env, &waiting);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].bindings, binds(&[("n", vint(2))]));
+    assert!(dt.is_empty());
+    assert!(dt.take_triggered(&env, &waiting).is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7b: with a stated duration, one pending trigger per passing
+/// element (failing ones are dropped) and the registration stays.
+#[test]
+fn req_event_002_delayed_if_duration_one_per_passing_element() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(oid(9), P2, if_ability(), BTreeMap::new(), false);
+    let env = BindEnv::new().requiring("test.cond", "n", vint(2));
+    let waiting = vec![
+        wt(9, P2, "delayed#0", binds(&[("n", vint(2))])),
+        wt(9, P2, "delayed#0", binds(&[("n", vint(1))])),
+        wt(9, P2, "delayed#0", binds(&[("n", vint(2)), ("k", vint(7))])),
+    ];
+    for _ in 0..2 {
+        let out = dt.take_triggered(&env, &waiting);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].bindings, binds(&[("n", vint(2))]));
+        assert_eq!(out[1].bindings, binds(&[("n", vint(2)), ("k", vint(7))]));
+        assert_eq!(dt.len(), 1);
+    }
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7: `registrations()` no longer carries the intervening "if"
+/// (it is checked in `take_triggered`); the ability id is still `delayed#<n>`.
+#[test]
+fn req_event_002_delayed_registrations_drop_intervening_if() {
+    let mut dt = DelayedTriggers::new();
+    let a = if_ability();
+    assert!(a.intervening_if.is_some());
+    dt.register(oid(9), P2, a.clone(), BTreeMap::new(), true);
+    let regs = dt.registrations();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].ability.intervening_if, None);
+    assert_eq!(regs[0].ability.base.ability_id, s("delayed#0"));
+    assert_eq!(regs[0].source, oid(9));
+    assert_eq!(regs[0].controller, P2);
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7: the condition is evaluated in the pre-event view when the
+/// waiting element has a look-back kind, otherwise in the post-event view.
+#[test]
+fn req_event_002_delayed_if_view_follows_look_back() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(oid(9), P2, if_ability(), BTreeMap::new(), false);
+    let env = BindEnv::new();
+    let mut looked = wt(9, P2, "delayed#0", BTreeMap::new());
+    looked.look_back = Some(LookBackKind::LeavesBattlefield);
+    let plain = wt(9, P2, "delayed#0", BTreeMap::new());
+    let out = dt.take_triggered(&env, &[looked, plain]);
+    assert_eq!(out.len(), 2);
+    let views: Vec<StateView> = env.calls.borrow().iter().map(|c| c.0).collect();
+    assert_eq!(views, vec![StateView::PreEvent, StateView::PostEvent]);
 }
 
 // =============================================================================================

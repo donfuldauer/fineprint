@@ -605,6 +605,129 @@ impl TriggerEnv for CondEnv {
 }
 
 // ---------------------------------------------------------------------------------------------
+// a binding-aware condition environment (delayed triggers, CR 603.4, 603.7)
+// ---------------------------------------------------------------------------------------------
+
+/// One recorded [`BindEnv`] condition call: view, tag, bindings.
+pub type BindCall = (StateView, String, BTreeMap<String, EventField>);
+
+/// A [`TriggerEnv`] whose `condition_holds` reads the `bindings` argument: a tag listed in
+/// `requires` holds only when `bindings[name] == value`; a tag that is not listed always holds.
+/// No registrations; every object and player matches; no predicate holds.
+#[derive(Debug, Default)]
+pub struct BindEnv {
+    pub requires: BTreeMap<String, (String, EventField)>,
+    pub calls: RefCell<Vec<BindCall>>,
+}
+
+impl BindEnv {
+    pub fn new() -> BindEnv {
+        BindEnv::default()
+    }
+
+    /// The condition tagged `tag` holds only when binding `name` equals `value`.
+    pub fn requiring(mut self, tag: &str, name: &str, value: EventField) -> BindEnv {
+        self.requires
+            .insert(tag.to_string(), (name.to_string(), value));
+        self
+    }
+}
+
+impl TriggerEnv for BindEnv {
+    fn registrations(&self, _view: StateView) -> Vec<TriggerRegistration> {
+        Vec::new()
+    }
+
+    fn object_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _object: ObjectId,
+        _selector: &ObjectSelectorAST,
+    ) -> bool {
+        true
+    }
+
+    fn player_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _player: PlayerId,
+        _group: &PlayerGroup,
+    ) -> bool {
+        true
+    }
+
+    fn predicate_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _field: Option<&EventField>,
+    ) -> bool {
+        false
+    }
+
+    fn condition_holds(
+        &self,
+        view: StateView,
+        _reg: &TriggerRegistration,
+        pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        let tag = tag_of(pred);
+        self.calls
+            .borrow_mut()
+            .push((view, tag.clone(), bindings.clone()));
+        match self.requires.get(&tag) {
+            Some((name, value)) => bindings.get(name) == Some(value),
+            None => true,
+        }
+    }
+
+    fn is_visible_to_all(&self, _object: ObjectId) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// a placement environment that knows public objects (CR 603.3b, CR 101.4c)
+// ---------------------------------------------------------------------------------------------
+
+/// A [`ScriptEnv`] plus a set of objects `is_public_object` answers true for.
+#[derive(Debug, Default)]
+pub struct PublicEnv {
+    pub inner: ScriptEnv,
+    pub public: BTreeSet<ObjectId>,
+}
+
+impl PublicEnv {
+    pub fn new(public: &[u64]) -> PublicEnv {
+        PublicEnv {
+            inner: ScriptEnv::new(),
+            public: public.iter().map(|&n| oid(n)).collect(),
+        }
+    }
+}
+
+impl PlacementEnv for PublicEnv {
+    fn legal_targets(
+        &self,
+        trigger: &PendingTrigger,
+        mode: Option<usize>,
+        slot: usize,
+        stacked_so_far: &[StackedTrigger],
+    ) -> Vec<ChoiceTarget> {
+        self.inner
+            .legal_targets(trigger, mode, slot, stacked_so_far)
+    }
+
+    fn is_public_object(&self, object: ObjectId) -> bool {
+        self.public.contains(&object)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // deterministic pseudo-random numbers for property tests (R3: seeded, no system source)
 // ---------------------------------------------------------------------------------------------
 
