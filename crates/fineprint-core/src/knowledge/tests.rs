@@ -29,6 +29,7 @@ const P2: PlayerId = PlayerId::new(2);
 const NOBODY: PlayerId = PlayerId::new(99);
 
 /// A two-player game with its knowledge and id generator.
+#[derive(Clone)]
 struct World {
     z: Zones,
     k: Knowledge,
@@ -63,6 +64,21 @@ impl World {
         let moved = self.z.move_object(&mut self.ids, id, req).unwrap();
         self.k.on_move(&self.z, &before, &moved).unwrap();
         moved
+    }
+
+    /// Moves `id` and applies `on_move_observed` with `observers`; returns the move.
+    fn mv_obs(&mut self, id: ObjectId, req: MoveRequest, observers: &[PlayerId]) -> Moved {
+        let before = *self.z.object(id).unwrap();
+        let moved = self.z.move_object(&mut self.ids, id, req).unwrap();
+        self.k
+            .on_move_observed(&self.z, &before, &moved, observers)
+            .unwrap();
+        moved
+    }
+
+    /// The object currently holding `card`.
+    fn obj(&self, card: u64) -> ObjectId {
+        self.z.object_of_card(c(card)).unwrap()
     }
 
     fn can(&self, viewer: PlayerId, id: ObjectId) -> bool {
@@ -198,21 +214,36 @@ fn look_two_return_two_other_player_knows_nothing() {
 // Test 2: reveal then shuffle in
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-CORE-004, CR 701.20a, CR 701.24a: a revealed card shuffled into the library stays known
-/// as a set member to everyone; no one knows its position.
+/// REQ-CORE-004, CR 701.20a, CR 701.24a: a revealed card shuffled into the library while every
+/// player watches stays known as a set member to everyone; no one knows its position. Without
+/// observers the opponent cannot tell which hand card went in and forgets it (step 0).
 #[test]
 fn reveal_then_shuffle_in() {
     let mut w = World::new();
     w.fill_library(P1, 10, 3);
     let h = w.create(1, P1, req(ZoneKind::Hand));
     w.k.reveal_to_all(&w.z, h).unwrap();
-    let m = w.mv(h, req(ZoneKind::Library));
+    let mut unobserved = w.clone();
+    let m = w.mv_obs(h, req(ZoneKind::Library), &[P1, P2]);
     w.k.shuffle_library(&w.z, P1, &[]).unwrap();
     for v in [P1, P2] {
         assert!(w.can(v, m.new));
         assert_eq!(w.view(v).players[&P1].library.known_cards, cards(&[1]));
         assert!(w.k.position_known(&w.z, v, P1).is_empty());
     }
+    let m = unobserved.mv(h, req(ZoneKind::Library));
+    unobserved
+        .k
+        .shuffle_library(&unobserved.z, P1, &[])
+        .unwrap();
+    assert!(unobserved.can(P1, m.new));
+    assert!(!unobserved.can(P2, m.new));
+    assert!(
+        unobserved.view(P2).players[&P1]
+            .library
+            .known_cards
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -596,16 +627,35 @@ fn shuffle_face_down_pile_errors_leave_state_unchanged() {
     assert_eq!(w.k, snapshot);
 }
 
-/// REQ-CORE-004, CR 701.24a: a face-down pile shuffle also drops position entries naming the
-/// shuffled objects (a face-down library card).
+/// REQ-CORE-004, CR 406.3, CR 701.24a (F2): a face-down pile is exile-only. A face-down library
+/// card or a face-down permanent is NotFaceDown, every id is checked before any change, and the
+/// library card stays in the library's known cards and keeps its position entry.
 #[test]
-fn shuffle_face_down_pile_drops_positions() {
+fn shuffle_face_down_pile_rejects_non_exile_face_down() {
     let mut w = World::new();
-    let fd = w.create(1, P1, face_down(ZoneKind::Library));
-    w.k.set_position_known(&w.z, P1, P1, 0, fd).unwrap();
-    w.k.shuffle_face_down_pile(&w.z, &[fd]).unwrap();
-    assert!(w.k.position_known(&w.z, P1, P1).is_empty());
-    assert_eq!(w.k, Knowledge::new());
+    let fd_lib = w.create(1, P1, face_down(ZoneKind::Library));
+    let fd_bf = w.create(2, P1, face_down(ZoneKind::Battlefield));
+    let ex = w.create(3, P1, face_down(ZoneKind::Exile));
+    w.k.set_position_known(&w.z, P2, P1, 0, fd_lib).unwrap();
+    w.k.add_known(&w.z, fd_bf, P2).unwrap();
+    w.k.grant_look(&w.z, ex, P2).unwrap();
+    let snapshot = w.k.clone();
+    for bad in [fd_lib, fd_bf] {
+        assert_eq!(
+            w.k.shuffle_face_down_pile(&w.z, &[ex, bad]),
+            Err(KnowledgeError::NotFaceDown(bad))
+        );
+        assert_eq!(w.k, snapshot);
+    }
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[1]));
+    assert_eq!(
+        w.k.position_known(&w.z, P2, P1),
+        BTreeMap::from([(0, fd_lib)])
+    );
+    // The valid exile pile behaves as before.
+    w.k.shuffle_face_down_pile(&w.z, &[ex]).unwrap();
+    assert!(!w.can(P2, ex));
+    assert!(w.can(P2, fd_lib) && w.can(P2, fd_bf));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -670,76 +720,101 @@ fn on_move_unknown_new_object() {
 // Test 7: projection shapes
 // ---------------------------------------------------------------------------------------------
 
-/// Every ObjectId and CardId in a view (walks every field).
-fn collect_ids(v: &ZonesView) -> (BTreeSet<ObjectId>, BTreeSet<CardId>) {
-    let mut objects = BTreeSet::new();
-    let mut card_ids = BTreeSet::new();
-    let mut take = |ovs: &[ObjectView]| {
-        for o in ovs {
-            objects.insert(o.id);
-            if let Some(card) = o.card {
-                card_ids.insert(card);
-            }
-        }
-    };
-    for pz in v.players.values() {
-        take(&pz.graveyard);
-        if let HandView::Own(h) = &pz.hand {
-            take(h);
-        }
-    }
-    for zone in [&v.battlefield, &v.stack, &v.exile, &v.command] {
-        take(zone);
-    }
-    for pz in v.players.values() {
-        card_ids.extend(pz.library.known_cards.iter().copied());
-        if let HandView::Opponent { known_cards, .. } = &pz.hand {
-            card_ids.extend(known_cards.iter().copied());
-        }
-    }
-    (objects, card_ids)
+/// The test's own record of `KnownTo` per card: what the test itself revealed, granted or let a
+/// player see, updated by the rules of the brief, never read back from the implementation.
+type Told = BTreeMap<CardId, BTreeSet<PlayerId>>;
+
+fn tell(told: &mut Told, card: CardId, players: impl IntoIterator<Item = PlayerId>) {
+    told.entry(card).or_default().extend(players);
 }
 
-/// REQ-CORE-004: no CardId the viewer cannot identify and no ObjectId of a hidden object the
-/// viewer may not see; every identifiable card is present; counts match.
-fn assert_no_leak(z: &Zones, k: &Knowledge, viewer: PlayerId) {
+fn told_set(told: &Told, card: CardId) -> BTreeSet<PlayerId> {
+    told.get(&card).cloned().unwrap_or_default()
+}
+
+/// The implicit entitlements, from the zone and face-down state only: public face up
+/// (CR 400.2), the viewer's own hand (CR 402.3), a face-down permanent or spell the viewer
+/// controls (CR 708.5).
+fn implicit(r: &ObjectRecord, viewer: PlayerId) -> bool {
+    (r.zone.kind().is_public() && !r.face_down)
+        || r.zone == ZoneId::Hand(viewer)
+        || (r.face_down
+            && matches!(r.zone, ZoneId::Battlefield | ZoneId::Stack)
+            && r.controller == viewer)
+}
+
+/// Whether the test's own model entitles `viewer` to the identity of `r`.
+fn entitled(told: &Told, r: &ObjectRecord, viewer: PlayerId) -> bool {
+    implicit(r, viewer) || told.get(&r.card).is_some_and(|s| s.contains(&viewer))
+}
+
+/// REQ-CORE-004: walks every field of the view. No ObjectId of a hidden object; every object
+/// view carries its card iff the test's model (`told` plus the zone and face-down state)
+/// entitles the viewer; every hidden-zone card set is exactly the entitled cards of that zone;
+/// counts match. Entitlement is never taken from the implementation under test.
+fn assert_no_leak(z: &Zones, k: &Knowledge, told: &Told, viewer: PlayerId) {
     let v = k.project(z, viewer).unwrap();
     assert_eq!(v.viewer, viewer);
     assert_eq!(v.players.keys().copied().collect::<Vec<_>>(), z.players());
-    let (objects, card_ids) = collect_ids(&v);
-    for id in &objects {
-        let r = z.object(*id).expect("view names a live object");
-        let allowed = r.zone.kind().is_public() || r.zone == ZoneId::Hand(viewer);
-        assert!(allowed, "hidden object id {id:?} leaked to {viewer:?}");
-    }
-    for card in &card_ids {
-        let id = z.object_of_card(*card).expect("view names a live card");
-        assert!(
-            k.can_identify(z, viewer, id).unwrap(),
-            "card {card:?} leaked to {viewer:?}"
-        );
-    }
-    for id in z.all_object_ids() {
-        let r = z.object(id).unwrap();
-        if k.can_identify(z, viewer, id).unwrap() {
-            assert!(card_ids.contains(&r.card));
+    let expect_cards = |zone: ZoneId| -> BTreeSet<CardId> {
+        z.contents(zone)
+            .into_iter()
+            .map(|id| *z.object(id).unwrap())
+            .filter(|r| entitled(told, r, viewer))
+            .map(|r| r.card)
+            .collect()
+    };
+    let check_objects = |ovs: &[ObjectView], zone: ZoneId| {
+        let ids: Vec<ObjectId> = ovs.iter().map(|o| o.id).collect();
+        assert_eq!(ids, z.contents(zone), "{zone:?} for {viewer:?}");
+        for o in ovs {
+            let r = z.object(o.id).expect("view names a live object");
+            assert!(
+                r.zone.kind().is_public() || r.zone == ZoneId::Hand(viewer),
+                "hidden object id {:?} leaked to {viewer:?}",
+                o.id
+            );
+            assert_eq!(
+                o.card,
+                entitled(told, r, viewer).then_some(r.card),
+                "card of {:?} for {viewer:?}",
+                o.id
+            );
+            assert_eq!(
+                (o.owner, o.controller, o.face_down),
+                (r.owner, r.controller, r.face_down)
+            );
         }
-    }
+    };
     for pl in z.players() {
         let pz = &v.players[&pl];
         assert_eq!(pz.library.count, z.len(ZoneId::Library(pl)));
+        assert_eq!(
+            pz.library.known_cards,
+            expect_cards(ZoneId::Library(pl)),
+            "library of {pl:?} for {viewer:?}"
+        );
         match &pz.hand {
             HandView::Own(h) => {
                 assert_eq!(pl, viewer);
-                assert_eq!(h.len(), z.len(ZoneId::Hand(pl)));
-                assert!(h.iter().all(|o| o.card.is_some()));
+                check_objects(h, ZoneId::Hand(pl));
             }
-            HandView::Opponent { count, .. } => {
+            HandView::Opponent { count, known_cards } => {
                 assert_ne!(pl, viewer);
                 assert_eq!(*count, z.len(ZoneId::Hand(pl)));
+                assert_eq!(
+                    *known_cards,
+                    expect_cards(ZoneId::Hand(pl)),
+                    "hand of {pl:?} for {viewer:?}"
+                );
             }
         }
+        check_objects(&pz.graveyard, ZoneId::Graveyard(pl));
     }
+    check_objects(&v.battlefield, ZoneId::Battlefield);
+    check_objects(&v.stack, ZoneId::Stack);
+    check_objects(&v.exile, ZoneId::Exile);
+    check_objects(&v.command, ZoneId::Command);
 }
 
 /// REQ-CORE-004, REQ-ZONE-001, CR 400.2, CR 401.3, CR 402.3: the shapes R-a..R-d.
@@ -810,8 +885,11 @@ fn project_shapes() {
     assert!(matches!(v2.players[&P2].hand, HandView::Own(_)));
     assert!(v2.players[&P1].library.known_cards.is_empty());
 
-    assert_no_leak(&w.z, &w.k, P1);
-    assert_no_leak(&w.z, &w.k, P2);
+    // The test itself told P1 about card 10 (the position look); nothing else.
+    let mut told = Told::new();
+    tell(&mut told, c(10), [P1]);
+    assert_no_leak(&w.z, &w.k, &told, P1);
+    assert_no_leak(&w.z, &w.k, &told, P2);
 }
 
 /// REQ-CORE-004, REQ-ZONE-001: the controller field of a view follows the record.
@@ -1068,8 +1146,15 @@ impl Lcg {
     }
 }
 
-/// Every entry position_known reports matches the live library.
+/// Every stored position entry (not only what position_known reports) matches the live
+/// library: the callers below honour the on_move / on_library_changed contract.
 fn assert_positions_live(z: &Zones, k: &Knowledge) {
+    for (&(_, owner), entries) in k.positions.iter() {
+        let live = z.contents(ZoneId::Library(owner));
+        for (&i, id) in entries {
+            assert_eq!(live.get(i), Some(id), "stale entry {i} of {owner:?}");
+        }
+    }
     for v in z.players() {
         for o in z.players() {
             let live = z.contents(ZoneId::Library(o));
@@ -1080,9 +1165,90 @@ fn assert_positions_live(z: &Zones, k: &Knowledge) {
     }
 }
 
-/// REQ-CORE-004 (R12, R-e), CR 400.2, CR 402.3, CR 708.5, CR 708.9, CR 701.24a, CR 701.24b:
-/// random creates, moves, reveals, looks and shuffles never make a view leak, and position
-/// knowledge always matches the live library.
+/// The brief's on_move_observed rules applied to the test's own model `told`. `knew_position`
+/// are the players who had a position entry naming the moved object before the move; `z` is
+/// the container after the move.
+fn told_move(
+    told: &mut Told,
+    z: &Zones,
+    before: &ObjectRecord,
+    moved: &Moved,
+    observers: &[PlayerId],
+    knew_position: &BTreeSet<PlayerId>,
+) {
+    let new = *z.object(moved.new).unwrap();
+    let players = z.players();
+    // Step 0: a player who did not observe a move out of a hidden zone forgets the candidates.
+    if matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand) && moved.from != moved.to {
+        let mut candidates: Vec<CardId> = z
+            .contents(moved.from)
+            .into_iter()
+            .map(|id| z.object(id).unwrap().card)
+            .collect();
+        candidates.push(new.card);
+        for &v in &players {
+            let observed = observers.contains(&v)
+                || implicit(&new, v)
+                || before.zone == ZoneId::Hand(v)
+                || knew_position.contains(&v);
+            if !observed {
+                for card in &candidates {
+                    if let Some(s) = told.get_mut(card) {
+                        s.remove(&v);
+                    }
+                }
+            }
+        }
+    }
+    // (a) CR 400.2.
+    if before.zone.kind().is_public() && !before.face_down {
+        tell(told, new.card, players.iter().copied());
+    }
+    // (b) CR 402.3.
+    if let ZoneId::Hand(owner) = before.zone {
+        tell(told, new.card, [owner]);
+    }
+    // (c) CR 708.5, CR 708.9.
+    if before.face_down && matches!(before.zone, ZoneId::Battlefield | ZoneId::Stack) {
+        tell(told, new.card, [before.controller]);
+        if moved.from != moved.to
+            && (moved.from == ZoneId::Battlefield
+                || (moved.from == ZoneId::Stack && moved.to != ZoneId::Battlefield))
+        {
+            tell(told, new.card, players.iter().copied());
+        }
+    }
+}
+
+/// Moves `id` in the property loop: applies on_move_observed and the model.
+#[allow(clippy::too_many_arguments)]
+fn prop_move(
+    z: &mut Zones,
+    k: &mut Knowledge,
+    ids: &mut IdGenerator<ObjectId>,
+    told: &mut Told,
+    id: ObjectId,
+    r: MoveRequest,
+    observers: &[PlayerId],
+) {
+    let before = *z.object(id).unwrap();
+    let knew_position: BTreeSet<PlayerId> = match before.zone {
+        ZoneId::Library(owner) => z
+            .players()
+            .into_iter()
+            .filter(|&v| k.position_known(z, v, owner).values().any(|&o| o == id))
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    let moved = z.move_object(ids, id, r).unwrap();
+    k.on_move_observed(z, &before, &moved, observers).unwrap();
+    told_move(told, z, &before, &moved, observers, &knew_position);
+}
+
+/// REQ-CORE-004 (R12, R-e), CR 400.2, CR 402.3, CR 406.3, CR 708.5, CR 708.9, CR 701.24a,
+/// CR 701.24b: random creates, moves (observed by random players or not), reveals, looks and
+/// shuffles never make a view leak against the test's own model of what each player was told,
+/// the stored KnownTo equals that model, and position knowledge always matches the live library.
 #[test]
 fn property_random_sequences_never_leak() {
     let players = [P1, P2, p(3)];
@@ -1091,6 +1257,7 @@ fn property_random_sequences_never_leak() {
         let mut z = Zones::new(&players, ZonesConfig::default());
         let mut k = Knowledge::new();
         let mut ids: IdGenerator<ObjectId> = IdGenerator::new();
+        let mut told = Told::new();
         let mut next_card = 1u64;
         for _step in 0..60 {
             let objects = z.all_object_ids();
@@ -1106,6 +1273,10 @@ fn property_random_sequences_never_leak() {
                     };
                     z.create_object(&mut ids, c(next_card), owner, r).unwrap();
                     next_card += 1;
+                    if kind == ZoneKind::Library {
+                        // The caller contract for insertions outside on_move.
+                        k.on_library_changed(&z, owner).unwrap();
+                    }
                 }
                 2 | 3 => {
                     if let Some(id) = rng.pick(&objects) {
@@ -1123,25 +1294,36 @@ fn property_random_sequences_never_leak() {
                             face_down: rng.below(3) == 0,
                             controller,
                         };
-                        let before = *z.object(id).unwrap();
-                        let moved = z.move_object(&mut ids, id, r).unwrap();
-                        k.on_move(&z, &before, &moved).unwrap();
+                        let observers: Vec<PlayerId> = players
+                            .iter()
+                            .copied()
+                            .filter(|_| rng.below(3) == 0)
+                            .collect();
+                        prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &observers);
                     }
                 }
                 4 => {
                     if let Some(id) = rng.pick(&objects) {
+                        let card = z.object(id).unwrap().card;
                         if rng.below(2) == 0 {
                             k.reveal_to_all(&z, id).unwrap();
+                            tell(&mut told, card, players);
                         } else {
-                            k.add_known(&z, id, players[rng.below(3)]).unwrap();
+                            let pl = players[rng.below(3)];
+                            k.add_known(&z, id, pl).unwrap();
+                            tell(&mut told, card, [pl]);
                         }
                     }
                 }
                 5 => {
                     if let Some(id) = rng.pick(&objects) {
-                        let r = k.grant_look(&z, id, players[rng.below(3)]);
-                        let rec = z.object(id).unwrap();
+                        let pl = players[rng.below(3)];
+                        let r = k.grant_look(&z, id, pl);
+                        let rec = *z.object(id).unwrap();
                         assert_eq!(r.is_ok(), rec.face_down && rec.zone == ZoneId::Exile);
+                        if r.is_ok() {
+                            tell(&mut told, rec.card, [pl]);
+                        }
                     }
                 }
                 6 => {
@@ -1151,6 +1333,7 @@ fn property_random_sequences_never_leak() {
                         let i = rng.below(lib.len());
                         let viewer = players[rng.below(3)];
                         k.set_position_known(&z, viewer, owner, i, lib[i]).unwrap();
+                        tell(&mut told, z.object(lib[i]).unwrap().card, [viewer]);
                         // A wrong index is rejected.
                         let wrong = (i + 1) % (lib.len() + 1);
                         assert!(
@@ -1169,10 +1352,8 @@ fn property_random_sequences_never_leak() {
                         if excluded.contains(&id) {
                             continue;
                         }
-                        let before = *z.object(id).unwrap();
                         let r = at(ZoneKind::Library, Position::Index(rng.below(lib.len())));
-                        let moved = z.move_object(&mut ids, id, r).unwrap();
-                        k.on_move(&z, &before, &moved).unwrap();
+                        prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &[]);
                     }
                     k.shuffle_library(&z, owner, &excluded).unwrap();
                     for v in players {
@@ -1182,20 +1363,45 @@ fn property_random_sequences_never_leak() {
                     }
                 }
                 _ => {
+                    // CR 406.3: only face-down exiled cards form a pile; any other face-down
+                    // object is rejected without a change.
+                    let in_pile = |id: &ObjectId| {
+                        z.object(*id)
+                            .is_some_and(|r| r.face_down && r.zone == ZoneId::Exile)
+                    };
                     let pile: Vec<ObjectId> = objects
                         .iter()
                         .copied()
-                        .filter(|id| z.object(*id).is_some_and(|r| r.face_down))
+                        .filter(in_pile)
                         .filter(|_| rng.below(2) == 0)
                         .collect();
+                    let outsider = objects
+                        .iter()
+                        .copied()
+                        .find(|id| z.object(*id).is_some_and(|r| r.face_down) && !in_pile(id));
+                    if let Some(bad) = outsider {
+                        let snapshot = k.clone();
+                        let mut with_bad = pile.clone();
+                        with_bad.push(bad);
+                        assert_eq!(
+                            k.shuffle_face_down_pile(&z, &with_bad),
+                            Err(KnowledgeError::NotFaceDown(bad))
+                        );
+                        assert_eq!(k, snapshot);
+                    }
                     k.shuffle_face_down_pile(&z, &pile).unwrap();
                     for id in pile {
                         assert!(k.known_to(&z, id).unwrap().is_empty());
+                        told.remove(&z.object(id).unwrap().card);
                     }
                 }
             }
+            for id in z.all_object_ids() {
+                let card = z.object(id).unwrap().card;
+                assert_eq!(k.known_to(&z, id).unwrap(), told_set(&told, card));
+            }
             for v in players {
-                assert_no_leak(&z, &k, v);
+                assert_no_leak(&z, &k, &told, v);
             }
             assert_positions_live(&z, &k);
         }
@@ -1209,4 +1415,338 @@ fn property_random_sequences_never_leak() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test 12: unobserved moves out of a hidden zone (step 0 of on_move_observed)
+// ---------------------------------------------------------------------------------------------
+
+/// Cards 1 (A) and 2 (B) are known to P2 as members of P1's library; 3 (X) and 4 are unknown.
+/// World `a_on_top` has library A, B, X, 4 (top first); the twin has X, B, A, 4. Nothing else
+/// differs. Returns the world and the top object.
+fn draw_twin(a_on_top: bool) -> (World, ObjectId) {
+    let mut w = World::new();
+    let order: [u64; 4] = if a_on_top { [1, 2, 3, 4] } else { [3, 2, 1, 4] };
+    let lib: Vec<ObjectId> = order
+        .iter()
+        .map(|&k| w.create(k, P1, at(ZoneKind::Library, Position::Bottom)))
+        .collect();
+    for card in [1, 2] {
+        let id = w.obj(card);
+        w.k.add_known(&w.z, id, P2).unwrap();
+    }
+    (w, lib[0])
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2, CR 402.3 (F1 twin worlds): an unrevealed draw of A
+/// and an unrevealed draw of the unknown X give P2 equal views and equal position knowledge.
+/// Controls: P1's own view differs; an observed draw and a reveal both make P2's views differ.
+#[test]
+fn twin_worlds_unobserved_draw_give_equal_views() {
+    let (mut w1, top1) = draw_twin(true);
+    let (mut w2, top2) = draw_twin(false);
+    // Indistinguishable for P2 before the draw.
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(w1.view(P2).players[&P1].library.known_cards, cards(&[1, 2]));
+
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+    let m1 = w1.mv(top1, req(ZoneKind::Hand));
+    let m2 = w2.mv(top2, req(ZoneKind::Hand));
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    // Control: the worlds really differ (P1's own hand shows A vs X).
+    assert_ne!(w1.view(P1), w2.view(P1));
+    assert_eq!(
+        w1.view(P1).players[&P1].hand,
+        HandView::Own(vec![ObjectView {
+            id: m1.new,
+            owner: P1,
+            controller: P1,
+            face_down: false,
+            card: Some(c(1)),
+        }])
+    );
+    // Control: a reveal of the drawn card distinguishes the worlds for P2.
+    let (mut r1, mut r2) = (w1.clone(), w2.clone());
+    r1.k.reveal_to_all(&r1.z, m1.new).unwrap();
+    r2.k.reveal_to_all(&r2.z, m2.new).unwrap();
+    assert_ne!(r1.view(P2), r2.view(P2));
+
+    // Control: P2 watches the draw, so P2 knows which card moved.
+    let n1 = o1.mv_obs(top1, req(ZoneKind::Hand), &[P2]);
+    o2.mv_obs(top2, req(ZoneKind::Hand), &[P2]);
+    assert_ne!(o1.view(P2), o2.view(P2));
+    assert!(o1.can(P2, n1.new));
+    assert_eq!(
+        o1.view(P2).players[&P1].hand,
+        HandView::Opponent {
+            count: 1,
+            known_cards: cards(&[1])
+        }
+    );
+    assert_eq!(o1.view(P2).players[&P1].library.known_cards, cards(&[2]));
+    assert_eq!(o2.view(P2).players[&P1].library.known_cards, cards(&[1, 2]));
+}
+
+/// P1 holds A (card 1) and B (card 2), both known to P2; the library holds 3 and 4. P1 puts A
+/// (`put_a`) or B on top of the library. Returns the world before the move and the moved object.
+fn put_back_twin(put_a: bool) -> (World, ObjectId) {
+    let mut w = World::new();
+    w.fill_library(P1, 3, 2);
+    let a = w.create(1, P1, req(ZoneKind::Hand));
+    let b = w.create(2, P1, req(ZoneKind::Hand));
+    w.k.add_known(&w.z, a, P2).unwrap();
+    w.k.add_known(&w.z, b, P2).unwrap();
+    (w, if put_a { a } else { b })
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 402.3 (F1 twin worlds): P1 puts one of two hand cards P2
+/// knows into its library unobserved; P2's views are equal whichever card it was. Control:
+/// with P2 observing, the views differ.
+#[test]
+fn twin_worlds_unobserved_hand_to_library_give_equal_views() {
+    let (mut w1, a) = put_back_twin(true);
+    let (mut w2, b) = put_back_twin(false);
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+    w1.mv(a, at(ZoneKind::Library, Position::Top));
+    w2.mv(b, at(ZoneKind::Library, Position::Top));
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert_ne!(w1.view(P1), w2.view(P1));
+
+    o1.mv_obs(a, at(ZoneKind::Library, Position::Top), &[P2]);
+    o2.mv_obs(b, at(ZoneKind::Library, Position::Top), &[P2]);
+    assert_ne!(o1.view(P2), o2.view(P2));
+    assert_eq!(o1.view(P2).players[&P1].library.known_cards, cards(&[1]));
+    assert_eq!(
+        o1.view(P2).players[&P1].hand,
+        HandView::Opponent {
+            count: 1,
+            known_cards: cards(&[2])
+        }
+    );
+}
+
+/// REQ-CORE-004, CR 401.2: a player who did not observe a move out of a library forgets every
+/// card of that library and the moved card, and loses every position entry for it, including
+/// entries the move did not shift (the bottom card leaves, the top entry stays live).
+#[test]
+fn step0_unobserved_forgets_candidates_and_positions() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 4);
+    w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    w.k.add_known(&w.z, lib[3], P2).unwrap();
+    // P1 knows its own top card; P1 sees the moved card arrive in its hand.
+    w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
+    let m = w.mv(lib[3], req(ZoneKind::Hand));
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+    assert!(!w.can(P2, m.new));
+    assert!(w.view(P2).players[&P1].library.known_cards.is_empty());
+    for id in [lib[0], lib[1]] {
+        assert!(!w.k.known_to(&w.z, id).unwrap().contains(&P2));
+    }
+    // P1 observed (the card is in P1's hand): P1's knowledge is untouched.
+    assert_eq!(
+        w.k.position_known(&w.z, P1, P1),
+        BTreeMap::from([(0, lib[0])])
+    );
+    assert_eq!(w.k.known_to(&w.z, lib[0]).unwrap(), set(&[P1]));
+    // The stored map holds no empty set.
+    assert!(w.k.known.values().all(|s| !s.is_empty()));
+    assert!(!w.k.known.contains_key(&c(2)));
+}
+
+/// REQ-CORE-004 step 0 (i): a player in `observers` keeps every piece of knowledge.
+#[test]
+fn step0_observer_keeps_knowledge() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.add_known(&w.z, lib[0], P2).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    w.k.set_position_known(&w.z, P2, P1, 2, lib[2]).unwrap();
+    let m = w.mv_obs(lib[0], req(ZoneKind::Hand), &[P2]);
+    assert!(w.can(P2, m.new));
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[2, 3]));
+    // The pruning of (d) still applies: lib[2] shifted to index 1.
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+}
+
+/// REQ-CORE-004, CR 400.2, step 0 (ii): a move from a library or a hand to a public zone face
+/// up is seen by everyone; P2 keeps its set knowledge of the source zone.
+#[test]
+fn step0_public_face_up_destination_is_observed() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let m = w.mv(lib[0], req(ZoneKind::Graveyard));
+    assert!(w.can(P2, m.new));
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[2]));
+    let m = w.mv(lib[2], req(ZoneKind::Battlefield));
+    assert!(w.can(P2, m.new));
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[2]));
+
+    let h1 = w.create(10, P1, req(ZoneKind::Hand));
+    let h2 = w.create(11, P1, req(ZoneKind::Hand));
+    w.k.add_known(&w.z, h2, P2).unwrap();
+    w.mv(h1, req(ZoneKind::Battlefield));
+    assert!(w.can(P2, h2));
+    // A face-down destination is not public face up: P2 forgets; the owner (iii, b) keeps it.
+    let m = w.mv(h2, face_down(ZoneKind::Exile));
+    assert_eq!(w.k.known_to(&w.z, m.new).unwrap(), set(&[P1]));
+    assert!(!w.can(P2, m.new));
+}
+
+/// REQ-CORE-004, CR 402.3, step 0 (iii): the hand owner chose the card and keeps its stored
+/// knowledge of the other hand cards; the opponent forgets them.
+#[test]
+fn step0_hand_owner_observes() {
+    let mut w = World::new();
+    w.fill_library(P1, 1, 2);
+    let h1 = w.create(10, P1, req(ZoneKind::Hand));
+    let h2 = w.create(11, P1, req(ZoneKind::Hand));
+    w.k.add_known(&w.z, h2, P1).unwrap();
+    w.k.add_known(&w.z, h2, P2).unwrap();
+    let m = w.mv(h1, req(ZoneKind::Library));
+    assert_eq!(w.k.known_to(&w.z, h2).unwrap(), set(&[P1]));
+    assert_eq!(w.k.known_to(&w.z, m.new).unwrap(), set(&[P1]));
+}
+
+/// REQ-CORE-004, CR 401.2, step 0 (iv): a player with a position entry naming the moved object
+/// knew which card moved and keeps its set knowledge.
+#[test]
+fn step0_position_entry_naming_moved_card_observes() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let m = w.mv(lib[0], req(ZoneKind::Hand));
+    assert!(w.can(P2, m.new));
+    assert_eq!(
+        w.view(P2).players[&P1].hand,
+        HandView::Opponent {
+            count: 1,
+            known_cards: cards(&[1])
+        }
+    );
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[2]));
+}
+
+/// REQ-CORE-004: a same-zone reposition (from == to) skips step 0; a hand reposition too.
+#[test]
+fn step0_skipped_for_same_zone_reposition() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.add_known(&w.z, lib[0], P2).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let m = w.mv(lib[0], at(ZoneKind::Library, Position::Index(2)));
+    assert_eq!(m.from, m.to);
+    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[1, 2]));
+    let h = w.create(10, P1, req(ZoneKind::Hand));
+    w.k.add_known(&w.z, h, P2).unwrap();
+    let m = w.mv(h, req(ZoneKind::Hand));
+    assert_eq!(m.from, m.to);
+    assert!(w.can(P2, m.new));
+}
+
+/// REQ-CORE-004 (R12): on_move_observed reports UnknownObject before UnknownPlayer and leaves
+/// the state unchanged; on_move equals on_move_observed with no observers.
+#[test]
+fn on_move_observed_errors_and_equivalence() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 2);
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let before = *w.z.object(lib[0]).unwrap();
+    let moved =
+        w.z.move_object(&mut w.ids, lib[0], req(ZoneKind::Hand))
+            .unwrap();
+    let snapshot = w.k.clone();
+    assert_eq!(
+        w.k.on_move_observed(&w.z, &before, &moved, &[P2, NOBODY]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(w.k, snapshot);
+    let ghost = Moved {
+        new: ObjectId::new(4242),
+        ..moved
+    };
+    assert_eq!(
+        w.k.on_move_observed(&w.z, &before, &ghost, &[NOBODY]),
+        Err(KnowledgeError::UnknownObject(ObjectId::new(4242)))
+    );
+    assert_eq!(w.k, snapshot);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.on_move(&w.z, &before, &moved).unwrap();
+    b.on_move_observed(&w.z, &before, &moved, &[]).unwrap();
+    assert_eq!(a, b);
+    assert_ne!(a, snapshot);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test 13: on_library_changed (F4)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-CORE-004, CR 401.2: the viewer knows A at index 0; X is created on top; after
+/// on_library_changed, drawing X does not bring the stale entry for A back. Without the call
+/// the coincidence would restore it (control).
+#[test]
+fn on_library_changed_prevents_coincidental_revival() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
+    let x = w.create(9, P1, at(ZoneKind::Library, Position::Top));
+    let mut control = w.clone();
+    w.k.on_library_changed(&w.z, P1).unwrap();
+    w.mv(x, req(ZoneKind::Hand));
+    assert!(w.k.position_known(&w.z, P1, P1).is_empty());
+    // Set knowledge of A is kept.
+    assert!(w.can(P1, lib[0]));
+
+    control.mv(x, req(ZoneKind::Hand));
+    assert_eq!(
+        control.k.position_known(&control.z, P1, P1),
+        BTreeMap::from([(0, lib[0])])
+    );
+}
+
+/// REQ-CORE-004: after an insertion at index n, entries below n are kept and entries at or
+/// after n are dropped; another library is untouched; an unknown owner is an error with the
+/// state unchanged.
+#[test]
+fn on_library_changed_keeps_entries_above_insertion() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 4);
+    let other = w.fill_library(P2, 20, 2);
+    for (i, &id) in lib.iter().enumerate() {
+        w.k.set_position_known(&w.z, P2, P1, i, id).unwrap();
+    }
+    w.k.set_position_known(&w.z, P1, P2, 1, other[1]).unwrap();
+    w.create(9, P1, at(ZoneKind::Library, Position::Index(2)));
+    let snapshot = w.k.clone();
+    assert_eq!(
+        w.k.on_library_changed(&w.z, NOBODY),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(w.k, snapshot);
+    w.k.on_library_changed(&w.z, P1).unwrap();
+    assert_eq!(
+        w.k.positions[&(P2, P1)],
+        BTreeMap::from([(0, lib[0]), (1, lib[1])])
+    );
+    assert_eq!(
+        w.k.position_known(&w.z, P1, P2),
+        BTreeMap::from([(1, other[1])])
+    );
+    // Unchanged library: a no-op.
+    let snapshot = w.k.clone();
+    w.k.on_library_changed(&w.z, P2).unwrap();
+    assert_eq!(w.k, snapshot);
 }

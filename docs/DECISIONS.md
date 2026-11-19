@@ -2731,7 +2731,9 @@ carry-over rule (stack -> battlefield) cover both.
 ## #25 FP-024: KnownTo is player memory
 
 **Decision:** The stored `KnownTo` set of a card persists across every zone change, including
-public-to-hidden moves and the CR 708.9 reveals; it is keyed by `CardId`. `Knowledge::on_move`
+public-to-hidden moves and the CR 708.9 reveals, except that a move out of a hidden zone the
+viewer did not observe forgets the candidates (see "#25 FP-024: Unobserved hidden moves forget
+the candidates" below); it is keyed by `CardId`. `Knowledge::on_move`
 adds every player when the object left a public zone face up, the owner when it left their hand,
 and the controller when it left the battlefield or the stack face down.
 **Rationale:** SRS 2.4 defines `KnownTo` as who knows the identity "because it was revealed,
@@ -2767,12 +2769,13 @@ change, CR 400.7). Position knowledge is a map per (viewer, library owner) from 
 `ObjectId`. `position_known` filters lazily against the live library, and `on_move` also prunes
 stored entries of the libraries the move left or entered that no longer match the live library,
 besides dropping entries that name `moved.old`. A known card whose index shifts therefore becomes
-unknown until `set_position_known` is called again, and an entry can never become valid again by
-coincidence (for example a card put on top and later drawn would otherwise "restore" a stale
-entry below it).
+unknown until `set_position_known` is called again. This coverage holds for moves through
+`on_move` / `on_move_observed` and for insertions into and removals from a library outside
+`on_move` that the caller follows with `on_library_changed` (see "#25 FP-024:
+on_library_changed" below); a stale entry left by a change the caller did not report could
+otherwise become valid again when a later move restores the earlier shape of the library.
 **Rationale:** Conservative: knowledge is never re-derived from an omniscient coincidence
-(R12, REQ-CORE-004). Moves that bypass `on_move` (or `create_object` into a library) are still
-covered by the lazy filter.
+(R12, REQ-CORE-004).
 **Alternatives:** Lazy filtering only (stale entries can reappear when the library returns to an
 earlier shape); shifting entries' indexes on every insert/remove (would need to know where every
 move inserted, and claims knowledge of positions after hidden inserts).
@@ -2808,10 +2811,85 @@ UnknownPlayer; `grant_look` UnknownObject, UnknownPlayer, then NotFaceDown; `can
 UnknownObject then UnknownPlayer (an unknown viewer is an error, not `false`);
 `set_position_known` UnknownPlayer (viewer, then library owner), UnknownObject, NotInLibrary,
 IndexMismatch (an index past the bottom is an IndexMismatch). (2) `shuffle_face_down_pile`
-reports UnknownObject for an unknown id. (3) `on_move` rule (a) also applies to a same-zone
+reports UnknownObject for an unknown id and NotFaceDown for any id that is not face down in
+exile (face up, or face down in any other zone), checking every id before any change (see
+"#25 FP-024: shuffle_face_down_pile is exile-only" below). (3) `on_move` rule (a) also applies to a same-zone
 reposition of a public face-up object (harmless: everyone could already see it). (4)
 `KnowledgeError` keeps exactly the frozen derives (`Clone, Debug, PartialEq, Eq`) and is not
 `#[non_exhaustive]`, so external tests can match it exhaustively.
 **Rationale:** R12 (every caller-supplied id is validated, nothing panics) and the frozen API.
 **Alternatives:** `Ok(false)` for an unknown viewer in `can_identify` (silently hides caller
 bugs).
+
+## #25 FP-024: Unobserved hidden moves forget the candidates
+
+**Decision:** `Knowledge::on_move_observed(zones, before, moved, observers)` runs a step 0 before
+the existing effects (a)-(d), only when `before` was in a library or a hand and
+`moved.from != moved.to`. A player V observed the move iff (i) V is in `observers`; or (ii) V
+may see the new object by the implicit entitlements of `can_identify` (public zone face up, V's
+own hand, a face-down permanent or spell V controls), ignoring stored `KnownTo`; or (iii) the
+object left V's hand (V chose it); or (iv) it left a library where V had a stored position
+entry naming `moved.old`. A player who did not observe it is removed from the stored `KnownTo`
+of every card now in `moved.from` and of the moved card (emptied sets are dropped), and, when
+the source is a library, loses all of its position entries for that library. An observer's
+knowledge is kept exactly as before. `on_move` is `on_move_observed` with no observers.
+**Rationale:** Twin-world non-interference for REQ-CORE-004 (PR #174, F1): a viewer who knows a
+set but cannot tell which member moved must not be able to tell from the view; if any card of
+the source zone stayed known, two worlds that differ only in which card moved would project to
+different views (the moved card shows up in the destination's known cards, or the remaining set
+shrinks). This is a design choice, not CR-derived. Set knowledge across `shuffle_library` is
+unchanged (SRS 2.4).
+**Alternatives:** Forgetting only the moved card (leaks through the remaining set); tracking
+per-zone possibility sets ("in zone A or zone B"; a much larger representation); making the
+caller pass every observer through an extra `on_move` argument (breaks the frozen `on_move`).
+
+## #25 FP-024: shuffle_face_down_pile is exile-only
+
+**Decision:** `shuffle_face_down_pile` rejects, with `NotFaceDown(id)`, every id that is not a
+face-down card in exile (a face-up card, or a face-down card in a library, on the battlefield,
+on the stack or anywhere else); `UnknownObject(id)` for an unknown id. Every id is validated
+before any state changes. Valid exile piles behave as before.
+**Rationale:** Look permissions on face-down cards exist only in exile (CR 406.3); a face-down
+library card is part of its library and is shuffled with `shuffle_library`, which keeps set
+knowledge (SRS 2.4). Clearing its `KnownTo` would drop it from every viewer's library known
+cards although it stays in the library (PR #174, F2).
+**Alternatives:** Routing library cards through position-only clearing (two behaviours behind
+one entry point, and a library shuffle already exists for that).
+
+## #25 FP-024: on_library_changed
+
+**Decision:** `Knowledge::on_library_changed(zones, owner)` drops every viewer's position entry
+for the library of `owner` that no longer matches the live library (`UnknownPlayer(owner)`,
+state unchanged, otherwise). Caller contract: after any `Zones` mutation that inserts into or
+removes from a library outside `on_move` (`create_object` or `enter_from_outside` into a
+library, `send_outside` of a library card), call it for that library. After a change at index
+`n`, entries with an index below `n` are kept and entries at `n` or after it are dropped,
+because those objects shifted. This closes the case where a stale entry becomes valid again by
+coincidence (PR #174, F4: the viewer knows A at index 0, a card is created on top, and drawing
+that card would put A back at index 0).
+**Rationale:** The lazy filter compares only the current library, so it cannot see that an
+entry was invalidated earlier; pruning at the change is the only point where the shift is
+visible. Known remaining gap: `Zones::send_outside` of a library card is an unobserved hidden
+move that `Knowledge` is not told about through `on_move`, so step 0 of
+`on_move_observed` does not run for it. The caller must call `on_library_changed` and treat the
+viewers' set knowledge of that library accordingly (the integration unit owns that call site).
+**Alternatives:** Shifting entries' indexes on every insert (claims position knowledge after a
+hidden insert); removing the claim from the identity/position decision without adding a hook
+(leaves the stale-entry revival).
+
+## #25 FP-024: Spec-test choices for the hidden-move rule (PR #174 round 1)
+
+**Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_knowledge_*.rs`)
+pin these points the fix brief left open: (1) rule (d) prunes position entries of both the
+library a card moved from and the library it moved to on every move, so a hand-to-library insert
+cannot revive a stale entry; (2) condition (iv) of `on_move_observed` step 0 uses the viewer's
+position entries as they stood before the move; (3) observing a move only keeps existing
+knowledge, it never adds the observer to the card's `KnownTo`; (4) error precedence among
+several invalid ids in one `shuffle_face_down_pile` call is not specified (tests use one invalid
+id per pile); (5) after `send_outside` / `enter_from_outside` only position entries are
+asserted, since identity knowledge there is the caller's contract (see `on_library_changed`).
+**Rationale:** (1) and (2) match the implementation, which the shadow-model property test
+confirms; (3) follows "if V observed it, V's knowledge is kept"; (4) and (5) are left open
+rather than over-specified until the integration unit defines the callers.
+**Alternatives:** Pruning only the source library (fails the shadow model and allows the F4
+revival through a hand-to-library insert).
