@@ -32,7 +32,9 @@
 //! with `DIVIDE_VALUE` before the batch is processed (CR 615.7).
 //!
 //! **State-based actions (CR 704.7).** With `sba` true, zone changes of the same object to the
-//! same destination are one event: one choice, one application, one execution. Different
+//! same destination are one group: the candidates are the union of the members' effects, one
+//! choice is made, the chosen effect is applied once to every member it matches (members it
+//! does not match still move the object), and the object moves at most once. Different
 //! objects never merge.
 //!
 //! **Atomicity and suspension.** Any error restores the registry and every component of the
