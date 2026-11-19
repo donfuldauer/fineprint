@@ -2274,3 +2274,21 @@ turn). `Option<AttackTarget>` alone for attack state (cannot express CR 506.4c).
 blockers' sets in `remove_from_combat` (not in the brief; would hide the removed attacker from the
 combat unit). Resetting control tracking on a same-controller set (records a control change that
 did not happen). Wiring into `GameState` now (outside owned paths; changes frozen layouts).
+
+## #20 FP-019 — Permanent spec-test readings
+
+**Decision.** Readings the Independent Tester chose where the brief was silent, all of which the
+implementation meets: (1) `set_blocking` on an unheld blocker whose slice also holds unheld ids is
+left untested (which error wins is unspecified); (2) `attach` with both the id and the target
+unknown, or an unknown id attaching to itself, is `UnknownObject(id)`, following the stated check
+order; (3) a control change keeps the permanent's status (CR 110.5c); whether designations and
+attachments survive a control change is not asserted; (4) `set_phased_out(id, true)` on an
+already phased-out permanent keeps combat state set after the first phase-out, and
+`removed_from_combat` stays true; (5) `remove_from_combat`, `set_controller` and a phase-out of a
+permanent that another permanent is attacking rewrite that attack to `Attacking(None)` (CR 506.4c);
+(6) `set_blocking` and `set_blocked` leave `removed_from_combat` unchanged.
+**Rationale.** Each is the literal reading of the #20 brief's behaviour contract, or the CR text
+it quotes.
+**Alternatives.** Clearing `removed_from_combat` on any combat setter (would hide that the
+permanent was removed); treating a phase-out of an attacked permanent as leaving its attackers'
+targets intact (contradicts CR 506.4c).
