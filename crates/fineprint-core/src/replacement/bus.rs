@@ -12,7 +12,7 @@ use fineprint_base::ids::{EffectId, IdGenerator, ObjectId, PlayerId};
 
 use super::types::{
     Action, BusError, BusEventKind, BusInterrupt, EventMatcher, Modification, ReplacementEffect,
-    ReplacementRegistry, Shield, affected_object, affected_player,
+    ReplacementRegistry, Shield, affected_object, affected_player, required_objects,
 };
 use crate::choice::{
     ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceReason,
@@ -58,7 +58,9 @@ pub struct BusReport {
 /// Processes one batch of simultaneous events through the replacement and prevention bus
 /// (REQ-EVENT-001, SRS 8.1, CR 614.6, CR 615.6, CR 616.1).
 ///
-/// Each event is processed in APNAP order of its chooser (CR 616.1): the applicable effects
+/// Each event is processed in APNAP order of its chooser, then submission order (CR 101.4,
+/// CR 616.1); an `Instead` descendant is processed as soon as the event it replaces has
+/// resolved, in the same order at that event's submission position: the applicable effects
 /// are collected against the current state, excluding the event's applied effects (CR 614.5)
 /// unless an effect overrides that (CR 903.9b-style); contained effects wait while a
 /// non-contained one applies (CR 616.1g); only the first non-empty tier is choosable
@@ -74,16 +76,22 @@ pub struct BusReport {
 /// batch (CR 704.3, CR 704.8: last known information is captured before it): the events that
 /// are not zone changes first, then the zone changes, and an object moves at most once: if
 /// several final zone changes name it, one is chosen by content (a move produced or redirected
-/// by a replacement first). That choice among one object's moves does not depend on submission
-/// order; but the results of different objects or separate groups are resolved in APNAP order,
-/// then submission order, and may compete for a one-use effect, so reversing the submission can
-/// change which object such an effect applies to. The `Prevent` follow-up events of the whole
+/// by a replacement first). Exception: with `sba` false, if every competing move of an object
+/// was submitted directly (no `Instead` descendant among them), nothing is reconciled; all are
+/// executed and the second fails with `UnknownObject`, rolling back the call (a caller's
+/// duplicate). That choice among one object's moves does not depend on submission order; but
+/// the results of different objects or separate groups are resolved in APNAP order of their
+/// choosers, then submission order (an `Instead` descendant taking the submission position of
+/// the event it replaces), and may compete for a one-use effect, so reversing the submission
+/// can change which object such an effect applies to. The `Prevent` follow-up events of the whole
 /// batch form one child batch after it (no applied effects, CR 615.5), processed the same way.
 /// A member stops just before a prevention pool is first applied to it;
 /// once every member has stopped or finished, a player whose pool cannot cover the current
 /// simultaneous damage from several sources divides it among them, each source's share at
-/// most its damage (CR 615.7), and the stopped members continue, those with a share first. An object that enters as a
-/// copy is a copy as part of its entry (CR 707.5). A shield-less prevention effect queues its
+/// most its damage (CR 615.7), and the stopped members continue, those with a share first. An
+/// object that a [`Modification::EntersAsCopyOf`] effect makes enter as a copy enters as that
+/// copy as part of its own entering event in the executed batch (CR 707.5, CR 614.1c,
+/// CR 616.1c): there is no separate `BecomeCopy` event. A shield-less prevention effect queues its
 /// follow-up events once per recipient per batch (CR 122.1c, CR 615.13). At most
 /// [`MAX_BUS_EVENTS`] event instances are taken up in one call.
 ///
@@ -262,7 +270,8 @@ type Planned = (EventInstance, Vec<ObjectId>);
 struct Plan {
     /// The final events of every member, `Instead` lineages included, in execution order: the
     /// events that are not zone changes first, then at most one zone change per object (see
-    /// [`Bus::reconcile`]).
+    /// [`reconcile`]; except, with `sba` false, a caller's duplicate of directly submitted
+    /// moves, which are all kept).
     events: Vec<Planned>,
     /// The `Prevent` follow-up events of the whole batch (CR 615.5), in the order they were
     /// queued: one child batch that follows the executed batch.
@@ -322,12 +331,16 @@ impl Bus<'_, '_, '_> {
     /// instead of the replaced one, so they are members of THIS batch (an `Instead` lineage), at
     /// any generation, whether the replaced member was in a CR 704.7 group or not. Nothing is
     /// executed while the batch resolves, so every member, lineage included, is judged against
-    /// the state before the batch (CR 616.1f, CR 616.2). The loop: phase A runs the members not
-    /// yet started (APNAP order among them, submission order within one chooser; a CR 704.7
-    /// group at its first member) and takes up the `Instead` events they queued as new members;
-    /// when every member has finished or stopped before a prevention pool, phases B and C
-    /// allocate the lowest stopped pool (CR 615.7) and resume its members; the loop ends when
-    /// nothing is pending. Then [`reconcile`] keeps at most one zone change per object.
+    /// the state before the batch (CR 616.1f, CR 616.2). The loop: phase A repeatedly takes the
+    /// not-started member with the least [`schedule_key`] (APNAP rank of its chooser, chooser,
+    /// root, member index; CR 101.4, CR 616.1; a CR 704.7 group at its first member), resolves
+    /// it and at once takes up the `Instead` events it queued as not-started members, so a
+    /// descendant competes by the same key as soon as its parent has resolved (it can't start
+    /// earlier; if its chooser ranks before members that already resolved, it simply runs
+    /// next). When every member has finished or stopped before a prevention pool, phases B and
+    /// C allocate the lowest stopped pool (CR 615.7) and resume its members; the loop ends when
+    /// nothing is pending. Then [`reconcile`] keeps at most one zone change per object (except
+    /// a caller's duplicate of directly submitted moves with `sba` false, see [`reconcile`]).
     fn resolve_batch(
         &mut self,
         events: Vec<EventInstance>,
@@ -337,8 +350,10 @@ impl Bus<'_, '_, '_> {
         if depth > MAX_CHILD_DEPTH {
             return Err(BusError::DepthExceeded.into());
         }
-        // CR 614.6, CR 614.7: an event naming an object an earlier batch of this call moved is
-        // an instruction that can't be carried out: it is ignored.
+        // CR 101.3, CR 614.6, CR 614.7: an event naming, as its affected object, an `Attach`
+        // host or a `BecomeCopy` copied object, an object an earlier batch of this call moved
+        // is an instruction that can't be carried out: it is ignored; the rest of the batch is
+        // carried out.
         let events: Vec<EventInstance> = events
             .into_iter()
             .filter(|instance| !self.impossible(instance.event()))
@@ -369,26 +384,30 @@ impl Bus<'_, '_, '_> {
             BTreeMap::new()
         };
         let mut queue = Queue::default();
-        let mut started = 0;
+        // Whether each member (same index) has been started by phase A.
+        let mut started: Vec<bool> = vec![false; members.len()];
         loop {
-            // Phase A: the members not yet started run until they finish or stop before a
-            // prevention pool. A CR 704.7 group is resolved as one at its first member.
-            if started < members.len() {
-                let first = started;
-                started = members.len();
-                let choosers: Vec<PlayerId> = members[first..].iter().map(|m| m.chooser).collect();
-                for k in self.apnap_order(&choosers) {
-                    let i = first + k;
-                    match members[i].group {
-                        None => self.resolve(&mut members, i, &mut queue)?,
-                        Some(g) if g == i => {
-                            let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
-                            self.resolve_group(&mut members, group, &mut queue)?;
+            // Phase A (CR 101.4, CR 616.1, SRS 8.1 step [2]): the not-started member with the
+            // least `schedule_key` runs until it finishes or stops before a prevention pool (a
+            // CR 704.7 group as one, at its first member); the `Instead` events it queued are
+            // taken up at once as not-started members (CR 614.6), so a descendant competes by
+            // the same key as soon as its parent has resolved.
+            if let Some(i) = self.next_member(&members, &started) {
+                match members[i].group {
+                    Some(g) if g == i => {
+                        let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
+                        for &j in group {
+                            started[j] = true;
                         }
-                        Some(_) => {}
+                        self.resolve_group(&mut members, group, &mut queue)?;
+                    }
+                    _ => {
+                        started[i] = true;
+                        self.resolve(&mut members, i, &mut queue)?;
                     }
                 }
                 self.absorb(&mut members, &mut queue)?;
+                started.resize(members.len(), false);
                 continue;
             }
             // Phases B and C (CR 615.7, CR 616.1f, CR 616.2): the lowest pool among stopped
@@ -428,7 +447,9 @@ impl Bus<'_, '_, '_> {
                     self.resolve(&mut members, i, &mut queue)?;
                 }
             }
+            // The members taken up here are scheduled by phase A on the next round.
             self.absorb(&mut members, &mut queue)?;
+            started.resize(members.len(), false);
         }
         let events = reconcile(&members, submitted, sba, &queue.copies);
         Ok(Plan {
@@ -437,19 +458,42 @@ impl Bus<'_, '_, '_> {
         })
     }
 
-    /// CR 614.6, CR 614.7, CR 400.7: whether `event`'s affected object is the old id of an
-    /// object an executed batch of THIS call moved to another zone. Such an event (a `Prevent`
-    /// follow-up or its `Instead` lineage, in a later batch) is an instruction that can't be
-    /// carried out and is ignored: not offered to effects, not executed, no error. An id that
-    /// was never issued, or that left in an earlier call, is not covered: it stays an error.
+    /// CR 101.3, CR 614.6, CR 614.7, CR 400.7: whether `event` names, in a role that needs the
+    /// object as it is now, the old id of an object an executed batch of THIS call moved to
+    /// another zone. The roles ([`required_objects`]): the affected object of every event, the
+    /// host of an `Attach` to a permanent (CR 701.3b), and the copied object of a `BecomeCopy`
+    /// (an engine limitation: the events layer can't copy last known information there,
+    /// CR 608.2h). A `Damage` source is not such a role (CR 608.2h: the object as it most
+    /// recently existed deals the damage). Such an event (a `Prevent` follow-up or its
+    /// `Instead` lineage, in a later batch) is an instruction that can't be carried out and is
+    /// ignored: not offered to effects, not executed, no error; the other events of its batch
+    /// are still carried out (CR 101.3). An id that was never issued, or that left in an
+    /// earlier call, is not covered: it stays an error.
     fn impossible(&self, event: &GameEvent) -> bool {
-        affected_object(event).is_some_and(|o| self.retired.contains(&o))
+        required_objects(event)
+            .iter()
+            .any(|o| self.retired.contains(o))
+    }
+
+    /// Phase A of [`Bus::resolve_batch`]: the not-started member with the least
+    /// [`Bus::schedule_key`], or `None` if every member has been started. A member of a CR 704.7
+    /// group other than its first is never taken on its own (it starts with the group).
+    fn next_member(&self, members: &[Member], started: &[bool]) -> Option<usize> {
+        let players = self.player_order();
+        members
+            .iter()
+            .enumerate()
+            .filter(|&(i, m)| !started[i] && m.group.is_none_or(|g| g == i))
+            .min_by_key(|&(i, m)| schedule_key(&players, m, i))
+            .map(|(i, _)| i)
     }
 
     /// CR 614.6, CR 704.3: takes up the queued `Instead` events as new members of the batch,
-    /// each inheriting its parent's root and submitted move, one generation deeper. A member
-    /// deeper than [`MAX_CHILD_DEPTH`] is [`BusError::DepthExceeded`]. The events were charged
-    /// against the work budget when they were queued.
+    /// each inheriting its parent's root and submitted move, one generation deeper; called
+    /// right after each resolve, so the new members are scheduled by phase A at once. A member
+    /// deeper than [`MAX_CHILD_DEPTH`] is [`BusError::DepthExceeded`]. An event that names a
+    /// retired object in a required role is ignored (see [`Bus::impossible`]). The events were
+    /// charged against the work budget when they were queued.
     fn absorb(&mut self, members: &mut Vec<Member>, queue: &mut Queue) -> Result<(), BusError> {
         for (parent, instance) in std::mem::take(&mut queue.instead) {
             let (root, depth, submitted_move) = {
@@ -477,8 +521,10 @@ impl Bus<'_, '_, '_> {
     /// E; CR 704.3, CR 704.8: the events layer captures last known information for every object
     /// the batch moves before any event of the batch). CR 707.5, CR 614.1c, CR 616.1c: an object
     /// that enters as a copy (its event's entry-copy plan) is a copy as part of its own entering
-    /// event, in this one executed batch; the copy is not routed through replacement collection
-    /// (the 614.12 look-ahead is a later unit).
+    /// event, in this one executed batch, through
+    /// [`EventContext::execute_batch_with_entry_copies`]: there is no separate `BecomeCopy`
+    /// event and the copy is not offered to replacement effects (distinct from the CR 614.12
+    /// look-ahead, a later unit).
     fn execute(&mut self, planned: Vec<Planned>) -> Result<(), BusError> {
         if planned.is_empty() {
             return Ok(());
@@ -644,11 +690,18 @@ impl Bus<'_, '_, '_> {
     /// Whether `event` would happen at all. CR 614.7: an effect that would replace an event
     /// that never happens does nothing. CR 614.7a, CR 120.8: a source that would deal 0 damage
     /// deals no damage. CR 701.26b: only tapped permanents can be untapped (so CR 122.1d's
-    /// stun counter replaces only a real untap). A `Tap` of a tapped permanent is not treated
-    /// here.
+    /// stun counter replaces only a real untap). CR 701.26a: only untapped permanents can be
+    /// tapped. Such an event offers no effect and reaches the executor unchanged (a no-op).
     fn would_happen(&self, event: &GameEvent) -> bool {
         match event {
             GameEvent::Damage { amount, .. } => *amount > 0,
+            // CR 701.26a
+            GameEvent::Tap { object } => self
+                .ctx
+                .permanents
+                .get(*object)
+                .is_some_and(|p| !p.status().tapped),
+            // CR 701.26b
             GameEvent::Untap { object } => self
                 .ctx
                 .permanents
@@ -1142,6 +1195,21 @@ impl Bus<'_, '_, '_> {
     }
 }
 
+/// CR 101.4, CR 616.1, SRS 8.1 step [2]: the phase A order of member `index` (`m`) among the
+/// not-started members of a batch, given the players in APNAP order: (APNAP rank of its chooser,
+/// chooser, root, member index). The rank is the chooser's position in `players`; a chooser
+/// outside it ranks last, by ascending id. An `Instead` descendant has its lineage's root, so
+/// it takes the submission position of the event it replaces; within one chooser and root the
+/// earlier-created member goes first. For submitted members (root = own index, or the group's
+/// first index) this is the order of [`Bus::apnap_order`].
+fn schedule_key(players: &[PlayerId], m: &Member, index: usize) -> (usize, PlayerId, usize, usize) {
+    let rank = players
+        .iter()
+        .position(|&q| q == m.chooser)
+        .unwrap_or(players.len());
+    (rank, m.chooser, m.root, index)
+}
+
 /// CR 704.3, CR 704.7: state-based actions that would have the same result happen at the same
 /// time as one event, and a single replacement effect replaces all of them. The zone changes
 /// of one object to one destination are one group: every member is tagged with the index of
@@ -1176,7 +1244,8 @@ fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
 /// CR 704.3, CR 704.7, CR 614.6, CR 614.7, CR 400.7: the final events of a resolved batch
 /// (`members`, of which the first `submitted` were submitted), in execution order, each with
 /// its entry-copy plan from `copies`. The object of a zone change moves at most once in the
-/// batch (see DECISIONS "Two destinations for one object"):
+/// batch, except for the `sba` false caller's duplicate in the first item below (see DECISIONS
+/// "Two destinations for one object"):
 ///
 /// - The final zone changes of every member, `Instead` lineages included, are the candidates
 ///   of their object. One candidate is executed as is. With `sba` false and only submitted
