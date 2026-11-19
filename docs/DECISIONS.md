@@ -2229,3 +2229,66 @@ canonical bytes; the implementation does encode the flag first, which is allowed
 single place an object changes position.
 **Alternatives.** Inserting at `k` counted before removal (makes `Index(k)` depend on where the
 object was); accepting `Some(owner)` everywhere (two spellings for one request).
+
+## #20 FP-019 — Permanent state API
+
+**Decision.** `fineprint_core::permanent` provides a standalone `Permanents` container
+(`BTreeMap<ObjectId, Permanent>`) with the API of the #20 brief: `Status` (four independent
+booleans, default untapped/unflipped/face up/phased in, CR 110.5b), an open designation map
+`BTreeMap<String, DesignationValue>` that reuses the #18 `DesignationValue` type and its canonical
+tags, continuous-control tracking as a turn number, an `Option<AttachTarget>` link, and a
+`CombatState` (`AttackState`, blocking set, `blocked`, `removed_from_combat`). Readings chosen:
+(1) continuity is strict: `controlled_continuously_since_start_of(t)` is
+`controlled_since_turn() < t`, so a permanent that came under control during the controller's
+turn `t` is not continuous for that turn (CR 302.6); haste is the caller's. No summoning-sickness
+boolean is stored. (2) Attack state is the enum `NotAttacking | Attacking(Option<AttackTarget>)`
+because CR 506.4c keeps a creature attacking after the planeswalker or battle it attacked is
+removed from combat, while it attacks nothing; `Attacking(None)` is that state. (3) `leave(x)`
+returns the pre-removal value, unattaches everything attached to `x` (CR 701.3d), removes `x` from
+every other blocking set, and rewrites attackers of `Permanent(x)` to `Attacking(None)` (CR 506.4,
+506.4c); other `blocked` flags stay (CR 509.1h). (4) `remove_from_combat(x)` resets `x`'s combat
+fields, sets `removed_from_combat`, and rewrites attackers of `x` to `Attacking(None)`, but leaves
+other permanents' blocking sets and `blocked` flags alone: the CR describes the removed creature
+ceasing to be blocking or blocked and keeps the attacker blocked (CR 509.1h); pruning stale
+references is left to the combat unit, which reads `removed_from_combat`. (5) `set_controller` to
+the same player is a complete no-op (the CR is silent; no control change happened); to a different
+player it stores the given turn as-is and then applies exactly `remove_from_combat` (CR 506.4,
+613.1b). (6) `set_phased_out` applies `remove_from_combat` only on a false-to-true transition
+(CR 702.26b, 506.4) and never changes controller or controlled-since (CR 702.26d). (7) `attach`
+checks, in order, unknown id, unknown target permanent, self-attach, cycle (walking attachment
+links from the target, bounded by `len()+1`), and replaces the old link; player targets are not
+validated. (8) `remove_from_combat` on a permanent recorded as attacking itself resets it to
+`NotAttacking` (it is not redirected to `Attacking(None)`), because the redirect applies only to
+other permanents. (9) Canonical encoding: `put_len` of the count, then per permanent in ascending
+id: id, controller, the four status bytes, designations, controlled-since (u64 LE), attachment as
+`Option` (tag 0x00 permanent / 0x01 player), combat state (attack tag 0x00 not attacking / 0x01
+attacking then `Option<AttackTarget>` with tag 0x00 player / 0x01 permanent; blocking set;
+`blocked`; `removed_from_combat`). (10) The container is standalone: not wired into `GameState`,
+its Merkle layout or wire form; `ObjectRecord.face_down` in zones is reconciled with
+`Status::face_down` by the integration unit.
+**Rationale.** Follows SRS REQ-ZONE-001 item 3, REQ-CORE-006 and the #20 brief's API and CR
+excerpts; keeps the frozen state and zones contracts untouched, as #19 did.
+**Alternatives.** A stored summoning-sickness flag (forbidden by REQ-ZONE-001). Non-strict
+continuity (`<=`) (would make a permanent gained during the controller's turn able to attack that
+turn). `Option<AttackTarget>` alone for attack state (cannot express CR 506.4c). Pruning other
+blockers' sets in `remove_from_combat` (not in the brief; would hide the removed attacker from the
+combat unit). Resetting control tracking on a same-controller set (records a control change that
+did not happen). Wiring into `GameState` now (outside owned paths; changes frozen layouts).
+
+## #20 FP-019 — Permanent spec-test readings
+
+**Decision.** Readings the Independent Tester chose where the brief was silent, all of which the
+implementation meets: (1) `set_blocking` on an unheld blocker whose slice also holds unheld ids is
+left untested (which error wins is unspecified); (2) `attach` with both the id and the target
+unknown, or an unknown id attaching to itself, is `UnknownObject(id)`, following the stated check
+order; (3) a control change keeps the permanent's status (CR 110.5c); whether designations and
+attachments survive a control change is not asserted; (4) `set_phased_out(id, true)` on an
+already phased-out permanent keeps combat state set after the first phase-out, and
+`removed_from_combat` stays true; (5) `remove_from_combat`, `set_controller` and a phase-out of a
+permanent that another permanent is attacking rewrite that attack to `Attacking(None)` (CR 506.4c);
+(6) `set_blocking` and `set_blocked` leave `removed_from_combat` unchanged.
+**Rationale.** Each is the literal reading of the #20 brief's behaviour contract, or the CR text
+it quotes.
+**Alternatives.** Clearing `removed_from_combat` on any combat setter (would hide that the
+permanent was removed); treating a phase-out of an attacked permanent as leaving its attackers'
+targets intact (contradicts CR 506.4c).

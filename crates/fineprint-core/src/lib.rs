@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+/// Permanent state on the battlefield: status, designations, control, attachments, combat (REQ-ZONE-001).
+pub mod permanent;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
 /// Zones, the zone-move primitive and the CR 400.7 exception registry (REQ-ZONE-001, REQ-CORE-002).
