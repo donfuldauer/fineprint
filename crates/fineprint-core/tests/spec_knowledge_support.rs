@@ -137,6 +137,41 @@ impl KWorld {
             .expect("create succeeds")
     }
 
+    /// Builds `owner`'s (empty) library from the synthetic cards `top_first` (top first). The
+    /// cards are created in ascending card order, each at the index that gives the final order,
+    /// so twin worlds with the same card set (and the same earlier objects) give every card the
+    /// same ObjectId whatever the order. Returns the library ids, top first.
+    pub fn build_library(&mut self, owner: PlayerId, top_first: &[u64]) -> Vec<ObjectId> {
+        assert!(
+            self.library(owner).is_empty(),
+            "build_library: empty library"
+        );
+        let rank = |c: u64| top_first.iter().position(|x| *x == c).expect("in order");
+        let mut sorted = top_first.to_vec();
+        sorted.sort_unstable();
+        let mut placed: Vec<u64> = Vec::new();
+        for c in sorted {
+            let idx = placed.iter().filter(|p| rank(**p) < rank(c)).count();
+            self.create_card(
+                cid(c),
+                owner,
+                KWorld::req_at(ZoneKind::Library, Position::Index(idx)),
+            );
+            placed.push(c);
+        }
+        let lib = self.library(owner);
+        let cards: Vec<u64> = lib.iter().map(|id| self.card(*id).get()).collect();
+        assert_eq!(cards, top_first, "build_library order");
+        lib
+    }
+
+    /// The object of the synthetic card number `card`.
+    pub fn id_of(&self, card: u64) -> ObjectId {
+        self.zones
+            .object_of_card(cid(card))
+            .expect("card in a zone")
+    }
+
     pub fn card(&self, id: ObjectId) -> CardId {
         self.zones.object(id).expect("object present").card
     }
@@ -173,6 +208,27 @@ impl KWorld {
         moved
     }
 
+    /// Moves with `Zones::move_object` then informs the knowledge with `on_move_indexed`:
+    /// `observers` know which card moved, `index_known_by` know the library index(es) of the
+    /// change (the brief's index-disclosure rule, a design decision).
+    pub fn mv_idx(
+        &mut self,
+        id: ObjectId,
+        req: MoveRequest,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
+    ) -> Moved {
+        let before = self.rec(id);
+        let moved = self
+            .zones
+            .move_object(&mut self.ids, id, req)
+            .expect("move succeeds");
+        self.k
+            .on_move_indexed(&self.zones, &before, &moved, observers, index_known_by)
+            .expect("on_move_indexed succeeds");
+        moved
+    }
+
     /// Removes `id` from its zone to its owner's sideboard with `Zones::send_outside`, then
     /// informs the knowledge with `on_removed_from_hidden_zone`, using the record copied BEFORE
     /// the removal (the documented caller contract). `observers` watched which card was removed.
@@ -189,11 +245,44 @@ impl KWorld {
         (before, card)
     }
 
+    /// As [`KWorld::send_out`], through `on_removed_from_hidden_zone_indexed`: `index_known_by`
+    /// know the index the card was removed from.
+    pub fn send_out_idx(
+        &mut self,
+        id: ObjectId,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
+    ) -> (ObjectRecord, CardId) {
+        let before = self.rec(id);
+        let card = self
+            .zones
+            .send_outside(id, OutsidePool::Sideboard)
+            .expect("send_outside succeeds");
+        self.k
+            .on_removed_from_hidden_zone_indexed(&self.zones, &before, observers, index_known_by)
+            .expect("on_removed_from_hidden_zone_indexed succeeds");
+        (before, card)
+    }
+
     /// Brings a fresh synthetic card from `owner`'s sideboard into the zone `req` names with
     /// `Zones::enter_from_outside`; for a library it then calls `on_library_changed` (an
     /// insertion: position-only). Returns the new object.
     pub fn enter_fresh(&mut self, owner: PlayerId, req: MoveRequest) -> ObjectId {
         let card = self.fresh_card();
+        self.enter_card(owner, card, req, None)
+    }
+
+    /// Brings `card` from `owner`'s sideboard into the zone `req` names with
+    /// `Zones::enter_from_outside`. For a library it then calls `on_library_changed_indexed`
+    /// with `index_known_by` when that is `Some`, the shorthand `on_library_changed` when it is
+    /// `None`. Returns the new object.
+    pub fn enter_card(
+        &mut self,
+        owner: PlayerId,
+        card: CardId,
+        req: MoveRequest,
+        index_known_by: Option<&[PlayerId]>,
+    ) -> ObjectId {
         self.zones
             .add_outside_card(owner, OutsidePool::Sideboard, card)
             .expect("add_outside_card succeeds");
@@ -202,11 +291,52 @@ impl KWorld {
             .enter_from_outside(&mut self.ids, owner, card, OutsidePool::Sideboard, req)
             .expect("enter_from_outside succeeds");
         if req.to == ZoneKind::Library {
-            self.k
-                .on_library_changed(&self.zones, owner)
-                .expect("on_library_changed succeeds");
+            self.library_changed(owner, index_known_by);
         }
         id
+    }
+
+    /// Creates `card` in the zone `req` names with `Zones::create_object` (an insertion); for a
+    /// library it then informs the knowledge as [`KWorld::enter_card`] does.
+    pub fn insert_card(
+        &mut self,
+        owner: PlayerId,
+        card: CardId,
+        req: MoveRequest,
+        index_known_by: Option<&[PlayerId]>,
+    ) -> ObjectId {
+        let id = self.create_card(card, owner, req);
+        if req.to == ZoneKind::Library {
+            self.library_changed(owner, index_known_by);
+        }
+        id
+    }
+
+    /// `on_library_changed_indexed(owner, ikb)` for `Some(ikb)`, `on_library_changed(owner)`
+    /// for `None`.
+    pub fn library_changed(&mut self, owner: PlayerId, index_known_by: Option<&[PlayerId]>) {
+        match index_known_by {
+            Some(ikb) => self
+                .k
+                .on_library_changed_indexed(&self.zones, owner, ikb)
+                .expect("on_library_changed_indexed succeeds"),
+            None => self
+                .k
+                .on_library_changed(&self.zones, owner)
+                .expect("on_library_changed succeeds"),
+        }
+    }
+
+    /// `shuffle_library_disclosed(owner, excluded, known_by)`.
+    pub fn shuffle_disclosed(
+        &mut self,
+        owner: PlayerId,
+        excluded: &[ObjectId],
+        known_by: &[PlayerId],
+    ) {
+        self.k
+            .shuffle_library_disclosed(&self.zones, owner, excluded, known_by)
+            .expect("shuffle_library_disclosed succeeds");
     }
 
     pub fn mv_to(&mut self, id: ObjectId, kind: ZoneKind) -> Moved {
@@ -439,13 +569,27 @@ impl Shadow {
         self.add_known(zones, id, viewer);
     }
 
-    /// CR 701.24a, 701.24b: every entry of that library is cleared except an excluded card
-    /// still at its recorded index; KnownTo is never touched (SRS 2.4).
+    /// `shuffle_library` (the no-disclosure shorthand): every entry of that library is cleared,
+    /// for every viewer.
     pub fn shuffle_library(&mut self, zones: &Zones, owner: PlayerId, excluded: &[ObjectId]) {
+        self.shuffle_library_disclosed(zones, owner, excluded, &[]);
+    }
+
+    /// CR 701.24a, 701.24b and the brief's index-disclosure rule (a design decision): every entry
+    /// of that library is cleared, except an entry whose object is excluded and still at its
+    /// recorded index, kept only for a viewer in `known_by`. KnownTo is never touched (SRS 2.4).
+    pub fn shuffle_library_disclosed(
+        &mut self,
+        zones: &Zones,
+        owner: PlayerId,
+        excluded: &[ObjectId],
+        known_by: &[PlayerId],
+    ) {
         let lib = zones.contents(ZoneId::Library(owner));
-        for ((_, o), e) in &mut self.pos {
+        for ((v, o), e) in &mut self.pos {
             if *o == owner {
-                e.retain(|i, obj| excluded.contains(obj) && lib.get(*i) == Some(obj));
+                let knows = known_by.contains(v);
+                e.retain(|i, obj| knows && excluded.contains(obj) && lib.get(*i) == Some(obj));
             }
         }
     }
@@ -458,14 +602,44 @@ impl Shadow {
         }
     }
 
-    /// Drops every entry for `owner`'s library that does not match the live library.
-    pub fn on_library_changed(&mut self, zones: &Zones, owner: PlayerId) {
+    /// Drops every entry for `owner`'s library that does not match the live library (CR 401.2).
+    fn prune(&mut self, zones: &Zones, owner: PlayerId) {
         let lib = zones.contents(ZoneId::Library(owner));
         for ((_, o), e) in &mut self.pos {
             if *o == owner {
                 e.retain(|i, obj| lib.get(*i) == Some(obj));
             }
         }
+    }
+
+    /// The brief's index-disclosure rule (a design decision, no CR) for one affected library:
+    /// every viewer NOT in `index_known_by` loses all of its entries for `owner`'s library,
+    /// without looking at where the change happened; the entries of the viewers in it are then
+    /// pruned against the live library (CR 401.2).
+    fn index_rule(&mut self, zones: &Zones, owner: PlayerId, index_known_by: &[PlayerId]) {
+        for ((v, o), e) in &mut self.pos {
+            if *o == owner && !index_known_by.contains(v) {
+                e.clear();
+            }
+        }
+        self.prune(zones, owner);
+    }
+
+    /// `on_library_changed` (the no-disclosure shorthand): every viewer loses its entries for
+    /// that library.
+    pub fn on_library_changed(&mut self, zones: &Zones, owner: PlayerId) {
+        self.library_changed_indexed(zones, owner, &[]);
+    }
+
+    /// `on_library_changed_indexed`: the index-disclosure rule for `owner`'s library; KnownTo is
+    /// never touched.
+    pub fn library_changed_indexed(
+        &mut self,
+        zones: &Zones,
+        owner: PlayerId,
+        index_known_by: &[PlayerId],
+    ) {
+        self.index_rule(zones, owner, index_known_by);
     }
 
     /// Whether step 0 of the hidden-source identity rule applies to a move.
@@ -504,14 +678,29 @@ impl Shadow {
         Some(out)
     }
 
-    /// `on_move_observed` (and `on_move` with no observers): step 0, then rules (a)-(d).
-    /// Returns the observed set when step 0 applied.
+    /// `on_move_observed` (and `on_move` with no observers): `on_move_indexed` with nobody
+    /// knowing the index.
     pub fn on_move(
         &mut self,
         zones: &Zones,
         before: &ObjectRecord,
         moved: &Moved,
         observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        self.on_move_indexed(zones, before, moved, observers, &[])
+    }
+
+    /// `on_move_indexed`: step 0 (with `observers`), rules (a)-(c), then the index-disclosure
+    /// rule for every affected library (moved.from and moved.to when they are libraries), with
+    /// effect (d) for the viewers in `index_known_by`. Returns the observed set when step 0
+    /// applied.
+    pub fn on_move_indexed(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
     ) -> Option<BTreeSet<PlayerId>> {
         let players = zones.players();
         let card = before.card;
@@ -562,9 +751,11 @@ impl Shadow {
                 }
             }
         }
+        // index-disclosure rule of the brief (design decision): only the viewers who know the
+        // index keep (pruned) entries for an affected library
         for z in [moved.from, moved.to] {
             if let ZoneId::Library(owner) = z {
-                self.on_library_changed(zones, owner);
+                self.index_rule(zones, owner, index_known_by);
             }
         }
         observed
@@ -595,13 +786,26 @@ impl Shadow {
     /// The model of `on_removed_from_hidden_zone`, called after `Zones::send_outside` with the
     /// record copied before the removal. Every non-observer forgets every card now in the source
     /// zone and the removed card; for a library source the non-observer's position entries for
-    /// that library are dropped, then the library is pruned against the live library (CR 401.2).
-    /// A public source is a no-op. Returns the observed set (`None` for a public source).
+    /// that library are dropped, and (nobody knowing the index) so are everyone else's. A public
+    /// source is a no-op. Returns the observed set (`None` for a public source).
     pub fn removed_from_hidden_zone(
         &mut self,
         zones: &Zones,
         before: &ObjectRecord,
         observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        self.removed_from_hidden_zone_indexed(zones, before, observers, &[])
+    }
+
+    /// `on_removed_from_hidden_zone_indexed`: identity as [`Shadow::removed_from_hidden_zone`],
+    /// then for a library source the index-disclosure rule (only `index_known_by` keep their
+    /// pruned entries for that library).
+    pub fn removed_from_hidden_zone_indexed(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
     ) -> Option<BTreeSet<PlayerId>> {
         let observed = Shadow::removal_observed(zones, before, observers)?;
         let mut source: Vec<CardId> = zones
@@ -619,7 +823,7 @@ impl Shadow {
             }
         }
         if let ZoneId::Library(owner) = before.zone {
-            self.on_library_changed(zones, owner);
+            self.index_rule(zones, owner, index_known_by);
         }
         Some(observed)
     }
@@ -641,6 +845,21 @@ impl Shadow {
             if fd && owner.is_none_or(|o| o == r.owner) {
                 self.reveal_to_all(zones, id);
             }
+        }
+    }
+}
+
+/// Asserts that every player of `players` has equal whole views and equal `position_known`
+/// for every library in `a` and `b` (the twin-world non-interference check, REQ-CORE-004).
+pub fn assert_twins_equal_for(a: &KWorld, b: &KWorld, players: &[PlayerId], ctx: &str) {
+    for p in players {
+        assert_eq!(a.view(*p), b.view(*p), "{ctx}: view of {p:?}");
+        for owner in a.players() {
+            assert_eq!(
+                a.positions(*p, owner),
+                b.positions(*p, owner),
+                "{ctx}: position_known of {p:?} on {owner:?}'s library"
+            );
         }
     }
 }
