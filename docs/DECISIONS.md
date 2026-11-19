@@ -3901,7 +3901,7 @@ all contained.
 ## #29 FP-028 — CR 704.7 merging of state-based-action batches
 
 **Decision:** (Review round 1, F2/F5; amended in review round 2, F2, and replaced by member-wise
-semantics in review round 3, H2; execution restructured in review round 4, J1-J4.) With `sba = true` only `ZoneChange` members merge. Members form a
+semantics in review round 3, H2; execution restructured in review round 4, J1-J4, and in review round 5, K1-K5.) With `sba = true` only `ZoneChange` members merge. Members form a
 group when they have the same affected object and the same destination (`request.to`) as
 submitted: the same object and the same kind of result. Every member stays in the list, tagged
 with its group; the group is resolved at the position of its first member in submission order
@@ -3917,17 +3917,18 @@ matches; each such member's event is modified or dropped and the effect is added
 set. Members it does not match are unchanged and keep resolving: the loop repeats over the group
 with the union rule until no candidate remains (CR 616.1f). Execution (review round 4; detail in
 "CR 704.7 group execution: one resolved batch"): the batch is first resolved completely, then
-executed as ONE batch. The object moves exactly once per group that still moves. The child events
-of an application to a group whose object still moves are resolved through the bus (not executed
-separately) and their final events are part of the same executed batch, before the group's move;
-a final child move of the group's object is not executed on its own but competes with the group's
-remaining members. The executed move: if a candidate's final destination differs from the
-group's original destination (a redirect), only such candidates compete, otherwise all do; the
-least by (canonical `GameEvent` bytes, canonical `AppliedEffects` bytes, entry-copy plan) wins
-and is executed at the position of the group's first member; the others are dropped (not
-executed, not logged). If every member was dropped (`Skip` or `Instead` on all), no group move is
-executed for the object and the group's child events follow the executed batch as a child batch;
-if only some were dropped, the remaining members still move it. The result never depends on submission order within a
+executed as ONE batch. The object moves at most once. Every `Instead` descendant, of a group
+member or of any other member, is resolved through the bus as a member of the same batch (not
+executed separately) and its final events are part of the same executed batch; a final `Instead`
+move of an object is not executed on its own but competes with that object's other final moves.
+The executed move (round 5, "Two destinations for one object"): if a candidate is a redirect
+(its final destination differs from its root's submitted destination, or its root was not a move
+of this object), only redirects compete, otherwise all do; the least by (canonical `GameEvent`
+bytes, canonical `AppliedEffects` bytes, entry-copy plan) wins and is executed at the position
+of the least root among the object's candidates; the others are dropped (not executed, not
+logged). If every member was dropped (`Skip` or `Instead` on all), the replacement events of the
+fully replaced group stay in the same executed batch (review round 5, K3); if only some were
+dropped, the remaining members still move it. The result never depends on submission order within a
 group: both orders give the same `BusReport`, registry and state hash. Members for different
 objects never merge, whether or not they share kind, candidate set or chooser; each is processed
 on its own (own request if it has two or more candidates, own application, own shield use) in
@@ -3976,60 +3977,139 @@ inputs, J4).
 
 ## #29 FP-028 — CR 704.7 group execution: one resolved batch
 
-**Decision:** (Review round 4, J1-J4.) The bus processes a batch in two stages. RESOLVE runs the
-SRS 8.1 loop for every member (Phase A, the CR 615.7 allocation Phases B and C, CR 704.7 groups)
-and executes nothing; it returns the final events in execution order, each with its entry-copy
-plan, and the child events that follow the executed batch. EXECUTE then makes ONE
-`execute_batch_with_entry_copies` call for the final events, after which the following child
-events are processed as one child batch (`depth + 1`), as before. The child events queued by an
-application to a CR 704.7 group whose object still has a member with an event are RESOLVED
-(together, as one child batch at `depth + 1`, `sba` false, same depth limit and work budget),
-not executed. Their final events, except moves of a moving group's object, open the parent's
-executed batch in queue order, so they precede every group move (the group's move stays at the
-position of its first member). Every final child `ZoneChange` whose object is the object of a
-moving group (the first such group in index order) is removed from that list and becomes a
-candidate of the group, next to the group's members that still have an event. Survivor rule:
-let D0 be the group's original destination (the `request.to` that formed the group); if any
-candidate's final destination differs from D0, only those candidates compete; otherwise all do;
-the winner is the least by (canonical event bytes, canonical applied-set bytes, entry-copy plan:
-a candidate with a plan before one without, then the lesser plan by `ObjectId` sequence), the
-candidate's position breaking a remaining tie between interchangeable inputs. The winner's plan
-is the one executed; the losers' plans are dropped. A child move candidate's applied set is its
-own and its plan is its own (empty unless an enters-as-copy effect applied to it). Plans are kept
-as a list of copied objects (several copy applications are executed in order, as before). The
-`after` order: the child events queued while resolving the group children come first, then
-the batch's own other child events. Choosing a candidate never fails: a candidate that is not
-chosen is not executed, logged or reported. If a group has no member with an event, nothing
-changes: its child events follow the executed batch. Tests:
-`req_event_001_r4_j1_instead_child_move_competes_with_group_move` (and `_j1_i_`, `_j1_ii_`,
-`_j1_iii_`), `req_event_001_r4_j2_lki_keeps_pre_sba_counters`,
-`req_event_001_r4_j3_unchanged_destination_modification_does_not_beat_redirect`,
-`req_event_001_r4_j4_entry_copy_plan_is_part_of_the_selection`.
+**Decision:** (Review round 4 J1-J4; replaced in round 5, K1-K5.) The bus processes a batch in two
+stages. RESOLVE runs the SRS 8.1 loop for every member and executes nothing. A member is a
+submitted event or an `Action::Instead` descendant of one (a lineage member): an applied
+`Instead` queues its events (charged against the work budget, each with the parent's applied set
+after the application, CR 614.5), and after each phase they are taken up as new members of the
+SAME batch, with the parent's root (the submitted member, or the first member of its CR 704.7
+group), the root's submitted (object, destination) and depth parent + 1 (above `MAX_CHILD_DEPTH`
+is `DepthExceeded`). The loop: phase A runs the members not yet started (APNAP order among them,
+submission order within one chooser; a group at its first member; only submitted members are
+grouped) and takes up the queued `Instead` events; when nothing is unstarted, phases B and C
+allocate the lowest stopped CR 615.7 pool per chooser in APNAP order over all members and resume
+its members, then take up their `Instead` events; the loop ends when nothing is pending. All
+members share one queue: one `prevented_once` set and one entry-copy list. The `Prevent { then }`
+follow-ups of the whole batch, lineage members included, form ONE following child batch
+(`depth + 1`, `sba` false), as before. RECONCILE: the final `ZoneChange`s of every member are
+gathered per object and at most one is executed per object. One candidate is executed as is.
+Exception: with `sba = false` and every candidate a submitted member, all are kept (a caller's
+duplicate still fails with `UnknownObject` and rolls back). Otherwise a candidate is a redirect if
+its root's submitted move is not a move of this object, or its FINAL `request.to` differs from its
+root's submitted destination (the final destination counts, not the initial one: N3); if a
+redirect exists only redirects compete; the winner is the least by (canonical event bytes,
+canonical applied-set bytes, entry-copy plan: a candidate with a plan before one without, then the
+lesser plan by `ObjectId` sequence), the candidate position breaking a remaining tie between
+interchangeable inputs. The winner's plan is executed; the losers (and their plans) are not
+executed, logged or reported; this never fails. EXECUTE: ONE `execute_batch_with_entry_copies`
+call: first the final events that are not zone changes, ordered by (root, member index), then the
+kept zone changes, each at the least (root, member index) of its object's candidates. Non-moves
+come first because `Tap`, `Attach`, `RemoveCounters` and the like need a live permanent (a shield
+counter's removal precedes its object's move). This also changes the order of `sba = false`
+batches: [move Y, tap Y] used to fail with `UnknownObject` and now succeeds. K1: the choice among
+ONE object's competing moves depends on content, not on submission position; results of
+DIFFERENT objects or separate groups are resolved in APNAP order, then submission order, and may
+compete for a one-use effect, so reversing the submission can change which object a one-use
+redirect applies to. Tests: `req_event_001_r4_j1_*`, `req_event_001_r4_j2_*`,
+`req_event_001_r4_j3_*`, `req_event_001_r4_j4_*`, `req_event_001_r5_k2_*`, `req_event_001_r5_k3_*`,
+`req_event_001_r5_e3_*`, `req_event_001_r5_k5_*`, `req_event_001_r5_e1_e4_*`,
+`req_event_001_r5_e2_*`, `req_event_001_r5_n1_*`, `req_event_001_r5_n3_*`,
+`req_event_001_children_reenter_bus` (the `Instead` child executes in the same batch as its
+sibling).
 **Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
 event, and CR 614.6 makes a replacement's modified event occur instead of the replaced one, so
-the modified event (for example the shield counter's removal) takes the replaced state-based
-action's place inside the same event (rules-researcher, review round 4). CR 704.8 derives a
-departing permanent's last known information from the game state before any of those
-state-based actions; the events layer captures LKI for every object a batch moves before any
-event of that batch, so one executed batch gives that by construction (the counter is still on
-the LKI record; the researcher notes that "performed" is not spelled out for modified events,
-and the pre-SBA reading is what CR 704.8 states). The CR is silent on one object that would move
-to two zones in one event (CR 616.1 orders effects for one event, not events). Judgement (R8):
-the redirected destination wins: the replaced member's modified event moves the object, and the
-sibling plain move finds the object gone and does nothing, by analogy with CR 614.7 (a
-replacement of an event that never happens does nothing) and CR 400.7 (an object that changes
-zones becomes a new object), not as a rule; the engine never fails or rolls back because of it.
-A modification that does not change the destination must not matter; only the destination counts
-(researcher conclusion (c)). For equal events and applied sets, the candidate with an
-entry-copy plan wins because it applied the enters-as-copy effect, and the copy is part of its
-entry (CR 707.5, CR 614.1c); so the result does not depend on which submitted instance already
-had the effect in its applied set.
-**Alternatives:** Patching J1-J4 one by one on the round-3 structure (rejected: the same
-patch-on-patch structure that produced them); executing the group children separately and
-reconciling the moves afterwards (rejected: the object id is already retired and LKI already
-captured); rolling back on a conflicting second move (rejected: researcher conclusion (b), the
-engine must never fail on it); a change in `events/` (not needed: `execute_batch_with_entry_copies`
-already captures LKI for the whole batch first).
+the modified event, at any generation, takes the replaced event's place inside the same event
+(rules-researcher, rounds 4 and 5). CR 704.8 derives a departing permanent's last known
+information from the game state before any of those state-based actions; the events layer
+captures LKI for every object a batch moves before any event of that batch, so one executed batch
+gives that by construction. One object with several final moves is settled by "Two destinations
+for one object" (researcher Q2). Rounds 3 and 4 kept a separate path for children of a group that
+still moved and deferred every other `Instead` child to a later batch; every round found a new
+shape where the two paths met (K2: a child move of an object with a plain move, K3: a fully
+replaced group, K5: a grandchild move, K4-inverse: a second `prevented_once`), each a retired id
+and a rollback or a split simultaneous event. One rule for every lineage removes the seam.
+**Alternatives:** Patching K2, K3 and K5 separately (rejected: the same patch-on-patch structure
+as rounds 3 and 4); a separate batch per lineage (rejected: splits one simultaneous event and
+`prevented_once`); one batch per `Prevent` follow-up (rejected: changes the plain K4 shape from one
+counter removal to two); executing children and reconciling afterwards (rejected: the object id is
+already retired and LKI already captured); a change in `events/` (not needed).
+
+## #29 FP-028 — Instead lineage joins the batch and is judged against the pre-batch state
+
+**Decision:** (Review round 5, K2/K3/K5, researcher Q3.) Every `Action::Instead` lineage is part of
+the same simultaneous batch as the event it replaces, at every generation, whether or not the
+replaced member is in a CR 704.7 group (see "CR 704.7 group execution: one resolved batch"). Since
+nothing executes while a batch resolves, a lineage member is collected against the state before
+the batch: a replacement that needs a counter sees it even if another part of the same modified
+event removes it. Consequence: an `overrides_614_5` effect with `requires_counter` whose `Instead`
+output matches itself again (Tap -> Instead[remove the counter, Tap]) no longer stops after a
+staged execution removed the counter; it applies at every generation until `DepthExceeded`, and
+everything is rolled back (unit test
+`req_event_001_r5_override_matching_own_instead_output_exceeds_depth`; the Independent Tester's
+spec test of an overriding chain is rewritten as a terminating chain). An event of a LATER batch of
+the same call (a `Prevent` follow-up or its `Instead` lineage) whose affected object is the old id
+of an object an executed batch of this call moved to another zone is an impossible instruction:
+it is ignored (not offered to effects, not executed, no error, the earlier batches kept; test
+`req_event_001_r5_follow_up_naming_moved_object_is_ignored`). An id that was never issued, or
+that left in an earlier call, is still `UnknownObject` (tests
+`req_event_001_r1_f6_enters_as_copy_is_not_replaced`,
+`req_event_001_r2_g1_source_stays_and_standalone_stays_strict`).
+**Rationale:** CR 614.6: "If an event is replaced, it never happens. A modified event occurs
+instead, which may in turn be replaced"; for the ignored events, CR 614.6: "the modified event may
+contain instructions that can't be carried out, in which case the impossible instruction is simply
+ignored", CR 614.7 and CR 400.7 (the moved object is a new object); CR 616.1f repeats the process "taking into account only
+replacement or prevention effects that would now be applicable"; CR 616.2: an effect can become
+applicable as the result of another that modifies the event; CR 120.4d: "Finally, the damage event
+occurs." The state changes only when the modified event occurs. The CR does not say this
+verbatim; the structure implies it (rules-researcher, round 5, Q3).
+**Alternatives:** Staged execution per generation (rejected: it splits one simultaneous event,
+retires object ids that a later generation names, and captures LKI after part of the event).
+
+## #29 FP-028 — Two destinations for one object
+
+**Decision:** (Review round 5, K2/K5/E1/E4, researcher Q2; an R8 judgement.) In one executed batch
+an object moves EXACTLY ONCE. Its candidates are the final zone changes of every member that
+names it (group members, ungrouped members, `Instead` lineage moves). A move produced or redirected
+by a replacement (a redirect: its root was not submitted as a move of this object, or its final
+destination differs from its root's submitted destination) beats a plain submitted move; among
+redirects, or among plain moves if there is no redirect, the least by (canonical event bytes,
+canonical applied-set bytes, entry-copy plan) wins. This never fails and never rolls back. With
+`sba = false` and only submitted candidates nothing is reconciled (the caller's duplicate fails in
+the events layer, as before; test `req_event_001_r1_f2_same_object_sba_moves_execute_once`). For
+example [X to the graveyard (sba), X to exile (sba)] moves X to the graveyard: the destination is
+encoded before the cause and the graveyard's tag (3) is below exile's (5) (test
+`req_event_001_r5_e1_e4_two_destinations_one_object_moves_once`).
+**Rationale:** The CR is silent on one object moving twice in one simultaneous event. No pair of
+CR 704.5 state-based actions sends one object to different zones; different zones arise only
+through a replacement, so the case reduces to a replacement-produced move, which is the modified
+event that occurs instead (CR 614.6) and so takes precedence over the plain move; the plain move
+then finds the object gone and does nothing, by analogy with CR 614.7 and CR 400.7, not as a
+rule. CR 704.3 and CR 704.7 make the state-based actions one event, so the result must not depend
+on submission order (researcher Q2).
+**Alternatives:** Failing or rolling back (rejected: the engine must never fail on it); the first
+submitted move wins (rejected: submission-order dependence); the last wins (rejected: the same).
+
+## #29 FP-028 — Known limitations of the one-batch resolution (round 5)
+
+**Decision:** Recorded, not fixed in this unit. (b) A CR 615.7 allocation of a pool happens on the
+damage stopped at that moment; damage that a lineage member produces later (an `Instead` applied
+in phase C) is allocated afresh: if the pool is left after the first allocation, the later damage
+triggers a second allocation, which may be a division (test
+`req_event_001_r5_limit_b_lineage_damage_after_division`: pool e1 is allocated without a division
+on 2 + 2 and keeps 1; lineage damage from two sources asks a second division of the remaining 1).
+A full division uses the whole pool, so no division follows a division of the same pool. (d) The
+events that are not zone changes execute before the zone changes, which changes the order for
+`sba = false` batches ([move Y, tap Y] now succeeds). (e) Results of different objects or groups
+are resolved in APNAP order, then submission order, and can compete for a one-use effect, so
+reversing the submission can change which object such an effect applies to (K1; documented).
+(f) "Instead, do A, then B" where B names a new object made by A cannot be expressed as
+`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit.
+**Rationale:** (b) is rare (it needs an `Instead` on partly prevented damage); (e) follows from
+CR 616.1 (each object's choice is its own, choosers in APNAP order); (f) needs sequenced
+sub-events, outside this unit.
+**Alternatives:** Re-running the allocation for all damage whenever lineage damage appears
+(rejected: it would undo prevention already applied); content order across objects (rejected:
+CR 616.1 orders by chooser, and the one-use effect's choice belongs to the first chooser).
 
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
@@ -4073,8 +4153,11 @@ player for a spell controlled by another player); fixing the chooser at submissi
 (rejected: the affected object's controller can change through an earlier application).
 ## #29 FP-028 — Bus limits MAX_CHILD_DEPTH and MAX_REPEATS
 
-**Decision:** `MAX_CHILD_DEPTH = 64`: the submitted batch is depth 0 and a child batch at depth
-above 64 is `BusError::DepthExceeded`. `MAX_REPEATS = 256`: an event may receive at most 256
+**Decision:** `MAX_CHILD_DEPTH = 64`: the submitted batch is depth 0; an `Instead` lineage member
+is one deeper than the event it replaces, within the same batch (review round 5: the depth counts
+`Instead` lineage generations, and a lineage deeper than 64 is `BusError::DepthExceeded`, rolled
+back); a `Prevent` follow-up batch is one deeper than the batch that queued it, as before, and its
+lineages count on from there. `MAX_REPEATS = 256`: an event may receive at most 256
 applications; the next is `BusError::RepeatLimit`. Review round 1 (F7) adds
 `MAX_BUS_EVENTS = 4096` and `BusError::WorkLimit`: within one `process_batch`/`process_event`
 call every event instance the bus takes up (the submitted members and every child at every depth)
@@ -4320,8 +4403,9 @@ CR 608.2h and SRS 2.3 supply the LKI fallback for the source.
 
 ## #29 FP-028 — One prevention follow-up per effect and recipient per batch
 
-**Decision:** (Review round 2, G3; an R8 judgement.) Within one bus batch (one simultaneous batch
-of members; child batches are separate), a prevention effect without a shield
+**Decision:** (Review round 2, G3; an R8 judgement; extended in review round 5, K4.) Within one bus
+batch (one simultaneous batch of members, its `Instead` lineage members included since round 5;
+the `Prevent` follow-up batch is separate), a prevention effect without a shield
 (`effect.shield.is_none()`) whose action is `Prevent { then }` queues its `then` follow-up events
 once per key (effect id, affected object, affected player), however many simultaneous damage
 events to that recipient it prevents. Every one of those damage events is still fully prevented
@@ -4343,7 +4427,15 @@ which treats one application as covering simultaneous damage. Without the groupi
 simultaneous damage event saw the counter before the queued removals ran and two counters were
 removed for one simultaneous strike. The counter-argument, CR 615.10's per-event wording, is
 limited to fixed-amount prevention. The CR does not settle the question; this is the
-better-supported reading, recorded as an R8 judgement.
+better-supported reading, recorded as an R8 judgement. Round 5 (K4, rules-researcher Q1, also an
+R8 judgement: the CR is silent): the additional effects produced while applying prevention to
+simultaneous damage events are simultaneous and form one modified event (CR 615.5: "the rest of
+the effect takes place immediately afterward"; CR 120.4's example: the damage event "becomes
+[5 damage is dealt to the defending player, the defending player gains 5 life]"; CR 615.13), so
+follow-up damage of two prevented events of one batch to a permanent with two shield counters
+costs ONE counter (CR 122.1c). All `Prevent` follow-ups of a batch form one child batch; the
+group case equals the plain case (tests `req_event_001_r5_k4_group_case_equals_plain_batch`,
+`req_event_001_r5_k4_inverse_simultaneous_damage_shares_one_removal`).
 **Alternatives:** One follow-up per damage event (round 1; rejected in round 2: two counters for
 one simultaneous strike); grouping only counter-backed effects (rejected: a matcher-specific rule
 the bus would have to special-case); reporting one application per group (rejected: the applied
