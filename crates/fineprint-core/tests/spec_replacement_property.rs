@@ -6,7 +6,8 @@
 //! events (REQ-EVENT-001; CR 614.5, 615.6, 615.7, 616.1, 616.1f). A fixed LCG seeded per case
 //! drives the generator and the answers (R3: no system randomness, no new dependencies). Damage
 //! comes from up to two source objects (or none), so pool shields meet multi-source damage and
-//! raise CR 615.7 allocation requests, which the runner answers with seeded valid divisions.
+//! raise CR 615.7 allocation requests, which the runner answers with the request's own timeout
+//! default (valid by construction: each allotment is capped at its source's current damage).
 //! Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
@@ -228,39 +229,32 @@ enum Strategy {
     Seeded(u64),
 }
 
-/// A valid `SubmitDivision` for a CR 615.7 allocation request: every recipient gets its
-/// minimum, the rest goes all to the first (First), all to the last (Last) or split at random
-/// (Seeded).
-fn divide_answer(req: &PendingChoiceRequest, strategy: Strategy, rng: &mut Lcg) -> ChoiceResponse {
+/// The answer to a CR 615.7 allocation request: the request's own `default_on_timeout`, which
+/// fills the recipients in ascending id order up to each source's current damage (review round 2,
+/// G4). Any other division could exceed a source's current damage, which the runner cannot see
+/// (earlier modifications change it), and would be rejected. Checks that the default divides the
+/// request's total among exactly its recipients.
+fn divide_answer(req: &PendingChoiceRequest) -> ChoiceResponse {
     let (total, recipients) = division(req);
     assert!(
         recipients.len() >= 2,
         "an allocation has two or more sources: {req:?}"
     );
-    let minimum: u64 = recipients.iter().map(|(_, m)| m).sum();
-    assert!(total >= minimum, "{req:?}");
-    let mut amounts: Vec<u64> = recipients.iter().map(|(_, m)| *m).collect();
-    let mut rest = total - minimum;
-    match strategy {
-        Strategy::First => amounts[0] += rest,
-        Strategy::Last => *amounts.last_mut().expect("non-empty") += rest,
-        Strategy::Seeded(_) => {
-            let last = amounts.len() - 1;
-            for a in amounts.iter_mut().take(last) {
-                let share = rng.below(rest + 1);
-                *a += share;
-                rest -= share;
+    let answer = req.default_on_timeout.clone();
+    match &answer {
+        ChoiceResponse::SubmitDivision { assignments } => {
+            let targets: Vec<_> = assignments.iter().map(|(t, _)| *t).collect();
+            let expected: Vec<_> = recipients.iter().map(|(t, _)| *t).collect();
+            assert_eq!(targets, expected, "{req:?}");
+            let sum: u64 = assignments.iter().map(|(_, a)| a).sum();
+            assert_eq!(sum, total, "{req:?}");
+            for ((_, a), (_, min)) in assignments.iter().zip(&recipients) {
+                assert!(a >= min, "{req:?}");
             }
-            amounts[last] += rest;
         }
+        other => panic!("the default of an allocation is a SubmitDivision, got {other:?}"),
     }
-    ChoiceResponse::SubmitDivision {
-        assignments: recipients
-            .iter()
-            .zip(amounts)
-            .map(|((t, _), a)| (*t, a))
-            .collect(),
-    }
+    answer
 }
 
 fn run_case(case: &Case, effects: Vec<ReplacementEffect>, strategy: Strategy) -> Run {
@@ -272,7 +266,7 @@ fn run_case(case: &Case, effects: Vec<ReplacementEffect>, strategy: Strategy) ->
     drive_with(bus, Call::batch(case.events.clone(), false), |_, req| {
         if matches!(req.payload, ChoicePayload::DivideValue { .. }) {
             assert_eq!(req.reason.cr, "CR 615.7", "{req:?}");
-            return divide_answer(req, strategy, &mut rng);
+            return divide_answer(req);
         }
         let n = option_count(req) as u64;
         assert!(n >= 2, "a request offers at least two effects: {req:?}");

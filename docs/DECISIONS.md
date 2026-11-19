@@ -3732,15 +3732,19 @@ candidate set or chooser; non-ZoneChange members never merge. Tests with several
 multiset of requests where the order is not fixed by APNAP/submission order. Cross-kind and
 non-ZoneChange same-result merges (for example two different SBAs that both cause a player to lose
 the game) are out of scope and untested. With `sba = false` a duplicate move of one object is only
-asserted to fail and roll back (the error variant is not asserted).
+asserted to fail and roll back (the error variant is not asserted). Review round 2 (F2): for two
+same-object, same-destination moves with different causes (`Destroy`, `StateBasedAction`) and
+`sba = true`, the tests assert only order independence: both submission orders give the same
+output, registry bytes, world snapshot and state hash, success, and at most one executed move of
+the object (with a shield-counter destroy shield, a one-use exile redirect, and no effect). Which
+cause survives the coalescing is the engine's content-based choice and is not asserted.
 (8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
 with `amount_below`) and uses only events and children no generated effect can loop on, so every
 case must end with `Ok`; invariant (1) is checked as "a non-override effect appears in
 `applications` at most once per submitted event". Generated damage comes from one of two fixed
 battlefield source objects or from no source, so pool shields meet multi-source damage; the runner
-answers a CR 615.7 `DIVIDE_VALUE` request with the recipients' minimums plus the rest all to the
-first (strategy First), all to the last (Last) or split by the seeded LCG (Seeded), and one test
-asserts that at least one generated case raises such a request.
+answers a CR 615.7 `DIVIDE_VALUE` request as (17) states, and one test asserts that at least one
+generated case raises such a request.
 (9) F3 (stack chooser): the public zones API creates a stack object with an explicit controller
 (`Zones::create_object` with `MoveRequest { to: Stack, controller: Some(p) }`), so the spell case is
 tested directly on the stack (owned by player 1, controlled by player 2, and the reverse).
@@ -3753,17 +3757,61 @@ case simply has to finish.
 applied to that source's event is not asserted (only that it appears in `applications` and the
 damage outcome); exact application lists are asserted only where unambiguous ((A:3,B:0): once;
 (A:1,B:2): twice). Only one pool is used per test, so the order of simultaneous allocation requests
-of several pools or choosers is not tested beyond "the allocation request precedes every
-CHOOSE_REPLACEMENT_EFFECT request of the batch, even the active player's". The request's options
-are asserted as `Enumerated([Object(A), Object(B)])`, `min = max = 2`, default all-to-first. The
-"no request when the effect becomes applicable only after another effect modified the event" limit
-is not tested.
-(12) F6 (enters as copy): the rollback when the copy step fails is provoked with a copied object id
-that does not exist; only `BusError::Event(_)` and an unchanged state are asserted, not the inner
-`EventError`.
+of several pools is not tested. The request's options are asserted as
+`Enumerated([Object(A), Object(B)])`, `min = max = 2`; its default follows the capped fill of (17)
+(for pool 3 against 3 + 3 that is (A:3, B:0)). The round-1 readings "the allocation request precedes
+every other request of the batch" and "an allotment a source cannot use stays in the pool" are
+withdrawn by review round 2 (G2, G4): see (15) and (17).
+(12) F6 (enters as copy): the copy is part of the entry (CR 707.5): the call executes and logs ONE
+non-empty batch for the entry, holding the entering event and no `BecomeCopy` event (the log gains
+one batch, not two); a `Skip` effect on `BecomeCopy` is not applied; `copy_of(new id)` is the
+original. Whether an empty batch also appears in `BusReport::executed` is not asserted ((2)). The
+rollback when the copy step fails is provoked with a copied object id that does not exist; only
+`BusError::Event(_)` and an unchanged state are asserted, not the inner `EventError`.
 (13) F11/F4: an Untap of an untapped permanent and zero damage are asserted to leave the state
 completely unchanged and log nothing; Tap of a tapped permanent is not tested (brief: unchanged, no
 CR text).
+(14) G1 (copy source, CR 608.2h, SRS 2.3): the entry copy succeeds when the original is destroyed in
+the SAME batch as the entering event, in both submission orders, for a zone-change entry and a
+token; the copy link is the original's (old) id and the original's executed move ends in a
+graveyard. How the source's characteristics are resolved (current information or last known
+information) is not asserted. The lenient source check is only for the entry copy: a standalone
+`BecomeCopy` whose copied object left the battlefield in an earlier call fails with
+`BusError::Event(_)` and changes nothing. A copied id that never existed still rolls back the whole
+call ((12)).
+(15) G2 (phased allocation, CR 615.7, 616.1f, 616.2): the allocation request is made when the pool
+is about to apply, over the members' current damage. Tested: a self-replacement doubling (1 + 1 ->
+2 + 2 > 3: one request, total 3; (A:1,B:2) leaves A dealing 1, (A:2,B:1) leaves B dealing 1); a
+self-replacement reduction (2 + 2 -> 1 + 1 <= 3: no request, 2 prevented, the pool keeps 1 point,
+checked against a later event with the modifier removed from the registry); the doubling and the
+pool in the same tier: choosing the pool first gives [CHOOSE, CHOOSE] and no division, choosing the
+doubling first gives [CHOOSE, CHOOSE, DIVIDE_VALUE]; the order of the two choice requests between
+A's and B's events is not asserted beyond preceding the division. A request a member makes before
+the pool applies (the active player's Draw choice) precedes the `DIVIDE_VALUE`
+(`req_event_001_r2_g2_allocation_follows_earlier_choices`, which replaces
+`req_event_001_r1_f8_allocation_request_comes_first`). The replay of the doubled allocation is
+compared by output, registry bytes, canonical state and hash.
+(16) G3 (shield-counter follow-ups, CR 122.1c, 615.13): the CR does not settle how many shield
+counters simultaneous damage to one permanent removes; the tests pin the Orchestrator's reading
+(R8) that ONE counter is removed for all simultaneous damage to that permanent: a shield-less
+`Prevent { then }` effect queues its follow-up once per (effect, recipient) per batch, while every
+damage event is still fully prevented and counted in `prevented`. Separate calls remove one counter
+each; two permanents with their own shields each lose one; a generic follow-up (`LifeChange` of
+player 1) on damage to player 2 from two sources executes once. `BusReport::applications` is
+asserted to list the effect once per prevented damage event ([e1, e1]); this is a reading given by
+the brief, not derived from the CR.
+(17) G4 (allotment caps, CR 615.7): each allotment is capped at its source's current damage. An
+over-cap answer (pool 4 with A 3, B 2: (A:1,B:3), (A:4,B:0), (A:0,B:4); pool 3: (A:0,B:3)) is
+asserted as rejected in either manifestation: the session refuses the answer and stays pending with
+its base unchanged, or the call ends with a bus error and the world and registry unchanged; the
+error variant is not asserted. The timeout default fills recipients in ascending id order up to each
+source's damage (pool 4, A 3, B 2: (A:3,B:1); pool 3: (A:3,B:0)), and answering with it is
+asserted to complete. With valid answers a batch that asked drains the pool and removes the effect;
+a later damage event is dealt in full. The property runner answers every allocation request with the
+request's own `default_on_timeout` (it cannot see current damage after generated modifications, so
+any other division could exceed a cap); it checks that the default divides the total among exactly
+the request's recipients, each at least its minimum, and the "every case ends Ok" invariant is
+kept.
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
