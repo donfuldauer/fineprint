@@ -126,6 +126,50 @@ fn req_event_001_chooser_create_token() {
     assert_eq!(req.chooser, P2);
 }
 
+// REQ-EVENT-001, CR 616.1, 112.2, 109.4 (F3): the chooser for an object on the stack is its
+// controller (a spell owned by player 1 and controlled by player 2: player 2 is asked), not its
+// owner.
+#[test]
+fn req_event_001_r1_f3_chooser_stack_object_controller() {
+    for (owner, controller) in [(P1, P2), (P2, P1), (P1, P1)] {
+        let mut w = World::new();
+        let spell = w.create_controlled(ZoneKind::Stack, owner, Some(controller));
+        assert_eq!(
+            w.zones
+                .object(spell)
+                .expect("on the stack")
+                .rules_controller(),
+            Some(controller)
+        );
+        let req = request_for(
+            w,
+            kind(BusEventKind::ZoneChange),
+            zone_change(spell, ZoneKind::Graveyard, ZoneChangeCause::CounterSpell),
+        );
+        assert_eq!(req.chooser, controller, "owner {owner:?}");
+        assert_eq!(req.reason.source, Some(spell));
+    }
+}
+
+// REQ-EVENT-001, CR 616.1, 109.4 (F3): an object with no controller (a graveyard card owned by
+// player 1) is chosen for by its owner, also when player 2 is active.
+#[test]
+fn req_event_001_r1_f3_chooser_graveyard_card_owner() {
+    for active in [P1, P2] {
+        let mut w = World::new();
+        w.game
+            .set_active_player(Some(active))
+            .expect("known player");
+        let card = w.create(ZoneKind::Graveyard, P1);
+        let req = request_for(
+            w,
+            kind(BusEventKind::ZoneChange),
+            zone_change(card, ZoneKind::Exile, ZoneChangeCause::Exile),
+        );
+        assert_eq!(req.chooser, P1);
+    }
+}
+
 // REQ-EVENT-001, CR 616.1: the chooser for PhaseBegins and StepBegins is the active player.
 #[test]
 fn req_event_001_chooser_phase_and_step_active_player() {
@@ -375,7 +419,12 @@ fn req_event_001_interrupt_conversions() {
         Interrupt::from(BusInterrupt::Pending(Box::new(req.clone()))),
         Interrupt::Pending(Box::new(req))
     );
-    for e in [BusError::RepeatLimit, BusError::DepthExceeded] {
+    for e in [
+        BusError::RepeatLimit,
+        BusError::DepthExceeded,
+        BusError::WorkLimit,
+    ] {
+        assert!(!e.to_string().is_empty(), "{e:?}");
         assert_eq!(
             Interrupt::from(BusInterrupt::Error(e.clone())),
             Interrupt::Error(ChoiceError::Procedure(e.to_string()))
@@ -593,8 +642,8 @@ fn req_event_001_registry_ids_and_remove() {
     assert_eq!(reg.get(eid(9)), Some(&e(9)));
 }
 
-// REQ-EVENT-001, CR 615: canonical bytes are equal for equal registries regardless of insertion
-// order, and change after a shield use.
+// REQ-EVENT-001: canonical bytes are equal for equal registries regardless of insertion order,
+// and change after a shield use.
 #[test]
 fn req_event_001_registry_canonical_encoding() {
     let a =
@@ -955,4 +1004,96 @@ fn req_event_001_matcher_fields_on_wrong_kind_do_not_match() {
         },
         zone_change(obj, ZoneKind::Graveyard, ZoneChangeCause::Sacrifice)
     ));
+}
+
+// ---------------------------------------------------------------------------------------------
+// review round 1: redirected entry keeps or clears the controller (F9)
+// ---------------------------------------------------------------------------------------------
+
+/// A hand card of player 1 moved to the battlefield under player 2's control, with one effect
+/// redirecting it to `to`.
+fn redirected_entry(to: ZoneKind) -> Run {
+    let mut w = World::new();
+    let card = w.create(ZoneKind::Hand, P1);
+    let mut request = fineprint_core::zones::MoveRequest::new(ZoneKind::Battlefield);
+    request.controller = Some(P2);
+    let effect = fx(
+        1,
+        m_zc_object(card),
+        Action::Modify(Modification::SetDestination(to)),
+    );
+    run_event(
+        Bus::new(w, vec![effect]),
+        GameEvent::ZoneChange {
+            object: card,
+            request,
+            cause: ZoneChangeCause::Other,
+        },
+        &[],
+    )
+}
+
+// REQ-EVENT-001, CR 109.4, 614.1c (F9): an entry under player 2's control redirected to a zone
+// other than the battlefield or the stack executes there (no controller), nothing rolled back.
+#[test]
+fn req_event_001_r1_f9_redirect_clears_controller() {
+    for to in [
+        ZoneKind::Exile,
+        ZoneKind::Graveyard,
+        ZoneKind::Hand,
+        ZoneKind::Library,
+    ] {
+        let r = redirected_entry(to);
+        assert_eq!(r.applications(), eids(&[1]), "{to:?}");
+        let executed = r.executed();
+        assert_eq!(executed.len(), 1);
+        let moved = new_id(&executed[0].outcome);
+        assert_eq!(r.world().zone_of(moved), Some(to));
+        assert_eq!(
+            r.world()
+                .zones
+                .object(moved)
+                .expect("moved")
+                .rules_controller(),
+            None
+        );
+        match executed[0].instance.event() {
+            GameEvent::ZoneChange { request, .. } => {
+                assert_eq!(request.to, to);
+                assert_eq!(request.controller, None);
+            }
+            other => panic!("expected a ZoneChange, got {other:?}"),
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 109.4 (F9): redirecting to the battlefield or the stack keeps the
+// requested controller.
+#[test]
+fn req_event_001_r1_f9_redirect_keeps_controller_where_accepted() {
+    for to in [ZoneKind::Battlefield, ZoneKind::Stack] {
+        let r = redirected_entry(to);
+        let executed = r.executed();
+        assert_eq!(executed.len(), 1, "{to:?}");
+        let moved = new_id(&executed[0].outcome);
+        assert_eq!(r.world().zone_of(moved), Some(to));
+        assert_eq!(
+            r.world()
+                .zones
+                .object(moved)
+                .expect("moved")
+                .rules_controller(),
+            Some(P2)
+        );
+        if to == ZoneKind::Battlefield {
+            assert_eq!(
+                r.world()
+                    .permanents
+                    .get(moved)
+                    .expect("a permanent")
+                    .controller(),
+                P2
+            );
+        }
+    }
 }
