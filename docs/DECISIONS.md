@@ -3382,3 +3382,83 @@ finish; until then `cargo xtask cr check` reports the new citations as "not in
 docs/cr-citations.json".
 **Rationale:** R1 owned paths.
 **Alternatives:** Regenerating the index from the Implementer (edits a file outside the owned paths).
+
+## #27 FP-026 — LKI sources: markers govern counters, Permanents govern attachments
+
+**Decision:** (CodeRabbit round 1, F1/F2.) `ObjectMarkers` is the single source of counters on
+objects: `AddCounters`, `RemoveCounters` and the LKI record all read and write it, and the
+caller's `CharacteristicsProvider::counters` is not consulted by the events module. The
+permanent container is the single source of the objects attached to a permanent: the LKI
+record's `attached_here` is exactly `Permanents::attachments_of(AttachTarget::Permanent(id))`
+(ascending), and the provider's `attached_here` is not consulted. This supersedes the
+"provider counters overridden per kind by the markers" and "provider's attachments plus
+`Permanents`" text of "LKI capture order inside a batch". The Implementer's unit test
+`req_event_001_lki_counters_merge` is replaced by `req_event_001_lki_counters_single_source`
+(R10: a recorded contract correction, not a weakened assertion; the counters the events put
+are still asserted exactly, and the provider-only kind is now asserted absent).
+**Rationale:** With two sources a provider count and no marker made `AddCounters` start from 0
+and replace the total, `RemoveCounters` find nothing, and LKI report the provider total again;
+`Unattach` edits only `Permanents`, so a stale provider attachment survived into LKI. A
+"provider baseline plus marker tombstone" model would need markers to store 0, breaking the
+"amounts >= 1" contract and the canonical encoding. The events module is what puts counters
+and attaches, so its own state is the authority (CR 122.1, CR 122.2, CR 701.3a, CR 701.3d).
+**Alternatives:** Provider as baseline with zero-count tombstones (encoding change); reading
+the provider in `held_counters` too (two writers of one value); the union of both attachment
+sources (stale entries survive `Unattach`).
+
+## #27 FP-026 — Draw of a token in a library
+
+**Decision:** (F4.) If the top card of the library is a token's card (`ObjectMarkers::is_token`),
+`Draw` is a no-op (`Ok(None)`): no move, no LKI, no `CardsDrawn`, no log entry, and no
+empty-library flag (the library is not empty). Same rule as `ZoneChange` of a token off the
+battlefield.
+**Rationale:** CR 111.8: such a token "remains in its current zone instead"; a blocked move is
+not a draw (CR 121.1 puts the top card into the hand, which does not happen), and CR 121.4 is
+about an empty library.
+**Alternatives:** An error (would roll back simultaneous events); skipping to the next card
+(not what CR 121.1 says).
+
+## #27 FP-026 — Face-down state kept in the zone record and Permanents together
+
+**Decision:** (F5, F6, F10.) The zone record's `face_down` and the permanent's
+`status().face_down` never disagree after an event. (1) A `ZoneChange` onto the battlefield
+sets the new permanent's face status from the zone record (a face-down entry is face down).
+(2) A same-zone battlefield reposition (where `Zones` overwrites the record's `face_down` with
+the request's) sets the permanent's status to the record's. (3) `TurnFaceUp`/`TurnFaceDown`
+update both: `Zones` has no public face setter and zones/ is not owned by #27, so the record is
+updated by a same-zone battlefield reposition (`MoveRequest { to: Battlefield, position: Top,
+face_down, controller: Some(record.controller) }`; same id, `ids` untouched, the battlefield is
+unordered; the controller is passed explicitly because `None` would fall back to the owner),
+then `Permanents::set_face_down`. Both happen inside the batch, so a later failure rolls both
+back. The event is a no-op only if both already equal the requested status; otherwise it
+repairs them and occurs (`Outcome::Applied`). A later zones/integration unit may add a direct
+setter and replace the reposition. This settles, for events, the #20 note that the record's
+`face_down` is "reconciled with `Status::face_down` by the integration unit".
+**Rationale:** The redacted projection (REQ-CORE-004) and LKI capture read the zone record: a
+permanent turned face down only in `Permanents` stayed identifiable to an opponent (a
+hidden-information leak, R12) and its LKI said face up while its permanent snapshot said face
+down. CR 701.27b and CR 708.8: turning face up or down is an action on the same object (no
+zone change, CR 400.7).
+**Alternatives:** Making the projection read `Permanents` (knowledge/ is not owned and the
+projection takes only `Zones`); adding a setter to `Zones` (outside the owned paths; left to a
+later unit).
+
+## #27 FP-026 — Same-zone reposition reports no LKI
+
+**Decision:** (F3.) A same-zone reposition always reports `lki_captured == false`, even when the
+same object was pre-captured because a later event of the batch (for example a draw of the
+only library card) moves it out of its zone; that later event reports `true`.
+**Rationale:** The flag belongs to the event that departs (CR 400.7: a reposition is not a zone
+change; CR 603.10a, CR 704.8 capture is for the departure).
+**Alternatives:** Reporting the pre-capture on the first event naming the object (misattributes
+the record to a non-departure).
+
+## #27 FP-026 — History copy-on-write cost
+
+**Decision:** (F12, deferred.) Keep the `Arc::make_mut` pattern in `History`: the planning run
+and the real run each copy the history map on their first history write after a snapshot.
+**Rationale:** The same copy-on-write pattern as `Zones`, `Permanents`, `MemoryTable` and
+`LkiStore`; no SRS requirement or issue criterion bounds it; changing it would redesign the
+batch executor's planning/rollback. Revisit when a performance or replay unit measures it.
+**Alternatives:** Staging history updates until the batch succeeds; a persistent map that
+shares unchanged entries.

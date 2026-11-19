@@ -67,9 +67,12 @@ enum LkiMode<'s> {
     On(&'s BTreeSet<ObjectId>),
 }
 
-/// The provider LKI capture uses: characteristics from the caller's provider; counters from
-/// the caller's provider overridden per kind by the counters the events module holds; the
-/// objects attached here from the caller's provider together with the permanent container.
+/// The provider LKI capture uses (CR 603.10, CR 608.2h): characteristics from the caller's
+/// provider; counters only from [`ObjectMarkers`], the single source of counters on objects
+/// (CR 122.1), which `AddCounters` and `RemoveCounters` also read and write; the objects
+/// attached here only from the permanent container, which `Attach` and `Unattach` write
+/// (CR 701.3a, CR 701.3d). The caller's provider's `counters` and `attached_here` are not
+/// consulted, so LKI always matches what the events themselves did (see DECISIONS).
 struct LkiProvider<'a> {
     inner: &'a dyn CharacteristicsProvider,
     markers: &'a ObjectMarkers,
@@ -81,16 +84,14 @@ impl CharacteristicsProvider for LkiProvider<'_> {
         self.inner.characteristics(id)
     }
 
+    /// CR 122.1: the counters the events module holds, and nothing else.
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
-        let mut counters = self.inner.counters(id);
-        counters.extend(self.markers.counters(id));
-        counters
+        self.markers.counters(id)
     }
 
+    /// CR 701.3a: the permanents attached to `id` in the permanent container, ascending.
     fn attached_here(&self, id: ObjectId) -> Vec<ObjectId> {
-        let mut attached = self.inner.attached_here(id);
-        attached.extend(self.permanents.attachments_of(AttachTarget::Permanent(id)));
-        attached
+        self.permanents.attachments_of(AttachTarget::Permanent(id))
     }
 }
 
@@ -357,6 +358,16 @@ impl EventContext<'_> {
             self.events.flag_empty_library_draw(player);
             return Ok(None);
         };
+        let card = self
+            .zones
+            .object(top)
+            .ok_or(EventError::UnknownObject(top))?
+            .card;
+        if self.events.markers().is_token(card) {
+            // CR 111.8: a token that has left the battlefield remains in its current zone; the
+            // blocked move is no draw (and the library is not empty, so no CR 121.4 flag).
+            return Ok(None);
+        }
         let (moved, lki_captured) =
             self.move_with_lki(top, MoveRequest::new(ZoneKind::Hand), mode)?;
         let turn = self.turn();
@@ -384,8 +395,12 @@ impl EventContext<'_> {
         };
         let moved = self.zones.move_object(self.ids, object, request)?;
         if moved.old == moved.new {
-            // CR 400.7: a same-zone reposition is not a zone change.
-            return Ok((moved, lki_captured));
+            // CR 400.7: a same-zone reposition is not a zone change: no LKI belongs to it (an
+            // id pre-captured for a later departure in the batch is reported by that event).
+            // The zone record now carries the request's face status; keep the permanent's
+            // status equal to it (CR 701.27b, CR 708.8).
+            self.sync_face_down(moved.new)?;
+            return Ok((moved, false));
         }
         self.memories.apply_zone_change(&moved);
         if moved.from == ZoneId::Battlefield && self.permanents.get(moved.old).is_some() {
@@ -400,6 +415,8 @@ impl EventContext<'_> {
                 .controller;
             // CR 110.1: it becomes a new permanent.
             self.permanents.enter(moved.new, controller, self.turn())?;
+            // A permanent put onto the battlefield face down is face down (CR 708.8).
+            self.sync_face_down(moved.new)?;
         }
         // CR 122.2, CR 400.7: counters, marked damage and copy links cease to exist.
         self.events.markers_mut().forget(moved.old);
@@ -693,20 +710,58 @@ impl EventContext<'_> {
         Ok(Some(Outcome::Applied))
     }
 
-    /// CR 701.27b: turning face up or down is its own action on the same object; CR 708.8.
+    /// Sets the face status of `object`, if it is a held permanent on the battlefield, to its
+    /// zone record's, so the two never disagree (CR 708.8).
+    fn sync_face_down(&mut self, object: ObjectId) -> Result<(), EventError> {
+        let Some(permanent) = self.permanents.get(object) else {
+            return Ok(());
+        };
+        let record = self
+            .zones
+            .object(object)
+            .ok_or(EventError::UnknownObject(object))?;
+        if record.zone == ZoneId::Battlefield && permanent.status().face_down != record.face_down {
+            self.permanents.set_face_down(object, record.face_down)?;
+        }
+        Ok(())
+    }
+
+    /// CR 701.27b: turning face up or down is its own action on the same object (no zone
+    /// change, CR 400.7); CR 708.8.
+    ///
+    /// Updates both the zone record's `face_down` (which the redacted projection and LKI
+    /// capture read, REQ-CORE-004) and the permanent's status, inside the batch, so a later
+    /// failing event rolls both back. The zone container has no direct setter, so the record
+    /// is updated by a same-zone battlefield reposition that keeps the id and passes the
+    /// current controller explicitly (see DECISIONS). The event is a no-op only if both
+    /// already equal `face_down`; if they disagree, the event repairs them and occurs.
     fn set_face_down(
         &mut self,
         object: ObjectId,
         face_down: bool,
     ) -> Result<Option<Outcome>, EventError> {
         self.require_permanent(object)?;
-        let current = self
+        let record = *self
+            .zones
+            .object(object)
+            .ok_or(EventError::UnknownObject(object))?;
+        if record.zone != ZoneId::Battlefield {
+            return Err(EventError::NotOnBattlefield(object));
+        }
+        let status = self
             .permanents
             .get(object)
             .is_some_and(|p| p.status().face_down);
-        if current == face_down {
+        if status == face_down && record.face_down == face_down {
             return Ok(None);
         }
+        let request = MoveRequest {
+            to: ZoneKind::Battlefield,
+            position: Position::Top,
+            face_down,
+            controller: Some(record.controller),
+        };
+        self.zones.move_object(self.ids, object, request)?;
         self.permanents.set_face_down(object, face_down)?;
         Ok(Some(Outcome::Applied))
     }

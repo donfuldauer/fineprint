@@ -23,6 +23,12 @@
 //! ids, token object, timestamp, turn) and whether LKI was captured (the record itself is in
 //! the `LkiStore` under the old id).
 //!
+//! **Sources of truth.** Counters on objects live only in [`ObjectMarkers`] and attachments only
+//! in the permanent container; LKI records take both from there, never from the
+//! characteristics provider. A permanent's face-down status is kept equal in the zone record
+//! (which the redacted view and LKI read) and in the permanent container: entering face down,
+//! a battlefield reposition and turning face up or down update both.
+//!
 //! **History.** [`History`] counts, per game turn and player, spells cast, life gained and
 //! lost, cards drawn, damage dealt and tokens created, fed only from executed events (after
 //! replacement and prevention) and from [`History::record_spell_cast`]; it answers
