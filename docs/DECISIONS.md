@@ -3700,3 +3700,155 @@ requests (CHOOSE_CARD_NAME is always a validator by design).
 **Alternatives:** (i) Merging repeated entries (rejected: silently reinterprets the answer);
 tracking objects across all methods (rejected: not stated by SRS 15.3, may break legitimate
 overlap). (ii) A count-based check in `well_formed` reusing generate.rs (rejected, reasons above).
+
+## #29 FP-028 — Spec-test choices
+
+**Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_replacement_*.rs`)
+read the brief as follows where it is silent, and assert only the common ground:
+(1) The bus is always driven through a `ChoiceSession` over a test state holding the world
+components and the `ReplacementRegistry` (a `ChoiceContext` is only handed out by a session); a
+`BusInterrupt::Error` becomes the procedure's output so that clause k (registry and world unchanged
+on error) can be checked on the final state. World components are compared by canonical bytes
+(`GameState` and `IdGenerator` by value), as in "#27 FP-026 — Spec-test choices".
+(2) Whether an empty parent batch (every event dropped) appears in `BusReport::executed` is not
+asserted: tests look only at batches that hold events, and at the logged batches (an empty batch is
+never logged, clause l).
+(3) An effect id already present in an incoming event's applied set is expected to stay in the
+executed event's applied set (it was applied to that event); only `contains` is asserted.
+(4) `reason.source` is asserted as `Some(object)` for object events and `None` for a Draw (no
+affected object). The request's options, bounds and default are not asserted.
+(5) The remaining amount of a `Shield::Pool` is checked only behaviourally (the next damage event)
+and by the registry's canonical bytes changing; `ReplacementRegistry::get(..).shield` is not
+asserted to reflect the remainder.
+(6) The "903.9b repeated application" regression is tested two ways: a bounded ZoneChange loop (an
+override effect "to hand -> command zone" applies again after a non-override effect "command zone ->
+hand"; applications `[override, other, override]`), and an override that keeps matching forever
+(`RepeatLimit`, nothing changed).
+(7) 704.7 merging (amended brief): merged events must share kind, first-round candidate set and
+chooser; tests with several merge groups assert the multiset of requests, not their order between
+groups of the same chooser. Cross-kind same-result merges (for example two different SBAs that both
+cause a player to lose the game) are out of scope and untested.
+(8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
+with `amount_below`) and uses only events and children no generated effect can loop on, so every
+case must end with `Ok`; invariant (1) is checked as "a non-override effect appears in
+`applications` at most once per submitted event".
+**Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
+silent, assert the reading every conforming implementation shares.
+**Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
+order between merge groups of one chooser (each over-specifies what the brief leaves open).
+
+## #29 FP-028 — Contained effects are filtered before the tier restriction
+
+**Decision:** When the bus collects R(E'), contained effects (`ReplacementEffect::contained`) are
+removed from the candidates while at least one non-contained effect applies to E'. The tier
+restriction (first non-empty tier of CR 616.1a-e) is applied afterwards to what remains. A
+contained effect becomes choosable once no non-contained effect applies.
+**Rationale:** CR 616.1g (text supplied by the rules-researcher): "While following the steps in
+616.1a-f, one replacement or prevention effect may apply to an event, and another may apply to an
+event contained within the first event. In this case, the second effect can't be chosen until
+after the first effect has been chosen." "Can't be chosen" makes a contained effect ineligible at
+every tier step. Filtering by tier first would give an empty choice when the tier-winning set is
+all contained.
+**Alternatives:** Tier first, then the contained filter (rejected: empty choice sets, see above).
+
+## #29 FP-028 — CR 704.7 merging of state-based-action batches
+
+**Decision:** With `sba = true`, events form a merge group when they have the same
+`BusEventKind`, the same first-round choosable set (after the contained filter and the tier
+restriction) and the same chooser. The group is formed when its first member is reached in APNAP
+order, from that member and the later not-yet-started members. It makes one choice, asked of the
+group's shared chooser (no request if the set has one effect). The chosen effect is applied to
+every member in that round, consumes one shield use and appears once in
+`BusReport::applications`. Only the first round is merged; later rounds run per event. A
+`Shield::Pool` is drawn down across the members in APNAP order. Members with different choosers
+form separate groups, each asking its own chooser, in APNAP order. With `sba = false` there is no
+merging.
+**Rationale:** CR 704.7 (rules-researcher): "If multiple state-based actions would have the same
+result at the same time, a single replacement effect will replace all of them." The brief
+amendment pins the shared-chooser condition. A pool is an amount, not a use, so drawing it across
+members keeps the "prevent the next N" meaning.
+**Alternatives:** Merging across choosers (rejected by the amendment); merging every round
+(rejected: later rounds may differ per event); one pool application per group (rejected: would
+prevent N per member).
+
+## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
+
+**Decision:** CR 704.7 merging here is limited to events of the same `BusEventKind`, the same
+candidate set and the same chooser. Merges across kinds are not implemented, for example two
+different state-based actions that both cause a game loss. There is no game-loss
+`BusEventKind` in this unit.
+**Rationale:** Brief amendment 1; the result comparison needs event kinds this unit does not have.
+**Alternatives:** A result-equivalence relation across kinds (deferred to the unit that adds
+game-loss events).
+
+## #29 FP-028 — A tier set with one effect is applied without asking
+
+**Decision:** When the choosable set (after the contained filter and the tier restriction) has
+exactly one effect, it is applied with no `CHOOSE_REPLACEMENT_EFFECT` request; with two or more
+the chooser is asked.
+**Rationale:** Brief requirement 2; a one-option choice carries no decision and would only add a
+round trip and a request id.
+**Alternatives:** Always ask (rejected: noise for clients, changes request numbering).
+
+## #29 FP-028 — Chooser, APNAP order and the turn-order fallback
+
+**Decision:** The chooser of an event: for `CreateToken`, its controller if set, else its owner;
+for an affected object, the controller in the permanent container if it is a permanent, else its
+owner from the zone record (an unknown object is `BusError::Event(UnknownObject)`); for an
+affected player, that player; otherwise the first player of the APNAP order (the active player).
+APNAP order is `GameState::turn_order()` rotated to start at the active player; if the turn order
+is empty, the players in ascending id order; with no active player, unrotated. Events are
+processed in that order of their choosers, submission order within one chooser; choosers outside
+the order come last by ascending id. The chooser is recomputed from the event as modified so far
+at each request (a `SetController` on a token changes who chooses next).
+**Rationale:** SRS 8.1 step [2] and "simultaneous choosers -> APNAP"; `GameState` has a turn-order
+API, so the ascending-id fallback is needed only when the order is empty.
+**Alternatives:** Fixing the chooser at submission time (rejected: the affected object's
+controller can change through an earlier application).
+
+## #29 FP-028 — Bus limits MAX_CHILD_DEPTH and MAX_REPEATS
+
+**Decision:** `MAX_CHILD_DEPTH = 64`: the submitted batch is depth 0 and a child batch at depth
+above 64 is `BusError::DepthExceeded`. `MAX_REPEATS = 256`: an event may receive at most 256
+applications; the next is `BusError::RepeatLimit`. Both errors roll everything back.
+**Rationale:** Self-feeding `Instead` effects and unbounded CR 614.5 overrides (CR 903.9b-style)
+would otherwise loop forever; the bounds are far above any real chain and keep the bus total.
+**Alternatives:** No bound (non-terminating); a global application budget (harder to explain).
+
+## #29 FP-028 — API details and additions beyond the fixed API
+
+**Decision:** The fixed API is implemented unchanged. Additions: `AmountOp::apply` (public),
+`impl From<BusError> for BusInterrupt`, `impl From<EventError> for BusInterrupt`,
+`impl From<EventError> for BusError`, `Display` for `BusInterrupt`, and `CanonicalEncode` for
+`BusEventKind`, `Tier`, `EventMatcher`, `AmountOp`, `Modification`, `Action`, `Shield` and
+`ReplacementEffect` (the registry encoding is built from them; zone kinds use their one-byte tag).
+The request's enumerated options are `ChoiceOption::Number(i)` for each index `i` of the payload's
+effect list, `min = max = 1`, `reveal_to` empty. `BusReport::executed` lists only batches in which
+an event occurred (as the event log does). `EntersAsCopyOf` emits its `BecomeCopy` child only when
+the executed event's outcome is a token creation or a zone change into the battlefield from
+another zone. `SetDestination` keeps the rest of the request (including any controller). On
+`BusInterrupt::Pending` the registry and the context are also restored, so a caller outside a
+`ChoiceSession` sees no partial change either.
+**Rationale:** Index options are unambiguous even with equal descriptions; the conversions let
+procedures use `?`; the encodings make the registry hashable.
+**Alternatives:** Text options with the descriptions (ambiguous when two descriptions are equal).
+
+## #29 FP-028 — Tiers are declarative data
+
+**Decision:** An effect's `Tier` is data on the effect. The bus does not check that a
+`Modification` fits its tier (for example that a `BackFaceEtb` effect turns a face). The
+back-face-up tier (CR 616.1d) is therefore only as correct as the effect's author, the DSL
+toolchain, which validates `tierHint` against CR 616.1b-d.
+**Rationale:** The engine has no face-turning modification yet; tier validation belongs to the
+toolchain (SRS 14.4.4).
+**Alternatives:** Inferring tiers from actions (cannot see self-replacement or back faces).
+
+## #29 FP-028 — Standalone replacement registry
+
+**Decision:** `ReplacementRegistry` is a separate component passed to `process_batch` next to the
+`EventContext`. It is not joined to `GameState`, its Merkle layout or its wire form. The caller
+keeps it equal to the effects in force; the bus only consumes shields and removes exhausted
+effects.
+**Rationale:** Same approach as "#27 FP-026 — Standalone event state and the rollback set"; the
+integration unit joins the components.
+**Alternatives:** Storing the registry in `GameState` now (outside the owned paths).

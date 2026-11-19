@@ -20,6 +20,8 @@ pub mod memory;
 pub mod objects;
 /// Permanent state on the battlefield: status, designations, control, attachments, combat (REQ-ZONE-001).
 pub mod permanent;
+/// The replacement and prevention bus: collection, precedence tiers, choice, shields, child events (REQ-EVENT-001).
+pub mod replacement;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
 /// Checkpoints, rollback, nested durable sub-transactions and the sandbox snapshot store (REQ-CORE-005).
