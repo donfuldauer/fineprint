@@ -227,3 +227,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #28 (PR #177 review round 2) | Classifier | Sonnet 5.5 | 1 | routed | — | 2 findings (review 5975520007): A repeated PAY_COSTS method index (fix), B sub-cutoff validator fixture (test fix); T1 Sonnet x2 |
 | 03-events | #28 (PR #177 review round 2) | Fixer (src) | Sonnet 5.5 | 1 | done | cargo test --workspace pass; coverage core 99.40%; fmt, clippy, guard clean | repeated method index rejected; synced fixture 5..=14999; DECISIONS round 2 entry |
 | 03-events | #28 (PR #177 review round 2) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_choice_validate 15 passed | repeated method index spec test |
+| 03-events | #29 | Classifier | Opus 5.5 | 1 | routed | — | T2: new replacement/prevention bus (REQ-EVENT-001); confined module so no Fable; allowance unknown. Branch ccr-5e8a5255-wlx6m1 (session's assigned branch) |
+| 03-events | #29 | Rules researcher | Opus 5.5 | 1 | answered | — | 616.1g contained filter before tiers: consistent; 704.7 merge must also require the same chooser; classifier amendments 1 and 2 sent to both executors |
+| 03-events | #29 | Implementer | Opus 5.5 | 1 | done | cargo test --workspace 2270 passed; coverage core 99.28%, replacement/ ~96.5%; fmt, clippy, guard clean | 38 unit tests; amendment 1 applied |
+| 03-events | #29 | Independent Tester | Opus 5.5 | 1 | done | 66 spec tests pass; fmt, clippy, guard clean | amendment 2 applied |
