@@ -635,3 +635,122 @@ fn req_net_003_ask_with_wrong_id_fails() {
     });
     assert!(r.is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ask-time request well-formedness (REQ-NET-003).
+// ---------------------------------------------------------------------------------------------
+
+/// A procedure that asks `req` as its only ask.
+fn ask_only(
+    req: PendingChoiceRequest,
+) -> impl Fn(&mut GameState, &mut ChoiceContext<'_>) -> Result<ChoiceResponse, Interrupt> {
+    move |_s, ctx| ctx.ask(req.clone())
+}
+
+/// A NUMBER request with `19_999` values (a validator contract), id 0.
+fn big_number_request() -> PendingChoiceRequest {
+    let req = ask_kind(
+        ChoiceKind::Number,
+        resolved(ResolvedCandidates::None, 0, 19_998),
+    );
+    assert!(is_validator(&req));
+    req
+}
+
+/// REQ-NET-003: `ask` rejects a request whose default does not validate: `start` returns
+/// `InvalidDefault` with an explanation.
+#[test]
+fn req_net_003_ask_rejects_invalid_default() {
+    let mut req = ask_kind(ChoiceKind::Player, resolved(players(&[1, 2]), 1, 1));
+    req.default_on_timeout = ChoiceResponse::Yes;
+    match ChoiceSession::start(base(1), ask_only(req)) {
+        Err(ChoiceError::InvalidDefault(e)) => assert!(!e.trim().is_empty()),
+        Err(other) => panic!("expected InvalidDefault, got {other:?}"),
+        Ok(_) => panic!("expected InvalidDefault, got a session"),
+    }
+}
+
+/// REQ-NET-003: a validator request whose `max` (or `min`) was changed without its contract is
+/// rejected with `Procedure`; changing both together is accepted and pending.
+#[test]
+fn req_net_003_ask_rejects_stale_contract_bounds() {
+    let stale = |edit: &dyn Fn(&mut PendingChoiceRequest)| {
+        let mut req = big_number_request();
+        edit(&mut req);
+        ChoiceSession::start(base(1), ask_only(req))
+    };
+    match stale(&|r| r.max = 9_999) {
+        Err(ChoiceError::Procedure(m)) => assert!(!m.trim().is_empty()),
+        Err(other) => panic!("expected Procedure, got {other:?}"),
+        Ok(_) => panic!("stale max accepted"),
+    }
+    match stale(&|r| {
+        r.min = 5;
+        r.default_on_timeout = num(5);
+    }) {
+        Err(ChoiceError::Procedure(m)) => assert!(!m.trim().is_empty()),
+        Err(other) => panic!("expected Procedure, got {other:?}"),
+        Ok(_) => panic!("stale min accepted"),
+    }
+    let s = stale(&|r| {
+        r.max = 9_999;
+        if let ChoiceOptions::Validator(c) = &mut r.options {
+            c.max = 9_999;
+        }
+    })
+    .expect("consistent bounds start");
+    assert!(s.pending().is_some());
+    let s = stale(&|r| {
+        r.min = 5;
+        r.default_on_timeout = num(5);
+        if let ChoiceOptions::Validator(c) = &mut r.options {
+            c.min = 5;
+        }
+    })
+    .expect("consistent bounds start");
+    assert!(s.pending().is_some());
+}
+
+/// REQ-NET-003: a second ask with an invalid default makes `submit` of the first answer return
+/// the error and leave status, answers and state hash unchanged.
+#[test]
+fn req_net_003_second_ask_invalid_default_leaves_session_unchanged() {
+    let mut s = ChoiceSession::start(base(1), |s: &mut GameState, ctx| {
+        lose(s, 1, 1);
+        ask_in(ctx, ChoiceKind::YesNo, yes_no())?;
+        let mut req = ask_kind(ChoiceKind::Player, resolved(players(&[1, 2]), 1, 1));
+        req.request_id = ctx.next_request_id();
+        req.default_on_timeout = ChoiceResponse::Yes;
+        ctx.ask(req)?;
+        Ok(())
+    })
+    .expect("first ask is well-formed");
+    let before = observe(&s);
+    match s.submit(RequestId::new(0), ChoiceResponse::Yes) {
+        Err(ChoiceError::InvalidDefault(e)) => assert!(!e.trim().is_empty()),
+        other => panic!("expected InvalidDefault, got {other:?}"),
+    }
+    assert_eq!(observe(&s), before);
+    assert!(!is_done(&s));
+    assert!(s.answers().is_empty());
+}
+
+/// REQ-NET-003: same for a stale validator contract on the second ask (`Procedure`).
+#[test]
+fn req_net_003_second_ask_stale_contract_leaves_session_unchanged() {
+    let mut s = ChoiceSession::start(base(1), |_s: &mut GameState, ctx| {
+        ask_in(ctx, ChoiceKind::YesNo, yes_no())?;
+        let mut req = big_number_request();
+        req.request_id = ctx.next_request_id();
+        req.max = 9_999;
+        ctx.ask(req)?;
+        Ok(())
+    })
+    .expect("first ask is well-formed");
+    let before = observe(&s);
+    match s.submit(RequestId::new(0), ChoiceResponse::No) {
+        Err(ChoiceError::Procedure(m)) => assert!(!m.trim().is_empty()),
+        other => panic!("expected Procedure, got {other:?}"),
+    }
+    assert_eq!(observe(&s), before);
+}
