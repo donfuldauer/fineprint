@@ -437,9 +437,14 @@ impl Shadow {
         matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand) && moved.from != moved.to
     }
 
-    /// The players who observed a hidden-source move, by (i)-(iv) of the brief; `None` when
-    /// step 0 does not apply. `zones` is the state after the move; the position entries are
-    /// the model's state before it.
+    /// The players who observed a hidden-source move, by (i)-(iii) of the brief; `None` when
+    /// step 0 does not apply. `zones` is the state after the move.
+    ///
+    /// Observation is a design rule of the brief (no CR): (i) listed in `observers`, (ii)
+    /// implicitly entitled to the NEW record, (iii) the source is the player's own hand. Holding
+    /// a position entry naming the moved card does NOT make a player an observer: knowing where
+    /// a card is does not reveal which position was selected. The model never looks at the
+    /// stored knowledge or at which object moved to decide observation.
     pub fn observed(
         &self,
         zones: &Zones,
@@ -456,14 +461,7 @@ impl Shadow {
             let i = observers.contains(&v);
             let ii = implicit_can(&new, v);
             let iii = before.zone == ZoneId::Hand(v);
-            let iv = match before.zone {
-                ZoneId::Library(owner) => self
-                    .pos
-                    .get(&(v, owner))
-                    .is_some_and(|e| e.values().any(|o| *o == moved.old)),
-                _ => false,
-            };
-            if i || ii || iii || iv {
+            if i || ii || iii {
                 out.insert(v);
             }
         }
