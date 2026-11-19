@@ -2550,3 +2550,18 @@ needs, and the characteristics come from whatever definition the token copies or
 from.
 **Alternatives:** Add TOKEN support here (out of scope); reject token components (the merged
 token rule could not be tested).
+
+## #23 FP-022 — Independent Tester judgement calls
+
+**Decision:** (1) A Room's `color_indicator` is the union of both halves' indicators in the
+combined zones and on the battlefield whatever the door state, and the cast half's own on the
+stack (as SPLIT in #22). (2) A Room definition error on the shared type line surfaces on the
+battlefield even with both halves locked, because the shared type line always applies (CR 709.5a).
+(3) `MergedPermanent::mana_value` with an unsupported top component returns the same
+`UnsupportedLayout` error as `base_characteristics`. (4) Negative station thresholds are not
+specified: the spec tests assert only that a negative counter count activates no symbol, including
+a `{0+}` symbol.
+**Rationale:** The briefs fixed colors and errors but not these fields and edge cases; each choice
+matches the Implementer's entries above and the nearest existing layout behaviour.
+**Alternatives:** Locked halves drop their indicator (rejected in "A locked Room half keeps its
+color indicator"); a separate mana-value error path for merged permanents (no rule asks for it).
