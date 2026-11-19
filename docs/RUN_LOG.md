@@ -243,3 +243,10 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 2) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 63, events lib 58 passed; fmt, clippy, guard clean | G1-G4, F2, F6 fixed; execute_batch_with_entry_copies added |
 | 03-events | #29 (PR #178 review round 2) | Independent Tester | Opus 5.5 | 1 | done | 131 spec tests pass; fmt, clippy, guard clean | regression specs; new spec_replacement_entry_copy.rs |
 | 03-events | #29 (PR #178 review round 2) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | docs/cr-citations.json regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 2) | Work verifier | Sonnet 5.5 | 1 | pass @ de7da3f | fmt, clippy clean; cargo test --workspace 2353 passed; coverage floors met, bus.rs 94.38%; guard, cr ok | round 2 threads replied and resolved |
+| 03-events | #29 (PR #178 review round 3) | Rules researcher + Issue investigator | Opus 5.5 | 1 | answered | H2, H4, H5 reproduced 25/25 | H1 not a defect (all allocations reachable); H2 member-wise per CR 704.7/701.8b; SRS 704.5g/704.5h erratum verified -> P8 queue line |
+| 03-events | #29 (PR #178 review round 3) | Classifier | Opus 5.5 | 1 | routed | — | T2 Fixer + T2 Independent Tester + T0 docs |
+| 03-events | #29 (PR #178 review round 3) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 74 passed; fmt, clippy, guard clean; bus.rs 95.12% | H2 member-wise groups, H4 spent allotment not offered, H5 allotted first |
+| 03-events | #29 (PR #178 review round 3) | Independent Tester | Opus 5.5 | 1 | done | 137 spec tests pass; fmt, clippy, guard clean | H2/H4/H5 specs incl. 120-seed group property test |
+| 03-events | #29 (PR #178 review round 3) | Docs | Haiku 5.5 | 1 | done | guard ok | SRS erratum entry; HUMAN_QUEUE P8 line |
+| 03-events | #29 (PR #178 review round 3) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |

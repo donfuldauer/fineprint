@@ -4135,6 +4135,12 @@ So an SBA destruction is a destruction, but not one the shield counter replaces.
 CR 122.1c); a separate "SBA destroy" cause (not needed: `StateBasedAction` already carries it,
 and no regeneration effect exists in this unit).
 
+## #29 FP-028 — SRS erratum: state-based-action table rows 704.5g and 704.5h
+
+**Decision:** `docs/SRS.md` is not edited (only a person edits it, PROCESS.md P8). The erratum is recorded here and a P8 line in `docs/HUMAN_QUEUE.md` proposes the edit. The CR 2026-11-06 text wins over the SRS. Two rows of the SRS state-based-action table disagree with it: (1) the 704.5g row says "It is destroyed. Regeneration and shield counters can replace this."; CR 704.5g says only "Regeneration can replace this event.", and the shield counter's destroy replacement (CR 122.1c) applies only to destruction "as the result of an effect", which a state-based action is not (CR 701.8b); (2) the 704.5h row says "It is destroyed." and omits that "Regeneration can replace this event." (CR 704.5h). The bus follows the CR: `ReplacementEffect::shield_counter_destroy` matches `ZoneChangeCause::Destroy` only (destruction as the result of an effect), so it does not apply to a move submitted with `ZoneChangeCause::StateBasedAction`; regeneration is not part of this unit.
+**Rationale:** The SRS rules baseline (CR 2026-11-06) is the normative source for rule text, and the SRS rows are summaries of it. The proposed rows: 704.5g "It is destroyed. Regeneration can replace this." and 704.5h "It is destroyed. Regeneration can replace this." (shield counters removed from the 704.5g row).
+**Alternatives:** Implementing the SRS row as written, so that the shield counter replaces lethal-damage destruction (rejected: contradicts CR 122.1c and 701.8b); editing the SRS in this PR (not allowed for agents, P8).
+
 ## #29 FP-028 — CR 704.7 group with two cause-specific effects: request sequence
 
 **Decision:** (Review round 3, H2 (g).) With e1 (one use, `Destroy` only, redirect to exile) and
