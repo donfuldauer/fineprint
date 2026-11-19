@@ -282,3 +282,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #30 | Implementer | Opus 5.5 | 1 | done | 2575 workspace tests pass; fmt, clippy, guard clean; triggers/ 100% lines | triggers::{look_back_kind, events_from_batch, detect, WaitingTriggers} |
 | 03-events | #30 | Independent Tester | Opus 5.5 | 1 | done | 81 spec_triggers_* pass | black-box, no disagreement with the implementation |
 | 03-events | #30 | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #30 (PR #179 review round 1) | work-classifier | Opus 5.5 | 1 | needs-rules → routed | — | 18 findings: 15 fixed, 1 contract (instance identity), 1 deferred to #61 (gain of control), docs |
+| 03-events | #30 (PR #179 review round 1) | rules-researcher | Opus 5.5 | 1 | done | baseline CR-2026-11-06 | destroy, control, draw, damage/life, tokens, re-exile, sacrifice, reposition |
+| 03-events | #30 (PR #179 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | triggers lib 44 passed; workspace green | detect_with_pre_event_memory, events_from_batch_with_lki, cross-view grouping |
+| 03-events | #30 (PR #179 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | detect 45, events 28, lookback 30 passed | black-box spec updates |
+| 03-events | #30 (PR #179 review round 1) | Orchestrator (T0 docs, CR index) | Opus 5.5 | 1 | done | cr check ok | DECISIONS round-1 entries |
