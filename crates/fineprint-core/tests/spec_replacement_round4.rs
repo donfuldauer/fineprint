@@ -235,14 +235,33 @@ fn req_event_001_r4_j1_instead_child_redirect_wins() {
 
 // REQ-EVENT-001, CR 704.3, 704.7, 614.6 (J1 b): as (a) but the child moves X to the graveyard
 // (the group's original destination): no error, the card ends in the graveyard, one move.
+// Review round 5 (N2): the one executed move of X, across every batch, is the Instead child
+// (cause Other), which beats the StateBasedAction member (a replacement-produced move wins over a
+// plain submitted move; Other also encodes before StateBasedAction, checked first).
 #[test]
 fn req_event_001_r4_j1_instead_child_same_destination() {
     let (w, x) = one_permanent();
+    let child = zone_change(x, ZoneKind::Graveyard, ZoneChangeCause::Other);
+    assert!(
+        bytes(&child) < bytes(&death(x, ZoneChangeCause::StateBasedAction)),
+        "precondition: Other encodes before StateBasedAction"
+    );
     let base = Bus::new(w, vec![instead_move(1, x, ZoneKind::Graveyard)]);
     let (a, b) = both_orders(&base, group(x), &[]);
     for r in [&a, &b] {
         assert!(r.result.is_ok(), "{:?}", r.result);
         assert_eq!(moves_of(r, x), 1);
+        let executed_moves: Vec<GameEvent> = r
+            .executed()
+            .iter()
+            .map(|e| e.instance.event().clone())
+            .filter(|e| is_move_of(e, x))
+            .collect();
+        assert_eq!(
+            executed_moves,
+            vec![child.clone()],
+            "the Instead child wins"
+        );
         assert_card_in(r, x, ZoneId::Graveyard(P1));
         assert_eq!(r.applications(), eids(&[1]));
         assert!(r.after.registry.is_empty());

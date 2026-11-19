@@ -113,8 +113,12 @@ fn req_event_001_parent_effect_does_not_apply_to_instead_child() {
     assert_eq!(applied_of(&tap), eids(&[1]));
 }
 
-// REQ-EVENT-001, CR 614.5, 903.9b, SRS 8.1: with `overrides_614_5` the effect that replaced the
-// parent may replace the `Instead` child too.
+// REQ-EVENT-001, CR 614.5, 614.6, 616.1f, SRS 8.1: with `overrides_614_5` the effect that replaced
+// the parent may replace the `Instead` child too. Review round 5 (clause B4, reading Q3): a
+// lineage is judged against the state BEFORE the call executes anything, so the charge counter is
+// still there for every generation and the effect matches its own child Tap forever: the call is
+// `DepthExceeded` and everything is rolled back (corrected from applications [1, 1], tapped, which
+// depended on the counter being removed between generations).
 #[test]
 fn req_event_001_override_effect_applies_again_to_instead_child() {
     let mut w = World::new();
@@ -125,12 +129,49 @@ fn req_event_001_override_effect_applies_again_to_instead_child() {
         GameEvent::Tap { object: obj },
         &[],
     );
-    // Depth 0: replaced. Depth 1: the child Tap is replaced again (the counter is still there
-    // while the child batch is processed), the RemoveCounters executes. Depth 2: the Tap
-    // executes.
-    assert_eq!(r.applications(), eids(&[1, 1]));
-    assert!(r.world().tapped(obj));
-    assert_eq!(r.world().counter(obj, "charge"), 0);
+    assert_eq!(r.error(), &BusError::DepthExceeded);
+    assert_unchanged(&r);
+}
+
+// REQ-EVENT-001, CR 614.5, 614.6, 616.1f, SRS 8.1 (override semantics, review round 5 C2): obj is
+// tapped; e1 (Tap -> Instead[Untap], overrides CR 614.5) and e2 (Untap -> Instead[Tap]). Tap ->
+// (e1) Untap -> (e2) Tap -> (e1 again: it overrides 614.5) Untap -> nothing left (e2 is already
+// applied and does not override). Ok; applications [e1, e2, e1]; obj ends untapped; ONE executed
+// batch holding exactly one Untap whose applied set is {e1, e2}.
+#[test]
+fn req_event_001_override_effect_terminating_chain_applies_again() {
+    let mut w = World::new();
+    let obj = w.create(ZoneKind::Battlefield, P1);
+    w.ok(GameEvent::Tap { object: obj });
+    let on = |kind| EventMatcher {
+        affected_object: Some(obj),
+        ..EventMatcher::new(kind)
+    };
+    let effects = vec![
+        fx(
+            1,
+            on(BusEventKind::Tap),
+            Action::Instead(vec![GameEvent::Untap { object: obj }]),
+        )
+        .with_overrides_614_5(true),
+        fx(
+            2,
+            on(BusEventKind::Untap),
+            Action::Instead(vec![GameEvent::Tap { object: obj }]),
+        ),
+    ];
+    let r = run_event(Bus::new(w, effects), GameEvent::Tap { object: obj }, &[]);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert_eq!(r.applications(), eids(&[1, 2, 1]));
+    assert!(!r.world().tapped(obj), "obj ends untapped");
+    let batches = r.nonempty_batches();
+    assert_eq!(batches.len(), 1, "ONE executed batch");
+    assert_eq!(batches[0].events.len(), 1, "exactly one event");
+    assert_eq!(
+        batches[0].events[0].instance.event(),
+        &GameEvent::Untap { object: obj }
+    );
+    assert_eq!(applied_of(&batches[0].events[0]), eids(&[1, 2]));
 }
 
 // REQ-EVENT-001, CR 615.5 (the prevention's follow-up), CR 614.6 (the Skip), SRS 8.1: children
@@ -309,8 +350,12 @@ fn req_event_001_endless_children_are_depth_exceeded() {
     assert_eq!(fineprint_core::replacement::MAX_CHILD_DEPTH, 64);
 }
 
-// REQ-EVENT-001, SRS 8.1: executed batches are reported parent first, then child batches, and
-// match the logged batches.
+// REQ-EVENT-001, SRS 8.1, CR 704.3, 614.6: the final events of the submitted members and of their
+// `Instead` lineages execute in ONE batch (review round 5, clause B1: a modified event occurs
+// instead of the event it replaces, in the same simultaneous batch; corrected from three batches
+// Tap; life(P1, +1); life(P2, -1)). Order (B2): the non-move final events by the member they
+// descend from, in the order the effect listed them: the damage's lineage [life(P1, +1), the
+// Draw child replaced by life(P2, -1)], then the Tap. The reported batch matches the logged one.
 #[test]
 fn req_event_001_executed_batches_parent_then_children() {
     let mut w = World::new();
@@ -337,25 +382,31 @@ fn req_event_001_executed_batches_parent_then_children() {
         false,
         &[],
     );
+    assert_eq!(r.applications(), eids(&[1, 2]));
     let batches = r.nonempty_batches();
-    assert_eq!(batches.len(), 3);
+    assert_eq!(batches.len(), 1, "ONE executed batch");
+    let events: Vec<GameEvent> = batches[0]
+        .events
+        .iter()
+        .map(|e| e.instance.event().clone())
+        .collect();
     assert_eq!(
-        batches[0].events[0].instance.event(),
-        &GameEvent::Tap { object: obj }
+        events,
+        vec![
+            life_change(P1, 1),
+            life_change(P2, -1),
+            GameEvent::Tap { object: obj }
+        ]
     );
-    assert_eq!(batches[1].events.len(), 1);
-    assert_eq!(batches[1].events[0].instance.event(), &life_change(P1, 1));
-    assert_eq!(batches[2].events[0].instance.event(), &life_change(P2, -1));
     let log = r.new_log();
-    assert_eq!(log.len(), 3);
-    for (a, b) in log.iter().zip(batches.iter()) {
-        let (mut x, mut y) = (Vec::new(), Vec::new());
-        a.encode_canonical(&mut x);
-        b.encode_canonical(&mut y);
-        assert_eq!(x, y);
-    }
-    assert!(batches[0].index < batches[1].index && batches[1].index < batches[2].index);
+    assert_eq!(log.len(), 1, "the log gains one batch");
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    log[0].encode_canonical(&mut x);
+    batches[0].encode_canonical(&mut y);
+    assert_eq!(x, y, "the logged batch equals the reported batch");
+    assert_eq!(log[0].index, batches[0].index);
     assert_eq!(r.world().life(P2), STARTING_LIFE - 1);
+    assert_eq!(r.world().life(P1), STARTING_LIFE + 1);
 }
 
 // ---------------------------------------------------------------------------------------------
