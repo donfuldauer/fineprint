@@ -15,7 +15,9 @@
 //! [`Transactions::commit_durable`] survives the rollback of its parent and of every ancestor:
 //! its effect (the change from its checkpoint to the moment of the durable commit) is carried
 //! over every restored ancestor checkpoint by [`Transactional::carry_durable`] (CR 734.1: the
-//! mana abilities that are not reversed with the action).
+//! mana abilities that are not reversed with the action). After the rollback of an ancestor the
+//! state is that ancestor's checkpoint with, in commit order, every durable effect beneath it
+//! applied exactly once.
 //!
 //! **Sandbox rewind.** [`SnapshotStore`] is a separate bounded history of snapshots for
 //! `RewindToSnapshot` (REQ-API-003). It is not governed by CR 734 and never interacts with
@@ -54,12 +56,23 @@ pub trait Transactional: Clone {
 
 /// The identifier of one transaction of a [`Transactions`] (REQ-CORE-005).
 ///
-/// Opaque. Ids are issued in increasing order and never reused within one [`Transactions`].
+/// Ids are issued in increasing order and never reused by the [`Transactions`] that issued
+/// them. An id is valid only on the [`Transactions`] instance that issued it: keep each handle
+/// with its instance. Passing a handle issued by another instance is a caller error whose
+/// result is unspecified: it may be [`TxnError::UnknownTxn`] or [`TxnError::NotInnermost`], or,
+/// if its number equals that of an open transaction of this instance, it is treated as that
+/// transaction. (Ids carry no instance identity: that would need global mutable state, which
+/// determinism forbids.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TxnId(u64);
 
-/// An error from [`Transactions`] (REQ-CORE-005). A call that returns an error changes nothing:
-/// neither the live state nor the open transactions.
+/// An error from [`Transactions`] (REQ-CORE-005).
+///
+/// A [`Transactions::commit`], [`Transactions::commit_durable`] or [`Transactions::rollback`]
+/// call that returns an error changes nothing: neither the live state nor the open
+/// transactions. This guarantee does not cover [`Transactions::into_state`], which consumes the
+/// wrapper: on [`TxnError::OpenTransactions`] the live state and the open transactions are
+/// dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TxnError {
@@ -72,7 +85,8 @@ pub enum TxnError {
         /// The innermost open transaction.
         innermost: TxnId,
     },
-    /// `into_state` was called while transactions are still open.
+    /// `into_state` was called while transactions are still open. The wrapper, with its live
+    /// state and open transactions, has been consumed and dropped.
     OpenTransactions {
         /// The number of open transactions.
         open: usize,
@@ -110,6 +124,8 @@ pub struct RollbackReport {
 }
 
 /// One durably committed sub-transaction: its checkpoint state and the state at its commit.
+/// Its window (`before` -> `after`) contains the windows of every durable record committed
+/// beneath it, which is why those records are dropped when it is made.
 #[derive(Clone, Debug)]
 struct DurableRecord<S> {
     before: S,
@@ -122,14 +138,17 @@ struct Frame<S> {
     id: TxnId,
     /// The live state at `checkpoint()` time.
     checkpoint: S,
-    /// Durable records of descendants, in commit order.
+    /// Durable records of descendants not covered by another record, in commit order: one per
+    /// durably committed child, plus those a plainly committed or rolled back child passed up.
     durable: Vec<DurableRecord<S>>,
 }
 
 /// A live state with a stack of open, nested transactions (REQ-CORE-005, CR 734).
 ///
 /// All mutation of the live state goes through [`Transactions::state_mut`]. Only the innermost
-/// open transaction can be committed or rolled back.
+/// open transaction can be committed or rolled back. A [`TxnId`] is valid only on the instance
+/// that issued it; using a foreign handle is a caller error with an unspecified result (see
+/// [`TxnId`]).
 #[derive(Clone, Debug)]
 pub struct Transactions<S: Transactional> {
     live: S,
@@ -199,7 +218,10 @@ impl<S: Transactional> Transactions<S> {
 
     /// Commits the innermost transaction `id` durably: the live state is kept and the change
     /// from its checkpoint to now survives the rollback of its parent and of every ancestor.
-    /// With no parent this is exactly [`Transactions::commit`].
+    /// With a parent, the parent receives exactly one record (this transaction's checkpoint and
+    /// the live state now); the durable records of its descendants are dropped, because this
+    /// record's window already contains their changes. With no parent this is exactly
+    /// [`Transactions::commit`].
     ///
     /// CR 734.1: mana abilities that are not reversed with the action are committed this way,
     /// as their own sub-transactions.
@@ -209,25 +231,24 @@ impl<S: Transactional> Transactions<S> {
     /// but not the innermost; nothing changes then.
     pub fn commit_durable(&mut self, id: TxnId) -> Result<(), TxnError> {
         let frame = self.pop_innermost(id)?;
-        let Frame {
-            checkpoint,
-            mut durable,
-            ..
-        } = frame;
+        // CR 734.1: the inherited records are dropped, not forwarded. Every descendant record's
+        // window lies inside this frame's window (checkpoint -> now), so this one record already
+        // carries their effects; forwarding them too would apply each of them twice on an
+        // ancestor's rollback.
         if !self.frames.is_empty() {
-            durable.push(DurableRecord {
-                before: checkpoint,
+            self.hand_to_parent(vec![DurableRecord {
+                before: frame.checkpoint,
                 after: self.live.clone(),
-            });
+            }]);
         }
-        self.hand_to_parent(durable);
         Ok(())
     }
 
     /// Rolls back the innermost transaction `id`: the live state becomes its checkpoint state
     /// exactly, then the effects of durable sub-transactions committed beneath it are carried
-    /// over, in commit order, with [`Transactional::carry_durable`]. The records then move to the
-    /// parent, if any, so that a rollback of an outer ancestor carries them again.
+    /// over, in commit order, with [`Transactional::carry_durable`], each exactly once. The
+    /// records then move to the parent, if any, so that a rollback of an outer ancestor carries
+    /// them again (over that ancestor's checkpoint, again exactly once).
     ///
     /// CR 734.1: the action is reversed by restoring the checkpoint. CR 734.2: the player who
     /// had priority at the checkpoint has it again.
@@ -254,8 +275,12 @@ impl<S: Transactional> Transactions<S> {
 
     /// The live state, consuming the wrapper.
     ///
+    /// Close every open transaction first: this call is not covered by the no-change-on-error
+    /// guarantee of [`TxnError`].
+    ///
     /// # Errors
-    /// [`TxnError::OpenTransactions`] if any transaction is still open.
+    /// [`TxnError::OpenTransactions`] if any transaction is still open. The wrapper has been
+    /// consumed then: the live state and the open transactions are dropped.
     pub fn into_state(self) -> Result<S, TxnError> {
         if self.frames.is_empty() {
             Ok(self.live)

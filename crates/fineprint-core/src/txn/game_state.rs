@@ -6,10 +6,16 @@
 //!
 //! `carry_durable` carries exactly the components a durably committed sub-transaction (a mana
 //! ability that is not reversed, CR 734.1) can change in today's `GameState`: the PRNG, the
-//! identifier generators and the players' life, counters and designations. It never carries the
+//! identifier generators and the players' life, counters and designations. Players are carried
+//! as a delta: the restored player keeps its checkpoint values plus only the change from
+//! `before` to `after` (life and counters additively, a count clamped at 0; a changed
+//! designation takes `after`'s value or absence). The PRNG and the generators are carried as
+//! values (the PRNG set to `after`'s; generators advanced, never rewound). It never carries the
 //! turn position, priority, active player, turn order, effect registry or history ledger, so the
 //! priority player stays the checkpoint's (CR 734.2). Components added to `GameState` by later
 //! units must be added here by those units.
+
+use std::collections::BTreeSet;
 
 use fineprint_base::hash::Digest;
 use fineprint_base::ids::PlayerId;
@@ -79,17 +85,18 @@ impl Transactional for GameState {
             |s| s.issue_link_id().is_ok(),
         );
 
-        // Players present in both `restored` and `after` whose state changed `before` ->
-        // `after`: life, counters and designations become `after`'s.
+        // Players present in `before`, `after` and `restored` whose state changed `before` ->
+        // `after`: only that change is applied over the restored player (CR 734.1: the action's
+        // own changes are reversed, the durable sub-transaction's are not).
         for player in after.players() {
             let id = player.id();
-            if before.player(id) == Some(player) {
+            let Some(prior) = before.player(id) else {
+                continue;
+            };
+            if prior == player {
                 continue;
             }
-            if restored.player(id).is_none_or(|r| r == player) {
-                continue;
-            }
-            copy_player(&mut restored, player);
+            carry_player(&mut restored, prior, player);
         }
 
         restored
@@ -116,38 +123,52 @@ pub(super) fn advance(
     }
 }
 
-/// Makes the life, counters and designations of `restored`'s player `from.id()` equal `from`'s.
-fn copy_player(restored: &mut GameState, from: &PlayerState) {
-    let id = from.id();
-    let Some(current) = restored.player(id) else {
+/// Applies the change of one player from `before` to `after` over `restored`'s player of the
+/// same id, if present: the life delta, the per-key counter delta (clamped at 0, which removes
+/// the entry, because a count is never negative) and the `after` value (or absence) of every
+/// designation that changed. Keys unchanged `before` -> `after` are not touched.
+fn carry_player(restored: &mut GameState, before: &PlayerState, after: &PlayerState) {
+    let Some(mut target) = restored.player_mut(after.id()) else {
         return;
     };
-    let stale_counters: Vec<String> = current
+    if before.life() != after.life() {
+        let life = target
+            .life()
+            .saturating_add(after.life().saturating_sub(before.life()));
+        target.set_life(life);
+    }
+    // Union of the counter kinds of `before` and `after` (ordered: BTreeMap keys).
+    let kinds: BTreeSet<&String> = before
         .counters()
         .keys()
-        .filter(|k| !from.counters().contains_key(*k))
-        .cloned()
+        .chain(after.counters().keys())
         .collect();
-    let stale_designations: Vec<String> = current
+    for kind in kinds {
+        let (from, to) = (before.counter(kind), after.counter(kind));
+        if from == to {
+            continue;
+        }
+        let amount = target
+            .counter(kind)
+            .saturating_add(to.saturating_sub(from))
+            .max(0);
+        target.set_counter(kind, amount);
+    }
+    let keys: BTreeSet<&String> = before
         .designations()
         .keys()
-        .filter(|k| !from.designations().contains_key(*k))
-        .cloned()
+        .chain(after.designations().keys())
         .collect();
-    let Some(mut target) = restored.player_mut(id) else {
-        return;
-    };
-    target.set_life(from.life());
-    for kind in &stale_counters {
-        target.set_counter(kind, 0);
-    }
-    for (kind, amount) in from.counters() {
-        target.set_counter(kind, *amount);
-    }
-    for key in &stale_designations {
-        target.clear_designation(key);
-    }
-    for (key, value) in from.designations() {
-        target.set_designation(key, value.clone());
+    for key in keys {
+        let to = after.designation(key);
+        if before.designation(key) == to {
+            continue;
+        }
+        match to {
+            Some(value) => target.set_designation(key, value.clone()),
+            None => {
+                target.clear_designation(key);
+            }
+        }
     }
 }
