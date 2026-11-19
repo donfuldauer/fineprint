@@ -59,7 +59,12 @@ fn zone_change_captures_lki_from_before_the_move() {
     let a = w.create_controlled(ZoneKind::Battlefield, P1, Some(P2));
     let host = w.create(ZoneKind::Battlefield, P2);
     w.provider.set_chars(a, chars("test.alpha_3_4", 3, 4));
-    w.provider.set_counter(a, "+1/+1", 2);
+    // Contract change C2: object counters live only in the event layer's markers.
+    w.ok(GameEvent::AddCounters {
+        target: CounterTarget::Object(a),
+        kind: "+1/+1".into(),
+        amount: 2,
+    });
     w.permanents.set_tapped(a, true).unwrap();
     w.permanents
         .attach(a, AttachTarget::Permanent(host))
