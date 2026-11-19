@@ -106,8 +106,9 @@ fn st(back_up: bool, copying_back_face: bool, flipped: bool) -> St {
 // DFC_NONMODAL
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-OBJ-002, CR 712.6a, 202.3: outside the stack and battlefield a nonmodal DFC has only its
-/// front face, whatever cast choice or status is passed; mana value from the front's cost.
+/// REQ-OBJ-002, CR 712.6a, 202.3, 202.3b: outside the stack and battlefield a nonmodal DFC has
+/// only its front face, whatever cast choice or status is passed; mana value from the front's
+/// cost, `copying_back_face` included (CR 202.3b covers only a spell or permanent).
 #[test]
 fn dfc_nonmodal_712_6a_front_outside_stack_and_battlefield() {
     let d = nonmodal();
@@ -119,9 +120,8 @@ fn dfc_nonmodal_712_6a_front_outside_stack_and_battlefield() {
                 let q = query(zone, cast, s);
                 let got = base_characteristics(&d, &q, v).expect("front");
                 assert_chars(&got, &expected_front(), &format!("{zone:?} {cast:?} {s:?}"));
-                let want = if s.copying_back_face { 0 } else { 4 };
                 for ctx in contexts() {
-                    assert_eq!(mana_value(&d, &q, ctx, v), Ok(want), "{zone:?} {s:?}");
+                    assert_eq!(mana_value(&d, &q, ctx, v), Ok(4), "{zone:?} {s:?}");
                 }
             }
         }
@@ -208,8 +208,10 @@ fn dfc_nonmodal_712_6d_battlefield_face_up_cast_ignored() {
     }
 }
 
-/// REQ-OBJ-002, CR 202.3b, 712.6d: `copying_back_face` makes the mana value 0 in every zone,
-/// while the characteristics still follow the selection table.
+/// REQ-OBJ-002, CR 202.3b, 712.6d, 712.6a: `copying_back_face` makes the mana value 0 for a
+/// spell on the stack or a permanent on the battlefield only; in Library, Hand, Graveyard, Exile
+/// and Command the flag is ignored and the front face's cost applies. The characteristics still
+/// follow the selection table.
 #[test]
 fn dfc_nonmodal_202_3b_copy_of_back_face_mana_value_zero() {
     let d = nonmodal();
@@ -222,8 +224,19 @@ fn dfc_nonmodal_202_3b_copy_of_back_face_mana_value_zero() {
                 Cast::None
             };
             let q = query(zone, cast, st(back_up, true, false));
+            let in_play = zone == ZoneKind::Stack || zone == ZoneKind::Battlefield;
+            let want_mv = if in_play { 0 } else { 4 };
             for ctx in contexts() {
-                assert_eq!(mana_value(&d, &q, ctx, v), Ok(0), "{zone:?} {back_up}");
+                assert_eq!(
+                    mana_value(&d, &q, ctx, v),
+                    Ok(want_mv),
+                    "{zone:?} {back_up}"
+                );
+                assert_eq!(
+                    DfcNonmodalLayout.mana_value(&d, &q, ctx, v),
+                    Ok(want_mv),
+                    "{zone:?} {back_up}"
+                );
             }
             let shows_back = back_up && (zone == ZoneKind::Stack || zone == ZoneKind::Battlefield);
             let want = if shows_back {

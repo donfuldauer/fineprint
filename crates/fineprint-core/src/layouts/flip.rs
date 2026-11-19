@@ -8,7 +8,7 @@
 use fineprint_dsl::card::{CardDefinitionDSL, FaceKind, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::faces::{chars, faces};
+use super::faces::{chars, effective_ctx, faces};
 use super::types::{Gating, Layout, LayoutError, LayoutQuery};
 use crate::objects::{Characteristics, ManaValueContext};
 use crate::zones::ZoneKind;
@@ -40,7 +40,9 @@ impl Layout for FlipLayout {
         }
         let alt = chars(flipped, vocab)?;
         // CR 710.1b, 710.2: a flipped permanent uses the alternative name, text box, type line
-        // and power/toughness; CR 710.1c: its mana cost and color do not change.
+        // and power/toughness; CR 710.1c: its mana cost and color do not change. Loyalty,
+        // defense and the hand and life modifiers are not among the characteristics CR 710.1b
+        // and 710.2 replace, so they stay the Main face's (DECISIONS.md #22).
         Ok(Characteristics {
             names: alt.names,
             mana_cost: normal.mana_cost,
@@ -53,10 +55,10 @@ impl Layout for FlipLayout {
             abilities: alt.abilities,
             power: alt.power,
             toughness: alt.toughness,
-            loyalty: alt.loyalty,
-            defense: alt.defense,
-            hand_modifier: alt.hand_modifier,
-            life_modifier: alt.life_modifier,
+            loyalty: normal.loyalty,
+            defense: normal.defense,
+            hand_modifier: normal.hand_modifier,
+            life_modifier: normal.life_modifier,
         })
     }
 
@@ -71,7 +73,7 @@ impl Layout for FlipLayout {
         // selected characteristics always carry the Main face's cost.
         Ok(self
             .base_characteristics(def, query, vocab)?
-            .mana_value(ctx))
+            .mana_value(effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {

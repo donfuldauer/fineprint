@@ -594,14 +594,20 @@ pub fn split_combined(left: &CardFaceDSL, right: &CardFaceDSL) -> Characteristic
     }
 }
 
-/// Flipped characteristics: the Flipped face's, but cost, indicator and colors stay the Main
-/// face's (CR 710.1b, 710.1c, 710.2).
+/// Flipped characteristics: name, text box, type line and P/T are the Flipped face's
+/// (CR 710.1b, 710.2); cost, indicator and colors stay the Main face's (CR 710.1c); loyalty,
+/// defense and the hand and life modifiers are not among the characteristics CR 710.1b and 710.2
+/// replace, so they stay the Main face's too.
 pub fn flip_flipped_chars(main: &CardFaceDSL, flipped: &CardFaceDSL) -> Characteristics {
     let m = chars(main);
     Characteristics {
         mana_cost: m.mana_cost,
         color_indicator: m.color_indicator,
         colors: m.colors,
+        loyalty: m.loyalty,
+        defense: m.defense,
+        hand_modifier: m.hand_modifier,
+        life_modifier: m.life_modifier,
         ..chars(flipped)
     }
 }
@@ -639,6 +645,13 @@ pub fn oracle(
     let layout = d.layout;
     let stack = zone == ZoneKind::Stack;
     let battlefield = zone == ZoneKind::Battlefield;
+    // CR 202.3e, 107.3g, 107.3m: X (and Y, Z: CR 107.3p) is 0 in every zone but the stack,
+    // whatever context the caller supplies.
+    let ctx = if stack {
+        ctx
+    } else {
+        ManaValueContext::OffStack
+    };
     let main_plain = |c: Characteristics| {
         let mv = cost_mv(c.mana_cost.as_ref(), ctx);
         (c, mv)
@@ -688,7 +701,9 @@ pub fn oracle(
             } else {
                 front
             };
-            let mv = if st.copying_back_face {
+            // CR 202.3b, 712.6d: only a spell or permanent copying a back face has mana value
+            // 0; in every other zone only the front face applies (CR 712.6a).
+            let mv = if st.copying_back_face && (stack || battlefield) {
                 0
             } else {
                 cost_mv(front.mana_cost.as_ref(), ctx)

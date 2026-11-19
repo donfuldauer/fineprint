@@ -2,13 +2,14 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Shared checks: layout match and face sets (REQ-OBJ-002).
+//! Shared checks: layout match and face sets, and the mana-value context (REQ-OBJ-002).
 
 use fineprint_dsl::card::{CardDefinitionDSL, CardFaceDSL, FaceKind, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::types::LayoutError;
-use crate::objects::Characteristics;
+use super::types::{LayoutError, LayoutQuery};
+use crate::objects::{Characteristics, ManaValueContext};
+use crate::zones::ZoneKind;
 
 /// Checks that `def` is a `layout` definition whose faces are exactly the face kinds in
 /// `required`, each once, in any order; returns the faces in the order of `required`.
@@ -56,4 +57,17 @@ pub(super) fn chars(
     vocab: &RulesVocabulary,
 ) -> Result<Characteristics, LayoutError> {
     Ok(Characteristics::from_face(face, vocab)?)
+}
+
+/// The mana-value context that applies to an object in `query.zone`: the caller's `ctx` on the
+/// stack, [`ManaValueContext::OffStack`] in every other zone whatever `ctx` says.
+pub(super) fn effective_ctx(query: &LayoutQuery, ctx: ManaValueContext) -> ManaValueContext {
+    if query.zone == ZoneKind::Stack {
+        // CR 202.3e: on the stack X is the number chosen for it (CR 107.3p: Y likewise).
+        ctx
+    } else {
+        // CR 202.3e, 107.3g: off the stack X is 0, even on the battlefield (CR 107.3m); Y
+        // follows the same rules (CR 107.3p) and Z is treated the same way.
+        ManaValueContext::OffStack
+    }
 }

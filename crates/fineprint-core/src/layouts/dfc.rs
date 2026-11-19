@@ -8,7 +8,7 @@
 use fineprint_dsl::card::{CardDefinitionDSL, CardFaceDSL, FaceKind, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::faces::{chars, faces};
+use super::faces::{chars, effective_ctx, faces};
 use super::types::{CastChoice, FaceUp, Gating, Layout, LayoutError, LayoutQuery};
 use crate::objects::{Characteristics, ManaValueContext, ManaValueSubject, mana_value};
 use crate::zones::ZoneKind;
@@ -105,9 +105,11 @@ impl Layout for DfcNonmodalLayout {
     ) -> Result<i64, LayoutError> {
         let selected = self.base_characteristics(def, query, vocab)?;
         let [front, _] = dfc_faces(LayoutBehavior::DfcNonmodal, def)?;
-        let subject = if query.status.copying_back_face {
-            // CR 202.3b, 712.6d: a copy of the back face of a nonmodal double-faced object
-            // has mana value 0.
+        let copy_in_play = matches!(query.zone, ZoneKind::Stack | ZoneKind::Battlefield);
+        let subject = if query.status.copying_back_face && copy_in_play {
+            // CR 202.3b, 712.6d: a permanent or spell that is a copy of the back face of a
+            // nonmodal double-faced object has mana value 0. In every other zone the flag is
+            // ignored and the front face's cost applies (CR 712.6a).
             ManaValueSubject::CopyOfNonmodalBackFace
         } else {
             match nonmodal_face(query)? {
@@ -121,7 +123,7 @@ impl Layout for DfcNonmodalLayout {
                 },
             }
         };
-        Ok(mana_value(&subject, ctx))
+        Ok(mana_value(&subject, effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {
@@ -158,7 +160,7 @@ impl Layout for DfcModalLayout {
         // mana value 0 (the front-cost rule of CR 202.3b is for nonmodal back faces only).
         Ok(self
             .base_characteristics(def, query, vocab)?
-            .mana_value(ctx))
+            .mana_value(effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {

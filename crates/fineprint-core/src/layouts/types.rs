@@ -34,8 +34,12 @@ pub enum CastChoice {
     /// A nonmodal double-faced card cast "transformed" or "converted": back face up on the
     /// stack (CR 712.6b, 712.8a).
     Transformed,
-    /// A modal double-faced card: the face chosen when cast (CR 712.8b) or played as a land
-    /// (CR 712.9).
+    /// A modal double-faced spell: the face chosen when it is cast, consulted on the stack only
+    /// (CR 712.8b).
+    ///
+    /// On the battlefield the selector reads [`LayoutStatus::face_up`] instead: a modal land
+    /// played with its back face up (CR 712.9), or any permanent whose back face is up
+    /// (CR 712.6e), is queried with `face_up = FaceUp::Back`.
     ModalFace(FaceUp),
 }
 
@@ -57,8 +61,9 @@ pub struct LayoutStatus {
     pub flipped: bool,
     /// Which face of a double-faced permanent is up on the battlefield (CR 712.6c-712.6e).
     pub face_up: FaceUp,
-    /// The object is a copy of the back face of a nonmodal double-faced object: its mana value
-    /// is 0 (CR 202.3b, 712.6d).
+    /// The object is a copy of the back face of a nonmodal double-faced object: as a spell on
+    /// the stack or a permanent on the battlefield its mana value is 0 (CR 202.3b, 712.6d).
+    /// Ignored in every other zone, where only the front face applies (CR 712.6a).
     pub copying_back_face: bool,
 }
 
@@ -233,6 +238,9 @@ pub trait Layout {
     ) -> Result<Characteristics, LayoutError>;
 
     /// The mana value of that object (CR 202.3), with `ctx` for variable symbols.
+    ///
+    /// `ctx` applies only when `query.zone` is the stack; in every other zone X, Y and Z count 0
+    /// whatever `ctx` says (CR 202.3e, 107.3g).
     ///
     /// # Errors
     /// As [`Layout::base_characteristics`]: the same selection runs first.
