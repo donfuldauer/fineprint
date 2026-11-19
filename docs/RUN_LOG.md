@@ -261,3 +261,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 5) | Fixer (src, tier-up attempt) | Opus 5.5 | 1 | done | replacement lib 96 passed; fmt, clippy, guard clean | one-batch resolution, reconcile, retired-id ignore (CR 614.6); K1-K5, N1-N3 |
 | 03-events | #29 (PR #178 review round 5) | Independent Tester | Opus 5.5 | 1 | done | 168 spec tests pass; fmt, clippy, guard clean | spec_replacement_round5.rs; C1/C2 re-specced (R10) |
 | 03-events | #29 (PR #178 review round 5) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 6) | Orchestrator | Opus 5.5 | 1 | blocked | CodeRabbit review of 6674c4b: 2 new defects in the Instead-lineage area | P7 step 3: three fixes + investigator pass + tier-up attempt spent; status:blocked-failure |
