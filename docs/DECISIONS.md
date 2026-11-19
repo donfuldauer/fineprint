@@ -3075,25 +3075,45 @@ edits in `state/`, outside the owned paths).
 
 ## #26 FP-025: Durable-record propagation rule
 
-**Decision:** `commit_durable(id)` pops the innermost frame and, when there is a parent, gives
-the parent exactly one record `(before = its checkpoint, after = live state now)`; the frame's
-inherited records are dropped, because that record's window contains each of theirs. At depth 1
-it is a plain `commit`. Whenever a frame is popped by `commit` or `rollback` its records move to
-the parent in order; a rollback first applies them, in commit order, to the
-restored checkpoint with `carry_durable`. Records are dropped when the root frame is popped.
-Only the innermost transaction may be committed or rolled back; a failed call changes nothing.
-**Rationale:** Net rule: after rolling back ancestor A the state is A's checkpoint with every
-durable effect committed anywhere beneath A applied in commit order, which is what CR 734.1
-requires of the library-touching mana abilities that are committed as their own
-sub-transactions (SRS §2.5). Keeping records after a rollback lets an outer rollback carry them
-again over its own (earlier) checkpoint. Dedupe rule: a durable commit with a parent replaces
-its inherited records by its own covering record, so each durable effect is applied exactly
-once on any rollback (CodeRabbit PR #175 round 1; with the delta carry rule a forwarded
-descendant record would be applied twice).
-**Alternatives:** Forwarding the inherited records and the covering record (applies descendant
-effects twice under the delta carry rule); a general state diff type recorded at commit (the
-state has none yet); allowing out-of-order commit (no rules procedure needs it; it makes
-nesting ambiguous).
+**Decision:** Each open frame keeps an ordered, non-overlapping list of steps
+`Entry { before, after, durable }` and a cursor: the live state up to which the steps account for
+its history (from the cursor to the live state the history is continuous). Own steps
+(`durable: false`) are the frame's own changes, which its rollback reverses; durable steps survive
+it. When a finished child F is handed to its parent P (with no parent everything is dropped, so
+records are dropped when the root frame is popped): `commit(F)` with no steps does nothing;
+`commit(F)` with steps gives P an own step `(P.cursor, F.checkpoint)`, F's steps with their tags,
+and an own step `(F.cursor, live)`, and moves P's cursor to `live`; `commit_durable(F)` with a
+parent gives P an own step `(P.cursor, F.checkpoint)`, every step of F re-tagged durable, and a
+durable step `(F.cursor, live)` (with F holding no steps this is the earlier single record
+`(F.checkpoint, live)`), and moves P's cursor to `live`; at depth 1 it is a plain `commit`.
+`rollback(F)` restores F's checkpoint and applies only F's durable steps, in order, each with its
+own `carry_durable(restored, before, after)` call; if F held durable steps and has a parent, P
+gets an own step `(P.cursor, F.checkpoint)` and F's durable steps, and P's cursor becomes the
+post-rollback live state; otherwise P is untouched. Steps are never merged or dropped for being
+empty. Only the innermost transaction may be committed or rolled back; a failed call changes
+nothing.
+**Rationale:** Net rule (CR 734.1, SRS §2.5): after rolling back an ancestor the state is its
+checkpoint with every durable effect beneath it applied exactly once, in time order, each as its
+own step. A carry need not be linear (the counter carry clamps at 0), so one net pair per durable
+frame loses effects: root checkpoint 1, root sets 5, inside durable A durable C1 sets 0 and durable
+C2 sets 5; A's net pair (5, 5) leaves 1 after the root's rollback, the steps give clamp(1 - 5) = 0
+then + 5 = 5 (CodeRabbit PR #175 round 3). Each change lies in exactly one step, so in the
+append-only case nothing is applied twice (the round 1 finding stays fixed). The steps are kept
+as the frames' history rather than reconstructed from the durable records alone, because a
+rolled-back child with a durable grandchild makes the live state jump: A checkpoint 0, child X
++2, durable grandchild G 2 -> 7, +1, X rolls back (live 5), A commits durably; filling the gaps
+between records ((0, 2), (2, 7)) gives 7 after the root's rollback, the correct answer is 5.
+Memory cost: no clone for a checkpoint beyond its snapshot, a plain commit of a frame with no
+steps, or a rollback with no durable step; otherwise at most three state clones per durable
+commit, per plain commit of a frame holding steps, and per rollback that forwards durable steps
+to a parent (the parent's cursor when it is not already an owned state, the child's cursor or
+checkpoint, and the live state).
+**Alternatives:** A single covering record per durable frame, dropping inherited records (loses
+non-linear effects: the round 3 finding); forwarding inherited records plus gap steps between
+them (unsound with rolled-back children, as above); forwarding the inherited records and the
+covering record (applies descendant effects twice: the round 1 finding); a general state diff
+type recorded at commit (the state has none yet); allowing out-of-order commit (no rules
+procedure needs it; it makes nesting ambiguous).
 
 ## #26 FP-025: SnapshotStore semantics
 
@@ -3144,14 +3164,16 @@ carry the reversed action's changes and priority).
 
 **Decision:** In `crates/fineprint-core/tests/spec_txn_*.rs`: (1) the brief's "P0"/"P1" are the
 first and second seats, `PlayerId(1)` and `PlayerId(2)`, because `GameState::new` issues players
-`1..=n`; (2) when a frame holding durable records is itself committed durably, the reference
-model drops the inherited descendant records and puts only the frame's own covering record on
-the parent, so each durable effect is carried exactly once (see "Durable-record propagation
-rule"); (3) the "never issued" id is taken from a second `Transactions` advanced further than the
+`1..=n`; (2) the reference model keeps each frame's history as ordered `(before, after)` steps
+tagged own or durable: a durable commit hands the parent an own step up to the frame's
+checkpoint, the frame's steps made durable and a durable step from its cursor to the live state;
+a rollback carries only durable steps, one `carry_durable` call each, in time order, and hands
+them up; so each durable effect is carried exactly once, step by step, never as one net pair
+(see "Durable-record propagation rule"); (3) the "never issued" id is taken from a second `Transactions` advanced further than the
 instance under test, as the brief allows; (4) the id-generator carry is only asserted where the
 outer action issued no ids before the durable sub began, because i(ii) does not say whether
 "differs" compares `after` with `before` or with `restored`.
-**Rationale:** (1) and (3) follow the public API; (2) follows the dedupe rule; (4) avoids asserting a case the brief leaves
+**Rationale:** (1) and (3) follow the public API; (2) follows the propagation rule; (4) avoids asserting a case the brief leaves
 open.
 **Alternatives:** Excluding nested durable-in-durable sequences from the property model (weaker);
 asserting one reading of i(ii) (could report a false defect).
@@ -3167,3 +3189,18 @@ change (CodeRabbit PR #175 round 1).
 a global counter or other global mutable state; R3 forbids that, and the deterministic engine
 has no per-instance source of identity.
 **Alternatives:** An instance id inside `TxnId` (needs global mutable state, R3).
+
+## #26 FP-025: Property oracle compares observable state, not carry call lists
+
+**Decision:** In `tests/spec_txn_property.rs` the per-step comparison between the reference model
+and `Transactions` uses each harness's observable state. For the append-only Toy this is the
+state with its recorded `carry_durable` call list cleared; for `GameState` and the clamped state
+it is the full state. The Toy's appended log is still checked exactly against the independently
+tracked bytes, and flat cases keep exact call-count and call-argument assertions in
+`spec_txn_durable.rs` (CodeRabbit PR #175 round 3).
+**Rationale:** Under the entry/cursor propagation rule the number of `carry_durable` calls for a
+durable frame that itself holds durable work is not specified (zero-width own segments may be
+re-tagged durable and passed as no-op steps), so a correct implementation may produce a
+different call list. The effect of the calls is fully specified and is what the oracle checks.
+**Alternatives:** Compare the full Toy including its call list (over-specifies an unspecified
+detail); drop the Toy from the property run (loses the independent byte oracle).
