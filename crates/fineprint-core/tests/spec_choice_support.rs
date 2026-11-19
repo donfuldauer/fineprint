@@ -427,7 +427,15 @@ pub fn oracle_count(kind: ChoiceKind, r: &ResolvedChoice) -> u64 {
             }
             total
         }
-        ChoiceKind::Number => (r.max - r.min).saturating_add(1),
+        ChoiceKind::Number => {
+            // The answer carries an i64, so the request's max is clamped to i64::MAX.
+            let hi = r.max.min(i64::MAX as u64);
+            if r.min > hi {
+                0
+            } else {
+                (hi - r.min).saturating_add(1)
+            }
+        }
         ChoiceKind::Color | ChoiceKind::CreatureType | ChoiceKind::Pile => {
             str_cands(r).len() as u64
         }
@@ -460,8 +468,8 @@ pub fn oracle_items(kind: ChoiceKind, r: &ResolvedChoice) -> Vec<ChoiceOption> {
         ChoiceKind::Mode => (0..str_cands(r).len() as u32)
             .map(ChoiceOption::Mode)
             .collect(),
-        ChoiceKind::Number => (r.min..=r.max)
-            .map(|v| ChoiceOption::Number(v as i64))
+        ChoiceKind::Number => (r.min..=r.max.min(i64::MAX as u64))
+            .map(|v| ChoiceOption::Number(i64::try_from(v).expect("clamped to i64::MAX")))
             .collect(),
         ChoiceKind::Color | ChoiceKind::CreatureType | ChoiceKind::Pile => {
             str_cands(r).into_iter().map(ChoiceOption::Text).collect()

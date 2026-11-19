@@ -59,6 +59,36 @@ fn req_net_003_number_threshold() {
     reject(&req, &num(-1));
 }
 
+/// REQ-NET-003, REQ-DSL-011: a NUMBER range above `i64::MAX` is clamped to the representable
+/// interval: bounds `i64::MAX - 1 ..= u64::MAX` enumerate exactly `i64::MAX - 1` and `i64::MAX`.
+#[test]
+fn req_net_003_number_clamped_to_i64_max() {
+    let lo = i64::MAX as u64 - 1;
+    let r = resolved(ResolvedCandidates::None, lo, u64::MAX);
+    assert_eq!(oracle_count(ChoiceKind::Number, &r), 2);
+    assert_eq!(
+        oracle_items(ChoiceKind::Number, &r),
+        vec![
+            ChoiceOption::Number(i64::MAX - 1),
+            ChoiceOption::Number(i64::MAX)
+        ]
+    );
+    let req = ask_kind(ChoiceKind::Number, r);
+    assert_eq!(
+        items(&req),
+        vec![
+            ChoiceOption::Number(i64::MAX - 1),
+            ChoiceOption::Number(i64::MAX)
+        ]
+    );
+    assert_eq!(req.min, lo);
+    assert_eq!(req.max, i64::MAX as u64);
+    accept(&req, &num(i64::MAX));
+    accept(&req, &num(i64::MAX - 1));
+    reject(&req, &num(i64::MAX - 2));
+    reject(&req, &num(i64::MIN));
+}
+
 /// REQ-NET-003: OBJECTS n=13 min 0 max 13 (8,192 answers) is enumerated; n=14 (16,384) is a
 /// validator; n=14 min=max=7 (3,432) is enumerated.
 #[test]
