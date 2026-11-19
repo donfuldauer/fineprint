@@ -45,8 +45,12 @@
 //! state-based-action loop of CR 603.3b, the resolution-time intervening-if check, phase/step
 //! triggers, and cost-payment LKI for crew, saddle and station.
 //!
-//! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet`; registrations are sorted by (source, ability id)
-//! and output is ordered by (first event index, source, ability id) (REQ-CORE-001).
+//! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet` (REQ-CORE-001). Detection sorts its
+//! registrations by (source, ability id) and its output by (first event index, source, ability
+//! id). That order is detection's alone: [`place_triggers`] does not keep it. Placement stacks in
+//! the two-part APNAP order of CR 603.3b (part 1, then part 2, players in APNAP order) and,
+//! within a player's part, in the order the controller chooses with
+//! `ORDER_SIMULTANEOUS_TRIGGERS` (CR 101.4c). It asks nothing for a single trigger.
 
 mod delayed;
 mod detect;
