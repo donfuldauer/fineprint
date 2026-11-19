@@ -195,6 +195,12 @@ impl<'a> MergedPermanent<'a> {
     /// component, top to bottom, without deduplication; every other characteristic, rules text
     /// included, stays the topmost component's (CR 702.140e).
     ///
+    /// These are the values before layer 1b (printed values, selected with each component's
+    /// layout), whatever any component's `face_up` flag says. [`MergedPermanent::face_up`]
+    /// reports the topmost component's status (CR 731.2e) so that layer 1b can apply the
+    /// face-down characteristics (CR 708.2). Face-down characteristics of merged components
+    /// are not modelled here; they are deferred to #39 FP-038 (DECISIONS.md #23).
+    ///
     /// # Errors
     /// The topmost component's [`LayoutError`] ([`LayoutError::UnsupportedLayout`] for a
     /// layout no component may use), then, when mutated, the other components' errors in top

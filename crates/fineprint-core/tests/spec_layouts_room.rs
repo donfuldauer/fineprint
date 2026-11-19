@@ -148,7 +148,7 @@ fn room_709_3b_left_half_on_stack() {
             abilities: vec![ab_l()],
             mv: 2,
         },
-        (&["Legendary"], &["Enchantment"], &["Room"]),
+        union_types(),
     );
     for doors in ALL_DOORS {
         let rq = q(ZoneKind::Stack, Some(SplitHalf::Left), doors);
@@ -179,7 +179,7 @@ fn room_709_3b_right_half_on_stack() {
             abilities: vec![ab_r1(), ab_r2()],
             mv: 5,
         },
-        (&[], &["Artifact", "Enchantment"], &["Room"]),
+        union_types(),
     );
     for doors in ALL_DOORS {
         let rq = q(ZoneKind::Stack, Some(SplitHalf::Right), doors);
@@ -220,7 +220,7 @@ fn room_709_3b_stack_without_cast_half_is_invalid_cast() {
     assert_eq!(chars_of(&room_sample(), &rq), Err(err));
 }
 
-/// REQ-OBJ-002, CR 202.3d: an X in the cast half counts the chosen value only on the stack;
+/// REQ-OBJ-002, CR 202.3d, 202.3e: an X in the cast half counts the chosen value only on the stack;
 /// elsewhere X is 0 whatever context is given.
 #[test]
 fn room_202_3d_x_cost_on_and_off_stack() {
@@ -616,7 +616,7 @@ fn room_bad_faces() {
 /// wherever its type line is used; `InvalidCast` and `BadFaces` take precedence.
 #[test]
 fn room_type_line_error_and_precedence() {
-    let d = room_def(bad_type(room_left()), room_right());
+    let d = room_def(bad_type(room_left()), bad_type(room_right()));
     for zone in [
         ZoneKind::Hand,
         ZoneKind::Library,
@@ -656,6 +656,70 @@ fn room_type_line_error_and_precedence() {
     );
 }
 
+/// The sample room with one half's type line changed: a differing card type, a differing
+/// subtype or a differing supertype, on either half.
+fn rooms_with_differing_type_lines() -> Vec<CardDefinitionDSL> {
+    let card_type = |f: fineprint_dsl::card::CardFaceDSL| fineprint_dsl::card::CardFaceDSL {
+        card_types: support::strings(&["Enchantment"]),
+        ..f
+    };
+    let subtype = |f: fineprint_dsl::card::CardFaceDSL| fineprint_dsl::card::CardFaceDSL {
+        subtypes: Vec::new(),
+        ..f
+    };
+    let supertype = |f: fineprint_dsl::card::CardFaceDSL| fineprint_dsl::card::CardFaceDSL {
+        supertypes: Vec::new(),
+        ..f
+    };
+    vec![
+        room_def(card_type(room_left()), room_right()),
+        room_def(room_left(), card_type(room_right())),
+        room_def(subtype(room_left()), room_right()),
+        room_def(room_left(), subtype(room_right())),
+        room_def(supertype(room_left()), room_right()),
+        room_def(room_left(), supertype(room_right())),
+    ]
+}
+
+/// REQ-OBJ-002, CR 709.5a: a room has one shared type line; halves whose card types, subtypes
+/// or supertypes differ are `BadFaces` from `base_characteristics` and `mana_value` in every
+/// zone: the stack with either cast half (and none), the battlefield with each door state, and
+/// hand, library, graveyard, exile and command.
+#[test]
+fn room_709_5a_differing_type_lines_are_bad_faces() {
+    for d in rooms_with_differing_type_lines() {
+        for d in [d.clone(), reversed(d)] {
+            for zone in ZoneKind::ALL {
+                for cast in ALL_CASTS {
+                    for doors in ALL_DOORS {
+                        let rq = q(zone, cast, doors);
+                        let ctx = format!("{zone:?} {cast:?} {doors:?}");
+                        assert_eq!(chars_of(&d, &rq), Err(bad_faces()), "{ctx}");
+                        for mvc in [ManaValueContext::OffStack, on_stack(2, 2, 2)] {
+                            assert_eq!(mv_of(&d, &rq, mvc), Err(bad_faces()), "{ctx} {mvc:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// REQ-OBJ-002, CR 709.5a: on the stack the cast half's type line is the shared type line,
+/// for either half cast.
+#[test]
+fn room_709_5a_stack_has_shared_type_line() {
+    let (sup, types, sub) = union_types();
+    for half in [SplitHalf::Left, SplitHalf::Right] {
+        for doors in ALL_DOORS {
+            let got = chars_of(&room_sample(), &q(ZoneKind::Stack, Some(half), doors)).unwrap();
+            assert_eq!(got.supertypes, set(sup), "{half:?}");
+            assert_eq!(got.card_types, set(types), "{half:?}");
+            assert_eq!(got.subtypes, set(sub), "{half:?}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // sweep
 // ---------------------------------------------------------------------------------------------
@@ -672,8 +736,8 @@ fn room_sweep_agreement_determinism() {
         room_indicator_left(),
         room_x_left(),
         reversed(room_sample()),
-        room_def(bad_type(room_left()), room_right()),
-        room_def(room_left(), bad_type(room_right())),
+        room_def(bad_type(room_left()), bad_type(room_right())),
+        reversed(room_def(bad_type(room_left()), bad_type(room_right()))),
     ];
     defs.extend(malformed_rooms());
     let mut wrong = room_sample();
