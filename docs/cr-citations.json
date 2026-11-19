@@ -387,19 +387,21 @@
     "110.1": {
       "sha256": "bcf49ccc274770a9628b54b00372c33c8a157f82ce76a85230c2d3bc84fe1093",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:371",
-        "crates/fineprint-core/src/events/exec.rs:392",
-        "crates/fineprint-core/src/events/exec.rs:401",
-        "crates/fineprint-core/src/events/tests.rs:320",
-        "crates/fineprint-core/src/events/tests.rs:323",
-        "crates/fineprint-core/src/events/tests.rs:353",
-        "crates/fineprint-core/src/events/tests.rs:370",
+        "crates/fineprint-core/src/events/exec.rs:382",
+        "crates/fineprint-core/src/events/exec.rs:407",
+        "crates/fineprint-core/src/events/exec.rs:416",
+        "crates/fineprint-core/src/events/tests.rs:1438",
+        "crates/fineprint-core/src/events/tests.rs:326",
+        "crates/fineprint-core/src/events/tests.rs:329",
+        "crates/fineprint-core/src/events/tests.rs:359",
+        "crates/fineprint-core/src/events/tests.rs:376",
         "crates/fineprint-core/src/permanent/container.rs:46",
         "crates/fineprint-core/src/permanent/container.rs:60",
         "crates/fineprint-core/src/permanent/container.rs:67",
         "crates/fineprint-core/src/permanent/mod.rs:11",
         "crates/fineprint-core/src/permanent/tests.rs:121",
-        "crates/fineprint-core/tests/spec_events_zone.rs:100"
+        "crates/fineprint-core/tests/spec_events_property.rs:320",
+        "crates/fineprint-core/tests/spec_events_zone.rs:105"
       ]
     },
     "110.2": {
@@ -413,7 +415,7 @@
         "crates/fineprint-core/src/permanent/types.rs:176",
         "crates/fineprint-core/src/zones/tests.rs:978",
         "crates/fineprint-core/src/zones/types.rs:205",
-        "crates/fineprint-core/tests/spec_events_zone.rs:119",
+        "crates/fineprint-core/tests/spec_events_zone.rs:124",
         "crates/fineprint-core/tests/spec_zones_model.rs:389",
         "crates/fineprint-core/tests/spec_zones_model.rs:514"
       ]
@@ -487,14 +489,14 @@
     "111": {
       "sha256": "c9e76a1f57d03c7e1318d866cee9f3d4f92dc42ef1496cc28e1f80d57100e4ee",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1064"
+        "crates/fineprint-core/src/events/tests.rs:1132"
       ]
     },
     "111.2": {
       "sha256": "24d15b79d6538808d680237a5bd14680adece9a796b4e3a448ebe872e816d6be",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:585",
-        "crates/fineprint-core/src/events/tests.rs:1067",
+        "crates/fineprint-core/src/events/exec.rs:602",
+        "crates/fineprint-core/src/events/tests.rs:1135",
         "crates/fineprint-core/src/events/types.rs:359",
         "crates/fineprint-core/src/events/types.rs:361",
         "crates/fineprint-core/tests/spec_events_tokens.rs:33",
@@ -506,16 +508,19 @@
       "sha256": "4202d61acea16783d14be81d91a0ca9747d41ef71fc5dee7fbb5da96e804042f",
       "locations": [
         "crates/fineprint-core/src/events/state.rs:19",
-        "crates/fineprint-core/src/events/state.rs:63"
+        "crates/fineprint-core/src/events/state.rs:67"
       ]
     },
     "111.8": {
       "sha256": "2db71637e2a289834937de5eacc7c45a11b95a6f447454c7f915d165afae9599",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:321",
-        "crates/fineprint-core/src/events/exec.rs:333",
-        "crates/fineprint-core/src/events/tests.rs:320",
-        "crates/fineprint-core/src/events/tests.rs:462",
+        "crates/fineprint-core/src/events/exec.rs:322",
+        "crates/fineprint-core/src/events/exec.rs:334",
+        "crates/fineprint-core/src/events/exec.rs:367",
+        "crates/fineprint-core/src/events/tests.rs:1645",
+        "crates/fineprint-core/src/events/tests.rs:326",
+        "crates/fineprint-core/src/events/tests.rs:468",
+        "crates/fineprint-core/tests/spec_events_draw.rs:217",
         "crates/fineprint-core/tests/spec_events_tokens.rs:124",
         "crates/fineprint-core/tests/spec_events_tokens.rs:6"
       ]
@@ -656,49 +661,51 @@
     "119": {
       "sha256": "026b5f3e6fae087b23a44e3ab824833133fff5e51cc8176c22dbce2cf8ce4330",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:718"
+        "crates/fineprint-core/src/events/tests.rs:786"
       ]
     },
     "119.2": {
       "sha256": "1d6cba805f744414e302a937f5b588ffa1bcf12a3cc721ef6a7997d5704b5c8d",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:413",
-        "crates/fineprint-core/src/events/exec.rs:433",
+        "crates/fineprint-core/src/events/exec.rs:430",
+        "crates/fineprint-core/src/events/exec.rs:450",
         "crates/fineprint-core/src/events/history.rs:23",
-        "crates/fineprint-core/src/events/tests.rs:1486",
-        "crates/fineprint-core/src/events/tests.rs:721",
+        "crates/fineprint-core/src/events/tests.rs:1808",
+        "crates/fineprint-core/src/events/tests.rs:789",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:5",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:82",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:155",
-        "crates/fineprint-core/tests/spec_events_history.rs:6"
+        "crates/fineprint-core/tests/spec_events_history.rs:6",
+        "crates/fineprint-core/tests/spec_events_property.rs:308"
       ]
     },
     "119.3": {
       "sha256": "9a5ff675580c92511c80b8e4c7af38dfcccf68396feb69b0ffe82b369eed7186",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:457",
-        "crates/fineprint-core/src/events/exec.rs:473",
-        "crates/fineprint-core/src/events/tests.rs:824",
+        "crates/fineprint-core/src/events/exec.rs:474",
+        "crates/fineprint-core/src/events/exec.rs:490",
+        "crates/fineprint-core/src/events/tests.rs:892",
         "crates/fineprint-core/src/events/types.rs:324",
-        "crates/fineprint-core/tests/spec_events_damage_life.rs:153"
+        "crates/fineprint-core/tests/spec_events_damage_life.rs:153",
+        "crates/fineprint-core/tests/spec_events_property.rs:308"
       ]
     },
     "119.6": {
       "sha256": "e5392a439ee2c3951676cf9afe1f57378beaeb0253d0482253bd446653ef0058",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:458",
-        "crates/fineprint-core/src/events/tests.rs:824",
+        "crates/fineprint-core/src/events/exec.rs:475",
+        "crates/fineprint-core/src/events/tests.rs:892",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:167"
       ]
     },
     "119.9": {
       "sha256": "532bb57b405cca83b06d78172b01694ca1b26ca12c760b8592191ac009a1d644",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:473",
-        "crates/fineprint-core/src/events/exec.rs:477",
-        "crates/fineprint-core/src/events/tests.rs:847",
-        "crates/fineprint-core/tests/spec_events_batch.rs:340",
+        "crates/fineprint-core/src/events/exec.rs:490",
+        "crates/fineprint-core/src/events/exec.rs:494",
+        "crates/fineprint-core/src/events/tests.rs:915",
+        "crates/fineprint-core/tests/spec_events_batch.rs:382",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:56",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:173",
@@ -708,16 +715,16 @@
     "119.10": {
       "sha256": "f647a215c470747c660282f96caec0c168b9537972a3e96686775fd3bdcb1cd3",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:473",
-        "crates/fineprint-core/src/events/exec.rs:477",
-        "crates/fineprint-core/src/events/tests.rs:847",
+        "crates/fineprint-core/src/events/exec.rs:490",
+        "crates/fineprint-core/src/events/exec.rs:494",
+        "crates/fineprint-core/src/events/tests.rs:915",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:56"
       ]
     },
     "120": {
       "sha256": "db863cb8a971ddee3daf9dcedcdaeeab0de550a2ad7877dbd11a9c21837efbcf",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:718",
+        "crates/fineprint-core/src/events/tests.rs:786",
         "crates/fineprint-core/src/events/types.rs:311"
       ]
     },
@@ -742,53 +749,54 @@
     "120.3a": {
       "sha256": "05425a3790fc888651c30e96c9119d737a2fc9a068f420047274cb7310ea0c94",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:413",
-        "crates/fineprint-core/src/events/exec.rs:433",
+        "crates/fineprint-core/src/events/exec.rs:430",
+        "crates/fineprint-core/src/events/exec.rs:450",
         "crates/fineprint-core/src/events/history.rs:23",
-        "crates/fineprint-core/src/events/tests.rs:1486",
-        "crates/fineprint-core/src/events/tests.rs:721",
+        "crates/fineprint-core/src/events/tests.rs:1808",
+        "crates/fineprint-core/src/events/tests.rs:789",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:82",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:155",
-        "crates/fineprint-core/tests/spec_events_history.rs:6"
+        "crates/fineprint-core/tests/spec_events_history.rs:6",
+        "crates/fineprint-core/tests/spec_events_property.rs:308"
       ]
     },
     "120.3b": {
       "sha256": "330a88b7052642b8d0154e47de3a94276167d5dd116dd466dff13e041fc9f3e4",
       "locations": [
-        "crates/fineprint-core/src/events/mod.rs:46"
+        "crates/fineprint-core/src/events/mod.rs:52"
       ]
     },
     "120.3d": {
       "sha256": "e48c0ba1aa4076f1e2be1b0b809bdbb448971b40b437d9368d6c5d003c906808",
       "locations": [
-        "crates/fineprint-core/src/events/mod.rs:46"
+        "crates/fineprint-core/src/events/mod.rs:52"
       ]
     },
     "120.3e": {
       "sha256": "4960e7961d54c1cbbeddd634a70491eaaf64cec6f750fe4ba2149079e9b61080",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:414",
-        "crates/fineprint-core/src/events/exec.rs:439",
+        "crates/fineprint-core/src/events/exec.rs:431",
+        "crates/fineprint-core/src/events/exec.rs:456",
         "crates/fineprint-core/src/events/state.rs:18",
-        "crates/fineprint-core/src/events/state.rs:48",
-        "crates/fineprint-core/src/events/tests.rs:746",
+        "crates/fineprint-core/src/events/state.rs:52",
+        "crates/fineprint-core/src/events/tests.rs:814",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:105",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:122",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:193",
-        "crates/fineprint-core/tests/spec_events_zone.rs:138"
+        "crates/fineprint-core/tests/spec_events_zone.rs:143"
       ]
     },
     "120.3f": {
       "sha256": "448142785eba9dd995c8c4969e86fcfac2b0a3a5a8747dee6a25ec5be8842db0",
       "locations": [
-        "crates/fineprint-core/src/events/mod.rs:46"
+        "crates/fineprint-core/src/events/mod.rs:52"
       ]
     },
     "120.3h": {
       "sha256": "dc9d594d93ae389c4901c5085ca4db42c69b4d44707f2ec8f4923e60fd191da6",
       "locations": [
-        "crates/fineprint-core/src/events/mod.rs:46"
+        "crates/fineprint-core/src/events/mod.rs:52"
       ]
     },
     "120.6": {
@@ -800,11 +808,11 @@
     "120.8": {
       "sha256": "f0954355e2df004958869db8eef522147074d5762ffdbe2c9799d97b929b0243",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:413",
-        "crates/fineprint-core/src/events/exec.rs:425",
-        "crates/fineprint-core/src/events/tests.rs:774",
+        "crates/fineprint-core/src/events/exec.rs:430",
+        "crates/fineprint-core/src/events/exec.rs:442",
+        "crates/fineprint-core/src/events/tests.rs:842",
         "crates/fineprint-core/src/events/types.rs:319",
-        "crates/fineprint-core/tests/spec_events_batch.rs:340",
+        "crates/fineprint-core/tests/spec_events_batch.rs:382",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:45",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:173",
@@ -814,40 +822,44 @@
     "121": {
       "sha256": "cd31e0369337a7561b18ca475ff3f3c2536afa769e066b452864e86ea16eb9e4",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:636"
+        "crates/fineprint-core/src/events/tests.rs:704"
       ]
     },
     "121.1": {
       "sha256": "f8a9df581b26b977082794a3c6c858893b9acd7127d18d0ea49bc3b44a07e088",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:341",
-        "crates/fineprint-core/src/events/tests.rs:639",
+        "crates/fineprint-core/src/events/exec.rs:342",
+        "crates/fineprint-core/src/events/tests.rs:1645",
+        "crates/fineprint-core/src/events/tests.rs:707",
         "crates/fineprint-core/src/events/types.rs:306",
-        "crates/fineprint-core/tests/spec_events_draw.rs:25",
+        "crates/fineprint-core/tests/spec_events_draw.rs:217",
+        "crates/fineprint-core/tests/spec_events_draw.rs:26",
         "crates/fineprint-core/tests/spec_events_draw.rs:5"
       ]
     },
     "121.2": {
       "sha256": "c2cee72ad9abcbe4e8dfe9830fe08e967b0f68275545512f47058b3cf2ff2afc",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:341",
-        "crates/fineprint-core/src/events/tests.rs:660",
+        "crates/fineprint-core/src/events/exec.rs:342",
+        "crates/fineprint-core/src/events/tests.rs:728",
         "crates/fineprint-core/src/events/types.rs:306",
-        "crates/fineprint-core/tests/spec_events_draw.rs:143",
+        "crates/fineprint-core/tests/spec_events_draw.rs:144",
         "crates/fineprint-core/tests/spec_events_draw.rs:5",
-        "crates/fineprint-core/tests/spec_events_draw.rs:50"
+        "crates/fineprint-core/tests/spec_events_draw.rs:51"
       ]
     },
     "121.4": {
       "sha256": "1d1b638465d8e06a0fb38f0915325ce6d7beb6679e977eaf4ae252505098a91f",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:341",
-        "crates/fineprint-core/src/events/exec.rs:356",
-        "crates/fineprint-core/src/events/state.rs:249",
-        "crates/fineprint-core/src/events/tests.rs:690",
-        "crates/fineprint-core/tests/spec_events_draw.rs:143",
+        "crates/fineprint-core/src/events/exec.rs:342",
+        "crates/fineprint-core/src/events/exec.rs:357",
+        "crates/fineprint-core/src/events/exec.rs:368",
+        "crates/fineprint-core/src/events/state.rs:253",
+        "crates/fineprint-core/src/events/tests.rs:1647",
+        "crates/fineprint-core/src/events/tests.rs:758",
+        "crates/fineprint-core/tests/spec_events_draw.rs:144",
         "crates/fineprint-core/tests/spec_events_draw.rs:5",
-        "crates/fineprint-core/tests/spec_events_draw.rs:80",
+        "crates/fineprint-core/tests/spec_events_draw.rs:81",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:173",
         "crates/fineprint-core/tests/spec_events_history.rs:6"
@@ -862,27 +874,32 @@
     "122": {
       "sha256": "3eb7ec074d844fdad8c94b431a2ab423cb5193ed091403b17c3732e25eeec654",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:890",
+        "crates/fineprint-core/src/events/tests.rs:958",
         "docs/SRS.md:516"
       ]
     },
     "122.1": {
       "sha256": "04f15412a0afd000608dba4cdda9507fe0d051b6896c820ed59fc3876c603582",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:520",
-        "crates/fineprint-core/src/events/exec.rs:540",
+        "crates/fineprint-core/src/events/exec.rs:537",
+        "crates/fineprint-core/src/events/exec.rs:557",
+        "crates/fineprint-core/src/events/exec.rs:72",
+        "crates/fineprint-core/src/events/exec.rs:87",
         "crates/fineprint-core/src/events/state.rs:18",
-        "crates/fineprint-core/src/events/state.rs:32",
-        "crates/fineprint-core/src/events/tests.rs:893",
-        "crates/fineprint-core/src/events/tests.rs:963",
+        "crates/fineprint-core/src/events/state.rs:36",
+        "crates/fineprint-core/src/events/tests.rs:1031",
+        "crates/fineprint-core/src/events/tests.rs:620",
+        "crates/fineprint-core/src/events/tests.rs:961",
         "crates/fineprint-core/src/events/types.rs:142",
         "crates/fineprint-core/src/events/types.rs:331",
         "crates/fineprint-core/src/events/types.rs:340",
         "crates/fineprint-core/tests/spec_events_counters.rs:132",
+        "crates/fineprint-core/tests/spec_events_counters.rs:229",
         "crates/fineprint-core/tests/spec_events_counters.rs:36",
         "crates/fineprint-core/tests/spec_events_counters.rs:5",
         "crates/fineprint-core/tests/spec_events_counters.rs:60",
         "crates/fineprint-core/tests/spec_events_counters.rs:69",
+        "crates/fineprint-core/tests/spec_events_property.rs:339",
         "crates/fineprint-dsl/src/vocab/mod.rs:122",
         "crates/fineprint-dsl/src/vocab/mod.rs:517",
         "crates/fineprint-dsl/src/vocab/mod.rs:81",
@@ -928,22 +945,25 @@
     "122.2": {
       "sha256": "b2bdfbc945b315dba2da24762d18176b6003b5979f00f647c1108b3f47e6f577",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:322",
-        "crates/fineprint-core/src/events/exec.rs:371",
-        "crates/fineprint-core/src/events/exec.rs:404",
-        "crates/fineprint-core/src/events/state.rs:105",
+        "crates/fineprint-core/src/events/exec.rs:323",
+        "crates/fineprint-core/src/events/exec.rs:382",
+        "crates/fineprint-core/src/events/exec.rs:421",
+        "crates/fineprint-core/src/events/state.rs:109",
         "crates/fineprint-core/src/events/state.rs:22",
-        "crates/fineprint-core/src/events/tests.rs:320",
-        "crates/fineprint-core/src/events/tests.rs:356",
-        "crates/fineprint-core/tests/spec_events_zone.rs:138",
+        "crates/fineprint-core/src/events/tests.rs:326",
+        "crates/fineprint-core/src/events/tests.rs:362",
+        "crates/fineprint-core/src/events/tests.rs:620",
+        "crates/fineprint-core/tests/spec_events_counters.rs:229",
+        "crates/fineprint-core/tests/spec_events_property.rs:339",
+        "crates/fineprint-core/tests/spec_events_zone.rs:143",
         "crates/fineprint-core/tests/spec_events_zone.rs:5"
       ]
     },
     "122.3": {
       "sha256": "9e8bcb230b00ad482f307ee9f1fd39623977c3450d7e2a4e8ab01f8303b66e8d",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:520",
-        "crates/fineprint-core/src/events/tests.rs:893",
+        "crates/fineprint-core/src/events/exec.rs:537",
+        "crates/fineprint-core/src/events/tests.rs:961",
         "crates/fineprint-core/tests/spec_events_counters.rs:165",
         "crates/fineprint-core/tests/spec_events_counters.rs:5"
       ]
@@ -1811,18 +1831,23 @@
     "400.7": {
       "sha256": "cecd4e29bd49598e6b268456385ca119beff77fc43dac8121de5fcdeb5024e98",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:321",
-        "crates/fineprint-core/src/events/exec.rs:369",
-        "crates/fineprint-core/src/events/exec.rs:387",
-        "crates/fineprint-core/src/events/exec.rs:404",
-        "crates/fineprint-core/src/events/state.rs:105",
+        "crates/fineprint-core/src/events/exec.rs:322",
+        "crates/fineprint-core/src/events/exec.rs:380",
+        "crates/fineprint-core/src/events/exec.rs:398",
+        "crates/fineprint-core/src/events/exec.rs:421",
+        "crates/fineprint-core/src/events/exec.rs:730",
+        "crates/fineprint-core/src/events/state.rs:109",
         "crates/fineprint-core/src/events/state.rs:22",
-        "crates/fineprint-core/src/events/tests.rs:1321",
-        "crates/fineprint-core/src/events/tests.rs:320",
-        "crates/fineprint-core/src/events/tests.rs:323",
-        "crates/fineprint-core/src/events/tests.rs:370",
-        "crates/fineprint-core/src/events/tests.rs:396",
-        "crates/fineprint-core/src/events/tests.rs:576",
+        "crates/fineprint-core/src/events/tests.rs:1389",
+        "crates/fineprint-core/src/events/tests.rs:1465",
+        "crates/fineprint-core/src/events/tests.rs:1486",
+        "crates/fineprint-core/src/events/tests.rs:1553",
+        "crates/fineprint-core/src/events/tests.rs:1619",
+        "crates/fineprint-core/src/events/tests.rs:326",
+        "crates/fineprint-core/src/events/tests.rs:329",
+        "crates/fineprint-core/src/events/tests.rs:376",
+        "crates/fineprint-core/src/events/tests.rs:402",
+        "crates/fineprint-core/src/events/tests.rs:582",
         "crates/fineprint-core/src/events/types.rs:295",
         "crates/fineprint-core/src/events/types.rs:648",
         "crates/fineprint-core/src/knowledge/mod.rs:11",
@@ -1899,12 +1924,15 @@
         "crates/fineprint-core/src/zones/types.rs:197",
         "crates/fineprint-core/src/zones/types.rs:237",
         "crates/fineprint-core/src/zones/types.rs:242",
-        "crates/fineprint-core/tests/spec_events_batch.rs:287",
-        "crates/fineprint-core/tests/spec_events_zone.rs:100",
-        "crates/fineprint-core/tests/spec_events_zone.rs:138",
-        "crates/fineprint-core/tests/spec_events_zone.rs:189",
-        "crates/fineprint-core/tests/spec_events_zone.rs:225",
-        "crates/fineprint-core/tests/spec_events_zone.rs:249",
+        "crates/fineprint-core/tests/spec_events_batch.rs:328",
+        "crates/fineprint-core/tests/spec_events_draw.rs:167",
+        "crates/fineprint-core/tests/spec_events_draw.rs:263",
+        "crates/fineprint-core/tests/spec_events_property.rs:320",
+        "crates/fineprint-core/tests/spec_events_zone.rs:105",
+        "crates/fineprint-core/tests/spec_events_zone.rs:143",
+        "crates/fineprint-core/tests/spec_events_zone.rs:194",
+        "crates/fineprint-core/tests/spec_events_zone.rs:230",
+        "crates/fineprint-core/tests/spec_events_zone.rs:254",
         "crates/fineprint-core/tests/spec_events_zone.rs:34",
         "crates/fineprint-core/tests/spec_events_zone.rs:5",
         "crates/fineprint-core/tests/spec_knowledge_identity.rs:411",
@@ -2186,7 +2214,7 @@
         "crates/fineprint-core/src/zones/tests.rs:441",
         "crates/fineprint-core/src/zones/types.rs:198",
         "crates/fineprint-core/src/zones/types.rs:239",
-        "crates/fineprint-core/tests/spec_events_zone.rs:174",
+        "crates/fineprint-core/tests/spec_events_zone.rs:179",
         "crates/fineprint-core/tests/spec_memory_lki.rs:246",
         "crates/fineprint-core/tests/spec_memory_support.rs:182",
         "crates/fineprint-core/tests/spec_zones_identity.rs:109",
@@ -2657,17 +2685,17 @@
     "500": {
       "sha256": "aa07eacfcc33ebde2a6a8850a1f05a73881e02e87defcc3fb05bbaa2b72da891",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1123",
+        "crates/fineprint-core/src/events/tests.rs:1191",
         "docs/SRS.md:201"
       ]
     },
     "500.1": {
       "sha256": "2a08085160c6d1656e0a6af65fe0906ceaf560ffd58d81aaba6dfdb42afa58cd",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:619",
-        "crates/fineprint-core/src/events/exec.rs:638",
-        "crates/fineprint-core/src/events/tests.rs:1126",
-        "crates/fineprint-core/src/events/tests.rs:242",
+        "crates/fineprint-core/src/events/exec.rs:636",
+        "crates/fineprint-core/src/events/exec.rs:655",
+        "crates/fineprint-core/src/events/tests.rs:1194",
+        "crates/fineprint-core/src/events/tests.rs:248",
         "crates/fineprint-core/src/events/types.rs:169",
         "crates/fineprint-core/src/events/types.rs:205",
         "crates/fineprint-core/src/events/types.rs:237",
@@ -2703,9 +2731,9 @@
     "500.6": {
       "sha256": "4361f25a5aef5b13b320ae15843a1d7466cd7e1db318bd014992dd947c71d3b5",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:630",
-        "crates/fineprint-core/src/events/exec.rs:638",
-        "crates/fineprint-core/src/events/tests.rs:1126",
+        "crates/fineprint-core/src/events/exec.rs:647",
+        "crates/fineprint-core/src/events/exec.rs:655",
+        "crates/fineprint-core/src/events/tests.rs:1194",
         "crates/fineprint-core/src/events/types.rs:373",
         "crates/fineprint-core/src/events/types.rs:378",
         "crates/fineprint-core/tests/spec_events_log.rs:5",
@@ -2749,7 +2777,7 @@
     "502.3": {
       "sha256": "819b587a6f4443ae6fa746230bbfcdd0b044b5c5ce1a7afdcb5b61b578efcc25",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1041",
+        "crates/fineprint-core/src/events/tests.rs:1109",
         "docs/SRS.md:1145",
         "docs/SRS.md:1451",
         "docs/SRS.md:250",
@@ -3077,10 +3105,10 @@
     "514.2": {
       "sha256": "4040f2df1c5ddc1560dc3f47f47651d9884c06e4c1999e9b52564f40d28c2ac0",
       "locations": [
-        "crates/fineprint-core/src/events/state.rs:55",
-        "crates/fineprint-core/src/events/state.rs:57",
-        "crates/fineprint-core/src/events/tests.rs:746",
-        "crates/fineprint-core/src/events/tests.rs:768",
+        "crates/fineprint-core/src/events/state.rs:59",
+        "crates/fineprint-core/src/events/state.rs:61",
+        "crates/fineprint-core/src/events/tests.rs:814",
+        "crates/fineprint-core/src/events/tests.rs:836",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:140",
         "docs/SRS.md:286"
       ]
@@ -3192,7 +3220,7 @@
       "sha256": "c0184814400f63762969161c2d9ce7ddd04d0fc737a825ccc5abd93501b9aaeb",
       "locations": [
         "crates/fineprint-core/src/events/mod.rs:22",
-        "crates/fineprint-core/src/events/state.rs:133",
+        "crates/fineprint-core/src/events/state.rs:137",
         "crates/fineprint-core/src/events/types.rs:707",
         "docs/SRS.md:444"
       ]
@@ -3200,9 +3228,9 @@
     "603.2b": {
       "sha256": "796cd7706c8a3422a48ec0e41286e9925a85e383b59003a2046936e96b7016d9",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:630",
-        "crates/fineprint-core/src/events/exec.rs:638",
-        "crates/fineprint-core/src/events/tests.rs:1126",
+        "crates/fineprint-core/src/events/exec.rs:647",
+        "crates/fineprint-core/src/events/exec.rs:655",
+        "crates/fineprint-core/src/events/tests.rs:1194",
         "crates/fineprint-core/tests/spec_events_turn.rs:45",
         "crates/fineprint-core/tests/spec_events_turn.rs:6"
       ]
@@ -3261,12 +3289,13 @@
     "603.10": {
       "sha256": "4d2cc336df16463473a7d3c9f15554520a65307d3bbeba097f6685742f2bedd4",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:179",
-        "crates/fineprint-core/src/events/exec.rs:370",
+        "crates/fineprint-core/src/events/exec.rs:180",
+        "crates/fineprint-core/src/events/exec.rs:381",
+        "crates/fineprint-core/src/events/exec.rs:70",
         "crates/fineprint-core/src/events/mod.rs:22",
-        "crates/fineprint-core/src/events/state.rs:133",
-        "crates/fineprint-core/src/events/tests.rs:547",
-        "crates/fineprint-core/src/events/tests.rs:576",
+        "crates/fineprint-core/src/events/state.rs:137",
+        "crates/fineprint-core/src/events/tests.rs:553",
+        "crates/fineprint-core/src/events/tests.rs:582",
         "crates/fineprint-core/src/events/types.rs:708",
         "crates/fineprint-core/src/memory/lki.rs:256",
         "crates/fineprint-core/src/memory/lki.rs:42",
@@ -3279,18 +3308,22 @@
     "603.10a": {
       "sha256": "6b3e2ce18e0408e3dd374d3fc44810332c8da9703fc273ebdad29cf83a617888",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:116",
+        "crates/fineprint-core/src/events/exec.rs:117",
         "crates/fineprint-core/src/events/mod.rs:17",
-        "crates/fineprint-core/src/events/tests.rs:323",
-        "crates/fineprint-core/src/events/tests.rs:359",
-        "crates/fineprint-core/src/events/tests.rs:484",
-        "crates/fineprint-core/tests/spec_events_batch.rs:238",
+        "crates/fineprint-core/src/events/tests.rs:1553",
+        "crates/fineprint-core/src/events/tests.rs:1619",
+        "crates/fineprint-core/src/events/tests.rs:329",
+        "crates/fineprint-core/src/events/tests.rs:365",
+        "crates/fineprint-core/src/events/tests.rs:490",
+        "crates/fineprint-core/src/events/tests.rs:681",
+        "crates/fineprint-core/tests/spec_events_batch.rs:219",
+        "crates/fineprint-core/tests/spec_events_batch.rs:274",
         "crates/fineprint-core/tests/spec_events_batch.rs:6",
-        "crates/fineprint-core/tests/spec_events_draw.rs:129",
+        "crates/fineprint-core/tests/spec_events_draw.rs:130",
         "crates/fineprint-core/tests/spec_events_tokens.rs:124",
         "crates/fineprint-core/tests/spec_events_zone.rs:5",
         "crates/fineprint-core/tests/spec_events_zone.rs:54",
-        "crates/fineprint-core/tests/spec_events_zone.rs:86",
+        "crates/fineprint-core/tests/spec_events_zone.rs:91",
         "docs/SRS.md:1447",
         "docs/SRS.md:445",
         "docs/SRS.md:446",
@@ -3524,7 +3557,7 @@
         "crates/fineprint-core/src/memory/record.rs:311",
         "crates/fineprint-core/src/memory/tests.rs:426",
         "crates/fineprint-core/src/memory/tests.rs:568",
-        "crates/fineprint-core/tests/spec_events_zone.rs:249",
+        "crates/fineprint-core/tests/spec_events_zone.rs:254",
         "crates/fineprint-core/tests/spec_memory_encoding.rs:224",
         "crates/fineprint-core/tests/spec_memory_memory.rs:131",
         "crates/fineprint-core/tests/spec_memory_memory.rs:167",
@@ -3610,8 +3643,9 @@
     "608.2h": {
       "sha256": "4020079ffa4c17c408cd844d206d0c21192cd2e7f207e9c6cfbf887f015d343c",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:179",
-        "crates/fineprint-core/src/events/tests.rs:359",
+        "crates/fineprint-core/src/events/exec.rs:180",
+        "crates/fineprint-core/src/events/exec.rs:70",
+        "crates/fineprint-core/src/events/tests.rs:365",
         "crates/fineprint-core/src/memory/error.rs:22",
         "crates/fineprint-core/src/memory/lki.rs:100",
         "crates/fineprint-core/src/memory/lki.rs:106",
@@ -3635,6 +3669,7 @@
         "crates/fineprint-core/src/memory/tests.rs:180",
         "crates/fineprint-core/src/memory/tests.rs:379",
         "crates/fineprint-core/src/memory/tests.rs:386",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:554",
         "crates/fineprint-core/tests/spec_events_zone.rs:5",
         "crates/fineprint-core/tests/spec_events_zone.rs:54",
         "crates/fineprint-core/tests/spec_memory_information.rs:102",
@@ -3746,9 +3781,9 @@
     "613.1a": {
       "sha256": "b49f010358f103948898f9599a9f4d66b845b77822a8c65540e03599d9d5ceaf",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:679",
-        "crates/fineprint-core/src/events/state.rs:70",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:269",
+        "crates/fineprint-core/src/events/exec.rs:696",
+        "crates/fineprint-core/src/events/state.rs:74",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:273",
         "crates/fineprint-core/tests/spec_events_permanent.rs:6"
       ]
     },
@@ -3954,13 +3989,13 @@
       "sha256": "02a8d7ca08c3b85b9f6b3db7817e53780ffeba74a527465db6bcee9e9b7b4653",
       "locations": [
         "crates/fineprint-core/src/events/mod.rs:11",
-        "crates/fineprint-core/src/events/tests.rs:1460",
-        "crates/fineprint-core/src/events/tests.rs:225",
+        "crates/fineprint-core/src/events/tests.rs:1782",
+        "crates/fineprint-core/src/events/tests.rs:231",
         "crates/fineprint-core/src/events/types.rs:17",
         "crates/fineprint-core/src/events/types.rs:550",
         "crates/fineprint-core/src/events/types.rs:579",
         "crates/fineprint-core/tests/spec_events_batch.rs:33",
-        "crates/fineprint-core/tests/spec_events_batch.rs:405",
+        "crates/fineprint-core/tests/spec_events_batch.rs:447",
         "crates/fineprint-core/tests/spec_events_batch.rs:52",
         "crates/fineprint-core/tests/spec_events_batch.rs:6",
         "crates/fineprint-core/tests/spec_events_encoding.rs:298",
@@ -4099,60 +4134,66 @@
     "701.3": {
       "sha256": "cee7808287efe2ef15f1a00975254541d72ff1939574046eeeefe49a7bf585c9",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1182"
+        "crates/fineprint-core/src/events/tests.rs:1250"
       ]
     },
     "701.3a": {
       "sha256": "429a0d4fcf8b1ed64279c5b25396360874c0edf94c6c2e52597daca62b82ac7c",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:645",
-        "crates/fineprint-core/src/events/tests.rs:1185",
+        "crates/fineprint-core/src/events/exec.rs:662",
+        "crates/fineprint-core/src/events/exec.rs:74",
+        "crates/fineprint-core/src/events/exec.rs:92",
+        "crates/fineprint-core/src/events/tests.rs:1253",
+        "crates/fineprint-core/src/events/tests.rs:681",
         "crates/fineprint-core/src/events/types.rs:383",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:199",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:203",
         "crates/fineprint-core/tests/spec_events_permanent.rs:6",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:92"
+        "crates/fineprint-core/tests/spec_events_permanent.rs:96"
       ]
     },
     "701.3b": {
       "sha256": "06f2bda4c40b070861d30c7c7efabf5ceabc872cd9d67038754678e44bbc1688",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:645",
-        "crates/fineprint-core/src/events/exec.rs:658",
-        "crates/fineprint-core/src/events/tests.rs:1185",
-        "crates/fineprint-core/src/events/tests.rs:1207",
+        "crates/fineprint-core/src/events/exec.rs:662",
+        "crates/fineprint-core/src/events/exec.rs:675",
+        "crates/fineprint-core/src/events/tests.rs:1253",
+        "crates/fineprint-core/src/events/tests.rs:1275",
         "crates/fineprint-core/src/permanent/container.rs:241",
         "crates/fineprint-core/src/permanent/container.rs:270",
         "crates/fineprint-core/src/permanent/tests.rs:586",
         "crates/fineprint-core/src/permanent/tests.rs:606",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:140",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:144",
         "crates/fineprint-core/tests/spec_permanent_attach.rs:168"
       ]
     },
     "701.3c": {
       "sha256": "7db6415abfa5a103b8e3b2203f04833e3782613a45bac17f50294572fa2f89dc",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:645",
         "crates/fineprint-core/src/events/exec.rs:662",
-        "crates/fineprint-core/src/events/tests.rs:1185",
-        "crates/fineprint-core/src/events/tests.rs:1209",
+        "crates/fineprint-core/src/events/exec.rs:679",
+        "crates/fineprint-core/src/events/tests.rs:1253",
+        "crates/fineprint-core/src/events/tests.rs:1277",
         "crates/fineprint-core/src/events/types.rs:661",
         "crates/fineprint-core/src/permanent/mod.rs:52",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:92"
+        "crates/fineprint-core/tests/spec_events_permanent.rs:96"
       ]
     },
     "701.3d": {
       "sha256": "185be363755baa3dd892ef8b4b4f1b7dd33c56b1d06c11d61b47fa3e6f64fcd6",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:667",
-        "crates/fineprint-core/src/events/tests.rs:1185",
-        "crates/fineprint-core/src/events/tests.rs:1228",
+        "crates/fineprint-core/src/events/exec.rs:684",
+        "crates/fineprint-core/src/events/exec.rs:74",
+        "crates/fineprint-core/src/events/tests.rs:1253",
+        "crates/fineprint-core/src/events/tests.rs:1296",
+        "crates/fineprint-core/src/events/tests.rs:681",
         "crates/fineprint-core/src/events/types.rs:390",
         "crates/fineprint-core/src/permanent/container.rs:68",
         "crates/fineprint-core/src/permanent/container.rs:82",
         "crates/fineprint-core/src/permanent/mod.rs:31",
         "crates/fineprint-core/src/permanent/tests.rs:173",
         "crates/fineprint-core/src/permanent/tests.rs:187",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:244",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:248",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:405",
         "crates/fineprint-core/tests/spec_events_permanent.rs:6",
         "crates/fineprint-core/tests/spec_permanent_attach.rs:226"
       ]
@@ -4166,14 +4207,14 @@
     "701.7": {
       "sha256": "736825cca466fd2a2f8ae5e3e7014bcbaad3573954c0abb8b5245f005b26f0d1",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1064"
+        "crates/fineprint-core/src/events/tests.rs:1132"
       ]
     },
     "701.7a": {
       "sha256": "260d36f6c95b29874d11c1d1d175f84d53ed28d158fda44881d70538e4065ed5",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:585",
-        "crates/fineprint-core/src/events/tests.rs:1067",
+        "crates/fineprint-core/src/events/exec.rs:602",
+        "crates/fineprint-core/src/events/tests.rs:1135",
         "crates/fineprint-core/src/events/types.rs:359",
         "crates/fineprint-core/tests/spec_events_tokens.rs:33",
         "crates/fineprint-core/tests/spec_events_tokens.rs:6"
@@ -4182,7 +4223,7 @@
     "701.8": {
       "sha256": "1e5ebe078b515df188c9018c099d343a5504114ce4454bbede316e5117d874a7",
       "locations": [
-        "crates/fineprint-core/src/events/mod.rs:45",
+        "crates/fineprint-core/src/events/mod.rs:51",
         "crates/fineprint-core/src/events/types.rs:77"
       ]
     },
@@ -4308,30 +4349,34 @@
     "701.26": {
       "sha256": "b925b341203a7308f653ac30c05d129000ce3d15acd5183ccb365624845e81d0",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1011"
+        "crates/fineprint-core/src/events/tests.rs:1079"
       ]
     },
     "701.26a": {
       "sha256": "f36f67020a26e4b119da87e2d8957bd40198a0b869fb3585f2688a109da261fc",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:566",
-        "crates/fineprint-core/src/events/tests.rs:1014",
+        "crates/fineprint-core/src/events/exec.rs:583",
+        "crates/fineprint-core/src/events/tests.rs:1082",
         "crates/fineprint-core/src/events/types.rs:349",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:34",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:49",
+        "crates/fineprint-core/tests/spec_events_batch.rs:356",
+        "crates/fineprint-core/tests/spec_events_batch.rs:371",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:38",
         "crates/fineprint-core/tests/spec_events_permanent.rs:5",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:64"
+        "crates/fineprint-core/tests/spec_events_permanent.rs:53",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:68"
       ]
     },
     "701.26b": {
       "sha256": "03439481a8804ace121dac596dde19a4418b02992c0d7e1c4e004c7afad0f1c4",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:566",
-        "crates/fineprint-core/src/events/tests.rs:1014",
+        "crates/fineprint-core/src/events/exec.rs:583",
+        "crates/fineprint-core/src/events/tests.rs:1082",
         "crates/fineprint-core/src/events/types.rs:354",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:34",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:49",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:5"
+        "crates/fineprint-core/tests/spec_events_batch.rs:356",
+        "crates/fineprint-core/tests/spec_events_batch.rs:371",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:38",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:5",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:53"
       ]
     },
     "701.27": {
@@ -4350,13 +4395,25 @@
     "701.27b": {
       "sha256": "341f07222d0a1db7cd9ad22d00ce2b45e87f7124afe73a45b7a73c24899cb58e",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:696",
-        "crates/fineprint-core/src/events/tests.rs:1296",
-        "crates/fineprint-core/src/events/tests.rs:1326",
+        "crates/fineprint-core/src/events/exec.rs:401",
+        "crates/fineprint-core/src/events/exec.rs:729",
+        "crates/fineprint-core/src/events/tests.rs:1364",
+        "crates/fineprint-core/src/events/tests.rs:1394",
+        "crates/fineprint-core/src/events/tests.rs:1440",
+        "crates/fineprint-core/src/events/tests.rs:1486",
+        "crates/fineprint-core/src/events/tests.rs:1553",
+        "crates/fineprint-core/src/events/tests.rs:1568",
         "crates/fineprint-core/src/events/types.rs:402",
         "crates/fineprint-core/src/events/types.rs:407",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:339",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:7"
+        "crates/fineprint-core/tests/spec_events_permanent.rs:343",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:433",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:464",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:489",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:554",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:572",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:7",
+        "crates/fineprint-core/tests/spec_events_property.rs:122",
+        "crates/fineprint-core/tests/spec_events_property.rs:330"
       ]
     },
     "701.27c": {
@@ -5033,7 +5090,7 @@
     "703.4m": {
       "sha256": "dd87eb19f91551c753bbdb3be2fbfc28cd5eccc6a0f52148a63599dd54d0aa70",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:113",
+        "crates/fineprint-core/src/events/exec.rs:114",
         "crates/fineprint-core/src/events/types.rs:601"
       ]
     },
@@ -5046,7 +5103,7 @@
     "704.3": {
       "sha256": "af9d4c6d9584be2f1672b07a71c2e76d8acde30a005567a7b74c2f21295fc1ae",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:112",
+        "crates/fineprint-core/src/events/exec.rs:113",
         "crates/fineprint-core/src/events/types.rs:600",
         "crates/fineprint-core/src/events/types.rs:89",
         "crates/fineprint-core/tests/spec_events_batch.rs:185",
@@ -5065,13 +5122,13 @@
     "704.5b": {
       "sha256": "189a248e4c1299bc738828e7069b508793ad6501757aa1c91f004299d5fc68c9",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:342",
-        "crates/fineprint-core/src/events/exec.rs:356",
-        "crates/fineprint-core/src/events/state.rs:248",
-        "crates/fineprint-core/src/events/state.rs:256",
-        "crates/fineprint-core/src/events/tests.rs:690",
-        "crates/fineprint-core/tests/spec_events_draw.rs:104",
-        "crates/fineprint-core/tests/spec_events_draw.rs:80",
+        "crates/fineprint-core/src/events/exec.rs:343",
+        "crates/fineprint-core/src/events/exec.rs:357",
+        "crates/fineprint-core/src/events/state.rs:252",
+        "crates/fineprint-core/src/events/state.rs:260",
+        "crates/fineprint-core/src/events/tests.rs:758",
+        "crates/fineprint-core/tests/spec_events_draw.rs:105",
+        "crates/fineprint-core/tests/spec_events_draw.rs:81",
         "docs/SRS.md:471"
       ]
     },
@@ -5157,7 +5214,7 @@
     "704.5q": {
       "sha256": "118213382f8b321c8fd772da0d7ff046214a9819e1c9d130af3d5b7d8598f4af",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:520",
+        "crates/fineprint-core/src/events/exec.rs:537",
         "crates/fineprint-core/tests/spec_events_counters.rs:165",
         "docs/SRS.md:484"
       ]
@@ -5278,16 +5335,17 @@
     "704.8": {
       "sha256": "9d4671fc2b407aa39d9d5ec01072d68b3ab26652dacc3dc0be7ebc1cc0ebfdaf",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:116",
-        "crates/fineprint-core/src/events/exec.rs:160",
-        "crates/fineprint-core/src/events/exec.rs:370",
+        "crates/fineprint-core/src/events/exec.rs:117",
+        "crates/fineprint-core/src/events/exec.rs:161",
+        "crates/fineprint-core/src/events/exec.rs:381",
         "crates/fineprint-core/src/events/mod.rs:17",
-        "crates/fineprint-core/src/events/tests.rs:484",
-        "crates/fineprint-core/src/events/tests.rs:527",
+        "crates/fineprint-core/src/events/tests.rs:490",
+        "crates/fineprint-core/src/events/tests.rs:533",
         "crates/fineprint-core/src/memory/lki.rs:271",
         "crates/fineprint-core/src/memory/mod.rs:13",
         "crates/fineprint-core/src/memory/tests.rs:348",
-        "crates/fineprint-core/tests/spec_events_batch.rs:238",
+        "crates/fineprint-core/tests/spec_events_batch.rs:219",
+        "crates/fineprint-core/tests/spec_events_batch.rs:274",
         "crates/fineprint-core/tests/spec_events_batch.rs:6",
         "crates/fineprint-core/tests/spec_memory_lki.rs:25",
         "crates/fineprint-core/tests/spec_memory_lki.rs:470",
@@ -5297,30 +5355,30 @@
     "707": {
       "sha256": "b89159edae2abff4c104f26d31ce5f97fd08e1bf7f3c9a2870b35b4b1dedd806",
       "locations": [
-        "crates/fineprint-core/src/events/tests.rs:1296"
+        "crates/fineprint-core/src/events/tests.rs:1364"
       ]
     },
     "707.2": {
       "sha256": "38fc13050f81aaccb9524eb4cb0dfa7e3d76e26ccd3ff199070f0ddd2bbb1e13",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:679",
+        "crates/fineprint-core/src/events/exec.rs:696",
         "crates/fineprint-core/src/events/state.rs:19",
-        "crates/fineprint-core/src/events/state.rs:70",
-        "crates/fineprint-core/src/events/tests.rs:1299",
+        "crates/fineprint-core/src/events/state.rs:74",
+        "crates/fineprint-core/src/events/tests.rs:1367",
         "crates/fineprint-core/src/layouts/merged.rs:194",
         "crates/fineprint-core/src/layouts/tests_composite.rs:1201",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:269",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:273",
         "crates/fineprint-core/tests/spec_events_permanent.rs:6"
       ]
     },
     "707.4": {
       "sha256": "11ee6eacaa3475984c4ce97759e1fb46949ad7ba570555b7f9065aa48728053e",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:679",
-        "crates/fineprint-core/src/events/tests.rs:1299",
+        "crates/fineprint-core/src/events/exec.rs:696",
+        "crates/fineprint-core/src/events/tests.rs:1367",
         "crates/fineprint-core/src/events/types.rs:395",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:269",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:290",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:273",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:294",
         "crates/fineprint-core/tests/spec_events_permanent.rs:6"
       ]
     },
@@ -5395,6 +5453,7 @@
     "708.5": {
       "sha256": "12fe9018f9ee38c647dea19a11bed053c37de41550bc3fd0f0acdfe2f9f81508",
       "locations": [
+        "crates/fineprint-core/src/events/tests.rs:1537",
         "crates/fineprint-core/src/knowledge/known_to.rs:314",
         "crates/fineprint-core/src/knowledge/known_to.rs:525",
         "crates/fineprint-core/src/knowledge/mod.rs:15",
@@ -5433,12 +5492,22 @@
     "708.8": {
       "sha256": "5710c802f542ce00dcbe18722e71ce4831296031fadfaa0a8dd659b677762216",
       "locations": [
-        "crates/fineprint-core/src/events/exec.rs:696",
-        "crates/fineprint-core/src/events/tests.rs:1296",
-        "crates/fineprint-core/src/events/tests.rs:1326",
+        "crates/fineprint-core/src/events/exec.rs:401",
+        "crates/fineprint-core/src/events/exec.rs:418",
+        "crates/fineprint-core/src/events/exec.rs:714",
+        "crates/fineprint-core/src/events/exec.rs:730",
+        "crates/fineprint-core/src/events/tests.rs:1364",
+        "crates/fineprint-core/src/events/tests.rs:1394",
+        "crates/fineprint-core/src/events/tests.rs:1438",
+        "crates/fineprint-core/src/events/tests.rs:1465",
+        "crates/fineprint-core/src/events/tests.rs:1486",
         "crates/fineprint-core/src/events/types.rs:402",
-        "crates/fineprint-core/tests/spec_events_permanent.rs:339",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:343",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:433",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:489",
+        "crates/fineprint-core/tests/spec_events_permanent.rs:554",
         "crates/fineprint-core/tests/spec_events_permanent.rs:7",
+        "crates/fineprint-core/tests/spec_events_property.rs:122",
         "docs/SRS.md:196"
       ]
     },
