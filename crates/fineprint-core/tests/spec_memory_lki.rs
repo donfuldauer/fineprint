@@ -390,11 +390,12 @@ fn lki_error_unknown_object() {
         .move_object(&mut w.ids, a, MoveRequest::new(ZoneKind::Graveyard))
         .unwrap();
     let before = w.lki.clone();
-    // `a` is no longer in a zone; AlreadyCaptured or UnknownObject are both errors, and the
-    // store must not change.
-    assert!(
-        w.capture(moved.old, &MoveRequest::new(ZoneKind::Exile))
-            .is_err()
+    // `a` is no longer in any zone, so UnknownObject takes precedence over AlreadyCaptured
+    // (the zone lookup runs before the already-captured check); the store must not change.
+    assert_eq!(moved.old, a);
+    assert_eq!(
+        w.capture(moved.old, &MoveRequest::new(ZoneKind::Exile)),
+        Err(MemoryError::UnknownObject(a))
     );
     assert_eq!(w.lki, before);
 }

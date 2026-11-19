@@ -2612,9 +2612,15 @@ pins an unsettled rule).
 `CharacteristicsProvider` trait, `LkiRecord`, `LkiStore`, `capture_lki_on_move`,
 `information_for` and `MemoryError`, exactly as fixed by the brief. Nothing is wired into
 `GameState`. The protocol is *capture before move*: the caller calls `capture_lki_on_move` before
-`Zones::move_object` (afterwards the old record is gone), then calls
+`Zones::move_object` (afterward the old record is gone), then calls
 `MemoryTable::apply_zone_change` with the returned `Moved`. For simultaneous state-based
 departures (CR 704.8) the caller captures every departing object first and only then moves them.
+Failure recovery: before capturing, the caller snapshots the `LkiStore` (`Clone` is a cheap `Arc`
+snapshot, and mutating the clone never changes the original). On any failed capture or failed
+`Zones::move_object`, the caller restores that snapshot, for a single move and for the whole
+simultaneous-departure batch alike. So after a failure the store holds no record for an object that
+did not leave its zone, and a retry can capture it again instead of getting `AlreadyCaptured`. This
+matches the transactional rollback that checkpoints (#26 FP-025) will provide once state is wired.
 A capture is made iff the request makes the object leave its zone (destination differs, or exile
 -> exile / command -> command, CR 400.8, 406.7, 400.10), which matches exactly when
 `Zones::move_object` issues a new id; same-zone repositions return `Ok(false)`. Records are keyed
