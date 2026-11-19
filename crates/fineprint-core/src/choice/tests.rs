@@ -2713,13 +2713,15 @@ fn req_net_003_ask_rejects_stale_validator_bounds() {
         Err(ChoiceError::Procedure(_))
     ));
     let synced = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
-        answer_number(ctx.ask(tightened(ctx, 5, 9_999, true)?)?)
+        answer_number(ctx.ask(tightened(ctx, 5, 14_999, true)?)?)
     };
     let mut s = ChoiceSession::start(toy_base(), synced).expect("consistent request accepted");
     let r = s.pending().expect("pending").clone();
-    assert_eq!((r.min, r.max), (5, 9_999));
-    reject(&r, &num(10_000));
-    s.submit(RequestId::new(0), num(9_999)).expect("in range");
+    // 14,995 answers: at or above the enumeration limit, so a validator contract is correct.
+    assert!(!is_enumerated(&r));
+    assert_eq!((r.min, r.max), (5, 14_999));
+    reject(&r, &num(15_000));
+    s.submit(RequestId::new(0), num(14_999)).expect("in range");
     assert!(s.pending().is_none());
 }
 
@@ -2792,6 +2794,15 @@ fn req_net_003_pay_costs_method_eligibility() {
     // Eligible only for the other method.
     reject(&r, &pay(vec![(0, vec![o(3)])]));
     reject(&r, &pay(vec![(1, vec![o(1)])]));
+    // A repeated method index is rejected even when each entry alone is valid.
+    assert!(!reject(&r, &pay(vec![(0, vec![o(1)]), (0, vec![o(1)])])).is_empty());
+    assert!(!reject(&r, &pay(vec![(0, vec![o(1)]), (0, vec![o(2)])])).is_empty());
+    // Several objects for one method go in one entry; different methods each use their own.
+    assert_eq!(r.validate(&pay(vec![(0, vec![o(1), o(2)])])), Ok(()));
+    assert_eq!(
+        r.validate(&pay(vec![(1, vec![o(3)]), (0, vec![o(2)])])),
+        Ok(())
+    );
     // Out-of-range method index.
     reject(&r, &pay(vec![(2, vec![])]));
     reject(&r, &pay(vec![(u32::MAX, vec![o(1)])]));

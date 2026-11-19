@@ -757,7 +757,8 @@ impl PendingChoiceRequest {
     ///   without a range), one option per symbol slot, harmonize from the candidates;
     /// - `CHOOSE_TARGETS`: one list per slot, `min..=max` distinct legal targets each (current
     ///   targets also allowed when the copy may keep them);
-    /// - `PAY_MANA_AND_COSTS`: method indices in range, each method's objects distinct and
+    /// - `PAY_MANA_AND_COSTS`: method indices in range, each method index at most once,
+    ///   each method's objects distinct and
     ///   eligible for that method, mana abilities as listed, auto-pay only if offered and alone,
     ///   decline only if optional, cancel only if cancellable;
     /// - `DECLARE_ATTACKERS`: distinct listed attackers, each with one of its targets;
@@ -1037,8 +1038,12 @@ impl PendingChoiceRequest {
                             );
                         }
                     }
+                    let mut seen_methods = BTreeSet::new();
                     for (m, objects) in methods {
                         index_below(*m, method_list.len(), "payment methods")?;
+                        if !seen_methods.insert(*m) {
+                            return Err(format!("payment method {m} is listed more than once"));
+                        }
                         let eligible = usize::try_from(*m)
                             .ok()
                             .and_then(|i| method_list.get(i))

@@ -3677,3 +3677,26 @@ payload fields ahead of the units that produce them.
 producer); extending the attack/block payloads now (speculative); syncing validator bounds by
 recomputing the contract in `validate` (rejected: hides the producer's bug); a single source for
 the bounds (rejected: `min`/`max` and `ValidatorContract` are pinned public fields).
+
+## #28 FP-027 — CodeRabbit round 2: judgement calls
+
+**Decision:**
+(i) PAY_COSTS: a method index may appear at most once per response; objects for one method go in
+one entry. `validate` rejects a repeated index with a non-empty explanation. Cross-method object
+overlap is not checked here (eligibility lists are per method; whether a payment covers the cost
+stays deferred to issue #54, FP-052).
+(ii) The `req_net_003_ask_rejects_stale_validator_bounds` success fixture is corrected to a range
+(5..=14_999) at or above `ENUMERATION_LIMIT`, so it is a valid validator-contract request.
+`well_formed` (session.rs) is unchanged: it checks only what makes a request unusable by the
+session (default validates, validator bounds equal request bounds). Whether a request uses
+Enumerated below `ENUMERATION_LIMIT` and Validator at or above it is a property of the producer:
+`generate_request` guarantees it by counting; a procedure-built request is the procedure's
+responsibility.
+**Rationale:** (i) A repeated index would bypass the per-method distinctness check, so the answer
+is ambiguous. (ii) The option count depends on type-specific candidate data (subsets, permutations,
+divisions, card names) that the request does not carry uniformly for payload-built types;
+re-deriving it in `well_formed` duplicates generate.rs and risks rejecting valid procedure-raised
+requests (CHOOSE_CARD_NAME is always a validator by design).
+**Alternatives:** (i) Merging repeated entries (rejected: silently reinterprets the answer);
+tracking objects across all methods (rejected: not stated by SRS 15.3, may break legitimate
+overlap). (ii) A count-based check in `well_formed` reusing generate.rs (rejected, reasons above).
