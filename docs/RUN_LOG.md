@@ -277,3 +277,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (triage T0) | Opus 5.5 | 1 | done | docs only | DECISIONS records the R10 change to req_event_001_r6_lineage_path_grandchild_takes_parent_position (verifier finding at 59c4901) |
 | 03-events | #29 (PR #178 review round 6d) | Orchestrator (R8) | Opus 5.5 | 1 | recorded | docs only | review 5981232036 (phase C descendants after the pool round) recorded as known limitation (h); later unit |
+| 03-events | #30 | work-classifier | Opus 5.5 | 1 | needs-rules → routed | — | T2: new trigger-detection module; 603.10a-g look-back needs CR text |
+| 03-events | #30 | rules-researcher | Opus 5.5 | 1 | done | baseline CR-2026-11-06 match | 603.10a-g match SRS; three SRS §8.2 citation discrepancies → DECISIONS + HUMAN_QUEUE P8 |
+| 03-events | #30 | Implementer | Opus 5.5 | 1 | done | 2575 workspace tests pass; fmt, clippy, guard clean; triggers/ 100% lines | triggers::{look_back_kind, events_from_batch, detect, WaitingTriggers} |
+| 03-events | #30 | Independent Tester | Opus 5.5 | 1 | done | 81 spec_triggers_* pass | black-box, no disagreement with the implementation |
+| 03-events | #30 | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
