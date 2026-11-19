@@ -271,3 +271,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 6b) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 108 passed; fmt, clippy, guard clean | lineage-path schedule_key (r4633092145); unit work-budget test covers DepthExceeded and WorkLimit (R10) |
 | 03-events | #29 (PR #178 review round 6b) | Independent Tester | Opus 5.5 | 1 | done | all spec_replacement_* pass; round6 11/11 x3 | grandchild spec test; F7 re-specced as depth-or-work limit (R10) |
 | 03-events | #29 (PR #178 review round 6b) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 6b) | Verifier | Sonnet 5.5 | 1 | pass | 802a692: workspace 2454 tests pass; fmt, clippy, coverage floors, guard, cr check ok | lineage-path follow-up traced; R10 evidence for both f7 tests present |
