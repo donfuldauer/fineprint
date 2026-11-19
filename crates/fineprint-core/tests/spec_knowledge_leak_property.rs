@@ -6,8 +6,10 @@
 //! states and knowledge sets (REQ-CORE-004 acceptance criterion 1; REQ-ZONE-001; CR 400.2,
 //! 400.7, 401.2, 401.3, 402.3, 406.3, 701.24a, 701.24b, 708.5, 708.9). Plain loops driven by a
 //! seeded LCG (R3): 8 seeds x 2 player counts x 250 steps.
-//! L3b (hidden-move twins) has no observation condition based on position knowledge. Black-box: written from the
-//! work-item brief only.
+//! L3b (hidden-move twins) has no observation condition based on position knowledge; it also
+//! covers removals from a hidden zone (`send_outside` + `on_removed_from_hidden_zone`, PR #174
+//! review finding F2). Insertions (`enter_from_outside` + `on_library_changed`) stay
+//! position-only. Black-box: written from the work-item brief only.
 //!
 //! The oracle is the independent `Shadow` model of the support file: it applies the brief's
 //! rules to every generated operation and never asks the implementation for the expected
@@ -21,7 +23,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{CardId, IdGenerator, ObjectId, PlayerId};
 use fineprint_core::knowledge::{KnowledgeError, ZonesView};
-use fineprint_core::zones::{MoveRequest, Moved, ObjectRecord, Position, ZoneId, ZoneKind};
+use fineprint_core::zones::{
+    MoveRequest, Moved, ObjectRecord, OutsidePool, Position, ZoneId, ZoneKind,
+};
 use support::*;
 
 const STEPS: usize = 250;
@@ -79,6 +83,21 @@ struct Stats {
     /// Compared non-observers who held, before the move, a position entry on the moved or on
     /// the alternative card (the case of the removed position-entry observation condition).
     twin_pos_holder_compared: usize,
+    /// `send_outside` operations followed by `on_removed_from_hidden_zone` (any source zone).
+    removals: usize,
+    /// Of those, removals from a library or a hand.
+    hidden_removals: usize,
+    /// (removal, non-observer) pairs whose views were compared across removal twins.
+    removal_compared: usize,
+    /// Compared non-observers who held, before the removal, a position entry or stored KnownTo
+    /// on either removed candidate.
+    removal_holder_compared: usize,
+    /// Removal twins where an observer's views were shown to differ (the control).
+    removal_control: usize,
+    /// `enter_from_outside` insertions (library or hand).
+    insertions: usize,
+    /// Of those, insertions into a library (followed by `on_library_changed`).
+    library_insertions: usize,
 }
 
 fn face_down_in(w: &KWorld, kinds: &[ZoneKind]) -> Vec<ObjectId> {
@@ -101,7 +120,7 @@ fn step(s: &mut World, rng: &mut Lcg, stats: &mut Stats) {
     let players = s.w.players();
     let all = s.w.zones.all_object_ids();
     let roll = rng.below(100);
-    if all.is_empty() || roll < 22 {
+    if all.is_empty() || roll < 18 {
         let req = random_request(rng, &players);
         let owner = rng.pick(&players);
         s.w.create_req(owner, req);
@@ -112,8 +131,12 @@ fn step(s: &mut World, rng: &mut Lcg, stats: &mut Stats) {
                 .expect("library changed");
             s.m.on_library_changed(&s.w.zones, owner);
         }
-    } else if roll < 50 {
+    } else if roll < 23 {
+        do_insert(s, rng, &players, stats);
+    } else if roll < 46 {
         do_move(s, rng, &players, &all, stats);
+    } else if roll < 51 {
+        do_remove(s, rng, &players, &all, stats);
     } else if roll < 55 {
         let id = rng.pick(&all);
         s.w.k.reveal_to_all(&s.w.zones, id).expect("reveal");
@@ -345,6 +368,233 @@ fn do_move(
             "L3b control: views differ"
         );
         stats.twin_control += 1;
+    }
+}
+
+/// Removes `id` with `Zones::send_outside`, then informs the implementation
+/// (`on_removed_from_hidden_zone`, with the record copied BEFORE the removal) and the model.
+/// With `inject`, rejected hook calls are tried first. Returns the record and the model's
+/// observed set (`None` for a public source).
+fn apply_removal(
+    s: &mut World,
+    id: ObjectId,
+    observers: &[PlayerId],
+    inject: Option<&mut Lcg>,
+) -> (ObjectRecord, Option<BTreeSet<PlayerId>>) {
+    let before = s.w.rec(id);
+    let pool = if id.get().is_multiple_of(2) {
+        OutsidePool::Sideboard
+    } else {
+        OutsidePool::Lesson
+    };
+    let card = s.w.zones.send_outside(id, pool).expect("send_outside");
+    assert_eq!(card, before.card);
+    if let Some(rng) = inject {
+        inject_removal_errors(s, &before, observers, rng);
+    }
+    s.w.k
+        .on_removed_from_hidden_zone(&s.w.zones, &before, observers)
+        .expect("on_removed_from_hidden_zone");
+    let observed = s.m.removed_from_hidden_zone(&s.w.zones, &before, observers);
+    (before, observed)
+}
+
+/// R12: the source library or hand of an unknown player is `UnknownPlayer(owner)` (checked
+/// first), an unknown observer `UnknownPlayer` of the first unknown one; nothing changes.
+fn inject_removal_errors(
+    s: &mut World,
+    before: &ObjectRecord,
+    observers: &[PlayerId],
+    rng: &mut Lcg,
+) {
+    let snapshot = s.w.k.clone();
+    let mut bad = observers.to_vec();
+    bad.insert(rng.idx(bad.len() + 1), NOBODY);
+    let public = !matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand);
+    if !public {
+        assert_eq!(
+            s.w.k.on_removed_from_hidden_zone(&s.w.zones, before, &bad),
+            Err(KnowledgeError::UnknownPlayer(NOBODY))
+        );
+    }
+    let ghost = PlayerId::new(1000 + rng.below(1000));
+    let zone = if rng.chance(1, 2) {
+        ZoneId::Library(ghost)
+    } else {
+        ZoneId::Hand(ghost)
+    };
+    let fake = ObjectRecord { zone, ..*before };
+    assert_eq!(
+        s.w.k.on_removed_from_hidden_zone(&s.w.zones, &fake, &bad),
+        Err(KnowledgeError::UnknownPlayer(ghost)),
+        "the owner error comes first"
+    );
+    assert_eq!(s.w.k, snapshot, "a rejected removal report changes nothing");
+}
+
+/// A random `send_outside` of a library or hand object (sometimes of any object) with random
+/// observers (none, a random subset, every player), followed by the hook. For a hidden source,
+/// a twin world removes a DIFFERENT object of the same source zone with the same observers
+/// (L3b for removals, PR #174 review finding F2). Observation (design rule of the brief, no
+/// CR) depends only on the observers list and the source zone, so the model's observed set
+/// must be the same in both worlds; every player outside it must then have equal whole views
+/// and equal `position_known` for every library in both worlds, including a player holding a
+/// position entry or set knowledge on either removed candidate.
+fn do_remove(
+    s: &mut World,
+    rng: &mut Lcg,
+    players: &[PlayerId],
+    all: &[ObjectId],
+    stats: &mut Stats,
+) {
+    let hidden: Vec<ObjectId> = all
+        .iter()
+        .copied()
+        .filter(|o| matches!(s.w.rec(*o).zone.kind(), ZoneKind::Library | ZoneKind::Hand))
+        .collect();
+    let id = if !hidden.is_empty() && rng.chance(4, 5) {
+        rng.pick(&hidden)
+    } else {
+        rng.pick(all)
+    };
+    let observers: Vec<PlayerId> = match rng.below(3) {
+        0 => Vec::new(),
+        1 => players
+            .iter()
+            .copied()
+            .filter(|_| rng.chance(1, 2))
+            .collect(),
+        _ => players.to_vec(),
+    };
+    let inject = rng.chance(1, 6);
+    let before = s.w.rec(id);
+    let mut twin = None;
+    let mut holders: BTreeSet<PlayerId> = BTreeSet::new();
+    let hidden_source = matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand);
+    if hidden_source {
+        let alts: Vec<ObjectId> =
+            s.w.zones
+                .contents(before.zone)
+                .into_iter()
+                .filter(|o| *o != id)
+                .collect();
+        if !alts.is_empty() {
+            let alt = rng.pick(&alts);
+            if let ZoneId::Library(owner) = before.zone
+                && rng.chance(2, 3)
+            {
+                seed_positions(s, rng, players, owner, &[id, alt]);
+            }
+            if rng.chance(1, 2) {
+                // set knowledge on both candidates for a random player
+                let p = rng.pick(players);
+                for o in [id, alt] {
+                    s.w.k.add_known(&s.w.zones, o, p).expect("add_known");
+                    s.m.add_known(&s.w.zones, o, p);
+                }
+            }
+            for p in players {
+                let pos_holder = match before.zone {
+                    ZoneId::Library(owner) => {
+                        s.m.positions(&s.w.zones, *p, owner)
+                            .values()
+                            .any(|o| *o == id || *o == alt)
+                    }
+                    _ => false,
+                };
+                let set_holder = s.m.stored(&s.w.zones, id).contains(p)
+                    || s.m.stored(&s.w.zones, alt).contains(p);
+                if pos_holder || set_holder {
+                    holders.insert(*p);
+                }
+            }
+            let mut t = s.clone();
+            let (_, tobs) = apply_removal(&mut t, alt, &observers, None);
+            twin = Some((t, tobs));
+        }
+    }
+    let (_, observed) = apply_removal(s, id, &observers, inject.then_some(rng));
+    stats.removals += 1;
+    if hidden_source {
+        stats.hidden_removals += 1;
+        assert!(observed.is_some(), "the hook applies to a hidden source");
+    } else {
+        assert!(observed.is_none(), "a public source is a no-op");
+    }
+    let Some((t, tobserved)) = twin else {
+        return;
+    };
+    check_model(&t, "removal twin");
+    let obs = observed.expect("hidden source");
+    let tobs = tobserved.expect("hidden source");
+    // structural guard: observation never depends on which card was removed
+    assert_eq!(
+        obs, tobs,
+        "L3b removal: observation must be world-independent ({before:?}, observers {observers:?})"
+    );
+    for p in players {
+        if obs.contains(p) {
+            continue;
+        }
+        assert_eq!(
+            s.w.view(*p),
+            t.w.view(*p),
+            "L3b removal: {p:?} did not observe the removal from {before:?} (observers {observers:?})"
+        );
+        for owner in players {
+            assert_eq!(
+                s.w.positions(*p, *owner),
+                t.w.positions(*p, *owner),
+                "L3b removal position_known: {p:?} on {owner:?}'s library after removal from {before:?}"
+            );
+        }
+        stats.removal_compared += 1;
+        if holders.contains(p) {
+            stats.removal_holder_compared += 1;
+        }
+    }
+    // control: the owner of the source hand sees which card left (CR 402.3)
+    if let ZoneId::Hand(owner) = before.zone {
+        assert!(obs.contains(&owner));
+        assert_ne!(
+            s.w.view(owner),
+            t.w.view(owner),
+            "L3b removal control: views differ"
+        );
+        stats.removal_control += 1;
+    }
+}
+
+/// A card from outside the game enters a library (random position, then `on_library_changed`:
+/// position-only, CR 401.2) or a hand (no knowledge call), in the implementation and in the
+/// model. Only cards never seen in the game enter (the brief does not say what a returning
+/// card's knowledge is). Stored KnownTo is never touched by an insertion.
+fn do_insert(s: &mut World, rng: &mut Lcg, players: &[PlayerId], stats: &mut Stats) {
+    let owner = rng.pick(players);
+    let to_library = rng.chance(2, 3);
+    let req = if to_library {
+        KWorld::req_at(ZoneKind::Library, random_position(rng))
+    } else {
+        MoveRequest::new(ZoneKind::Hand)
+    };
+    let known_before: Vec<(ObjectId, BTreeSet<PlayerId>)> =
+        s.w.zones
+            .all_object_ids()
+            .into_iter()
+            .map(|id| (id, s.w.known_to(id)))
+            .collect();
+    let new = s.w.enter_fresh(owner, req);
+    if to_library {
+        s.m.on_library_changed(&s.w.zones, owner);
+        stats.library_insertions += 1;
+    }
+    stats.insertions += 1;
+    assert!(
+        s.w.known_to(new).is_empty(),
+        "a fresh card is known to nobody"
+    );
+    for (id, k) in known_before {
+        assert_eq!(s.w.known_to(id), k, "an insertion never changes KnownTo");
     }
 }
 
@@ -773,6 +1023,28 @@ fn run_all(players: &[PlayerId]) {
     assert!(
         stats.twin_pos_holder_compared > 0,
         "L3b never compared a position-holding non-observer: {stats:?}"
+    );
+    assert!(stats.removals > 0, "no send_outside: {stats:?}");
+    assert!(
+        stats.hidden_removals > 0,
+        "no hidden-zone send_outside: {stats:?}"
+    );
+    assert!(
+        stats.removal_compared > 0,
+        "L3b compared no removal non-observer: {stats:?}"
+    );
+    assert!(
+        stats.removal_holder_compared > 0,
+        "L3b never compared a knowledge-holding removal non-observer: {stats:?}"
+    );
+    assert!(
+        stats.removal_control > 0,
+        "L3b removal control never ran: {stats:?}"
+    );
+    assert!(stats.insertions > 0, "no enter_from_outside: {stats:?}");
+    assert!(
+        stats.library_insertions > 0,
+        "no enter_from_outside into a library: {stats:?}"
     );
     eprintln!("L3b stats {} players: {stats:?}", players.len());
 }
