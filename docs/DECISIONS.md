@@ -3788,10 +3788,12 @@ rollback when the copy step fails is provoked with a copied object id that does 
 `BusError::Event(_)` and an unchanged state are asserted, not the inner `EventError`.
 (13) F11/F4: an Untap of an untapped permanent and zero damage are asserted to leave the state
 completely unchanged and log nothing; a Tap of a tapped permanent executing on its own is not
-tested (brief: unchanged, no CR text). Amended in review round 5 (C2): a Tap of a tapped permanent
-is submitted as the START of `req_event_001_override_effect_terminating_chain_applies_again` and is
-asserted to collect effects (it is replaced, so it never executes), as the decision "Events that
-would not happen offer no effects" states.
+tested (brief: unchanged, no CR text). Amended in review round 6 (D6, clause B4, thread
+r4632818842; CR 701.26a, 614.7), replacing the round-5 amendment: a Tap of a tapped permanent would
+not happen, exactly like an Untap of an untapped permanent, so it offers no replacement or
+prevention effect (no request, no application, no shield use) and changes nothing (nothing executed
+or logged); `req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect` asserts this, with an
+untapped control. The terminating chain no longer starts from a tapped permanent (item 29).
 (14) G1 (copy source, CR 608.2h, SRS 2.3): the entry copy succeeds when the original is destroyed in
 the SAME batch as the entering event, in both submission orders, for a zone-change entry and a
 token; the copy link is the original's (old) id and the original's executed move ends in a
@@ -3936,15 +3938,38 @@ equals the reported one (bytes and index), the life totals and `applications` [1
 keeps its scenario but now asserts `DepthExceeded` with the state unchanged: the lineage is judged
 against the pre-call state, so the overriding effect keeps matching its own child Tap (the charge
 counter is never removed between generations). Its old purpose (CR 614.5 override semantics) moves
-to `req_event_001_override_effect_terminating_chain_applies_again`: a tapped permanent, e1 (Tap ->
-Instead[Untap], overriding) and e2 (Untap -> Instead[Tap]): Ok, `applications` [e1, e2, e1], the
-permanent untapped, ONE batch holding exactly one Untap with applied set {e1, e2}.
+to `req_event_001_override_effect_terminating_chain_applies_again`, re-specified in review round 6
+(D6, clause B4, thread r4632818842; CR 701.26a, 614.7: the round-5 chain started with a Tap of a
+tapped permanent, which now offers no effect): an UNTAPPED permanent, e1 (Tap ->
+Instead[AddCounters charge 1], overriding) and e2 (AddCounters -> Instead[Tap]), every event
+possible against the pre-call state: Ok, `applications` [e1, e2, e1], the permanent untapped with
+one charge counter, ONE batch holding exactly one AddCounters with applied set {e1, e2}.
 (30) B6 (CodeRabbit K1): separate results (different objects, separate groups) are scheduled in
 APNAP order then submission order and may compete for a one-use effect, and an object's new id and
 the batch order depend on the position of its move; so whole-run equality (report, registry bytes,
 world snapshot, canonical state, state hash, and a re-run) is asserted only between the two orders
 of ONE group's members, or of one object's two events, with every other event at the same position.
-Other reorderings (K2 b) assert only final zones and counts.
+Other reorderings (K2 b) assert only final zones and counts. Amended in review round 6 (clause B1):
+an `Instead` descendant takes the submission position of the event it replaces (item 31).
+(31) D1 (review round 6, clause B1, thread r4632671472; CR 101.4, 616.1, SRS 8.1 [2]; tests in
+`spec_replacement_round6.rs`): a descendant is resolved in APNAP order of its own chooser at the
+submission position of the event it replaces, as soon as that event has resolved. The tests observe
+this only through which simultaneous life gain takes a one-use doubler (a descendant gain of the
+active player wins in both submission orders, also when its parent's chooser is the nonactive
+player; two gains of one player go by the parent's position) and through the chooser of the first
+two `CHOOSE_REPLACEMENT_EFFECT` requests (`PendingChoiceRequest::chooser`, as in
+`spec_replacement_choice.rs`); the total number of requests is asserted only as at least two. No
+existing spec test pinned the old "descendants after the cohort" order: none needed correcting.
+(32) D2 (review round 6, clause B2, thread r4632671485; CR 101.3, 614.6, 400.7, 701.3b, 608.2h):
+in a later batch of the call (a `Prevent { then }` follow-up, or the `Instead` descendants of one),
+the roles checked against objects an earlier batch moved are the affected object, the
+`Attach` host (`AttachTarget::Permanent`) and `BecomeCopy.copied` (an engine limitation: the rules
+would copy last known information); such an event is ignored and the rest of its batch executes. A
+damage source is not a role: damage from a moved source is still dealt (CR 608.2h). A never-issued
+id still fails with `UnknownObject` and rolls the call back. Each shape runs directly and via an
+`Instead` of the follow-up gain (with a gain of 2 in place of 1).
+(33) D6 (review round 6, clause B4, thread r4632818842; CR 701.26a, 614.7): a Tap of a tapped
+permanent offers no effect and is a no-op (items 13 and 29).
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed

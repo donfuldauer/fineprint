@@ -133,16 +133,20 @@ fn req_event_001_override_effect_applies_again_to_instead_child() {
     assert_unchanged(&r);
 }
 
-// REQ-EVENT-001, CR 614.5, 614.6, 616.1f, SRS 8.1 (override semantics, review round 5 C2): obj is
-// tapped; e1 (Tap -> Instead[Untap], overrides CR 614.5) and e2 (Untap -> Instead[Tap]). Tap ->
-// (e1) Untap -> (e2) Tap -> (e1 again: it overrides 614.5) Untap -> nothing left (e2 is already
-// applied and does not override). Ok; applications [e1, e2, e1]; obj ends untapped; ONE executed
-// batch holding exactly one Untap whose applied set is {e1, e2}.
+// REQ-EVENT-001, CR 614.5, 614.6, 616.1f, SRS 8.1 (override semantics, review round 5 C2;
+// re-specified in review round 6, clause B4, thread r4632818842): obj is UNTAPPED; e1 (Tap ->
+// Instead[AddCounters charge 1], overrides CR 614.5) and e2 (AddCounters -> Instead[Tap]). Tap ->
+// (e1) AddCounters -> (e2) Tap -> (e1 again: it overrides 614.5) AddCounters -> nothing left (e2
+// is already applied and does not override). Ok; applications [e1, e2, e1]; obj ends untapped (no
+// Tap executed); one charge counter; ONE executed batch holding exactly one AddCounters whose
+// applied set is {e1, e2}. Corrected under R10: the round-5 shape started from a TAPPED permanent
+// (Tap -> Instead[Untap], Untap -> Instead[Tap]); a Tap of a tapped permanent would not happen
+// (CR 701.26a), so it offers no effect (CR 614.7) and that chain never starts. Every event here
+// stays possible against the state before the call.
 #[test]
 fn req_event_001_override_effect_terminating_chain_applies_again() {
     let mut w = World::new();
     let obj = w.create(ZoneKind::Battlefield, P1);
-    w.ok(GameEvent::Tap { object: obj });
     let on = |kind| EventMatcher {
         affected_object: Some(obj),
         ..EventMatcher::new(kind)
@@ -151,12 +155,12 @@ fn req_event_001_override_effect_terminating_chain_applies_again() {
         fx(
             1,
             on(BusEventKind::Tap),
-            Action::Instead(vec![GameEvent::Untap { object: obj }]),
+            Action::Instead(vec![add_counters(obj, "charge", 1)]),
         )
         .with_overrides_614_5(true),
         fx(
             2,
-            on(BusEventKind::Untap),
+            on(BusEventKind::AddCounters),
             Action::Instead(vec![GameEvent::Tap { object: obj }]),
         ),
     ];
@@ -164,12 +168,13 @@ fn req_event_001_override_effect_terminating_chain_applies_again() {
     assert!(r.result.is_ok(), "{:?}", r.result);
     assert_eq!(r.applications(), eids(&[1, 2, 1]));
     assert!(!r.world().tapped(obj), "obj ends untapped");
+    assert_eq!(r.world().counter(obj, "charge"), 1, "one charge counter");
     let batches = r.nonempty_batches();
     assert_eq!(batches.len(), 1, "ONE executed batch");
     assert_eq!(batches[0].events.len(), 1, "exactly one event");
     assert_eq!(
         batches[0].events[0].instance.event(),
-        &GameEvent::Untap { object: obj }
+        &add_counters(obj, "charge", 1)
     );
     assert_eq!(applied_of(&batches[0].events[0]), eids(&[1, 2]));
 }
