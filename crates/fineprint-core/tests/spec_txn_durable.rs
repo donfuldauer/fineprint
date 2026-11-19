@@ -120,11 +120,12 @@ fn durable_sub_player_state_variant() {
     assert_eq!(txns.state().turn().priority_player(), Some(pid(1)));
 }
 
-/// REQ-CORE-005, CR 734.1: per semantics i(iii), when the durable sub changes a player, that
-/// player's life, counters and designations are copied from the state at durable commit, which
-/// includes an outer-action change to the same player made before the sub began.
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 1): a durable sub carries only its own change to a
+/// player (the before -> after delta over the restored checkpoint). An outer-action change to
+/// the same player made before the sub began is not carried: the checkpoint life is restored,
+/// and only the sub's new counter survives.
 #[test]
-fn durable_sub_copies_whole_player_from_after() {
+fn durable_sub_carries_only_its_own_player_delta() {
     let mut txns = Transactions::new(game(2));
     let checkpoint_state = txns.state().clone();
     let outer = txns.checkpoint();
@@ -137,12 +138,155 @@ fn durable_sub_copies_whole_player_from_after() {
     txns.commit_durable(sub).unwrap();
     txns.rollback(outer).unwrap();
     let mut expected = checkpoint_state;
+    expected
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_c", 1);
+    assert_eq!(txns.state(), &expected);
+    assert_eq!(txns.state().state_hash(), expected.state_hash());
+    // The outer-only life change (20 -> 8) is reverted, not carried.
+    assert_eq!(txns.state().player(pid(1)).unwrap().life(), 20);
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 1): same player, same field. Life is 20 at the
+/// outer checkpoint, the outer action sets 8, the durable sub goes 8 -> 5; after the outer
+/// rollback the life is 20 + (5 - 8) = 17.
+#[test]
+fn durable_sub_life_delta_over_outer_change_same_player() {
+    let mut txns = Transactions::new(game(2));
+    let checkpoint_state = txns.state().clone();
+    assert_eq!(checkpoint_state.player(pid(1)).unwrap().life(), 20);
+    let outer = txns.checkpoint();
+    set_life(txns.state_mut(), 1, 8);
+    let sub = txns.checkpoint();
+    set_life(txns.state_mut(), 1, 5);
+    txns.commit_durable(sub).unwrap();
+    let report = txns.rollback(outer).unwrap();
+    let mut expected = checkpoint_state;
+    set_life(&mut expected, 1, 17);
+    assert_eq!(txns.state(), &expected);
+    assert_eq!(txns.state().state_hash(), expected.state_hash());
+    assert_eq!(report.state_hash, expected.state_hash());
+    assert_eq!(txns.state().player(pid(1)).unwrap().life(), 17);
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 1): same player, same counter key. The counter is 2
+/// at the outer checkpoint, the outer action sets 5, the durable sub goes 5 -> 7; after the
+/// outer rollback it is 2 + (7 - 5) = 4.
+#[test]
+fn durable_sub_counter_delta_over_outer_change_same_key() {
+    let mut txns = Transactions::new(game(2));
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 2);
+    let checkpoint_state = txns.state().clone();
+    let outer = txns.checkpoint();
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 5);
+    let sub = txns.checkpoint();
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 7);
+    txns.commit_durable(sub).unwrap();
+    txns.rollback(outer).unwrap();
+    let mut expected = checkpoint_state;
+    expected
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 4);
+    assert_eq!(txns.state(), &expected);
+    assert_eq!(
+        txns.state()
+            .player(pid(1))
+            .unwrap()
+            .counter("test.counter_x"),
+        4
+    );
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 1, decided over-decrement policy): the counter is 1
+/// at the outer checkpoint, the outer action raises it to 6, the durable sub takes it 6 -> 0.
+/// The carried count 1 + (0 - 6) is clamped at 0, so the entry is absent; life is untouched.
+#[test]
+fn durable_sub_counter_over_decrement_clamps_at_zero() {
+    let mut txns = Transactions::new(game(2));
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 1);
+    let checkpoint_state = txns.state().clone();
+    let outer = txns.checkpoint();
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 6);
+    let sub = txns.checkpoint();
+    txns.state_mut()
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 0);
+    txns.commit_durable(sub).unwrap();
+    txns.rollback(outer).unwrap();
+    let mut expected = checkpoint_state;
+    expected
+        .player_mut(pid(1))
+        .unwrap()
+        .set_counter("test.counter_x", 0);
+    assert_eq!(txns.state(), &expected);
+    let p1 = txns.state().player(pid(1)).unwrap();
+    assert_eq!(p1.counter("test.counter_x"), 0);
+    assert!(!p1.counters().contains_key("test.counter_x"));
+    assert_eq!(p1.life(), 20);
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 1): with outer-action changes to the same player
+/// before the sub began, the durable sub's counter removal and its designation addition,
+/// change and removal are carried, while the outer-only counter and designation changes are
+/// not; a designation changed by both takes the sub's (`after`'s) value.
+#[test]
+fn durable_sub_carries_counter_and_designation_changes_not_outer_ones() {
+    let mut txns = Transactions::new(game(2));
+    let checkpoint_state = txns.state().clone();
+    let outer = txns.checkpoint();
+    {
+        let mut p = txns.state_mut().player_mut(pid(1)).unwrap();
+        p.set_counter("test.counter_a", 9); // outer only
+        p.set_designation("test.outer_only", DesignationValue::Int(3)); // outer only
+        p.set_designation("test.level", DesignationValue::Int(5)); // outer, then sub
+    }
+    let sub = txns.checkpoint();
+    {
+        let mut p = txns.state_mut().player_mut(pid(1)).unwrap();
+        p.set_counter("test.counter_b", 0); // removed by the sub
+        p.set_designation("test.label", DesignationValue::Text("sub".to_owned())); // added
+        p.set_designation("test.level", DesignationValue::Int(2)); // changed
+        p.clear_designation("test.flag"); // removed
+    }
+    txns.commit_durable(sub).unwrap();
+    txns.rollback(outer).unwrap();
+    let mut expected = checkpoint_state;
     {
         let mut p = expected.player_mut(pid(1)).unwrap();
-        p.set_life(8);
-        p.set_counter("test.counter_c", 1);
+        p.set_counter("test.counter_b", 0);
+        p.set_designation("test.label", DesignationValue::Text("sub".to_owned()));
+        p.set_designation("test.level", DesignationValue::Int(2));
+        p.clear_designation("test.flag");
     }
     assert_eq!(txns.state(), &expected);
+    assert_eq!(txns.state().state_hash(), expected.state_hash());
+    let p1 = txns.state().player(pid(1)).unwrap();
+    assert_eq!(p1.counter("test.counter_a"), 2);
+    assert!(!p1.counters().contains_key("test.counter_b"));
+    assert!(p1.designation("test.outer_only").is_none());
+    assert!(p1.designation("test.flag").is_none());
+    assert_eq!(
+        p1.designation("test.level"),
+        Some(&DesignationValue::Int(2))
+    );
 }
 
 /// REQ-CORE-005, CR 734.1: a durable sub that changes nothing carries nothing.
@@ -184,6 +328,42 @@ fn durable_survives_through_plain_commit_of_intermediate() {
     issue_objects(&mut expected, 2);
     assert_eq!(txns.state(), &expected);
     assert_eq!(txns.state().state_hash(), expected.state_hash());
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 4): durable B inside durable A, then the root is
+/// rolled back. A's record covers B's window, so each durable effect is applied exactly once:
+/// the PRNG draws and object ids of A and B, and B's life change (life is carried as a delta,
+/// so a second application would show). The root's own change before A is reverted.
+#[test]
+fn durable_inside_durable_then_root_rollback_applies_once() {
+    let mut txns = Transactions::new(game(2));
+    let cp = txns.state().clone();
+    let r = txns.checkpoint();
+    set_life(txns.state_mut(), 2, 4);
+    let a = txns.checkpoint();
+    issue_objects(txns.state_mut(), 2);
+    let b = txns.checkpoint();
+    draw(txns.state_mut(), 6);
+    issue_objects(txns.state_mut(), 1);
+    set_life(txns.state_mut(), 1, 17);
+    txns.commit_durable(b).unwrap();
+    txns.commit_durable(a).unwrap();
+    assert_eq!(txns.depth(), 1);
+    let report = txns.rollback(r).unwrap();
+    assert_eq!(txns.depth(), 0);
+    let mut expected = cp.clone();
+    issue_objects(&mut expected, 2);
+    draw(&mut expected, 6);
+    issue_objects(&mut expected, 1);
+    set_life(&mut expected, 1, 17);
+    assert_eq!(txns.state(), &expected);
+    assert_eq!(txns.state().state_hash(), expected.state_hash());
+    assert_eq!(report.state_hash, expected.state_hash());
+    assert_eq!(txns.state().ids().object.last_issued(), 3);
+    assert_eq!(txns.state().player(pid(1)).unwrap().life(), 17);
+    assert_eq!(txns.state().player(pid(2)).unwrap().life(), 20);
+    // CR 734.2: the checkpoint's priority player keeps priority.
+    assert_eq!(report.priority_player, cp.priority_player());
 }
 
 /// REQ-CORE-005, CR 734.1, case 5(b): R, A, B durable, A rolled back: B survives A's rollback;
@@ -466,6 +646,47 @@ fn toy_records_propagate_through_intermediate_rollback() {
             calls: vec![(2, 3)],
         }
     );
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 4): root R; A appends 7; B inside A appends 8; B
+/// and then A are committed durably; R is rolled back. A's single record covers B, so the log
+/// is exactly `[7, 8]` (not `[8, 7, 8]`) from exactly one `carry_durable` call.
+#[test]
+fn toy_durable_inside_durable_root_rollback_applies_once() {
+    let mut txns = Transactions::new(Toy::new(0));
+    let r = txns.checkpoint();
+    txns.state_mut().a = 1;
+    let a = txns.checkpoint();
+    txns.state_mut().a = 2;
+    toy_append(&mut txns, &[7]);
+    let b = txns.checkpoint();
+    txns.state_mut().a = 3;
+    toy_append(&mut txns, &[8]);
+    txns.commit_durable(b).unwrap();
+    txns.commit_durable(a).unwrap();
+    txns.rollback(r).unwrap();
+    assert_eq!(txns.state().log, vec![7, 8]);
+    assert_eq!(txns.state().calls, vec![(1, 3)]);
+    assert_eq!(txns.state().a, 0);
+}
+
+/// REQ-CORE-005, CR 734.1 (PR #175 finding 4): B durable inside A; A rolled back, then R rolled
+/// back. B's effect is applied exactly once at each rollback: the log is `[8]` after each.
+#[test]
+fn toy_durable_inside_rolled_back_frame_applies_once_per_rollback() {
+    let mut txns = Transactions::new(Toy::new(0));
+    let r = txns.checkpoint();
+    let a = txns.checkpoint();
+    toy_append(&mut txns, &[7]);
+    let b = txns.checkpoint();
+    toy_append(&mut txns, &[8]);
+    txns.commit_durable(b).unwrap();
+    txns.rollback(a).unwrap();
+    assert_eq!(txns.state().log, vec![8]);
+    assert_eq!(txns.state().calls.len(), 1);
+    txns.rollback(r).unwrap();
+    assert_eq!(txns.state().log, vec![8]);
+    assert_eq!(txns.state().calls.len(), 1);
 }
 
 /// REQ-CORE-005: no `carry_durable` call when no durable record lies beneath the frame, and a
