@@ -2475,3 +2475,78 @@ colors come from the unlocked halves' costs and are 0/colorless with neither unl
 **Rationale:** Rules-researcher check of the §4.2 rows against the CR text (issue #23).
 **Alternatives:** Follow the SRS wording (contradicts the CR on the stack P/T and on the
 leave-the-battlefield event count).
+
+## #23 FP-022 — Composite layouts are dedicated APIs; layout_for unchanged
+
+**Decision:** ROOM, MELD, STATION, PREPARATION and MUTATE get their own public types in
+`fineprint_core::layouts` (`RoomLayout` with `RoomQuery`/`RoomDoors`, `MeldLayout` and
+`MeldedPair`, `StationLayout` and `active_station_symbols`, `PreparationLayout` with
+`prepare_spell_characteristics`/`become_prepared`, `MutateLayout` and `MergedPermanent`).
+`layout_for`, the free functions `base_characteristics`/`mana_value`/`gating`, the `Layout`
+trait, `LayoutQuery`, `LayoutStatus` and `CastChoice` are unchanged, so `layout_for` still
+returns `UnsupportedLayout` for these five behaviors. Four `LayoutError` variants are added
+(`NotMeldPair`, `AlreadyPrepared`, `TooFewComponents`, `InvalidStationSymbols`). The exhaustive
+`match` in `layouts/tests.rs::is_defined_error` gains the four variants in its `false` arm (no
+existing layout returns them), the only edit needed for it to compile.
+**Rationale:** A Room needs door state, a melded permanent needs two definitions and a merged
+permanent an ordered list of components; none fits `LayoutQuery` without changing a frozen
+contract and the #22 spec tests. Wiring into `layout_for` belongs to the integration issue.
+**Alternatives:** Extend `LayoutQuery`/`LayoutStatus` with door, prepared and merge fields
+(breaks the #22 API and its frozen tests); make `LayoutError` `#[non_exhaustive]` (does not
+help inside the crate).
+
+## #23 FP-022 — A locked Room half keeps its color indicator
+
+**Decision:** On the battlefield a Room's colors are `base_colors(cost of the unlocked halves,
+union of both halves' color indicators, CdaColors::None)`, and `color_indicator` is the union of
+both halves' indicators whatever the doors; a locked half loses only its name, mana cost, rules
+text and abilities. With both halves locked the Room is colorless unless a half has an indicator.
+**Rationale:** CR 709.5 removes only "the name, mana cost, or rules text" of a locked half; a
+color indicator is none of these, so nothing removes it, while the cost colors go with the cost
+(CR 202.2). Abilities follow the rules text they are printed in.
+**Alternatives:** Drop a locked half's indicator too (reads more into CR 709.5 than it says);
+keep the combined cost's colors (contradicts the removed mana cost, see the #23 SRS 4.2 gaps
+entry).
+
+## #23 FP-022 — Station symbols are caller-supplied; the layer system picks P/T
+
+**Decision:** `active_station_symbols` takes the station symbols as `StationSymbol` values
+(threshold, abilities, optional P/T box) supplied by the caller, checks there are one or two
+(CR 722.1), returns none off the battlefield or with a negative counter count, and otherwise
+returns every symbol whose threshold is at most the charge-counter count, in printed order. When
+two symbols apply, both are returned; choosing whose P/T box is the base P/T is left to the
+layer system. `StationLayout` itself keeps the Main face's printed abilities (CR 722.4) and drops
+power and toughness off the battlefield (CR 722.2c).
+**Rationale:** `AbilityAST` is an opaque placeholder (as in the #22 gating decision), so the
+striations cannot be read from a definition without inventing a JSON convention. Picking between
+two active P/T boxes is a layer-system question, and there is no layer system yet. A negative counter
+count cannot occur in the game, so it activates nothing rather than activating a `{0+}` symbol.
+**Alternatives:** Parse symbols from `AbilityAST` (invents a format); return only the highest
+active symbol (pre-empts the layer system); clamp negative counts to 0.
+
+## #23 FP-022 — Merged permanents: `mutated` flag, abilities-only union
+
+**Decision:** `MergedPermanent::new(components, mutated)` takes an explicit `mutated` flag. The
+merged permanent's base characteristics are the topmost component's, selected with its own
+layout on the battlefield (CR 731.2a); when `mutated` is true its `abilities` are the
+concatenation of every component's abilities, top to bottom, without deduplication
+(CR 702.140e), and every other field, `rules_text` included, stays the topmost component's.
+Errors come from the topmost component, then, only when mutated, from the others in order.
+**Rationale:** CR 731.2a lets the effect that caused the merge specify otherwise; mutate is the
+one such effect in scope, so a flag keeps the general merge and mutate apart. `rules_text` is an
+opaque token stream with no ability boundaries, so only the structured ability list is united.
+**Alternatives:** Always unite abilities (wrong for non-mutate merges); concatenate rules text
+too (mixes printed text of several cards into one stream with no defined meaning); deduplicate
+abilities (CR 702.140e says "all abilities of each card").
+
+## #23 FP-022 — Token components use a stand-in definition
+
+**Decision:** A `MergedComponent` that is a token is described by `is_token: true` plus any
+definition whose layout the component resolver supports (MUTATE, MELD, STATION, PREPARATION or
+any `layout_for` layout). TOKEN and DFC_TOKEN definitions return `UnsupportedLayout` until the
+token issue, like every other unsupported layout (ROOM included).
+**Rationale:** Token definitions are out of scope for this unit; the token flag is what CR 731.2d
+needs, and the characteristics come from whatever definition the token copies or was created
+from.
+**Alternatives:** Add TOKEN support here (out of scope); reject token components (the merged
+token rule could not be tested).
