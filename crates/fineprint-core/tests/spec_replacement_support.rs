@@ -22,8 +22,8 @@ use fineprint_base::encode::CanonicalEncode;
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId};
 use fineprint_core::choice::{
-    ChoiceContext, ChoicePayload, ChoiceResponse, ChoiceSession, Interrupt, PendingChoiceRequest,
-    Status,
+    ChoiceContext, ChoicePayload, ChoiceResponse, ChoiceSession, ChoiceTarget, Interrupt,
+    PendingChoiceRequest, Status,
 };
 use fineprint_core::events::{
     CounterTarget, DamageTarget, EventBatch, EventContext, EventInstance, EventState,
@@ -330,6 +330,17 @@ pub fn dmg_object(o: ObjectId, amount: i64) -> GameEvent {
     }
 }
 
+/// Damage from source object `source` to player `p` (no source controller).
+pub fn dmg_from(source: ObjectId, p: PlayerId, amount: i64) -> GameEvent {
+    GameEvent::Damage {
+        source: Some(source),
+        source_controller: None,
+        target: DamageTarget::Player(p),
+        amount,
+        combat: false,
+    }
+}
+
 pub fn zone_change(object: ObjectId, to: ZoneKind, cause: ZoneChangeCause) -> GameEvent {
     GameEvent::ZoneChange {
         object,
@@ -609,6 +620,26 @@ pub fn select(index: u32) -> ChoiceResponse {
     ChoiceResponse::SelectReplacement { index }
 }
 
+/// The `(total, recipients)` of a `DivideValue` request (the CR 615.7 pool allocation).
+pub fn division(req: &PendingChoiceRequest) -> (u64, Vec<(ChoiceTarget, u64)>) {
+    match &req.payload {
+        ChoicePayload::DivideValue { total, recipients } => (*total, recipients.clone()),
+        other => panic!("expected a DivideValue payload, got {other:?}"),
+    }
+}
+
+/// `SubmitDivision` giving `amounts[i]` to source object `sources[i]`.
+pub fn divide(sources: &[ObjectId], amounts: &[u64]) -> ChoiceResponse {
+    assert_eq!(sources.len(), amounts.len());
+    ChoiceResponse::SubmitDivision {
+        assignments: sources
+            .iter()
+            .zip(amounts)
+            .map(|(&s, &a)| (ChoiceTarget::Object(s), a))
+            .collect(),
+    }
+}
+
 /// The most requests one test run may publish before it is declared non-terminating.
 pub const MAX_REQUESTS: usize = 2_000;
 
@@ -618,6 +649,16 @@ pub fn drive(
     base: Bus,
     call: Call,
     mut pick: impl FnMut(usize, &PendingChoiceRequest) -> u32,
+) -> Run {
+    drive_with(base, call, |i, req| select(pick(i, req)))
+}
+
+/// Drives `call` on `base` to completion, answering each request `req` (the `i`-th, from 0)
+/// with `answer(i, req)` (any response type, e.g. a `SubmitDivision`).
+pub fn drive_with(
+    base: Bus,
+    call: Call,
+    mut answer: impl FnMut(usize, &PendingChoiceRequest) -> ChoiceResponse,
 ) -> Run {
     let before = base.clone();
     let mut session = match ChoiceSession::start(base, procedure(call)) {
@@ -630,9 +671,9 @@ pub fn drive(
             requests.len() < MAX_REQUESTS,
             "the bus did not terminate within {MAX_REQUESTS} requests"
         );
-        let index = pick(requests.len(), &req);
-        if let Err(e) = session.submit(req.request_id, select(index)) {
-            panic!("answer {index} to {req:?} rejected: {e:?}");
+        let response = answer(requests.len(), &req);
+        if let Err(e) = session.submit(req.request_id, response.clone()) {
+            panic!("answer {response:?} to {req:?} rejected: {e:?}");
         }
         requests.push(req);
     }

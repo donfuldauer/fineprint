@@ -3,9 +3,11 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! Property tests for the replacement bus over generated effect sets on Damage and ZoneChange
-//! events (REQ-EVENT-001; CR 614.5, 615, 616.1, 616.1f). A fixed LCG seeded per case drives
-//! the generator (R3: no system randomness, no new dependencies). Black-box: written from the
-//! work-item brief only.
+//! events (REQ-EVENT-001; CR 614.5, 615.6, 615.7, 616.1, 616.1f). A fixed LCG seeded per case
+//! drives the generator and the answers (R3: no system randomness, no new dependencies). Damage
+//! comes from up to two source objects (or none), so pool shields meet multi-source damage and
+//! raise CR 615.7 allocation requests, which the runner answers with seeded valid divisions.
+//! Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
 mod support;
@@ -13,7 +15,8 @@ mod support;
 use std::collections::BTreeMap;
 
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId};
-use fineprint_core::events::{GameEvent, ZoneChangeCause};
+use fineprint_core::choice::{ChoicePayload, ChoiceResponse, PendingChoiceRequest};
+use fineprint_core::events::{DamageTarget, GameEvent, ZoneChangeCause};
 use fineprint_core::replacement::{
     Action, AmountOp, BusEventKind, EventMatcher, Modification, ReplacementEffect, Shield, Tier,
 };
@@ -153,6 +156,10 @@ fn gen_case(seed: u64) -> Case {
             world.create_controlled(ZoneKind::Battlefield, owner, Some(controller))
         })
         .collect();
+    // Two damage source objects that never move.
+    let srcs: Vec<ObjectId> = (0..2)
+        .map(|_| world.create(ZoneKind::Battlefield, P1))
+        .collect();
     let prevention_only = rng.chance(1, 3);
 
     // Distinct effect ids in 1..=20, in generation (insertion) order.
@@ -182,7 +189,20 @@ fn gen_case(seed: u64) -> Case {
     let mut unmoved = objs.clone();
     for _ in 0..1 + rng.below(3) {
         if prevention_only || unmoved.is_empty() || rng.chance(1, 2) {
-            events.push(dmg_player(player(&mut rng), 1 + rng.below(6) as i64));
+            let target = player(&mut rng);
+            let amount = 1 + rng.below(6) as i64;
+            let source = match rng.below(3) {
+                0 => None,
+                1 => Some(srcs[0]),
+                _ => Some(srcs[1]),
+            };
+            events.push(GameEvent::Damage {
+                source,
+                source_controller: None,
+                target: DamageTarget::Player(target),
+                amount,
+                combat: false,
+            });
         } else {
             let i = usize::try_from(rng.below(unmoved.len() as u64)).expect("fits");
             let obj = unmoved.remove(i);
@@ -208,13 +228,52 @@ enum Strategy {
     Seeded(u64),
 }
 
+/// A valid `SubmitDivision` for a CR 615.7 allocation request: every recipient gets its
+/// minimum, the rest goes all to the first (First), all to the last (Last) or split at random
+/// (Seeded).
+fn divide_answer(req: &PendingChoiceRequest, strategy: Strategy, rng: &mut Lcg) -> ChoiceResponse {
+    let (total, recipients) = division(req);
+    assert!(
+        recipients.len() >= 2,
+        "an allocation has two or more sources: {req:?}"
+    );
+    let minimum: u64 = recipients.iter().map(|(_, m)| m).sum();
+    assert!(total >= minimum, "{req:?}");
+    let mut amounts: Vec<u64> = recipients.iter().map(|(_, m)| *m).collect();
+    let mut rest = total - minimum;
+    match strategy {
+        Strategy::First => amounts[0] += rest,
+        Strategy::Last => *amounts.last_mut().expect("non-empty") += rest,
+        Strategy::Seeded(_) => {
+            let last = amounts.len() - 1;
+            for a in amounts.iter_mut().take(last) {
+                let share = rng.below(rest + 1);
+                *a += share;
+                rest -= share;
+            }
+            amounts[last] += rest;
+        }
+    }
+    ChoiceResponse::SubmitDivision {
+        assignments: recipients
+            .iter()
+            .zip(amounts)
+            .map(|((t, _), a)| (*t, a))
+            .collect(),
+    }
+}
+
 fn run_case(case: &Case, effects: Vec<ReplacementEffect>, strategy: Strategy) -> Run {
     let bus = Bus::new(case.world.clone(), effects);
     let mut rng = Lcg::new(match strategy {
         Strategy::Seeded(s) => s,
         _ => 0,
     });
-    drive(bus, Call::batch(case.events.clone(), false), |_, req| {
+    drive_with(bus, Call::batch(case.events.clone(), false), |_, req| {
+        if matches!(req.payload, ChoicePayload::DivideValue { .. }) {
+            assert_eq!(req.reason.cr, "CR 615.7", "{req:?}");
+            return divide_answer(req, strategy, &mut rng);
+        }
         let n = option_count(req) as u64;
         assert!(n >= 2, "a request offers at least two effects: {req:?}");
         let i = match strategy {
@@ -222,7 +281,7 @@ fn run_case(case: &Case, effects: Vec<ReplacementEffect>, strategy: Strategy) ->
             Strategy::Last => n - 1,
             Strategy::Seeded(_) => rng.below(n),
         };
-        u32::try_from(i).expect("fits")
+        select(u32::try_from(i).expect("fits"))
     })
 }
 
@@ -271,7 +330,7 @@ fn check_invariants(case: &Case, r: &Run, seed: u64, strategy: Strategy) {
         }
     }
 
-    // (4) CR 615: with only prevention effects, dealt + prevented == submitted.
+    // (4) CR 615.6, 615.7: with only prevention effects, dealt + prevented == submitted.
     if case.prevention_only {
         let dealt: i64 = r
             .executed()
@@ -289,7 +348,7 @@ fn check_invariants(case: &Case, r: &Run, seed: u64, strategy: Strategy) {
         assert!(report.prevented >= 0, "{ctx}");
     }
 
-    // (5) CR 615: shields never go below zero; an exhausted effect is absent.
+    // (5) CR 615.7: shields never go below zero; an exhausted effect is absent.
     for id in r.after.registry.ids() {
         assert!(by_id.contains_key(&id), "{ctx}: registry gained {id:?}");
     }
@@ -313,7 +372,7 @@ fn check_invariants(case: &Case, r: &Run, seed: u64, strategy: Strategy) {
     }
 }
 
-// REQ-EVENT-001, CR 614.5, 615, 616.1, 616.1f: for every generated case and every answer
+// REQ-EVENT-001, CR 614.5, 615.6, 615.7, 616.1, 616.1f: for every generated case and every answer
 // strategy (first, last, seeded) the bus terminates, and invariants (1), (4) and (5) hold.
 #[test]
 fn req_event_001_property_terminates_and_invariants_hold() {
@@ -368,16 +427,28 @@ fn req_event_001_property_order_independent_and_deterministic() {
     }
 }
 
-// REQ-EVENT-001: the generator itself is deterministic and covers both modes.
+// REQ-EVENT-001, CR 615.7: the generator itself is deterministic, covers both modes, and some
+// cases raise a CR 615.7 allocation request (a pool met by damage from two sources).
 #[test]
 fn req_event_001_property_generator_is_deterministic() {
     let mut modes = [0usize; 2];
+    let mut allocations = 0usize;
     for seed in 0..CASES {
         let a = gen_case(seed);
         let b = gen_case(seed);
         assert_eq!(a.effects, b.effects);
         assert_eq!(a.events, b.events);
         modes[usize::from(a.prevention_only)] += 1;
+        let r = run_case(&a, a.effects.clone(), Strategy::First);
+        allocations += r
+            .requests
+            .iter()
+            .filter(|q| matches!(q.payload, ChoicePayload::DivideValue { .. }))
+            .count();
     }
     assert!(modes[0] > 0 && modes[1] > 0);
+    assert!(
+        allocations > 0,
+        "no generated case raised an allocation request"
+    );
 }

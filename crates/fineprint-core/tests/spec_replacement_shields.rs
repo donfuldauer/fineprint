@@ -3,8 +3,8 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! Spec tests for prevention and shields on the replacement bus, and the counter-backed
-//! effects (REQ-EVENT-001; CR 615, 122.1c, 122.1d, 122.1h). Black-box: written from the
-//! work-item brief only.
+//! effects (REQ-EVENT-001; CR 615.1, 615.6, 615.7, 615.8, 614.7, 614.7a, 120.8, 122.1c,
+//! 122.1d, 122.1h, 701.26b). Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
 mod support;
@@ -23,7 +23,7 @@ fn next(r: &Run) -> Bus {
     r.after.clone()
 }
 
-// REQ-EVENT-001, CR 615: a `Uses(2)` prevention shield prevents two damage events, then is
+// REQ-EVENT-001, CR 615.7, 615.8: a `Uses(2)` prevention shield prevents two damage events, then is
 // gone from the registry and the third damage event is dealt.
 #[test]
 fn req_event_001_uses_shield_consumed_then_removed() {
@@ -47,7 +47,7 @@ fn req_event_001_uses_shield_consumed_then_removed() {
     assert_eq!(r3.world().life(P2), STARTING_LIFE - 3);
 }
 
-// REQ-EVENT-001, CR 615: a `Pool(3)` shield prevents 2 of 2 damage (1 left), then 1 of 4
+// REQ-EVENT-001, CR 615.7: a `Pool(3)` shield prevents 2 of 2 damage (1 left), then 1 of 4
 // (3 dealt) and is removed.
 #[test]
 fn req_event_001_pool_shield_drains() {
@@ -71,7 +71,7 @@ fn req_event_001_pool_shield_drains() {
     assert!(r2.after.registry.get(eid(1)).is_none());
 }
 
-// REQ-EVENT-001, CR 615: a pool larger than the damage prevents all of it; the event is
+// REQ-EVENT-001, CR 615.7, 615.6: a pool larger than the damage prevents all of it; the event is
 // dropped (nothing logged) and the effect stays.
 #[test]
 fn req_event_001_pool_larger_than_damage_drops_event() {
@@ -83,7 +83,7 @@ fn req_event_001_pool_larger_than_damage_drops_event() {
     assert!(r.after.registry.get(eid(1)).is_some());
 }
 
-// REQ-EVENT-001, CR 615: a "prevent all" effect without a shield prevents every damage event
+// REQ-EVENT-001, CR 615.1, 615.6: a "prevent all" effect without a shield prevents every damage event
 // and stays; the prevented total is reported and nothing is logged.
 #[test]
 fn req_event_001_prevent_all_without_shield() {
@@ -98,7 +98,7 @@ fn req_event_001_prevent_all_without_shield() {
     assert!(r2.after.registry.get(eid(1)).is_some());
 }
 
-// REQ-EVENT-001, CR 615: `BusReport::prevented` is the total over the batch.
+// REQ-EVENT-001, CR 615.1: `BusReport::prevented` is the total over the batch.
 #[test]
 fn req_event_001_prevented_total_over_batch() {
     let bus = Bus::new(World::new(), vec![prevent(1)]);
@@ -114,7 +114,7 @@ fn req_event_001_prevented_total_over_batch() {
     assert_eq!(r.world().life(P1), STARTING_LIFE - 4);
 }
 
-// REQ-EVENT-001, CR 122.1c, 615: the counter-backed damage shield prevents the damage and
+// REQ-EVENT-001, CR 122.1c, 615.1: the counter-backed damage shield prevents the damage and
 // removes exactly one shield counter through a child RemoveCounters event (a second executed
 // batch after the parent batch).
 #[test]
@@ -145,7 +145,7 @@ fn req_event_001_shield_counter_prevents_damage() {
     assert_eq!(r.new_log().len(), 2);
 }
 
-// REQ-EVENT-001, CR 122.1c: the damage shield alone on one event: one logged batch, the
+// REQ-EVENT-001, CR 122.1c, 615.1: the damage shield alone on one event: one logged batch, the
 // RemoveCounters child; no damage.
 #[test]
 fn req_event_001_shield_counter_single_event_logs_only_removal() {
@@ -291,4 +291,75 @@ fn req_event_001_shield_counter_removal_reenters_bus() {
     assert_eq!(r.world().zone_of(obj), Some(ZoneKind::Battlefield));
     assert_eq!(r.world().counter(obj, "shield"), 1);
     assert!(r.new_log().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// review round 1: events that would not happen (F4, F11)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-EVENT-001, CR 614.7a, 120.8, 614.7 (F4): zero damage is no event: in a batch
+// [0 damage, 3 damage] a one-use prevention shield is not consumed by the zero event and
+// prevents the 3; the zero event is not logged.
+#[test]
+fn req_event_001_r1_f4_zero_damage_does_not_consume_shield() {
+    let bus = Bus::new(World::new(), vec![prevent(1).with_shield(Shield::Uses(1))]);
+    let r = run_batch(bus, vec![dmg_player(P2, 0), dmg_player(P2, 3)], false, &[]);
+    assert_eq!(r.applications(), eids(&[1]));
+    assert_eq!(r.report().prevented, 3);
+    assert_eq!(r.world().life(P2), STARTING_LIFE);
+    assert!(r.after.registry.is_empty());
+    assert!(r.executed().is_empty());
+    assert!(r.new_log().is_empty());
+}
+
+// REQ-EVENT-001, CR 614.7a, 120.8, 614.7 (F4): a single zero-damage event: no application, the
+// shield stays, nothing logged; with two applicable effects nothing is asked.
+#[test]
+fn req_event_001_r1_f4_single_zero_damage_offers_nothing() {
+    let bus = Bus::new(World::new(), vec![prevent(1).with_shield(Shield::Uses(1))]);
+    let initial = bytes(&bus.registry);
+    let r = run_event(bus, dmg_player(P2, 0), &[]);
+    assert!(r.applications().is_empty());
+    assert_eq!(r.report().prevented, 0);
+    assert_eq!(bytes(&r.after.registry), initial);
+    assert!(r.new_log().is_empty());
+    assert_eq!(r.world().life(P2), STARTING_LIFE);
+
+    let bus = Bus::new(World::new(), vec![prevent(1), prevent(2)]);
+    let r = run_event(bus, dmg_player(P2, 0), &[]);
+    assert!(r.requests.is_empty());
+    assert!(r.applications().is_empty());
+    assert!(r.new_log().is_empty());
+}
+
+// REQ-EVENT-001, CR 122.1d, 701.26b (F11): untapping an UNTAPPED permanent is no event: the
+// stun effect does not apply, the counter stays, nothing changes.
+#[test]
+fn req_event_001_r1_f11_stun_ignores_untapped_permanent() {
+    let mut w = World::new();
+    let obj = w.create(ZoneKind::Battlefield, P1);
+    w.put_counters(obj, "stun", 1);
+    assert!(!w.tapped(obj));
+    let bus = Bus::new(w, vec![ReplacementEffect::stun_counter(eid(1), obj)]);
+    let r = run_event(bus, GameEvent::Untap { object: obj }, &[]);
+    assert!(r.applications().is_empty());
+    assert_eq!(r.world().counter(obj, "stun"), 1);
+    assert!(!r.world().tapped(obj));
+    assert!(r.new_log().is_empty());
+    assert_unchanged(&r);
+}
+
+// REQ-EVENT-001, CR 122.1d (F11): a TAPPED permanent with one stun counter stays tapped and
+// loses the counter; one application.
+#[test]
+fn req_event_001_r1_f11_stun_replaces_untap_of_tapped_permanent() {
+    let mut w = World::new();
+    let obj = w.create(ZoneKind::Battlefield, P1);
+    w.ok(GameEvent::Tap { object: obj });
+    w.put_counters(obj, "stun", 1);
+    let bus = Bus::new(w, vec![ReplacementEffect::stun_counter(eid(1), obj)]);
+    let r = run_event(bus, GameEvent::Untap { object: obj }, &[]);
+    assert_eq!(r.applications(), eids(&[1]));
+    assert!(r.world().tapped(obj));
+    assert_eq!(r.world().counter(obj, "stun"), 0);
 }
