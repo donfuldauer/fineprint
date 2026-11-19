@@ -32,21 +32,38 @@
 //! form; the integration unit does that. It is integer-only and uses no hash-ordered container
 //! (REQ-CORE-006).
 //!
-//! **Out of scope here** (later work): the ROOM, MELD, ATTRACTION, STATION, PREPARATION and
-//! MUTATE layouts, tokens (TOKEN, DFC_TOKEN), variant layouts (PLANAR, SCHEME, VANGUARD,
-//! CONSPIRACY, DUNGEON), face-down status, copy effects (only the `copying_back_face` mana-value
-//! flag is modelled), level/lore counters and designations, and the layer system.
+//! **Composite layouts.** ROOM, MELD, STATION, PREPARATION and MUTATE are implemented as
+//! dedicated APIs, not through [`layout_for`] (which still returns
+//! [`LayoutError::UnsupportedLayout`] for them until the integration unit wires them in):
+//! [`RoomLayout`] with [`RoomQuery`] and [`RoomDoors`] (CR 709.5); [`MeldLayout`] and
+//! [`MeldedPair`] (CR 713); [`StationLayout`] and [`active_station_symbols`] (CR 722);
+//! [`PreparationLayout`], [`prepare_spell_characteristics`] and [`become_prepared`] (CR 723);
+//! [`MutateLayout`] and [`MergedPermanent`] (CR 702.140, 731). Their actions (unlocking,
+//! melding, the station ability, creating and casting a prepare copy, mutating) are not
+//! implemented.
+//!
+//! **Out of scope here** (later work): the ATTRACTION layout, tokens (TOKEN, DFC_TOKEN),
+//! variant layouts (PLANAR, SCHEME, VANGUARD, CONSPIRACY, DUNGEON), face-down status, copy
+//! effects (only the `copying_back_face` mana-value flag is modelled), level/lore counters and
+//! designations, and the layer system.
 
 mod alternative;
 mod dfc;
 mod faces;
 mod flip;
+mod meld;
+mod merged;
+mod preparation;
 mod printed;
+mod room;
 mod split;
+mod station;
 mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_composite;
 
 use fineprint_dsl::card::{CardDefinitionDSL, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
@@ -54,8 +71,15 @@ use fineprint_dsl::vocab::RulesVocabulary;
 pub use alternative::{AdventurerLayout, OmenLayout, PrototypeLayout};
 pub use dfc::{DfcModalLayout, DfcNonmodalLayout};
 pub use flip::FlipLayout;
+pub use meld::{MeldLayout, MeldedPair};
+pub use merged::{MergeSide, MergedComponent, MergedPermanent, MutateLayout};
+pub use preparation::{
+    PREPARED_DESIGNATION, PreparationLayout, become_prepared, prepare_spell_characteristics,
+};
 pub use printed::{CaseLayout, ClassLayout, LevelerLayout, NormalLayout, SagaLayout};
+pub use room::{RoomDoors, RoomLayout, RoomQuery};
 pub use split::SplitLayout;
+pub use station::{StationLayout, StationSymbol, active_station_symbols};
 pub use types::{CastChoice, FaceUp, Gating, Layout, LayoutError, LayoutQuery, LayoutStatus};
 
 use crate::objects::{Characteristics, ManaValueContext};

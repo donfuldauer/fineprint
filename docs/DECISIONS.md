@@ -2460,3 +2460,147 @@ replaces the Main face's values (CodeRabbit round 1, PR #171).
 **Alternatives:** Take all four from the Flipped face (the first implementation: reads more into
 CR 710.1b than it says); set them to `None` when flipped (drops printed Main-face values no rule
 removes).
+
+## #23 FP-022 — SRS 4.2 gaps for room, meld, station, preparation and mutate
+
+**Decision:** Where SRS §4.2 (REQ-OBJ-002) and the CR baseline (2026-11-06) differ, the CR wins
+(P1): (1) STATION: the stack shows the printed characteristics except power and toughness, which
+are absent (CR 722.2c: no power or toughness in any zone other than the battlefield); (2) MELD:
+when a melded permanent leaves the battlefield, one permanent leaves and both cards are put into
+the new zone (CR 713.8), not "the two cards move separately"; (3) ROOM: on the battlefield a
+Room's name, mana cost and rules text come only from its unlocked halves, so its mana value and
+colors come from the unlocked halves' costs and are 0/colorless with neither unlocked (CR 709.5,
+202.3, 202.3a; 709.5 is more specific than 709.4b); the unlock special action needs priority
+(CR 116.2m, 709.5e).
+**Rationale:** Rules-researcher check of the §4.2 rows against the CR text (issue #23).
+**Alternatives:** Follow the SRS wording (contradicts the CR on the stack P/T and on the
+leave-the-battlefield event count).
+
+## #23 FP-022 — Composite layouts are dedicated APIs; layout_for unchanged
+
+**Decision:** ROOM, MELD, STATION, PREPARATION and MUTATE get their own public types in
+`fineprint_core::layouts` (`RoomLayout` with `RoomQuery`/`RoomDoors`, `MeldLayout` and
+`MeldedPair`, `StationLayout` and `active_station_symbols`, `PreparationLayout` with
+`prepare_spell_characteristics`/`become_prepared`, `MutateLayout` and `MergedPermanent`).
+`layout_for`, the free functions `base_characteristics`/`mana_value`/`gating`, the `Layout`
+trait, `LayoutQuery`, `LayoutStatus` and `CastChoice` are unchanged, so `layout_for` still
+returns `UnsupportedLayout` for these five behaviors. Four `LayoutError` variants are added
+(`NotMeldPair`, `AlreadyPrepared`, `TooFewComponents`, `InvalidStationSymbols`). The exhaustive
+`match` in `layouts/tests.rs::is_defined_error` gains the four variants in its `false` arm (no
+existing layout returns them), the only edit needed for it to compile.
+**Rationale:** A Room needs door state, a melded permanent needs two definitions and a merged
+permanent an ordered list of components; none fits `LayoutQuery` without changing a frozen
+contract and the #22 spec tests. Wiring into `layout_for` belongs to the integration issue.
+**Alternatives:** Extend `LayoutQuery`/`LayoutStatus` with door, prepared and merge fields
+(breaks the #22 API and its frozen tests); make `LayoutError` `#[non_exhaustive]` (does not
+help inside the crate).
+
+## #23 FP-022 — A locked Room half keeps its color indicator
+
+**Decision:** On the battlefield a Room's colors are `base_colors(cost of the unlocked halves,
+union of both halves' color indicators, CdaColors::None)`, and `color_indicator` is the union of
+both halves' indicators whatever the doors; a locked half loses only its name, mana cost, rules
+text and abilities. With both halves locked the Room is colorless unless a half has an indicator.
+**Rationale:** CR 709.5 removes only "the name, mana cost, or rules text" of a locked half; a
+color indicator is none of these, so nothing removes it, while the cost colors go with the cost
+(CR 202.2). Abilities follow the rules text they are printed in.
+**Alternatives:** Drop a locked half's indicator too (reads more into CR 709.5 than it says);
+keep the combined cost's colors (contradicts the removed mana cost, see the #23 SRS 4.2 gaps
+entry).
+
+## #23 FP-022 — Station symbols are caller-supplied; the layer system picks P/T
+
+**Decision:** `active_station_symbols` takes the station symbols as `StationSymbol` values
+(threshold, abilities, optional P/T box) supplied by the caller, checks there are one or two
+(CR 722.1), returns none off the battlefield or with a negative counter count, and otherwise
+returns every symbol whose threshold is at most the charge-counter count, in printed order. When
+two symbols apply, both are returned; choosing whose P/T box is the base P/T is left to the
+layer system. `StationLayout` itself keeps the Main face's printed abilities (CR 722.4) and drops
+power and toughness off the battlefield (CR 722.2c).
+**Rationale:** `AbilityAST` is an opaque placeholder (as in the #22 gating decision), so the
+striations cannot be read from a definition without inventing a JSON convention. Picking between
+two active P/T boxes is a layer-system question, and there is no layer system yet. A negative counter
+count cannot occur in the game, so it activates nothing rather than activating a `{0+}` symbol.
+**Alternatives:** Parse symbols from `AbilityAST` (invents a format); return only the highest
+active symbol (pre-empts the layer system); clamp negative counts to 0.
+
+## #23 FP-022 — Merged permanents: `mutated` flag, abilities-only union
+
+**Decision:** `MergedPermanent::new(components, mutated)` takes an explicit `mutated` flag. The
+merged permanent's base characteristics are the topmost component's, selected with its own
+layout on the battlefield (CR 731.2a); when `mutated` is true its `abilities` are the
+concatenation of every component's abilities, top to bottom, without deduplication
+(CR 702.140e), and every other field, `rules_text` included, stays the topmost component's.
+Errors come from the topmost component, then, only when mutated, from the others in order.
+**Rationale:** CR 731.2a lets the effect that caused the merge specify otherwise; mutate is the
+one such effect in scope, so a flag keeps the general merge and mutate apart. `rules_text` is an
+opaque token stream with no ability boundaries, so only the structured ability list is united.
+**Alternatives:** Always unite abilities (wrong for non-mutate merges); concatenate rules text
+too (mixes printed text of several cards into one stream with no defined meaning); deduplicate
+abilities (CR 702.140e says "all abilities of each card").
+
+## #23 FP-022 — Token components use a stand-in definition
+
+**Decision:** A `MergedComponent` that is a token is described by `is_token: true` plus any
+definition whose layout the component resolver supports (MUTATE, MELD, STATION, PREPARATION or
+any `layout_for` layout). TOKEN and DFC_TOKEN definitions return `UnsupportedLayout` until the
+token issue, like every other unsupported layout (ROOM included).
+**Rationale:** Token definitions are out of scope for this unit; the token flag is what CR 731.2d
+needs, and the characteristics come from whatever definition the token copies or was created
+from.
+**Alternatives:** Add TOKEN support here (out of scope); reject token components (the merged
+token rule could not be tested).
+
+## #23 FP-022 — Independent Tester judgement calls
+
+**Decision:** (1) A Room's `color_indicator` is the union of both halves' indicators in the
+combined zones and on the battlefield whatever the door state, and the cast half's own on the
+stack (as SPLIT in #22). (2) A Room definition error on the shared type line surfaces on the
+battlefield even with both halves locked, because the shared type line always applies (CR 709.5a).
+(3) `MergedPermanent::mana_value` with an unsupported top component returns the same
+`UnsupportedLayout` error as `base_characteristics`. (4) Negative station thresholds are not
+specified: the spec tests assert only that a negative counter count activates no symbol, including
+a `{0+}` symbol.
+**Rationale:** The briefs fixed colors and errors but not these fields and edge cases; each choice
+matches the Implementer's entries above and the nearest existing layout behaviour.
+**Alternatives:** Locked halves drop their indicator (rejected in "A locked Room half keeps its
+color indicator"); a separate mana-value error path for merged permanents (no rule asks for it).
+
+## #23 FP-022 — Room halves must share one type line
+
+CodeRabbit round 1, PR #172.
+**Decision:** A ROOM definition whose two faces' type lines differ (supertypes, card types or
+subtypes) is malformed and is rejected with `LayoutError::BadFaces` in every zone, the stack with
+any cast half and the battlefield with any door state included (both halves locked too, as in
+"Independent Tester judgement calls" (2)). The check runs in the shared selection path, after the
+face-set check and before `InvalidCast` and `Object`. Each type-line field is compared as a set
+(order and repeats ignored), because `Characteristics` and the combined view keep the types as
+sets. On the stack the cast half's record is returned; its type line equals the shared line (CR
+709.5a). The spec fixtures `room_left()`/`room_right()` behind `room_sample()` live in
+`tests/spec_layouts_composite_support.rs`, not under `src/layouts/` as the brief assumed; they
+were given the one shared type line there (the brief owns `room_sample()` "wherever it is
+defined"), and the spec tests that built a Room from one rejected half now put the rejected type
+line on both halves.
+**Rationale:** CR 709.5a gives both halves the one shared type line; 709.5b exempts only the
+halves' existence from 709.3b, so the shared type line also applies on the stack. Set comparison
+matches the semantics of the type-line field everywhere it is read.
+**Alternatives:** The union of both halves' types on the stack (rejected: it would accept data
+that contradicts the one shared type line); silently using the cast half's line (the CodeRabbit
+finding); an order-sensitive comparison of the stored lists (rejected: order carries no meaning
+in the type line as `Characteristics` stores it).
+
+## #23 FP-022 — Face-down merged components deferred to layer 1b (#39)
+
+CodeRabbit round 1, PR #172.
+**Decision:** `MergedPermanent::base_characteristics` returns the pre-layer-1b values (printed
+values selected with each component's layout), whatever any component's `face_up` flag says.
+`face_up()` reports the topmost component's status (CR 731.2e) so that layer 1b can apply CR
+708.2. The face-down characteristics of merged components are not modelled here. Whether a
+face-down lower component of a mutated permanent contributes its printed abilities is open for
+#39: CR 702.140e gives the permanent the abilities of each card and token that represents it, CR
+708.2 limits face-down permanents, and a component is not itself a permanent; no ruling was
+found. The unit tests no longer pin printed values to a face-down top.
+**Rationale:** SRS §4.3 / REQ-OBJ-003 apply face-down status in layer 1b (CR 613.2b), which is
+issue #39 FP-038; this module selects base characteristics and copiable values before layer 1b.
+**Alternatives:** Modelling face-down values in this module (rejected: it duplicates layer 1b and
+pins an unsettled rule).
