@@ -64,12 +64,13 @@ pub struct BusReport {
 /// The surviving events are then executed as one batch in submission order, and the queued
 /// child events form one child batch processed the same way. An `Instead` child keeps the
 /// applied set of the event it replaces (CR 614.5); other children start with none. With
-/// `sba` true, zone changes of the same object to the same destination are one event
-/// (CR 704.7); the surviving event of such a group is chosen by its content, never by its
-/// submission position. A member stops just before a prevention pool is first applied to it;
+/// `sba` true, zone changes of the same object to the same destination are one group
+/// (CR 704.7): its candidates are the union of its members' effects, one choice is made and
+/// the chosen effect is applied once to every member it matches; the object moves at most
+/// once, never depending on submission position. A member stops just before a prevention pool is first applied to it;
 /// once every member has stopped or finished, a player whose pool cannot cover the current
 /// simultaneous damage from several sources divides it among them, each source's share at
-/// most its damage (CR 615.7), and the stopped members continue. An object that enters as a
+/// most its damage (CR 615.7), and the stopped members continue, those with a share first. An object that enters as a
 /// copy is a copy as part of its entry (CR 707.5). A shield-less prevention effect queues its
 /// follow-up events once per recipient per batch (CR 122.1c, CR 615.13). At most
 /// [`MAX_BUS_EVENTS`] event instances are taken up in one call.
@@ -184,6 +185,11 @@ struct Member {
     declined: BTreeSet<EffectId>,
     /// The `Shield::Pool` effect it stopped just before applying, waiting for its allocation.
     stopped: Option<EffectId>,
+    /// CR 704.7: the index of the first member of its same-result group (see [`coalesce`]),
+    /// if it is in one.
+    group: Option<usize>,
+    /// Whether an effect was applied to it in this batch.
+    modified: bool,
 }
 
 impl Member {
@@ -196,6 +202,8 @@ impl Member {
             allocated: BTreeSet::new(),
             declined: BTreeSet::new(),
             stopped: None,
+            group: None,
+            modified: false,
         }
     }
 }
@@ -203,8 +211,9 @@ impl Member {
 /// What the members of one batch queued while they were resolved.
 #[derive(Default)]
 struct Queue {
-    /// Child events, in the order they were queued, with their applied sets.
-    children: Vec<EventInstance>,
+    /// Child events, in the order they were queued, with their applied sets, each tagged
+    /// with the CR 704.7 group (first member index) whose application queued it, if any.
+    children: Vec<(Option<usize>, EventInstance)>,
     /// `(member, copied)`: the object member `member` puts onto the battlefield enters as a
     /// copy of `copied` (CR 614.1c, CR 707.5).
     copies: Vec<(usize, ObjectId)>,
@@ -255,15 +264,25 @@ impl Bus<'_, '_, '_> {
         for instance in &events {
             members.push(Member::new(self.chooser(instance.event())?, instance));
         }
-        if sba {
-            coalesce(&mut members);
-        }
+        let groups = if sba {
+            coalesce(&mut members)
+        } else {
+            BTreeMap::new()
+        };
         let choosers: Vec<PlayerId> = members.iter().map(|m| m.chooser).collect();
         let order = self.apnap_order(&choosers);
         let mut queue = Queue::default();
-        // Phase A: every member runs until it finishes or stops before a prevention pool.
+        // Phase A: every member runs until it finishes or stops before a prevention pool. A
+        // CR 704.7 group is resolved as one at the position of its first member.
         for &i in &order {
-            self.resolve(&mut members, i, &mut queue)?;
+            match members[i].group {
+                None => self.resolve(&mut members, i, &mut queue)?,
+                Some(first) if first == i => {
+                    let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
+                    self.resolve_group(&mut members, group, &mut queue)?;
+                }
+                Some(_) => {}
+            }
         }
         // Phases B and C (CR 615.7, CR 616.1f, CR 616.2): the lowest pool among stopped
         // members is allocated on the current damage, per chooser in APNAP order; its stopped
@@ -283,34 +302,79 @@ impl Bus<'_, '_, '_> {
                     .filter(|&i| members[i].stopped == Some(pool) && members[i].chooser == chooser)
                     .collect();
                 self.allocate(pool, chooser, &mut members, &group)?;
+                // CR 615.7: members drawing on an allotment take the pool before members
+                // outside the division (sourceless damage), so the division is honoured; the
+                // sort is stable (APNAP and submission order among equals).
+                let mut group = group;
+                group.sort_by_key(|&i| {
+                    members[i]
+                        .event
+                        .as_ref()
+                        .is_none_or(|ev| self.allotment(pool, &members[i], ev).is_none())
+                });
                 for &i in &group {
                     self.take_pool(&mut members, i, pool, &mut queue)?;
                     self.resolve(&mut members, i, &mut queue)?;
                 }
             }
         }
-        self.execute(&members, &queue.copies)?;
-        if queue.children.is_empty() {
+        // CR 704.3, CR 704.7: the child events of an application to a group whose object
+        // still moves (a member the effect did not match) happen as part of the same
+        // simultaneous event, so they are processed before the move, while the object exists
+        // (see DECISIONS). Every other child event follows the executed batch.
+        let (before, after): (Vec<_>, Vec<_>) = queue.children.into_iter().partition(|(g, _)| {
+            g.is_some_and(|first| {
+                group_survivor(&members, groups.get(&first).map_or(&[][..], Vec::as_slice))
+                    .is_some()
+            })
+        });
+        if !before.is_empty() {
+            self.run(
+                before.into_iter().map(|(_, c)| c).collect(),
+                false,
+                depth + 1,
+            )?;
+        }
+        self.execute(&members, &groups, &queue.copies)?;
+        if after.is_empty() {
             return Ok(());
         }
-        self.run(queue.children, false, depth + 1)
+        self.run(
+            after.into_iter().map(|(_, c)| c).collect(),
+            false,
+            depth + 1,
+        )
     }
 
     /// Executes the surviving events as one batch in submission order (SRS 8.1: execute E).
-    /// CR 707.5, CR 614.1c, CR 616.1c: an object that enters as a copy (`copies`, by member
+    /// CR 704.7: a same-result group executes at most one move, chosen by [`group_survivor`],
+    /// at the position of its first member. CR 707.5, CR 614.1c, CR 616.1c: an object that enters as a copy (`copies`, by member
     /// index) is a copy as part of its own entering event, in this one executed batch; the
     /// copy is not routed through replacement collection (the 614.12 look-ahead is a later
     /// unit). The copy of a member that did not survive or did not enter is skipped.
     fn execute(
         &mut self,
         members: &[Member],
+        groups: &BTreeMap<usize, Vec<usize>>,
         copies: &[(usize, ObjectId)],
     ) -> Result<(), BusError> {
         let mut position: BTreeMap<usize, usize> = BTreeMap::new();
         let mut survivors: Vec<EventInstance> = Vec::new();
         for (i, m) in members.iter().enumerate() {
+            let chosen = match m.group {
+                None => i,
+                Some(first) if first == i => {
+                    let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
+                    match group_survivor(members, group) {
+                        Some(j) => j,
+                        None => continue,
+                    }
+                }
+                Some(_) => continue,
+            };
+            let m = &members[chosen];
             if let Some(e) = &m.event {
-                position.insert(i, survivors.len());
+                position.insert(chosen, survivors.len());
                 survivors.push(EventInstance::new(e.clone()).with_applied(m.applied.clone()));
             }
         }
@@ -485,36 +549,92 @@ impl Bus<'_, '_, '_> {
     /// The choosable effects for `member`'s current `event` (SRS 8.1 steps [1] and [3]),
     /// ascending id.
     fn choosable(&self, event: &GameEvent, member: &Member) -> Vec<EffectId> {
+        restrict(self.eligible(event, member))
+    }
+
+    /// SRS 8.1 step [1]: the effects applicable to `member`'s current `event`, ascending id,
+    /// before the CR 616.1g and tier restrictions.
+    fn eligible(&self, event: &GameEvent, member: &Member) -> Vec<&ReplacementEffect> {
         // CR 614.7, CR 614.7a: an event that would not happen offers no effect.
         if !self.would_happen(event) {
             return Vec::new();
         }
         // [1] CR 614.5: not an effect already applied, unless it overrides 614.5 (CR 903.9b).
-        let mut candidates: Vec<&ReplacementEffect> = self
-            .registry
+        self.registry
             .iter()
             .filter(|e| e.overrides_614_5 || !member.applied.contains(e.id))
             .filter(|e| match e.shield {
                 Some(Shield::Uses(n)) => n > 0,
-                Some(Shield::Pool(n)) => n > 0 && !member.declined.contains(&e.id),
+                Some(Shield::Pool(n)) => {
+                    n > 0
+                        && !member.declined.contains(&e.id)
+                        // CR 615.7: an allocated pool whose allotment for this member's source
+                        // is used up is not offered again (an overriding pool would loop).
+                        && !(member.allocated.contains(&e.id)
+                            && self.allotment(e.id, member, event) == Some(0))
+                }
                 None => true,
             })
             .filter(|e| self.matches(&e.matcher, event))
-            .collect();
-        // CR 616.1g: a contained effect can't be chosen while another effect applies to the
-        // containing event; filtered before the tier restriction.
-        if candidates.iter().any(|e| !e.contained) {
-            candidates.retain(|e| !e.contained);
-        }
-        // [3] CR 616.1a-e: the first non-empty tier.
-        let Some(top) = candidates.iter().map(|e| e.tier).min() else {
-            return Vec::new();
-        };
-        candidates
-            .into_iter()
-            .filter(|e| e.tier == top)
-            .map(|e| e.id)
             .collect()
+    }
+
+    /// CR 616.1, CR 704.3, CR 704.7: SRS 8.1 steps [1]-[5] for a same-result group of
+    /// state-based zone changes of one object (`group`, ascending index). The candidates are
+    /// the union of the effects eligible for at least one member (CR 616.1g and the tier
+    /// restriction run on the union); the object's chooser picks one; it is applied once
+    /// (one application, one shield use, one set of child events) to every member it is
+    /// eligible for, and the members it does not match keep resolving. Repeats until no
+    /// candidate remains (CR 616.1f, CR 616.2).
+    fn resolve_group(
+        &mut self,
+        members: &mut [Member],
+        group: &[usize],
+        queue: &mut Queue,
+    ) -> Result<(), BusInterrupt> {
+        loop {
+            let mut ids: BTreeSet<EffectId> = BTreeSet::new();
+            let mut event: Option<GameEvent> = None;
+            for &i in group {
+                let Some(ev) = &members[i].event else {
+                    continue;
+                };
+                if event.is_none() {
+                    event = Some(ev.clone());
+                }
+                ids.extend(self.eligible(ev, &members[i]).iter().map(|e| e.id));
+            }
+            let Some(event) = event else {
+                return Ok(());
+            };
+            let set = restrict(ids.iter().filter_map(|&id| self.registry.get(id)).collect());
+            if set.is_empty() {
+                // SRS 8.1: R(E) empty -> execute E.
+                return Ok(());
+            }
+            let chosen = self.choose(&event, &set)?;
+            let effect = self.effect(chosen)?;
+            // The members the effect applies to, in content order (order independence).
+            let mut targets: Vec<usize> = group
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    members[i].event.as_ref().is_some_and(|ev| {
+                        self.eligible(ev, &members[i])
+                            .iter()
+                            .any(|e| e.id == chosen)
+                    })
+                })
+                .collect();
+            targets.sort_by_cached_key(|&i| (content_key(&members[i]), i));
+            let mut pool = pool_of(&effect);
+            for (n, &i) in targets.iter().enumerate() {
+                // CR 704.7: one application; its child events are queued once.
+                self.apply(&mut members[i], i, &effect, &mut pool, queue, n == 0)?;
+            }
+            self.consume(&effect, pool);
+            self.report.applications.push(chosen);
+        }
     }
 
     /// CR 615.7: what is left of the allotment `member`'s chooser gave `event`'s source from
@@ -779,7 +899,7 @@ impl Bus<'_, '_, '_> {
         queue: &mut Queue,
     ) -> Result<(), BusError> {
         let mut pool = pool_of(effect);
-        self.apply(member, index, effect, &mut pool, queue)?;
+        self.apply(member, index, effect, &mut pool, queue, true)?;
         self.consume(effect, pool);
         self.report.applications.push(effect.id);
         Ok(())
@@ -795,6 +915,8 @@ impl Bus<'_, '_, '_> {
     }
 
     /// SRS 8.1 step [4]: E' = R*(E), E'.AppliedEffects += R* (CR 614.5); CR 615.6 prevention.
+    /// `children` false: the application's child events were already queued for another
+    /// member of the same CR 704.7 group.
     fn apply(
         &mut self,
         member: &mut Member,
@@ -802,11 +924,13 @@ impl Bus<'_, '_, '_> {
         effect: &ReplacementEffect,
         pool: &mut Option<i64>,
         queue: &mut Queue,
+        children: bool,
     ) -> Result<(), BusError> {
         if member.repeats >= MAX_REPEATS {
             return Err(BusError::RepeatLimit);
         }
         member.repeats += 1;
+        member.modified = true;
         // CR 614.5
         member.applied.insert(effect.id);
         let Some(event) = member.event.as_mut() else {
@@ -828,13 +952,17 @@ impl Bus<'_, '_, '_> {
                 // CR 614.6: the modified event replaces the event; CR 614.5: it keeps the
                 // replaced event's applied effects, this one included.
                 member.event = None;
+                if !children {
+                    return Ok(());
+                }
                 self.charge(events.len())?;
-                queue.children.extend(
-                    events
-                        .iter()
-                        .cloned()
-                        .map(|e| EventInstance::new(e).with_applied(member.applied.clone())),
-                );
+                let group = member.group;
+                queue.children.extend(events.iter().cloned().map(|e| {
+                    (
+                        group,
+                        EventInstance::new(e).with_applied(member.applied.clone()),
+                    )
+                }));
             }
             Action::Prevent { then } => {
                 // CR 615.6: prevented damage never happens. CR 615.7: a pool prevents up to
@@ -866,12 +994,13 @@ impl Bus<'_, '_, '_> {
                 // CR 122.1c, CR 615.13: a shield-less prevention effect is applied once to all
                 // simultaneous damage to one recipient, so its follow-up is queued once per
                 // batch (see DECISIONS); `Uses` and `Pool` shields count their own uses.
-                if effect.shield.is_some() || queue.prevented_once.insert(recipient) {
+                if children && (effect.shield.is_some() || queue.prevented_once.insert(recipient)) {
                     // CR 615.5: the follow-up is a new event, with no applied effects.
                     self.charge(then.len())?;
+                    let group = member.group;
                     queue
                         .children
-                        .extend(then.iter().cloned().map(EventInstance::new));
+                        .extend(then.iter().cloned().map(|e| (group, EventInstance::new(e))));
                 }
             }
         }
@@ -903,51 +1032,97 @@ impl Bus<'_, '_, '_> {
     }
 }
 
-/// CR 704.3, CR 704.7: state-based actions that would have the same result happen once. The
-/// zone changes of one object to one destination are one group; the group keeps the position
-/// of its first member in submission order, and its event and applied set are those of the
-/// member whose (canonical event bytes, canonical applied-set bytes) is the least, so the
-/// result never depends on submission order (an engine determinism rule, see DECISIONS); the
-/// other members are dropped. Different objects never merge.
-fn coalesce(members: &mut [Member]) {
-    let mut groups: BTreeMap<(ObjectId, ZoneKind), Vec<usize>> = BTreeMap::new();
+/// CR 704.3, CR 704.7: state-based actions that would have the same result happen at the same
+/// time as one event, and a single replacement effect replaces all of them. The zone changes
+/// of one object to one destination are one group: every member is tagged with the index of
+/// the group's first member (the group's position in submission and APNAP order) and stays in
+/// the list, so collection sees every member's cause (see [`Bus::resolve_group`]). Returns
+/// each group of two or more members by its first index. Different objects never merge.
+fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
+    let mut by_result: BTreeMap<(ObjectId, ZoneKind), Vec<usize>> = BTreeMap::new();
     for (i, m) in members.iter().enumerate() {
         if let Some(GameEvent::ZoneChange {
             object, request, ..
         }) = &m.event
         {
-            groups.entry((*object, request.to)).or_default().push(i);
+            by_result.entry((*object, request.to)).or_default().push(i);
         }
     }
-    for group in groups.values() {
-        let [first, rest @ ..] = group.as_slice() else {
-            continue;
-        };
-        if rest.is_empty() {
+    let mut groups = BTreeMap::new();
+    for group in by_result.into_values() {
+        if group.len() < 2 {
             continue;
         }
-        let key = |i: usize| {
-            let mut event = Vec::new();
-            let mut applied = Vec::new();
-            if let Some(e) = &members[i].event {
-                e.encode_canonical(&mut event);
-            }
-            members[i].applied.encode_canonical(&mut applied);
-            (event, applied)
-        };
-        let best = group
-            .iter()
-            .copied()
-            .min_by_key(|&i| key(i))
-            .unwrap_or(*first);
-        if best != *first {
-            members[*first].event = members[best].event.clone();
-            members[*first].applied = members[best].applied.clone();
+        for &i in &group {
+            members[i].group = Some(group[0]);
         }
-        for &i in rest {
-            members[i].event = None;
-        }
+        groups.insert(group[0], group);
     }
+    groups
+}
+
+/// CR 704.7: the one member of a same-result group that is executed, if any member
+/// still has an event. If every remaining member has the same destination, the one with the
+/// least (canonical event bytes, canonical applied-set bytes); otherwise the members modified
+/// by an application are preferred (the object ends where the replacement sent it), and the
+/// same content rule picks among them. Never depends on submission order (see DECISIONS).
+fn group_survivor(members: &[Member], group: &[usize]) -> Option<usize> {
+    let remaining: Vec<usize> = group
+        .iter()
+        .copied()
+        .filter(|&i| members[i].event.is_some())
+        .collect();
+    let destination = |i: usize| match &members[i].event {
+        Some(GameEvent::ZoneChange { request, .. }) => Some(request.to),
+        _ => None,
+    };
+    let first = *remaining.first()?;
+    let agree = remaining
+        .iter()
+        .all(|&i| destination(i) == destination(first));
+    let modified: Vec<usize> = remaining
+        .iter()
+        .copied()
+        .filter(|&i| members[i].modified)
+        .collect();
+    let pool = if agree || modified.is_empty() {
+        remaining
+    } else {
+        modified
+    };
+    pool.into_iter()
+        .min_by_key(|&i| (content_key(&members[i]), i))
+}
+
+/// The (canonical event bytes, canonical applied-set bytes) of `member`, the content order of
+/// CR 704.7 group members.
+fn content_key(member: &Member) -> (Vec<u8>, Vec<u8>) {
+    let mut event = Vec::new();
+    let mut applied = Vec::new();
+    if let Some(e) = &member.event {
+        e.encode_canonical(&mut event);
+    }
+    member.applied.encode_canonical(&mut applied);
+    (event, applied)
+}
+
+/// SRS 8.1 step [3] on the step [1] `candidates`: CR 616.1g, then the first non-empty tier
+/// (CR 616.1a-e); ascending id.
+fn restrict(mut candidates: Vec<&ReplacementEffect>) -> Vec<EffectId> {
+    // CR 616.1g: a contained effect can't be chosen while another effect applies to the
+    // containing event; filtered before the tier restriction.
+    if candidates.iter().any(|e| !e.contained) {
+        candidates.retain(|e| !e.contained);
+    }
+    // [3] CR 616.1a-e: the first non-empty tier.
+    let Some(top) = candidates.iter().map(|e| e.tier).min() else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|e| e.tier == top)
+        .map(|e| e.id)
+        .collect()
 }
 
 fn pool_of(effect: &ReplacementEffect) -> Option<i64> {

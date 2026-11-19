@@ -3833,42 +3833,74 @@ all contained.
 
 ## #29 FP-028 — CR 704.7 merging of state-based-action batches
 
-**Decision:** (Review round 1, F2/F5; replaces the round 0 rule.) With `sba = true` only
-`ZoneChange` members merge. Members form a group when they have the same affected object and the
-same destination (`request.to`) at collection time: the same object and the same kind of result.
-(Review round 2, F2.) The group keeps the position of its first member in submission order (for
-APNAP and execution order), but its event and applied set are those of the member whose pair
-(canonical encoding of its `GameEvent`, canonical encoding of its `AppliedEffects`) is the
-lexicographic minimum; exact ties are identical and interchangeable. The group makes one
-collection and one choice (asked of that object's chooser; no request if the choosable set has
-one effect), the chosen effect is applied once, consumes one shield use, appears once in
-`BusReport::applications`, and the group is executed as one event (the content-chosen member's
-modified event). The other members are dropped: not executed, not logged. Members for different objects never merge, whether or not they share kind,
-candidate set or chooser; each is processed on its own (own request if it has two or more
-candidates, own application, own shield use) in APNAP and submission order. Non-`ZoneChange`
-events never merge. With `sba = false` nothing merges and equal duplicate moves are not coalesced
-(the second fails with `UnknownObject` and the batch rolls back).
+**Decision:** (Review round 1, F2/F5; amended in review round 2, F2, and replaced by member-wise
+semantics in review round 3, H2.) With `sba = true` only `ZoneChange` members merge. Members form a
+group when they have the same affected object and the same destination (`request.to`) as
+submitted: the same object and the same kind of result. Every member stays in the list, tagged
+with its group; the group is resolved at the position of its first member in submission order
+(for APNAP and execution order). Collection: an effect is a candidate for the group if it is
+eligible (the per-member filters: not already applied to that member unless it overrides
+CR 614.5, shield left, matcher matching that member's CURRENT event) for at least one member;
+candidates are deduplicated by `EffectId`, and the CR 616.1g contained filter and the tier
+restriction run on that union. One choice is made for the group (asked of the object's chooser;
+no request if the restricted set has one effect). The chosen effect is applied ONCE (one
+`BusReport::applications` entry, one shield use, one set of `Instead` or `Prevent` child events,
+taken from the first matched member in content order) to EVERY member it is eligible for and
+matches; each such member's event is modified or dropped and the effect is added to its applied
+set. Members it does not match are unchanged and keep resolving: the loop repeats over the group
+with the union rule until no candidate remains (CR 616.1f). Execution: at most one move of the
+object per group. Of the members that still have an event, if all have the same destination,
+the one with the least (canonical `GameEvent` bytes, canonical `AppliedEffects` bytes) is
+executed and the rest are dropped (not executed, not logged); exact ties are identical and
+interchangeable. If their destinations differ (only possible because a replacement changed some
+members), the judgement recorded here (R8): members modified by an application are preferred
+over members that were not, and among the preferred members the least canonical pair wins;
+exactly one is executed, at the position of the group's first member. If every member was
+dropped (`Skip` or `Instead` on all), nothing is executed for the object; if only some were
+dropped, the remaining members still move it. The child events of an application to a group
+whose object still moves are processed (as a child batch) before the executed batch, while the
+object exists, because they are part of the same simultaneous event; every other child batch
+follows the executed batch as before. The result never depends on submission order within a
+group: both orders give the same `BusReport`, registry and state hash. Members for different
+objects never merge, whether or not they share kind, candidate set or chooser; each is processed
+on its own (own request if it has two or more candidates, own application, own shield use) in
+APNAP and submission order. Non-`ZoneChange` events never merge. With `sba = false` nothing
+merges and equal duplicate moves are not coalesced (the second fails with `UnknownObject` and the
+batch rolls back).
 **Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
-event; CR 704.5g and CR 704.5h both "destroy", and CR 701.8a makes destruction one move to the
-owner's graveyard, so two state-based actions destroying one permanent are one result. CR 704.7:
-"If multiple state-based actions would have the same result at the same time, a single
-replacement effect will replace all of them." The CR text does not define the key of "the same
-result"; per R8 this is a judgement call: same object and same destination is the narrowest
-reading that covers the lethal-damage-plus-deathtouch case, and CR 616.1 makes each affected
-object's choice its own, so different permanents are distinct results (the round 0 rule merged
-them and let one shield use exile several permanents). The survivor rule is determinism by
-content (R3, REQ-CORE-001): the result of a batch must not depend on submission order within a
-group, and the property tests assert insertion-order independence. The rule is an engine choice,
-not a statement about the CR: the CR was not consulted on which cause (for example `Destroy` or
-`StateBasedAction`) should prevail, and none is claimed.
+event; CR 704.5g and CR 704.5h both destroy, and CR 701.8b makes those state-based actions
+destructions, so two state-based actions destroying one permanent are one result. CR 704.7: "If
+multiple state-based actions would have the same result at the same time, a single replacement
+effect will replace all of them." The CR text does not define the key of "the same result"; per
+R8 same object and same destination is the narrowest reading that covers the lethal-damage-plus-
+deathtouch case, and CR 616.1 makes each affected object's choice its own, so different
+permanents are distinct results. Rules-researcher conclusions (review round 3): the CR gives no
+rule that a replacement matching one state-based action cancels the others, so each replacement
+applies to the members it matches (one replacement replaces all same-result actions it applies
+to) and members it does not match still move the object; considering only one member's cause
+hides a replacement that matches another member; same-cause duplicates merge and one replacement
+covers both; CR 704.5f and CR 704.5g/h are mutually exclusive (toughness), so real mixed-cause
+groups are for example a CR 704.5g destruction plus a move that is not a destruction. The
+execution rule for differing destinations follows CR 704.7 (the replacement replaces the result
+of the actions it applies to, so the object ends where the replacement sent it); unmatched
+members move the object only when no member was replaced; an object cannot move twice in one
+batch. Determinism (R3, REQ-CORE-001): candidates are iterated by `EffectId`, matched members in
+content order, and the executed member chosen by content, so submission order within a group has
+no effect.
 **Alternatives:** Grouping by kind, candidate set and chooser (round 0; rejected in review:
 different permanents are not the same result); deduplicating by event kind or destination alone
 (rejected: merges different objects); merging only equal events (rejected: a cause difference
 such as lethal damage versus deathtouch would keep two moves of one object); keeping the first
 submitted member (round 1; rejected in round 2: submission order changed which cause-sensitive
-replacement applied); a precedence among causes (rejected: not settled by the supplied rules
-text; a rules question if it is wanted); the union of the members' applied sets (rejected: it
-would apply CR 614.5 to the history of an event that did not happen).
+replacement applied); survivor-only collection (round 2; rejected in round 3: it hides a
+replacement matching a discarded member's cause); any matching replacement cancels the whole
+merged move (rejected: the CR has no such rule; unmatched members still move the object); a
+precedence among causes (still rejected: not settled by the supplied rules text); the union of
+the members' applied sets (rejected: it would apply CR 614.5 to the history of an event that did
+not happen); running the child events of a group application after the move (rejected: a child
+such as the shield counter's removal would name an object that has already left, and the batch
+would fail).
+
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
 **Decision:** CR 704.7 merging here covers only `ZoneChange` events of the same object to the same
@@ -3983,7 +4015,8 @@ rules question settles it).
 
 ## #29 FP-028 — Pool prevention is allocated by the affected player
 
-**Decision:** (Review round 1, F8; amended in review round 2, G2 and G4.) The allocation is made on
+**Decision:** (Review round 1, F8; amended in review round 2, G2 and G4, and in review round 3, H4 and
+H5.) The allocation is made on
 the damage as it stands when the shield applies. Each member's resolve loop is resumable: a member
 stops immediately before it would apply a `Shield::Pool` effect P not yet allocated for it (after
 any `CHOOSE_REPLACEMENT_EFFECT` that selected P, or when P is the single candidate of its tier),
@@ -4010,8 +4043,13 @@ A:3, B:2 gives (A:3, B:1)). When P applies to a member in the table it prevents 
 the source's unused allotment, the member's current damage and the pool left; events of one
 source use its allotment in APNAP and submission order. A member whose source's allotment is used
 up or 0 is not given P (no application) and continues; this includes a member that chose P over
-another effect and then finds its allotment 0. Sourceless damage is not in the table and draws on
-the pool in order. With valid answers every point of the pool is used by the batch whenever the
+another effect and then finds its allotment 0. A pool that is allocated for a member and whose
+allotment for that member's source is used up is not offered again, so an overriding (CR 614.5
+exception) pool cannot loop on a spent allotment (review round 3, H4). Sourceless damage is not
+in the table (a sourceless share cannot be offered in `DIVIDE_VALUE`; every damage has a source
+object, CR 120.1) and draws on what the division leaves, after the allotted members of that
+chooser: in Phase C the group is stably sorted so members with an allotment take P first
+(review round 3, H5). With valid answers every point of the pool is used by the batch whenever the
 eligible damage allows it, so a batch that asked for an allocation leaves the pool drained and P
 removed from the registry. Request order: the `DIVIDE_VALUE` request comes after every request
 members make before reaching the pool (for example the active player's unrelated
@@ -4019,7 +4057,10 @@ members make before reaching the pool (for example the active player's unrelated
 applied. `Shield::Uses` shields are unchanged. Known limitations: a pool can keep points when the
 total eligible damage was below it, or when a modification applied after the allocation (in
 Phase C) changed the damage; the grouping is per chooser, not per shielded object or player; a
-member that chose P and finds its allotment 0 continues without it.
+member that chose P and finds its allotment 0 continues without it; a member stopped at a
+different pool is outside that pool's division, but every allocation of the damage remains
+reachable because the player chooses the order of the pools through CHOOSE_REPLACEMENT_EFFECT and
+divides each pool among the members that chose it (review round 3, H1; not a defect).
 **Rationale:** CR 615.7: "If damage would be dealt to the shielded permanent or player by two or
 more applicable sources at the same time, the player or the controller of the permanent chooses
 which damage the shield prevents. Once the shield has been reduced to 0, any remaining damage is
@@ -4042,6 +4083,42 @@ fixed); a lazy check at the pool's first application (rejected: an earlier membe
 pool before a later member's modifications exist); redistributing an unused allotment to the
 remaining damage (rejected for the cap, which keeps the answer exactly what the player chose);
 adding a per-recipient maximum to `choice/` (outside this unit).
+
+## #29 FP-028 — SBA destruction and the shield counter's destroy replacement
+
+**Decision:** (Review round 3, H2.) `ZoneChangeCause::Destroy` is destruction as the result of an
+effect; `ReplacementEffect::shield_counter_destroy` matches `Destroy` only and is unchanged. A
+caller that models lethal damage or deathtouch (CR 704.5g, CR 704.5h) submits
+`ZoneChangeCause::StateBasedAction`, to which the shield counter does not apply and which
+regeneration (not in this unit) would replace. A mixed `Destroy` + `StateBasedAction` group is
+the only way one object's CR 704.7 group has a shield-matching member and a non-matching one;
+member-wise semantics apply the shield to the `Destroy` member only: the counter is spent (its
+removal is processed before the move), the `Destroy` member does not move, and the
+`StateBasedAction` member still moves the object to the graveyard (test
+`req_event_001_r3_h2_d_shield_counter_on_mixed_group`).
+**Rationale:** CR 701.8b: state-based actions that check for lethal damage or deathtouch damage
+destroy; CR 122.1c: the shield counter replaces destruction "as the result of an effect"; a
+state-based action is not the result of an effect (CR 704.1; rules-researcher, review round 3).
+So an SBA destruction is a destruction, but not one the shield counter replaces.
+**Alternatives:** Letting the shield counter match `StateBasedAction` (rejected: contradicts
+CR 122.1c); a separate "SBA destroy" cause (not needed: `StateBasedAction` already carries it,
+and no regeneration effect exists in this unit).
+
+## #29 FP-028 — CR 704.7 group with two cause-specific effects: request sequence
+
+**Decision:** (Review round 3, H2 (g).) With e1 (one use, `Destroy` only, redirect to exile) and
+e2 (one use, `StateBasedAction` only, `Skip`) on a [`Destroy`, `StateBasedAction`] group of one
+permanent of P1: one `CHOOSE_REPLACEMENT_EFFECT` request to P1 offering both effects (the union);
+the chosen effect applies to its member; the other is then the only candidate and applies without
+a request (CR 616.1f). Answer e1: applications [e1, e2]; answer e2: applications [e2, e1]. In both
+cases the `StateBasedAction` member is skipped and the `Destroy` member moves the card to exile;
+both effects are removed; the same for both submission orders (test
+`req_event_001_r3_h2_g_union_of_candidates_one_request`).
+**Rationale:** Derived from the member-wise rules of "CR 704.7 merging of state-based-action
+batches" (union collection, one choice per round, application to matching members only,
+repetition until no candidate remains).
+**Alternatives:** Two separate requests, one per member (rejected: CR 704.7 makes the group one
+event with one choice per round).
 
 ## #29 FP-028 — Enters-as-copy is applied as part of the entry event
 
