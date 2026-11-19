@@ -44,8 +44,8 @@ struct Delayed {
     captured: BTreeMap<String, EventField>,
     one_shot: bool,
     /// The trigger-limit counters of this instance (CR 603.2h), counted by
-    /// [`DelayedTriggers::take_triggered`] after the intervening "if" passed (CR 603.4), and by
-    /// [`DelayedTriggers::fire`]; one shared counter per registration.
+    /// [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`], each only after the
+    /// intervening "if" passed (CR 603.4); one shared counter per registration.
     counts: LimitCounts,
 }
 
@@ -89,8 +89,9 @@ impl LimitCounts {
 /// recorded decision (docs/DECISIONS.md, "#31 FP-030 — Inferences and choices").
 ///
 /// A registration's trigger limit (CR 603.2h) is enforced, with one counter per registration,
-/// by both [`DelayedTriggers::take_triggered`] (after the intervening "if", CR 603.4) and
-/// [`DelayedTriggers::fire`] (which takes the current turn).
+/// by both [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`] (which take the
+/// current turn). Both check the stored intervening "if" first (CR 603.4) and count the limit
+/// only if it held.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DelayedTriggers {
     entries: BTreeMap<u64, Delayed>,
@@ -149,8 +150,9 @@ impl DelayedTriggers {
     /// (`intervening_if` and `limit` are `None`). [`detect`](super::detect) checks an
     /// intervening "if" with the event's bindings only, but a delayed trigger's condition must
     /// see the bindings it captured when it was created (CR 603.4, CR 603.7).
-    /// [`DelayedTriggers::take_triggered`] checks the stored condition instead, with the
-    /// captured bindings applied, and only then the stored limit (CR 603.2h), so that an event
+    /// [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`] check the stored
+    /// condition instead, with the captured bindings applied, and only then the stored limit
+    /// (CR 603.2h), so that an event
     /// that fails the condition neither uses up the limit nor suppresses a later event that
     /// passes it. Detect therefore never keeps limit counters in Memory for a delayed ability.
     #[must_use]
@@ -227,16 +229,13 @@ impl DelayedTriggers {
             }
             // CR 603.4: the intervening "if" is checked when the trigger event occurs, here
             // with the captured bindings (CR 603.7).
-            if let Some(pred) = &d.ability.intervening_if {
-                let view = if w.look_back.is_some() {
-                    StateView::PreEvent
-                } else {
-                    StateView::PostEvent
-                };
-                let reg = registration(n, d, true);
-                if !env.condition_holds(view, &reg, pred, &bindings) {
-                    continue;
-                }
+            let view = if w.look_back.is_some() {
+                StateView::PreEvent
+            } else {
+                StateView::PostEvent
+            };
+            if !condition_ok(env, view, n, d, &bindings) {
+                continue;
             }
             // CR 603.2h: the trigger limit, counted only for an element whose condition held.
             if let Some(limit) = d.ability.limit
@@ -266,15 +265,31 @@ impl DelayedTriggers {
     /// Fires the delayed trigger `id` directly (a phase or step delayed trigger; the turn unit
     /// calls it when the step begins), with its captured bindings. `None` if `id` is unknown.
     ///
-    /// `turn` is the current turn number, the same value the caller passes to
-    /// [`detect`](super::detect) and [`DelayedTriggers::take_triggered`]. If the stored ability
-    /// has a `limit`, it is checked and counted against this registration's own counters, the
-    /// same ones [`DelayedTriggers::take_triggered`] uses (CR 603.2h): if the per-turn or
-    /// per-game count has reached the limit, the result is `None`, nothing is counted and a
-    /// one-shot stays registered (a dropped firing does not consume it). No intervening "if" is
-    /// evaluated here (there is no event and no environment). A registration without a limit is
-    /// never limited. A one-shot trigger that fires is removed (CR 603.7b).
-    pub fn fire(&mut self, id: DelayedTriggerId, turn: u64) -> Option<PendingTrigger> {
+    /// If the stored ability has an intervening "if", it is evaluated here first (CR 603.4) with
+    /// [`TriggerEnv::condition_holds`], the captured bindings as the only bindings and
+    /// [`StateView::PostEvent`] (there is no event), for a registration whose ability id is
+    /// `delayed#<n>`. A false condition gives `None`, counts nothing and leaves a one-shot
+    /// registered (CR 603.7b).
+    ///
+    /// Then `turn`, the current turn number (the same value the caller passes to
+    /// [`detect`](super::detect) and [`DelayedTriggers::take_triggered`]), is used: if the stored
+    /// ability has a `limit`, it is checked and counted against this registration's own
+    /// counters, the same ones [`DelayedTriggers::take_triggered`] uses (CR 603.2h): if the
+    /// per-turn or per-game count has reached the limit, the result is `None`, nothing is
+    /// counted and a one-shot stays registered (a dropped firing does not consume it). The
+    /// condition comes before the limit, so a false occurrence does not use the limit up. A
+    /// registration with neither is never dropped and `env` is not consulted. A one-shot
+    /// trigger that fires is removed (CR 603.7b).
+    pub fn fire<E: TriggerEnv + ?Sized>(
+        &mut self,
+        env: &E,
+        turn: u64,
+        id: DelayedTriggerId,
+    ) -> Option<PendingTrigger> {
+        let d = self.entries.get(&id.0)?;
+        if !condition_ok(env, StateView::PostEvent, id.0, d, &d.captured) {
+            return None;
+        }
         let d = self.entries.get_mut(&id.0)?;
         if let Some(limit) = d.ability.limit
             && !d.counts.try_count(&limit, turn)
@@ -314,8 +329,26 @@ impl DelayedTriggers {
     }
 }
 
+/// Whether delayed trigger `n`'s stored intervening "if" holds (CR 603.4) for `bindings` in
+/// `view`; true if it has none (then `env` is not consulted). Shared by
+/// [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`], which both evaluate it
+/// before the limit (CR 603.2h).
+fn condition_ok<E: TriggerEnv + ?Sized>(
+    env: &E,
+    view: StateView,
+    n: u64,
+    d: &Delayed,
+    bindings: &BTreeMap<String, EventField>,
+) -> bool {
+    match &d.ability.intervening_if {
+        Some(pred) => env.condition_holds(view, &registration(n, d, true), pred, bindings),
+        None => true,
+    }
+}
+
 /// The registration of delayed trigger `id`: its stored source, controller and ability with the
-/// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`. The `limit` is
+/// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`
+/// ([`condition_ok`] keeps it; [`DelayedTriggers::registrations`] does not). The `limit` is
 /// always removed: [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`] enforce it
 /// (CR 603.2h).
 fn registration(id: u64, d: &Delayed, keep_condition: bool) -> TriggerRegistration {

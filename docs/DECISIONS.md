@@ -5105,3 +5105,36 @@ deterministic state) is met; only the literal word "Memory" is not.
 **Alternatives:** Store under the source's Memory (rejected, retired at zone change); a new Memory
 slot keyed by `delayed#<n>` (rejected, memory module is another unit's, and the key space is not
 object ids); change `detect.rs` (rejected, unit #30's file).
+
+## #31 FP-030 CR round 4 — delayed trigger condition at a phase or step
+
+**Decision:** `DelayedTriggers::fire(env, turn, id)` evaluates the stored intervening "if"
+(CR 603.4) with the captured bindings in `StateView::PostEvent` before it counts the limit
+(CR 603.2h); a false condition counts nothing and does not consume a one-shot (CR 603.7b);
+`take_triggered` and `fire` share one condition helper and one counter set. This supersedes
+(i) the sentence "`fire` ... counts no limit" in "#31 FP-030 CR round 2 — delayed trigger
+limits", (ii) "No intervening 'if' is evaluated here" in "#31 FP-030 CR round 3 — delayed
+trigger limits at a phase or step" and (iii) the words "only possible in
+`take_triggered`/`fire`", which read as if `fire` evaluated the condition before round 4: from
+round 4 on both do.
+
+**Rationale:** The finding, verified: a false occurrence used up a per-turn or per-game limit
+and a later true occurrence returned None.
+
+**Alternatives:** A `condition: bool` parameter (rejected: the caller would need the stored
+predicate and the captured bindings, which `DelayedTriggers` owns, and could skip the check); a
+documented caller-side check (rejected: the same, and `take_triggered` does it inside, so the
+two entry points would differ).
+
+## #31 FP-030 CR round 4 — limits of state triggers are the caller's
+
+**Decision:** `StateTriggers::check` does not apply a state trigger's `limit` and does not stay
+in step with a delayed ability that has a state trigger (state.rs doc).
+
+**Rationale:** `check(env)` has no turn and no Memory, `detect` skips `Trigger::State`
+(detect.rs), and the integration unit owns turn state and Memory; changing `check`'s signature
+touches every caller and test and is out of scope for this round.
+
+**Alternatives:** Counters inside `StateTriggers` keyed by (source, ability id) and a `turn`
+parameter (rejected for this round: a signature change to a public method; recommended as the
+first item of the integration unit); a P8 item (rejected: a design choice, not a human task).
