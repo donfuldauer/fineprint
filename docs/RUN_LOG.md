@@ -305,3 +305,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #31 (PR #181 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | workspace 2724 passed; fmt, clippy, guard, cr check clean; core 98.89 % | B delayed intervening-if with captured bindings; D order labels; E mode validator |
 | 03-events | #31 (PR #181 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | delayed 17, placement 32, property 2 passed | G property target membership; spec tests for B, D, E |
 | 03-events | #31 (PR #181 review round 1) | Fixer (docs) | Haiku 5.5 | 1 | done | full gate re-run clean | H DECISIONS item 6 (603.7b departure, owner #182); J mod.rs ordering doc; deferral record |
+| 03-events | #31 (PR #181 review round 1) | work-verifier | Opus 5.5 | 1 | pass | 2724 tests pass; fmt, clippy, guard, cr check clean; core 98.89 % | @ 31e6d85 |
+| 03-events | #31 (PR #181 review round 2) | work-classifier | Opus 5.5 | 1 | routed | — | 2 findings: delayed limit counted before captured-binding condition (regression from round 1 B) fix; stale cr-citations locations fix by `cr index` |
+| 03-events | #31 (PR #181 review round 2) | Fixer (src) | Opus 5.5 | 1 | done | workspace 2736 passed; fmt, clippy, guard, cr check clean; core 98.84 % | delayed limit enforced in DelayedTriggers after the condition; take_triggered(env, turn, waiting); detect.rs unchanged |
+| 03-events | #31 (PR #181 review round 2) | Fixer (tester) | Sonnet 5.5 | 1 | done | spec_triggers_stack_delayed 24 passed | one-batch and two-call regressions; limit, Memory, registrations, one-shot |
+| 03-events | #31 (PR #181 review round 2) | Orchestrator (T0 CR index) | Opus 5.5 | 1 | done | cr check ok | regenerated stale citation locations |
