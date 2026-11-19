@@ -11,7 +11,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use fineprint_base::ids::ObjectId;
+use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_core::knowledge::KnowledgeError;
 use fineprint_core::zones::{MoveRequest, OutsidePool, Position, ZoneKind};
 use support::*;
@@ -130,27 +130,51 @@ fn reveal_then_unobserved_put_in_library_forgotten_by_opponent() {
     assert_eq!(lib_known(&w.view(P1), P1), set(&[card]));
 }
 
-/// REQ-CORE-004, CR 701.24b: an excluded card still at its recorded index keeps its entry; a
-/// non-excluded card is always cleared.
+/// REQ-CORE-004, CR 701.24b (index-disclosure rule of the brief, a design decision): an
+/// excluded card still at its recorded index keeps its entry for the viewers in `known_by`
+/// (`shuffle_library_disclosed`); a non-excluded card is always cleared. A viewer outside
+/// `known_by` keeps nothing, and the shorthand `shuffle_library` (nobody knows which card was
+/// excluded) leaves no entry for anyone. KnownTo is never touched.
 #[test]
 fn shuffle_excluding_found_card_at_its_index() {
-    let (mut w, lib) = lib_world(4, false);
-    for (i, id) in lib.iter().enumerate() {
-        w.k.set_position_known(&w.zones, P1, P1, i, *id)
+    let build = || -> (KWorld, Vec<ObjectId>) {
+        let (mut w, lib) = lib_world(4, false);
+        for (i, id) in lib.iter().enumerate() {
+            w.k.set_position_known(&w.zones, P1, P1, i, *id)
+                .expect("pos");
+        }
+        w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
             .expect("pos");
-    }
-    w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
-        .expect("pos");
-    w.k.set_position_known(&w.zones, P2, P1, 3, lib[3])
-        .expect("pos");
-    w.k.shuffle_library(&w.zones, P1, &[lib[0]])
-        .expect("shuffle");
+        w.k.set_position_known(&w.zones, P2, P1, 3, lib[3])
+            .expect("pos");
+        (w, lib)
+    };
+    // both viewers know which card was excluded
+    let (mut w, lib) = build();
+    let known: Vec<_> = lib.iter().map(|id| w.known_to(*id)).collect();
+    w.shuffle_disclosed(P1, &[lib[0]], &[P1, P2]);
     assert_eq!(w.positions(P1, P1), map(&[(0, lib[0])]));
     assert_eq!(w.positions(P2, P1), map(&[(0, lib[0])]));
+    let after: Vec<_> = lib.iter().map(|id| w.known_to(*id)).collect();
+    assert_eq!(known, after, "KnownTo untouched");
+    // only P1 knows it
+    let (mut w, lib) = build();
+    w.shuffle_disclosed(P1, &[lib[0]], &[P1]);
+    assert_eq!(w.positions(P1, P1), map(&[(0, lib[0])]));
+    assert!(w.positions(P2, P1).is_empty(), "P2 not in known_by");
+    // contrast: the shorthand discloses nothing
+    let (mut w, lib) = build();
+    w.k.shuffle_library(&w.zones, P1, &[lib[0]])
+        .expect("shuffle");
+    assert!(w.positions(P1, P1).is_empty(), "shorthand: no entry kept");
+    assert!(w.positions(P2, P1).is_empty(), "shorthand: no entry kept");
+    let after: Vec<_> = lib.iter().map(|id| w.known_to(*id)).collect();
+    assert_eq!(known, after, "KnownTo untouched");
 }
 
 /// REQ-CORE-004, CR 701.24b: an excluded card no longer at its recorded index loses the
-/// entry, and it stays lost when the card returns to that index later.
+/// entry even for a viewer in `known_by`, and it stays lost when the card returns to that
+/// index later.
 #[test]
 fn shuffle_excluding_card_that_moved_loses_its_entry() {
     let (mut w, lib) = lib_world(4, false);
@@ -161,8 +185,7 @@ fn shuffle_excluding_card_that_moved_loses_its_entry() {
     // move the top card to the bottom without telling the knowledge: lib[1] is now at 0
     w.raw_mv(lib[0], KWorld::req_at(ZoneKind::Library, Position::Bottom));
     assert_eq!(w.library(P1), vec![lib[1], lib[2], lib[3], lib[0]]);
-    w.k.shuffle_library(&w.zones, P1, &[lib[1]])
-        .expect("shuffle");
+    w.shuffle_disclosed(P1, &[lib[1]], &[P1]);
     assert!(w.positions(P1, P1).is_empty());
     // put it back: lib[1] is at index 1 again; its entry was cleared, not merely hidden
     w.raw_mv(lib[0], KWorld::req_at(ZoneKind::Library, Position::Top));
@@ -171,15 +194,17 @@ fn shuffle_excluding_card_that_moved_loses_its_entry() {
 }
 
 /// REQ-CORE-004, CR 701.24a: a non-excluded entry is cleared by a shuffle even if the card
-/// happens to stay at the recorded index.
+/// happens to stay at the recorded index, also for a viewer in `known_by`; the excluded
+/// card's entry of that viewer is kept (contrast).
 #[test]
 fn shuffle_clears_non_excluded_even_when_still_at_index() {
     let (mut w, lib) = lib_world(3, false);
     w.k.set_position_known(&w.zones, P2, P1, 2, lib[2])
         .expect("pos");
-    w.k.shuffle_library(&w.zones, P1, &[lib[0]])
-        .expect("shuffle");
-    assert!(w.positions(P2, P1).is_empty());
+    w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
+        .expect("pos");
+    w.shuffle_disclosed(P1, &[lib[0]], &[P2]);
+    assert_eq!(w.positions(P2, P1), map(&[(0, lib[0])]));
     assert_eq!(w.library(P1)[2], lib[2], "still there physically");
 }
 
@@ -444,14 +469,17 @@ fn library_changed_drops_entries_not_restored_by_a_draw() {
     assert!(!u.known_to(lib[0]).contains(&P2));
 }
 
-/// REQ-CORE-004, CR 401.2: an insertion at a deeper index keeps the entries above it (smaller
-/// indexes) and drops those at or below it in the pile (indexes at or after the insertion).
-/// Removing the inserted card again follows the caller contract (`send_outside`, then
-/// `on_removed_from_hidden_zone`): with P2 as an observer the dropped entries do not come back
-/// and the kept ones stay; with no observers P2 loses every entry for that library.
+/// REQ-CORE-004, CR 401.2 (index-disclosure rule of the brief, a design decision): an
+/// insertion at a deeper index whose index P2 knows (`on_library_changed_indexed` with [P2])
+/// keeps P2's entries above it (smaller indexes) and drops those at or below it in the pile
+/// (indexes at or after the insertion); the shorthand `on_library_changed` (index unknown)
+/// leaves P2 no entry. Removing the inserted card again follows the caller contract
+/// (`send_outside`, then the removal hook): watched by P2 with the index known to P2 the
+/// dropped entries do not come back and the kept ones stay; watched by P2 without the index
+/// (shorthand) P2 loses every entry; with no observers P2 loses every entry too.
 #[test]
 fn library_changed_keeps_entries_above_the_insertion() {
-    let build = || -> (KWorld, Vec<ObjectId>, ObjectId) {
+    let build = |disclosed: bool| -> (KWorld, Vec<ObjectId>, ObjectId) {
         let (mut w, lib) = lib_world(4, false);
         for (i, id) in lib.iter().enumerate() {
             w.k.set_position_known(&w.zones, P2, P1, i, *id)
@@ -459,26 +487,42 @@ fn library_changed_keeps_entries_above_the_insertion() {
         }
         let x = w.create_req(P1, KWorld::req_at(ZoneKind::Library, Position::Index(2)));
         assert_eq!(w.library(P1), vec![lib[0], lib[1], x, lib[2], lib[3]]);
-        w.k.on_library_changed(&w.zones, P1).expect("changed");
-        assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
+        if disclosed {
+            w.library_changed(P1, Some(&[P2]));
+            assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
+        } else {
+            w.k.on_library_changed(&w.zones, P1).expect("changed");
+            assert!(w.positions(P2, P1).is_empty(), "shorthand: index unknown");
+        }
+        for id in &lib {
+            assert!(w.known_to(*id).contains(&P2), "set knowledge kept");
+        }
         (w, lib, x)
     };
-    // removing x, watched by P2: the dropped entries do not come back
-    let (mut w, lib, x) = build();
-    w.send_out(x, &[P2]);
+    build(false);
+    // removing x, watched by P2 who knows the index: the dropped entries do not come back
+    let (mut w, lib, x) = build(true);
+    w.send_out_idx(x, &[P2], &[P2]);
     assert_eq!(w.library(P1), lib);
     assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
+    // removing x watched by P2, index not disclosed: no entry left
+    let (mut v, lib, x) = build(true);
+    v.send_out(x, &[P2]);
+    assert_eq!(v.library(P1), lib);
+    assert!(v.positions(P2, P1).is_empty());
     // removing x unobserved: P2 forgets every entry for that library (hidden-source rule)
-    let (mut u, lib, x) = build();
+    let (mut u, lib, x) = build(true);
     u.send_out(x, &[]);
     assert_eq!(u.library(P1), lib);
     assert!(u.positions(P2, P1).is_empty());
 }
 
-/// REQ-CORE-004, CR 401.2: removal (`send_outside` + `on_removed_from_hidden_zone`) and
-/// insertion (`enter_from_outside` + `on_library_changed`) of library cards outside `on_move`.
-/// P1 watches its own removals (passed in `observers`); an unobserved removal drops P1's
-/// entries for that library too (the owner of a library is not an observer by itself).
+/// REQ-CORE-004, CR 401.2: removal (`send_outside` + the removal hook) and insertion
+/// (`enter_from_outside` + `on_library_changed[_indexed]`) of library cards outside `on_move`.
+/// P1 watches its own removals (passed in `observers`) and knows their index (passed in
+/// `index_known_by`); an unobserved removal drops P1's entries for that library too (the owner
+/// of a library is not an observer by itself), and so does an observed removal whose index is
+/// not disclosed (the shorthand).
 #[test]
 fn library_changed_after_send_outside_and_enter_from_outside() {
     let (mut w, lib) = lib_world(3, false);
@@ -490,8 +534,16 @@ fn library_changed_after_send_outside_and_enter_from_outside() {
     let mut u = w.clone();
     u.send_out(lib[2], &[]);
     assert!(u.positions(P1, P1).is_empty());
-    // observed removal of the bottom card: the entries above it still match
-    let (_, card) = w.send_out(lib[2], &[P1]);
+    // observed removal of the bottom card, index not disclosed: every entry goes
+    let mut o = w.clone();
+    o.send_out(lib[2], &[P1]);
+    assert!(o.positions(P1, P1).is_empty());
+    assert!(
+        o.can(P1, lib[0]) && o.can(P1, lib[1]),
+        "identity kept by the observer"
+    );
+    // observed removal of the bottom card at an index P1 knows: the entries above it match
+    let (_, card) = w.send_out_idx(lib[2], &[P1], &[P1]);
     assert_eq!(w.positions(P1, P1), map(&[(0, lib[0]), (1, lib[1])]));
     // bring it back on top: everything shifts, nothing matches
     let back = w
@@ -505,19 +557,21 @@ fn library_changed_after_send_outside_and_enter_from_outside() {
         )
         .expect("in");
     assert_eq!(w.library(P1), vec![back, lib[0], lib[1]]);
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
+    w.library_changed(P1, Some(&[P1]));
     assert!(w.positions(P1, P1).is_empty());
-    // remove it again (observed): lib[0] and lib[1] are back at 0 and 1, but their entries stay
-    // dropped
-    w.send_out(back, &[P1]);
+    // remove it again (observed, index known): lib[0] and lib[1] are back at 0 and 1, but
+    // their entries stay dropped
+    w.send_out_idx(back, &[P1], &[P1]);
     assert!(w.positions(P1, P1).is_empty());
 }
 
 /// REQ-CORE-004, CR 401.2, SRS 2.4: insertions stay position-only. P2 knows the set {A, B} of
 /// P1's library and no positions; P1 knows every position. A card entering from outside the
-/// game at index 2 (`enter_from_outside` + `on_library_changed`) leaves P2's stored KnownTo of
-/// A and B and its projected `known_cards` intact (set knowledge is not forgotten by an
-/// insertion); P1's entries below the insertion index are kept, those at or after it dropped.
+/// game at index 2 (`enter_from_outside` + `on_library_changed_indexed` with [P1], the index
+/// known to P1 only) leaves P2's stored KnownTo of A and B and its projected `known_cards`
+/// intact (set knowledge is not forgotten by an insertion); P1's entries below the insertion
+/// index are kept, those at or after it dropped. With the shorthand `on_library_changed` P1
+/// keeps no entry (index-disclosure rule, a design decision) and every KnownTo is the same.
 /// An insertion into P1's hand does not touch P2's knowledge of P1's hand cards either.
 #[test]
 fn insertion_from_outside_keeps_set_knowledge() {
@@ -532,8 +586,19 @@ fn insertion_from_outside_keeps_set_knowledge() {
     let h = w.create(ZoneKind::Hand, P1);
     w.k.add_known(&w.zones, h, P2).expect("add");
     let (ca, cb) = (w.card(a), w.card(b));
-    let x = w.enter_fresh(P1, KWorld::req_at(ZoneKind::Library, Position::Index(2)));
+    let mut s = w.clone();
+    let req2 = KWorld::req_at(ZoneKind::Library, Position::Index(2));
+    let card = w.fresh_card();
+    let x = w.enter_card(P1, card, req2, Some(&[P1]));
     assert_eq!(w.library(P1), vec![lib[0], lib[1], x, lib[2], lib[3]]);
+    // contrast: the same insertion through the shorthand
+    let sx = s.enter_card(P1, card, req2, None);
+    assert_eq!(sx, x);
+    assert!(s.positions(P1, P1).is_empty(), "shorthand: no entry kept");
+    assert!(s.positions(P2, P1).is_empty());
+    for id in s.zones.all_object_ids() {
+        assert_eq!(s.known_to(id), w.known_to(id), "only positions differ");
+    }
     assert!(w.known_to(a).contains(&P2), "set knowledge of A kept");
     assert!(w.known_to(b).contains(&P2), "set knowledge of B kept");
     assert!(w.can(P2, a) && w.can(P2, b));
@@ -556,7 +621,9 @@ fn insertion_from_outside_keeps_set_knowledge() {
 }
 
 /// REQ-CORE-004, R12: `on_library_changed` for an unknown owner is `UnknownPlayer` and
-/// changes nothing; for a library whose entries all match it changes nothing.
+/// changes nothing; `on_library_changed_indexed` with P2 in `index_known_by` for a library whose
+/// entries all match changes nothing; the shorthand drops P2's entries (nobody knows the index,
+/// index-disclosure rule of the brief) but no KnownTo.
 #[test]
 fn library_changed_errors_and_no_op() {
     let (mut w, lib) = lib_world(3, false);
@@ -570,8 +637,238 @@ fn library_changed_errors_and_no_op() {
         );
     }
     assert_eq!(w.k, snapshot);
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
-    w.k.on_library_changed(&w.zones, P2).expect("changed");
+    w.library_changed(P1, Some(&[P2]));
+    w.library_changed(P2, Some(&[P2]));
     assert_eq!(w.positions(P2, P1), map(&[(1, lib[1])]));
     assert_eq!(w.k, snapshot, "nothing to drop");
+    // the shorthand on the other library keeps P2's entry for P1's library
+    w.k.on_library_changed(&w.zones, P2).expect("changed");
+    assert_eq!(w.positions(P2, P1), map(&[(1, lib[1])]));
+    // the shorthand on P1's library drops it, but not the KnownTo
+    w.k.on_library_changed(&w.zones, P1).expect("changed");
+    assert!(
+        w.positions(P2, P1).is_empty(),
+        "shorthand: index unknown to P2"
+    );
+    assert_eq!(w.known_to(lib[1]), set(&[P2]));
+}
+
+// ---------------------------------------------------------------------------------------------
+// index disclosure (PR #174 review round 4, findings F1/F2 and their class): position
+// knowledge survives a library change only for the viewers who know the index of the change
+// (the brief's index-disclosure rule, a design decision; no CR). Twin worlds differ only in
+// the hidden index of the change.
+// ---------------------------------------------------------------------------------------------
+
+const CA: u64 = 10;
+const CB: u64 = 11;
+const CX: u64 = 20;
+/// The inserted card.
+const CN: u64 = 30;
+
+/// P1's library, top first: X, A, B (fixed synthetic cards); P2 knows A at index 1 and B as a
+/// member of the set; P3 (three players) knows nothing.
+fn index_world(players: &[PlayerId]) -> KWorld {
+    let mut w = KWorld::with_players(players);
+    let lib = w.build_library(P1, &[CX, CA, CB]);
+    w.k.set_position_known(&w.zones, P2, P1, 1, lib[1])
+        .expect("pos");
+    w.k.add_known(&w.zones, lib[2], P2).expect("add");
+    assert_eq!(w.positions(P2, P1), map(&[(1, w.id_of(CA))]));
+    w
+}
+
+/// Inserts the card N at `index` of P1's library, by `Zones::create_object` (`via_enter`
+/// false) or `Zones::enter_from_outside` (true), then informs the knowledge with the shorthand
+/// (`ikb` None) or `on_library_changed_indexed` (`ikb` Some).
+fn insert_n(w: &mut KWorld, index: usize, via_enter: bool, ikb: Option<&[PlayerId]>) -> ObjectId {
+    let req = KWorld::req_at(ZoneKind::Library, Position::Index(index));
+    if via_enter {
+        w.enter_card(P1, cid(CN), req, ikb)
+    } else {
+        w.insert_card(P1, cid(CN), req, ikb)
+    }
+}
+
+/// REQ-CORE-004, CR 401.2, SRS 2.4 (PR #174 review finding F2; index-disclosure rule of the
+/// brief): P2 knows A at index 1. World 1 inserts N at index 0 (above A), world 2 at index 2
+/// (below A), by `create_object` and by `enter_from_outside`, then the shorthand
+/// `on_library_changed`: P2 cannot tell where N went, so `position_known(P2, P1)` is equal
+/// (empty) in both worlds, every player's whole view is equal, and P2's KnownTo of A and B is
+/// unchanged (set knowledge survives an insertion). P3 (no knowledge) sees equal views.
+/// Control: `on_library_changed_indexed(.., [P2])`: index 0 drops A's entry (A shifted to 2),
+/// index 2 keeps A@1, so a viewer who knows the index CAN tell the worlds apart.
+#[test]
+fn insertion_twin_above_and_below() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        for via_enter in [false, true] {
+            let ctx = format!("{players:?} enter {via_enter}");
+            // shorthand
+            let mut w1 = index_world(&players);
+            let mut w2 = index_world(&players);
+            assert_twins_equal_for(&w1, &w2, &players, "precondition");
+            let n1 = insert_n(&mut w1, 0, via_enter, None);
+            let n2 = insert_n(&mut w2, 2, via_enter, None);
+            assert_eq!(n1, n2, "{ctx}: same new id");
+            let a = w1.id_of(CA);
+            assert_eq!(w1.library(P1)[0], n1);
+            assert_eq!(w2.library(P1)[2], n2);
+            assert_eq!(w2.library(P1)[1], a, "A still at 1 in world 2");
+            assert_twins_equal_for(&w1, &w2, &players, &ctx);
+            assert!(w1.positions(P2, P1).is_empty(), "{ctx}");
+            for w in [&w1, &w2] {
+                assert!(w.known_to(a).contains(&P2), "{ctx}: A set knowledge kept");
+                assert!(w.known_to(w.id_of(CB)).contains(&P2), "{ctx}: B kept");
+                assert_eq!(
+                    lib_known(&w.view(P2), P1),
+                    set(&[cid(CA), cid(CB)]),
+                    "{ctx}"
+                );
+            }
+            // control: P2 knows the index
+            let mut c1 = index_world(&players);
+            let mut c2 = index_world(&players);
+            insert_n(&mut c1, 0, via_enter, Some(&[P2]));
+            insert_n(&mut c2, 2, via_enter, Some(&[P2]));
+            assert!(c1.positions(P2, P1).is_empty(), "{ctx}: A shifted");
+            assert_eq!(c2.positions(P2, P1), map(&[(1, a)]), "{ctx}: A kept");
+            assert_ne!(c1.positions(P2, P1), c2.positions(P2, P1));
+            let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+            assert_twins_equal_for(&c1, &c2, &others, &ctx);
+            assert_eq!(
+                c1.view(P2),
+                c2.view(P2),
+                "{ctx}: positions are never projected"
+            );
+        }
+    }
+}
+
+/// P1's library, top first: A, X, B; P2 knows A at index 0 and B as a member of the set.
+fn shuffle_world(players: &[PlayerId]) -> KWorld {
+    let mut w = KWorld::with_players(players);
+    let lib = w.build_library(P1, &[CA, CX, CB]);
+    w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
+        .expect("pos");
+    w.k.add_known(&w.zones, lib[2], P2).expect("add");
+    w
+}
+
+/// REQ-CORE-004, CR 701.24a, 701.24b, SRS 2.4 (index-disclosure rule of the brief, finding
+/// class (f)): P2 holds an entry for A. World 1 shuffles excluding A, world 2 excluding X, with
+/// the shorthand `shuffle_library`: P2 cannot tell which card was the excluded found card, so
+/// `position_known` is equal (empty) for every player and every view is equal. Control:
+/// `shuffle_library_disclosed(.., [A], [P2])` keeps A@0 while `(.., [X], [P2])` does not, and
+/// `(.., [A], [])` keeps nothing. KnownTo is never touched by any shuffle.
+#[test]
+fn shuffle_excluded_twin() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        let base = shuffle_world(&players);
+        let (a, x) = (base.id_of(CA), base.id_of(CX));
+        let known: Vec<_> = base
+            .zones
+            .all_object_ids()
+            .into_iter()
+            .map(|id| base.known_to(id))
+            .collect();
+        let known_now = |w: &KWorld| -> Vec<_> {
+            w.zones
+                .all_object_ids()
+                .into_iter()
+                .map(|id| w.known_to(id))
+                .collect()
+        };
+        let mut w1 = base.clone();
+        let mut w2 = base.clone();
+        w1.k.shuffle_library(&w1.zones, P1, &[a]).expect("shuffle");
+        w2.k.shuffle_library(&w2.zones, P1, &[x]).expect("shuffle");
+        assert_twins_equal_for(&w1, &w2, &players, "shorthand");
+        assert!(w1.positions(P2, P1).is_empty());
+        assert_eq!(known_now(&w1), known);
+        assert_eq!(known_now(&w2), known);
+        // control
+        let mut c1 = base.clone();
+        let mut c2 = base.clone();
+        let mut c3 = base.clone();
+        c1.shuffle_disclosed(P1, &[a], &[P2]);
+        c2.shuffle_disclosed(P1, &[x], &[P2]);
+        c3.shuffle_disclosed(P1, &[a], &[]);
+        assert_eq!(c1.positions(P2, P1), map(&[(0, a)]));
+        assert!(c2.positions(P2, P1).is_empty());
+        assert!(c3.positions(P2, P1).is_empty());
+        let others: Vec<PlayerId> = players.iter().copied().filter(|p| *p != P2).collect();
+        assert_twins_equal_for(&c1, &c2, &others, "control, not in known_by");
+        for c in [&c1, &c2, &c3] {
+            assert_eq!(known_now(c), known, "KnownTo untouched");
+        }
+    }
+}
+
+/// REQ-CORE-004, R12: errors of `on_library_changed_indexed` (UnknownPlayer(owner) first, then
+/// the first unknown `index_known_by` player) and of `shuffle_library_disclosed`
+/// (UnknownPlayer(owner), then NotInLibrary for the first bad excluded id, then the first
+/// unknown `known_by` player); rejected calls change nothing. The shorthands equal the new
+/// methods with an empty disclosure.
+#[test]
+fn index_disclosure_errors_and_shorthands() {
+    let mut w = index_world(&[P1, P2, P3]);
+    let lib = w.library(P1);
+    let hand = w.create(ZoneKind::Hand, P1);
+    let snapshot = w.k.clone();
+    let lc = |w: &mut KWorld, owner: PlayerId, ikb: &[PlayerId]| {
+        w.k.on_library_changed_indexed(&w.zones, owner, ikb)
+    };
+    assert_eq!(
+        lc(&mut w, NOBODY, &[pid(77)]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY)),
+        "owner first"
+    );
+    assert_eq!(
+        lc(&mut w, P1, &[P2, pid(77), NOBODY]),
+        Err(KnowledgeError::UnknownPlayer(pid(77)))
+    );
+    assert_eq!(
+        lc(&mut w, P1, &[pid(u64::MAX)]),
+        Err(KnowledgeError::UnknownPlayer(pid(u64::MAX)))
+    );
+    assert_eq!(w.k, snapshot);
+    let sh = |w: &mut KWorld, owner: PlayerId, ex: &[ObjectId], kb: &[PlayerId]| {
+        w.k.shuffle_library_disclosed(&w.zones, owner, ex, kb)
+    };
+    assert_eq!(
+        sh(&mut w, NOBODY, &[oid(9_999)], &[pid(77)]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY)),
+        "owner first"
+    );
+    assert_eq!(
+        sh(&mut w, P1, &[lib[0], hand, oid(9_999)], &[pid(77)]),
+        Err(KnowledgeError::NotInLibrary {
+            owner: P1,
+            object: hand
+        }),
+        "NotInLibrary before an unknown known_by player"
+    );
+    assert_eq!(
+        sh(&mut w, P1, &[lib[1]], &[P2, pid(77), NOBODY]),
+        Err(KnowledgeError::UnknownPlayer(pid(77)))
+    );
+    assert_eq!(
+        sh(&mut w, P1, &[], &[NOBODY]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(w.k, snapshot, "rejected calls change nothing");
+    assert_eq!(w.positions(P2, P1), map(&[(1, lib[1])]));
+    // shorthands
+    let (mut a, mut b) = (w.clone(), w.clone());
+    a.k.on_library_changed(&a.zones, P1).expect("lc");
+    b.k.on_library_changed_indexed(&b.zones, P1, &[])
+        .expect("lc");
+    assert_eq!(a.k, b.k);
+    assert_ne!(a.k, snapshot, "the shorthand dropped P2's entry");
+    let (mut a, mut b) = (w.clone(), w.clone());
+    a.k.shuffle_library(&a.zones, P1, &[lib[1]]).expect("sh");
+    b.k.shuffle_library_disclosed(&b.zones, P1, &[lib[1]], &[])
+        .expect("sh");
+    assert_eq!(a.k, b.k);
+    assert!(a.positions(P2, P1).is_empty());
 }
