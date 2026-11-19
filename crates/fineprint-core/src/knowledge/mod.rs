@@ -24,7 +24,10 @@
 //! a player who did not observe the move (see [`Knowledge::on_move_observed`]) forgets every
 //! card of the source zone and the moved card, and their position entries for a source
 //! library: they cannot tell which member of the set they knew moved, so the view must leave
-//! it ambiguous (REQ-CORE-004; a design decision, see `docs/DECISIONS.md`).
+//! it ambiguous (REQ-CORE-004; a design decision, see `docs/DECISIONS.md`). Knowing the
+//! moved card's library position does not make a player an observer: `Knowledge` cannot tell
+//! a disclosed-position move from a secret selection, so the caller passes such players as
+//! observers when the selected position is itself public.
 //!
 //! **Shuffles.** [`Knowledge::shuffle_library`] clears position knowledge of the shuffled
 //! cards (CR 701.24a, CR 701.24b) but keeps identity knowledge of the library as a set.

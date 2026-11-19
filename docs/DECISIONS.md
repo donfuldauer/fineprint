@@ -2828,11 +2828,21 @@ the existing effects (a)-(d), only when `before` was in a library or a hand and
 `moved.from != moved.to`. A player V observed the move iff (i) V is in `observers`; or (ii) V
 may see the new object by the implicit entitlements of `can_identify` (public zone face up, V's
 own hand, a face-down permanent or spell V controls), ignoring stored `KnownTo`; or (iii) the
-object left V's hand (V chose it); or (iv) it left a library where V had a stored position
-entry naming `moved.old`. A player who did not observe it is removed from the stored `KnownTo`
+object left V's hand (V chose it). These three conditions depend only on the caller's observers,
+the destination and the source zone, never on which candidate moved. A player who did not
+observe it is removed from the stored `KnownTo`
 of every card now in `moved.from` and of the moved card (emptied sets are dropped), and, when
 the source is a library, loses all of its position entries for that library. An observer's
 knowledge is kept exactly as before. `on_move` is `on_move_observed` with no observers.
+
+Knowledge cannot tell a disclosed-position move (a draw from the top) from a secret selection
+of a library card, so a viewer who knows a position is not an observer by that fact. The caller
+must pass such viewers in `observers` when the selected position is itself public. Consequence:
+a viewer who knows the top card and is not passed as an observer forgets it when the top card
+is drawn; conservative, never leaks.
+
+The round-1 wording of this entry, "or (iv) it left a library where V had a stored position
+entry naming it", is superseded (removed in PR #174 review round 2).
 **Rationale:** Twin-world non-interference for REQ-CORE-004 (PR #174, F1): a viewer who knows a
 set but cannot tell which member moved must not be able to tell from the view; if any card of
 the source zone stayed known, two worlds that differ only in which card moved would project to
@@ -2841,7 +2851,10 @@ shrinks). This is a design choice, not CR-derived. Set knowledge across `shuffle
 unchanged (SRS 2.4).
 **Alternatives:** Forgetting only the moved card (leaks through the remaining set); tracking
 per-zone possibility sets ("in zone A or zone B"; a much larger representation); making the
-caller pass every observer through an extra `on_move` argument (breaks the frozen `on_move`).
+caller pass every observer through an extra `on_move` argument (breaks the frozen `on_move`);
+keeping condition (iv) (rejected: observation status depends on `moved.old`, so twin worlds
+differ: CodeRabbit round 2, thread 4625001805); inferring observation from position entries
+plus a "disclosed" flag (needs a caller-provided flag anyway, which `observers` already is).
 
 ## #25 FP-024: shuffle_face_down_pile is exile-only
 
@@ -2882,8 +2895,9 @@ hidden insert); removing the claim from the identity/position decision without a
 **Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_knowledge_*.rs`)
 pin these points the fix brief left open: (1) rule (d) prunes position entries of both the
 library a card moved from and the library it moved to on every move, so a hand-to-library insert
-cannot revive a stale entry; (2) condition (iv) of `on_move_observed` step 0 uses the viewer's
-position entries as they stood before the move; (3) observing a move only keeps existing
+cannot revive a stale entry; (2) superseded: condition (iv) was removed in round 2, and the spec
+tests now assert that position knowledge is not observation and that observers are explicit
+(only `observers`, the implicit entitlements on the new record and the source hand count); (3) observing a move only keeps existing
 knowledge, it never adds the observer to the card's `KnownTo`; (4) error precedence among
 several invalid ids in one `shuffle_face_down_pile` call is not specified (tests use one invalid
 id per pile); (5) after `send_outside` / `enter_from_outside` only position entries are
