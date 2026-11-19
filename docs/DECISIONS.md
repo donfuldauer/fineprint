@@ -2460,3 +2460,18 @@ replaces the Main face's values (CodeRabbit round 1, PR #171).
 **Alternatives:** Take all four from the Flipped face (the first implementation: reads more into
 CR 710.1b than it says); set them to `None` when flipped (drops printed Main-face values no rule
 removes).
+
+## #23 FP-022 — SRS 4.2 gaps for room, meld, station, preparation and mutate
+
+**Decision:** Where SRS §4.2 (REQ-OBJ-002) and the CR baseline (2026-11-06) differ, the CR wins
+(P1): (1) STATION: the stack shows the printed characteristics except power and toughness, which
+are absent (CR 722.2c: no power or toughness in any zone other than the battlefield); (2) MELD:
+when a melded permanent leaves the battlefield, one permanent leaves and both cards are put into
+the new zone (CR 713.8), not "the two cards move separately"; (3) ROOM: on the battlefield a
+Room's name, mana cost and rules text come only from its unlocked halves, so its mana value and
+colors come from the unlocked halves' costs and are 0/colorless with neither unlocked (CR 709.5,
+202.3, 202.3a; 709.5 is more specific than 709.4b); the unlock special action needs priority
+(CR 116.2m, 709.5e).
+**Rationale:** Rules-researcher check of the §4.2 rows against the CR text (issue #23).
+**Alternatives:** Follow the SRS wording (contradicts the CR on the stack P/T and on the
+leave-the-battlefield event count).
