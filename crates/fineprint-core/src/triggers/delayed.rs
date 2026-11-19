@@ -44,7 +44,8 @@ struct Delayed {
     captured: BTreeMap<String, EventField>,
     one_shot: bool,
     /// The trigger-limit counters of this instance (CR 603.2h), counted by
-    /// [`DelayedTriggers::take_triggered`] after the intervening "if" passed (CR 603.4).
+    /// [`DelayedTriggers::take_triggered`] after the intervening "if" passed (CR 603.4), and by
+    /// [`DelayedTriggers::fire`]; one shared counter per registration.
     counts: LimitCounts,
 }
 
@@ -86,6 +87,10 @@ impl LimitCounts {
 /// when it is created (SRS 8.2 item 5). It does not trigger before it is registered
 /// (CR 603.7a). It persists if its source leaves its zone: the CR is silent, so this is a
 /// recorded decision (docs/DECISIONS.md, "#31 FP-030 — Inferences and choices").
+///
+/// A registration's trigger limit (CR 603.2h) is enforced, with one counter per registration,
+/// by both [`DelayedTriggers::take_triggered`] (after the intervening "if", CR 603.4) and
+/// [`DelayedTriggers::fire`] (which takes the current turn).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DelayedTriggers {
     entries: BTreeMap<u64, Delayed>,
@@ -260,9 +265,23 @@ impl DelayedTriggers {
 
     /// Fires the delayed trigger `id` directly (a phase or step delayed trigger; the turn unit
     /// calls it when the step begins), with its captured bindings. `None` if `id` is unknown.
-    /// A one-shot trigger is removed (CR 603.7b).
-    pub fn fire(&mut self, id: DelayedTriggerId) -> Option<PendingTrigger> {
-        let d = self.entries.get(&id.0)?;
+    ///
+    /// `turn` is the current turn number, the same value the caller passes to
+    /// [`detect`](super::detect) and [`DelayedTriggers::take_triggered`]. If the stored ability
+    /// has a `limit`, it is checked and counted against this registration's own counters, the
+    /// same ones [`DelayedTriggers::take_triggered`] uses (CR 603.2h): if the per-turn or
+    /// per-game count has reached the limit, the result is `None`, nothing is counted and a
+    /// one-shot stays registered (a dropped firing does not consume it). No intervening "if" is
+    /// evaluated here (there is no event and no environment). A registration without a limit is
+    /// never limited. A one-shot trigger that fires is removed (CR 603.7b).
+    pub fn fire(&mut self, id: DelayedTriggerId, turn: u64) -> Option<PendingTrigger> {
+        let d = self.entries.get_mut(&id.0)?;
+        if let Some(limit) = d.ability.limit
+            && !d.counts.try_count(&limit, turn)
+        {
+            return None;
+        }
+        let d = &*d;
         let pending = PendingTrigger::new(
             TriggerOrigin::Delayed,
             d.controller,
@@ -297,7 +316,8 @@ impl DelayedTriggers {
 
 /// The registration of delayed trigger `id`: its stored source, controller and ability with the
 /// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`. The `limit` is
-/// always removed: [`DelayedTriggers::take_triggered`] enforces it (CR 603.2h).
+/// always removed: [`DelayedTriggers::take_triggered`] and [`DelayedTriggers::fire`] enforce it
+/// (CR 603.2h).
 fn registration(id: u64, d: &Delayed, keep_condition: bool) -> TriggerRegistration {
     let mut ability = d.ability.clone();
     ability.base.ability_id = DelayedTriggerId(id).ability_id();

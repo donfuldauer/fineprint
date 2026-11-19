@@ -651,7 +651,7 @@ fn req_event_002_delayed_fire_and_cancel() {
     a.optional = Some(true);
     let once = d.register(o(4), p(3), a.clone(), captured.clone(), true);
     let lasting = d.register(o(4), p(3), a, captured.clone(), false);
-    let f = d.fire(once).expect("fires");
+    let f = d.fire(once, 1).expect("fires");
     assert_eq!(
         f,
         PendingTrigger {
@@ -666,13 +666,13 @@ fn req_event_002_delayed_fire_and_cancel() {
             modes: None,
         }
     );
-    assert_eq!(d.fire(once), None);
-    assert!(d.fire(lasting).is_some());
-    assert!(d.fire(lasting).is_some());
+    assert_eq!(d.fire(once, 1), None);
+    assert!(d.fire(lasting, 1).is_some());
+    assert!(d.fire(lasting, 1).is_some());
     assert_eq!(d.len(), 1);
     assert!(d.cancel(lasting));
     assert!(!d.cancel(lasting));
-    assert_eq!(d.fire(lasting), None);
+    assert_eq!(d.fire(lasting, 1), None);
 }
 
 /// REQ-EVENT-002, CR 603.7, CR 603.7a: end to end with detect(): the delayed registrations are
@@ -2238,4 +2238,120 @@ fn req_event_002_delayed_one_shot_dropped_by_condition_or_limit_stays() {
         "a one-shot that did not trigger stays registered"
     );
     assert_eq!(env.calls.borrow().len(), 2, "both conditions were checked");
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR round 3: fire enforces the registration's limit with the counters take_triggered uses
+// ---------------------------------------------------------------------------------------------
+
+/// An event ability with the trigger limit `per_turn` / `per_game`.
+fn limited_event_ability(per_turn: Option<u32>, per_game: Option<u32>) -> TriggeredAbilityAST {
+    let mut a = event_ability("orig", EventKind::Attacks);
+    a.limit = Some(ActivationLimit { per_turn, per_game });
+    a
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.7b: a duration registration with a limit of once each game
+/// fires once through `fire`; later calls, in the same or a later turn, give None and the
+/// registration stays. (The unlimited-by-`fire` code returned Some on every call.)
+#[test]
+fn req_event_002_fire_applies_per_game_limit() {
+    let mut d = DelayedTriggers::new();
+    let id = d.register(
+        o(1),
+        p(1),
+        limited_event_ability(None, Some(1)),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(d.fire(id, 1).is_some());
+    assert_eq!(d.fire(id, 1), None);
+    assert_eq!(d.fire(id, 2), None);
+    assert_eq!(d.len(), 1);
+}
+
+/// REQ-EVENT-002, CR 603.2h: a once-each-turn limit counts per turn in `fire`.
+#[test]
+fn req_event_002_fire_applies_per_turn_limit() {
+    let mut d = DelayedTriggers::new();
+    let id = d.register(
+        o(1),
+        p(1),
+        limited_event_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(d.fire(id, 5).is_some());
+    assert_eq!(d.fire(id, 5), None);
+    assert!(d.fire(id, 6).is_some());
+    assert_eq!(d.len(), 1);
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.7b: `fire` and `take_triggered` share one counter per
+/// registration, in both orders.
+#[test]
+fn req_event_002_fire_and_take_triggered_share_counters() {
+    let mut d = DelayedTriggers::new();
+    let id = d.register(
+        o(1),
+        p(1),
+        limited_event_ability(None, Some(1)),
+        BTreeMap::new(),
+        false,
+    );
+    let got = d.take_triggered(&Env::default(), 1, &[waiting(1, 1, "delayed#0", &[])]);
+    assert_eq!(got.len(), 1);
+    assert_eq!(d.fire(id, 1), None);
+    assert_eq!(d.fire(id, 2), None);
+
+    let mut r = DelayedTriggers::new();
+    let id = r.register(
+        o(1),
+        p(1),
+        limited_event_ability(None, Some(1)),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(r.fire(id, 1).is_some());
+    assert!(
+        r.take_triggered(&Env::default(), 1, &[waiting(1, 1, "delayed#0", &[])])
+            .is_empty()
+    );
+    assert_eq!(r.len(), 1);
+
+    // A per-turn count made by either counts for both in the same turn.
+    let mut t = DelayedTriggers::new();
+    let id = t.register(
+        o(1),
+        p(1),
+        limited_event_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(t.fire(id, 3).is_some());
+    assert!(
+        t.take_triggered(&Env::default(), 3, &[waiting(1, 1, "delayed#0", &[])])
+            .is_empty()
+    );
+    assert_eq!(
+        t.take_triggered(&Env::default(), 4, &[waiting(1, 1, "delayed#0", &[])])
+            .len(),
+        1
+    );
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.7b: a one-shot whose limit is reached from the start does
+/// not fire and is not consumed.
+#[test]
+fn req_event_002_fire_one_shot_at_limit_stays() {
+    let mut d = DelayedTriggers::new();
+    let id = d.register(
+        o(1),
+        p(1),
+        limited_event_ability(None, Some(0)),
+        BTreeMap::new(),
+        true,
+    );
+    assert_eq!(d.fire(id, 1), None);
+    assert_eq!(d.len(), 1);
 }
