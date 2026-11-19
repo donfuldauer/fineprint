@@ -210,7 +210,7 @@ struct Member {
     /// if it is in one (only submitted members are grouped).
     group: Option<usize>,
     /// The submitted member its `Instead` lineage descends from (itself if submitted; the
-    /// group's first member if that member is in a CR 704.7 group): its execution slot.
+    /// group's first member if that member is in a CR 704.7 group).
     root: usize,
     /// Its lineage position (see [`schedule_key`]): `[root]` for a submitted member (the group's
     /// first index for a CR 704.7 group member); for an `Instead` descendant, its parent's path
@@ -418,7 +418,8 @@ impl Bus<'_, '_, '_> {
             }
             // Phases B and C (CR 615.7, CR 616.1f, CR 616.2): the lowest pool among stopped
             // members is allocated on the current damage, per chooser in APNAP order; its
-            // stopped members then take it and run on until they finish or stop again.
+            // stopped members then take it, in `schedule_key` order (allotted members first),
+            // and run on until they finish or stop again.
             let Some(pool) = members.iter().filter_map(|m| m.stopped).min() else {
                 break;
             };
@@ -431,17 +432,25 @@ impl Bus<'_, '_, '_> {
                     pool_choosers.push(m.chooser);
                 }
             }
+            let players = self.player_order();
             for chooser in pool_choosers {
-                let group: Vec<usize> = order
-                    .iter()
-                    .copied()
+                // CR 101.4, CR 616.1: the chooser's stopped members in `schedule_key` order
+                // (lineage path), the order phase A stopped them in, so a descendant resumes at
+                // the position of the event it replaces.
+                let mut group: Vec<usize> = (0..members.len())
                     .filter(|&i| members[i].stopped == Some(pool) && members[i].chooser == chooser)
                     .collect();
+                group.sort_by(|&i, &j| {
+                    schedule_key(&players, &members[i], i).cmp(&schedule_key(
+                        &players,
+                        &members[j],
+                        j,
+                    ))
+                });
                 self.allocate(pool, chooser, &mut members, &group)?;
                 // CR 615.7: members drawing on an allotment take the pool before members
                 // outside the division (sourceless damage), so the division is honoured; the
-                // sort is stable (APNAP and submission order among equals).
-                let mut group = group;
+                // sort is stable (`schedule_key` order among equals).
                 group.sort_by_key(|&i| {
                     members[i]
                         .event
@@ -1279,9 +1288,10 @@ fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
 ///   plans are dropped; this never fails. The choice among one object's candidates depends
 ///   on their content only, not on submission order.
 ///
-/// Order: the events that are not zone changes first, by (root, member index), so that they
+/// Order: the events that are not zone changes first, by (lineage path, member index), so a
+/// descendant sits at the position of the event it replaces (CR 614.6), and so that they
 /// name live objects (a counter removal before its object's move); then the kept zone
-/// changes, each at the least (root, member index) of its object's candidates. The events
+/// changes, each at the least (lineage path, member index) of its object's candidates. The events
 /// layer captures last known information for every moved object before the batch (CR 704.8).
 fn reconcile(
     members: &[Member],
@@ -1302,8 +1312,10 @@ fn reconcile(
             plan,
         ))
     };
-    let slot = |i: usize| (members[i].root, i);
-    let mut others: Vec<((usize, usize), Planned)> = Vec::new();
+    // CR 614.6: a descendant executes at the position of the event it replaces (lineage path;
+    // `[root]` for a submitted member), the member index separating a group's members.
+    let slot = |i: usize| (members[i].path.clone(), i);
+    let mut others: Vec<((Vec<usize>, usize), Planned)> = Vec::new();
     let mut moves: BTreeMap<ObjectId, Vec<usize>> = BTreeMap::new();
     for (i, m) in members.iter().enumerate() {
         match &m.event {
@@ -1312,7 +1324,7 @@ fn reconcile(
             None => {}
         }
     }
-    let mut kept: Vec<((usize, usize), Planned)> = Vec::new();
+    let mut kept: Vec<((Vec<usize>, usize), Planned)> = Vec::new();
     for (object, candidates) in moves {
         if candidates.len() == 1 || (!sba && candidates.iter().all(|&i| i < submitted)) {
             kept.extend(
@@ -1340,8 +1352,8 @@ fn reconcile(
             kept.push((first, winner));
         }
     }
-    others.sort_by_key(|(k, _)| *k);
-    kept.sort_by_key(|(k, _)| *k);
+    others.sort_by(|(a, _), (b, _)| a.cmp(b));
+    kept.sort_by(|(a, _), (b, _)| a.cmp(b));
     others.into_iter().chain(kept).map(|(_, p)| p).collect()
 }
 
