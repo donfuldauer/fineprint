@@ -668,12 +668,20 @@ fn req_event_001_r1_f6_failing_copy_rolls_back_entry() {
     assert_eq!(r.world().zone_of(card), Some(ZoneKind::Hand));
 }
 
-// REQ-EVENT-001, CR 903.9b (F7): an overriding Draw -> Instead[Draw, Draw] doubles the events
-// at every level; the shared work budget stops it with `WorkLimit` before memory runs out, and
-// nothing changes.
+// REQ-EVENT-001, CR 903.9b, 616.1, 101.4 (F7; re-specified in review round 6, thread
+// r4633092145): a runaway override is stopped by a limit and nothing changes. Formerly
+// `req_event_001_r1_f7_doubling_override_is_work_limit`, which asserted `WorkLimit` for the
+// doubling chain; corrected under R10: `Instead` lineages are now resolved depth-first (a
+// descendant takes the position of the event it replaces, followed by its index in the
+// `Instead` list), so the narrow chain Draw -> Instead[Draw, Draw] (overriding CR 614.5) reaches
+// the child-depth limit (`DepthExceeded`) before the 4096-event work budget. A wide but shallow
+// fan-out (41 submitted gains of player 2, each replaced by 100 gains of player 1: 4100
+// descendants at depth 1) still exhausts the work budget (`WorkLimit`). Both roll the whole call
+// back: state hash and registry unchanged.
 #[test]
-fn req_event_001_r1_f7_doubling_override_is_work_limit() {
+fn req_event_001_r1_f7_runaway_override_is_depth_or_work_limit() {
     assert_eq!(fineprint_core::replacement::MAX_BUS_EVENTS, 4096);
+    // The narrow doubling chain: DepthExceeded.
     let mut w = World::new();
     w.create(ZoneKind::Library, P1);
     let effect = fx(
@@ -701,9 +709,35 @@ fn req_event_001_r1_f7_doubling_override_is_work_limit() {
         false,
         &[],
     );
+    assert_eq!(r.error(), &BusError::DepthExceeded);
+    assert_unchanged(&r);
+    assert_eq!(r.after.canonical(), r.before.canonical());
+    assert_eq!(bytes(&r.after.registry), bytes(&r.before.registry));
+    assert_eq!(
+        r.after.world.game.state_hash(),
+        r.before.world.game.state_hash()
+    );
+
+    // The wide, shallow fan-out: WorkLimit.
+    let fan_out = fx(
+        1,
+        life_matcher(P2),
+        Action::Instead(vec![life_change(P1, 1); 100]),
+    );
+    let r = run_batch(
+        Bus::new(World::new(), vec![fan_out]),
+        vec![life_change(P2, 1); 41],
+        false,
+        &[],
+    );
     assert_eq!(r.error(), &BusError::WorkLimit);
     assert_unchanged(&r);
     assert_eq!(r.after.canonical(), r.before.canonical());
+    assert_eq!(bytes(&r.after.registry), bytes(&r.before.registry));
+    assert_eq!(
+        r.after.world.game.state_hash(),
+        r.before.world.game.state_hash()
+    );
 }
 
 // REQ-EVENT-001 (F7): the budget counts the submitted members: exactly `MAX_BUS_EVENTS` plain

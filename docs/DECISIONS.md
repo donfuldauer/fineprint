@@ -3770,7 +3770,7 @@ tested directly on the stack (owned by player 1, controlled by player 2, and the
 so the boundary is tested directly (4096 succeed, 4097 is `WorkLimit`, nothing changed), plus a
 children case (4095 members + one replaced Draw with one child is 4097: `WorkLimit`; one member
 fewer succeeds). "Returns quickly" is not asserted on wall-clock time (R7); the doubling-override
-case simply has to finish.
+case simply has to finish. Amended in review round 6 (thread r4633092145; item 34).
 (11) F8 (pool allocation): when a source's allotment is 0, whether the pool effect still counts as
 applied to that source's event is not asserted (only that it appears in `applications` and the
 damage outcome); exact application lists are asserted only where unambiguous ((A:3,B:0): once;
@@ -3970,6 +3970,21 @@ id still fails with `UnknownObject` and rolls the call back. Each shape runs dir
 `Instead` of the follow-up gain (with a gain of 2 in place of 1).
 (33) D6 (review round 6, clause B4, thread r4632818842; CR 701.26a, 614.7): a Tap of a tapped
 permanent offers no effect and is a no-op (items 13 and 29).
+(34) Lineage positions (review round 6, thread r4633092145; CR 616.1, 101.4): a descendant's
+position is its parent's position followed by its index in the parent's `Instead` list, recursively,
+so lineages expand depth-first. `req_event_001_r6_lineage_grandchild_takes_parent_position`: Tap T
+-> Instead[Tap U, P1 gains 3], Tap U -> Instead[P1 gains 1], a one-use doubler of player 1's gains:
+the grandchild gain of 1 is doubled (P1 +5, applications [e1, e2, e9]); with the list [gains 3,
+Tap U] the gain of 3 is (+7, [e1, e9, e2]); each also with a gain of player 2 before and after the
+Tap. Corrected under R10: `req_event_001_r1_f7_doubling_override_is_work_limit` is renamed
+`req_event_001_r1_f7_runaway_override_is_depth_or_work_limit` (the old name became wrong): the
+narrow overriding chain Draw -> Instead[Draw, Draw] now asserts `DepthExceeded` (it reaches the
+child-depth limit before the work budget); a wide shallow fan-out added to the same test (41
+submitted gains of player 2, each replaced without override by 100 gains of player 1, 4100
+descendants at depth 1) asserts `WorkLimit`. A shallow fan-out was chosen over the suggested
+overriding 100-per-level fan-out because whether that one hits the depth or the work limit first
+depends on how the budget counts unresolved descendants, which the brief leaves open. Both cases
+assert the state hash, the canonical state and the registry bytes unchanged.
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
