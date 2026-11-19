@@ -3204,3 +3204,11 @@ re-tagged durable and passed as no-op steps), so a correct implementation may pr
 different call list. The effect of the calls is fully specified and is what the oracle checks.
 **Alternatives:** Compare the full Toy including its call list (over-specifies an unspecified
 detail); drop the Toy from the property run (loses the independent byte oracle).
+
+## #26 FP-025: Clamped property oracle shares the cursor rule (deferred)
+
+**Decision:** keep the clamped reference model on the specified entry/cursor rule for this PR; the cursor-rule error class (cursor not moved to the post-rollback state) is pinned by the fixed tests `counter_example_gamestate_counter_and_life`, `ntoy_counter_example_all_variants` and lib `req_core_005_cr_734_1_durable_after_rolled_back_child_not_replayed`, which fail if the cursor is not moved to the post-rollback state.
+
+**Rationale:** an action-level non-linear oracle must re-derive which effects survive which rollback, i.e. re-implement the same semantics in another form, a larger change than this review round; the random runs still check every step of the specified model against the implementation, and the fixed cases cover the shared-rule risk CodeRabbit names (PR #175 round 4).
+
+**Alternatives:** action-level effect tracking for the clamped state (deferred; candidate follow-up when the casting unit first uses durable sub-transactions).

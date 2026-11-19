@@ -49,11 +49,19 @@ pub trait Transactional: Clone {
     fn priority_player(&self) -> Option<PlayerId>;
 
     /// Called when a transaction is rolled back and some descendant sub-transactions were
-    /// committed durably. `restored` is the checkpoint state (with earlier durable effects of the
-    /// same rollback already applied). `before` is the state at the moment the durable
-    /// sub-transaction began, `after` the state at the moment it was committed durably.
-    /// Return `restored` with the effect of that sub-transaction (the change `before` -> `after`)
-    /// applied. The result's `priority_player()` must equal `restored.priority_player()`.
+    /// committed durably, once per recorded durable step, in time order.
+    ///
+    /// `before` and `after` are the endpoints of one such step, not necessarily the checkpoint
+    /// and commit states of one durable sub-transaction: a step may be part of a durable
+    /// sub-transaction, may include the own work of an enclosing durably committed frame, and may
+    /// have unchanged endpoints (a no-op step: return `restored` unchanged in effect). For
+    /// example, if a durable parent changes a counter from 6 to 9 before its durable child and
+    /// ends at 4, rollback can pass 6 -> 9 as a separate step; the parent's own
+    /// checkpoint-to-commit pair is 6 -> 4. `restored` is the checkpoint state with the earlier
+    /// steps of the same rollback already applied.
+    ///
+    /// Return `restored` with the effect of the step (the change `before` -> `after`) applied.
+    /// The result's `priority_player()` must equal `restored.priority_player()`.
     #[must_use]
     fn carry_durable(restored: Self, before: &Self, after: &Self) -> Self;
 }
@@ -250,8 +258,9 @@ impl<S: Transactional> Transactions<S> {
     /// but not the innermost; nothing changes then.
     pub fn commit(&mut self, id: TxnId) -> Result<(), TxnError> {
         let mut frame = self.pop_innermost(id)?;
-        if frame.entries.is_empty() {
-            // Nothing durable beneath: the live state is continuous from the parent's cursor.
+        if frame.entries.is_empty() || self.frames.is_empty() {
+            // Nothing durable beneath, or the root: the live state is continuous from the
+            // parent's cursor, or nothing remains to forward to (entries drop with the root).
             return Ok(());
         }
         let tail = frame.take_cursor();
