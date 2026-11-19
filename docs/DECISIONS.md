@@ -4240,9 +4240,21 @@ host of an `Attach` and the copied object of a `BecomeCopy`; a damage source is 
 covered (CR 608.2h). The remaining limitation: a `BecomeCopy` whose copied object this call
 already moved is ignored instead of copying its last known information (CR 608.2h); that needs an
 events-layer change in a later unit.
+(h) Recorded after review 5981232036 (bus.rs:466, outside the diff). Phase C resumes all of one
+chooser's stopped pool members before any `Instead` descendant created during that resumption is
+taken up. Such a descendant is scheduled by phase A only after the pool round, not at the position
+of the event it replaces. A one-use effect can therefore go to a later stopped member first.
+Example: two simultaneous 3-damage events to P1 from one source; pool e1 of 1 applies to both;
+e2 replaces damage below 3 with Instead[1 damage to P1] on the first; e9 doubles damage once.
+P1 ends at 13, where the lineage-position rule would give 15. Both outcomes are legal orders for
+simultaneous events; the engine is deterministic either way; only the internal lineage-position
+rule is not met inside phase C. A fix must run each resumed member's descendants, with their
+choices and any pool they stop at, before the next stopped member resumes; a later unit.
 **Rationale:** (b) is rare (it needs an `Instead` on partly prevented damage); (e) follows from
 CR 616.1 (each object's choice is its own, choosers in APNAP order); (f) needs sequenced
-sub-events, outside this unit.
+sub-events, outside this unit; (h) needs nested resolution inside phase C, needs an `Instead` on
+damage partly prevented by a pool plus a one-use effect matching a sibling, and is an ordering
+choice among simultaneous events rather than a rules violation.
 **Alternatives:** Re-running the allocation for all damage whenever lineage damage appears
 (rejected: it would undo prevention already applied); content order across objects (rejected:
 CR 616.1 orders by chooser, and the one-use effect's choice belongs to the first chooser).
