@@ -70,11 +70,20 @@ struct LogToy {
 
 impl Transactional for LogToy {
     fn state_hash(&self) -> Digest {
-        let mut bytes = Vec::new();
-        for v in &self.log {
-            bytes.extend_from_slice(&v.to_le_bytes());
+        fn put(bytes: &mut Vec<u8>, v: &[i64]) {
+            bytes.extend_from_slice(&(v.len() as u64).to_le_bytes());
+            for x in v {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
         }
+        let mut bytes = Vec::new();
+        put(&mut bytes, &self.log);
         bytes.extend_from_slice(&self.carries.to_le_bytes());
+        bytes.extend_from_slice(&(self.calls.len() as u64).to_le_bytes());
+        for (before, after) in &self.calls {
+            put(&mut bytes, before);
+            put(&mut bytes, after);
+        }
         leaf_digest(&bytes)
     }
 
@@ -1013,4 +1022,37 @@ fn req_api_003_rewind_error_leaves_store_unchanged() {
     );
     assert_eq!(s.len(), 2);
     assert_eq!(s.latest(), Some(&game()));
+}
+
+/// REQ-CORE-005: `LogToy`'s hash covers its whole state, including the recorded carry calls:
+/// states differing only in call history hash differently; equal states hash equal.
+#[test]
+fn req_core_005_logtoy_hash_covers_calls() {
+    let a = LogToy {
+        log: vec![2],
+        carries: 1,
+        calls: vec![(vec![1], vec![1, 2])],
+    };
+    let b = LogToy {
+        log: vec![2],
+        carries: 1,
+        calls: vec![(vec![3], vec![3, 2])],
+    };
+    assert_ne!(a.state_hash(), b.state_hash());
+    assert_eq!(a.state_hash(), a.clone().state_hash());
+}
+
+/// REQ-CORE-005: committing the root with durable entries beneath it leaves the live state
+/// unchanged and no transaction open (CR 734.1).
+#[test]
+fn req_core_005_root_commit_with_durable_entries_keeps_live() {
+    let mut t = toy();
+    let root = t.checkpoint();
+    let child = t.checkpoint();
+    t.state_mut().a = 5;
+    t.commit_durable(child).unwrap();
+    t.state_mut().a = 7;
+    t.commit(root).unwrap();
+    assert_eq!(t.state().a, 7);
+    assert_eq!(t.depth(), 0);
 }
