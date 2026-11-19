@@ -2402,7 +2402,8 @@ LEVELER, SAGA, CLASS, CASE), `layout_for`, the free functions `base_characterist
 `UnsupportedLayout`. The module is standalone: not wired into `GameState`, the Merkle layout or
 the wire form. The cast choice is consulted only on the stack and, for PROTOTYPE, the
 battlefield. Copies are not modelled except the `copying_back_face` mana-value flag (nonmodal
-only, CR 202.3b, 712.6d). Faces are looked up by `face_kind`; the face set must be exact.
+only, CR 202.3b, 712.6d, and only on the stack or battlefield; in every other zone the flag is
+ignored and the front face's cost applies, CR 712.6a). Faces are looked up by `face_kind`; the face set must be exact.
 Errors: `LayoutMismatch`, then `BadFaces`, then `InvalidCast`, then `Object`. SPLIT combined
 characteristics: names are the set of both names; the mana cost is the left symbols followed by
 the right symbols (`None` when neither half has a cost); the color indicator is the union of the
@@ -2413,11 +2414,20 @@ and life modifiers are `None`. Judgement calls: (a) `mana_value` runs the same s
 error of the selected face makes mana value fail too); (b) only the faces a query selects are
 passed to `Characteristics::from_face` (a bad type line on an unselected face is not reported);
 (c) `gating` checks only the layout and the face set (no type-line validation), and returns
-`Ok(None)` for the eight non-gating layouts once those checks pass.
+`Ok(None)` for the eight non-gating layouts once those checks pass; (d) amended in CodeRabbit
+round 1: off the stack X (and Y, Z) count 0 whatever context is supplied. Every layout's
+`mana_value` passes the caller's context on only when `query.zone` is the stack and
+`ManaValueContext::OffStack` in every other zone (CR 202.3e, 107.3g; the permanent's X is 0,
+CR 107.3m; Y follows X, CR 107.3p). This replaces the earlier reading that a supplied `OnStack`
+context is honoured off the stack.
 **Rationale:** The brief pins the API for the Independent Tester; making `mana_value` and
 `base_characteristics` agree on errors keeps callers from seeing a mana value for an object whose
 characteristics cannot be built; validating only selected faces matches the selection tables
-("face X chars"); gating is data-only and needs no type line.
+("face X chars"); gating is data-only and needs no type line. For (d), the query already says
+where the object is, so the zone decides the context: CR 202.3e and 107.3g make X 0 in every
+zone other than the stack, and a caller passing a stale `OnStack` context (for example for a
+permanent that was an X spell) must not change the mana value; this matches the #21 rule that
+split `NotOnStack` ignores the supplied context.
 **Alternatives:** Validate every face on every call (rejects an object for a face it does not
 have in that zone); compute mana value from the raw faces without validation (the two functions
 could disagree); `gating` returning `None` without any check for non-gating layouts
@@ -2436,3 +2446,17 @@ and chapter structure cannot be read without inventing a format the real AST wou
 **Alternatives:** A provisional JSON shape inside `AbilityAST` (would need migrating and could
 diverge from the real AST); omitting `Gating` until the AST lands (the issue requires gating
 data now).
+
+## #22 FP-021 — Flip loyalty, defense, hand and life modifiers
+
+**Decision:** A flipped flip permanent on the battlefield takes its name, text box (rules text and
+abilities), type line (supertypes, card types, subtypes), power and toughness from the Flipped
+face (CR 710.1b, 710.2); its mana cost, color and color indicator stay the Main face's
+(CR 710.1c); its loyalty, defense, hand modifier and life modifier also stay the Main face's.
+**Rationale:** CR 710.1b lists the alternative characteristics of the bottom half as name, text
+box, type line, power and toughness, and CR 710.2 says only those normal versions stop applying
+once flipped. Loyalty, defense and the hand and life modifiers are not among them, so nothing
+replaces the Main face's values (CodeRabbit round 1, PR #171).
+**Alternatives:** Take all four from the Flipped face (the first implementation: reads more into
+CR 710.1b than it says); set them to `None` when flipped (drops printed Main-face values no rule
+removes).

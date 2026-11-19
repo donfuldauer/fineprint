@@ -12,7 +12,7 @@ use fineprint_dsl::card::{
 use fineprint_dsl::mana::{ManaCostDSL, ManaSymbol};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::faces::{chars, faces};
+use super::faces::{chars, effective_ctx, faces};
 use super::types::{CastChoice, Gating, Layout, LayoutError, LayoutQuery};
 use crate::objects::{
     Characteristics, ManaValueContext, ManaValueSubject, SplitHalf, SplitState, mana_value,
@@ -133,8 +133,23 @@ impl Layout for SplitLayout {
         ctx: ManaValueContext,
         vocab: &RulesVocabulary,
     ) -> Result<i64, LayoutError> {
-        self.base_characteristics(def, query, vocab)?;
         let (left, right, state) = select(def, query)?;
+        // Validate the type lines of the halves that exist, as `base_characteristics` does
+        // (same errors, same order), without building the combined record.
+        match state {
+            // CR 709.3b: only the half being cast exists on the stack.
+            SplitState::OnStackHalf(SplitHalf::Left) => {
+                chars(left, vocab)?;
+            }
+            SplitState::OnStackHalf(SplitHalf::Right) => {
+                chars(right, vocab)?;
+            }
+            // CR 709.4, 709.4d: off the stack, or fused, both halves, left then right.
+            SplitState::NotOnStack | SplitState::OnStackFused => {
+                chars(left, vocab)?;
+                chars(right, vocab)?;
+            }
+        }
         // CR 202.3d: combined costs off the stack or fused; the cast half's cost otherwise.
         Ok(mana_value(
             &ManaValueSubject::Split {
@@ -142,7 +157,7 @@ impl Layout for SplitLayout {
                 right: right.mana_cost.as_ref(),
                 state,
             },
-            ctx,
+            effective_ctx(query, ctx),
         ))
     }
 

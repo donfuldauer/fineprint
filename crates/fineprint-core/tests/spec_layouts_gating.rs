@@ -93,7 +93,9 @@ fn normal_109_3_main_in_every_zone() {
                 let got = base_characteristics(&d, &q, v).expect("main");
                 assert_chars(&got, &expected, &format!("{zone:?} {cast:?} {s:?}"));
                 assert_eq!(mana_value(&d, &q, ManaValueContext::OffStack, v), Ok(2));
-                assert_eq!(mana_value(&d, &q, on_stack(4, 0, 0), v), Ok(6));
+                // CR 202.3e, 107.3g: X counts on the stack only.
+                let with_x = if zone == ZoneKind::Stack { 6 } else { 2 };
+                assert_eq!(mana_value(&d, &q, on_stack(4, 0, 0), v), Ok(with_x));
             }
         }
     }
@@ -125,7 +127,7 @@ fn leveler_711_6_uppermost_pt_in_every_zone() {
 
 /// REQ-OBJ-002, CR 109.3, 715.2, 717.2a, 720.3b: SAGA, CLASS and CASE have their Main face's
 /// characteristics in every zone with every cast choice and status; mana value from the Main
-/// cost (the CASE sample has `{X}`).
+/// cost (the CASE sample has `{X}`, counted on the stack only: CR 202.3e, 107.3g).
 #[test]
 fn saga_class_case_715_717_720_main_in_every_zone() {
     let v = support::vocab();
@@ -149,7 +151,12 @@ fn saga_class_case_715_717_720_main_in_every_zone() {
                         mana_value(&d, &q, ManaValueContext::OffStack, v),
                         Ok(mv_off)
                     );
-                    assert_eq!(mana_value(&d, &q, on_stack(5, 0, 0), v), Ok(mv_x5));
+                    let with_x = if zone == ZoneKind::Stack {
+                        mv_x5
+                    } else {
+                        mv_off
+                    };
+                    assert_eq!(mana_value(&d, &q, on_stack(5, 0, 0), v), Ok(with_x));
                 }
             }
         }

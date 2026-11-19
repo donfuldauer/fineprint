@@ -12,7 +12,7 @@
 use fineprint_dsl::card::{CardDefinitionDSL, FaceKind, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::faces::{chars, faces};
+use super::faces::{chars, effective_ctx, faces};
 use super::types::{CastChoice, Gating, Layout, LayoutError, LayoutQuery};
 use crate::objects::{CdaColors, Characteristics, ManaValueContext, base_colors};
 use crate::zones::ZoneKind;
@@ -104,7 +104,7 @@ impl Layout for AdventurerLayout {
         // CR 202.3, 716.3b: the selected characteristics' own mana cost.
         Ok(self
             .base_characteristics(def, query, vocab)?
-            .mana_value(ctx))
+            .mana_value(effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {
@@ -148,7 +148,7 @@ impl Layout for OmenLayout {
         // CR 202.3, 721.3b: the selected characteristics' own mana cost.
         Ok(self
             .base_characteristics(def, query, vocab)?
-            .mana_value(ctx))
+            .mana_value(effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {
@@ -223,7 +223,7 @@ impl Layout for PrototypeLayout {
         // CR 202.3, 719.3b: the selected mana cost (the prototype cost when prototyped).
         Ok(self
             .base_characteristics(def, query, vocab)?
-            .mana_value(ctx))
+            .mana_value(effective_ctx(query, ctx)))
     }
 
     fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {

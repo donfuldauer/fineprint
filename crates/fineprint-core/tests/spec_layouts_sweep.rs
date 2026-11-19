@@ -264,3 +264,45 @@ fn sweep_no_panic_all_layouts() {
         let _ = gating(&d);
     }
 }
+
+/// REQ-OBJ-001, REQ-OBJ-002, CR 202.3e, 107.3g, 107.3m, 107.3p: with `{X}{Y}{Z}` added to every
+/// face's cost, every in-scope layout gives, in every zone but the stack, the same mana value
+/// for an `OnStack` context as for `OffStack` (X, Y and Z are 0 off the stack whatever context
+/// is supplied), through `layouts::mana_value` and the layout object; on the stack a selected
+/// face with variable symbols counts them.
+#[test]
+fn sweep_variables_zero_off_the_stack_every_layout() {
+    use fineprint_core::objects::ManaValueContext;
+    let v = support::vocab();
+    let ctx = support::on_stack(3, 2, 1);
+    for layout in IN_SCOPE {
+        let mut d = sample(layout);
+        for f in &mut d.faces {
+            f.mana_cost = Some(support::cost("{X}{Y}{Z}{1}"));
+        }
+        let obj = layout_for(layout).expect("in scope");
+        for zone in ZoneKind::ALL {
+            for cast in Cast::ALL {
+                for st in St::all() {
+                    let q = query(zone, cast, st);
+                    let what = format!("{layout:?} {zone:?} {cast:?} {st:?}");
+                    let off = mana_value(&d, &q, ManaValueContext::OffStack, v);
+                    let on = mana_value(&d, &q, ctx, v);
+                    assert_eq!(obj.mana_value(&d, &q, ctx, v), on, "{what}");
+                    if zone != ZoneKind::Stack {
+                        assert_eq!(on, off, "{what}");
+                    } else if let (Ok(on), Ok(off)) = (on, off) {
+                        // 0 only for a copy of a nonmodal back face (CR 202.3b).
+                        let copy = layout == LayoutBehavior::DfcNonmodal && st.copying_back_face;
+                        if copy {
+                            assert_eq!((on, off), (0, 0), "{what}");
+                        } else {
+                            // 3 + 2 + 1 per counted cost (two for a fused split spell).
+                            assert!(on == off + 6 || on == off + 12, "{what}: {on} {off}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
