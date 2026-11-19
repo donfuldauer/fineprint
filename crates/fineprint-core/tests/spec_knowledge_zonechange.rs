@@ -9,7 +9,7 @@
 #[path = "spec_knowledge_support.rs"]
 mod support;
 
-use fineprint_base::ids::ObjectId;
+use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_core::knowledge::KnowledgeError;
 use fineprint_core::zones::{MoveRequest, Position, ZoneId, ZoneKind};
 use support::*;
@@ -303,23 +303,33 @@ fn same_zone_library_reposition_drops_entries_of_moved_card() {
 }
 
 /// REQ-CORE-004, CR 401.2, 400.7: a drawn card (library to hand) loses its position entries;
-/// knowledge follows the card to its new id.
+/// knowledge follows the card to its new id when P2 watched the draw (hidden-source identity
+/// rule (i): the caller passes P2 in `observers` because the selected position, the top, is
+/// public). The same draw without observers makes P2 forget: holding a position entry on the
+/// drawn card does not make P2 an observer.
 #[test]
 fn drawn_card_loses_position_entries() {
-    let mut w = KWorld::two();
-    let lib: Vec<_> = (0..3)
-        .map(|_| w.create_bottom(ZoneKind::Library, P1))
-        .collect();
-    w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
-        .expect("pos");
-    w.k.set_position_known(&w.zones, P2, P1, 2, lib[2])
-        .expect("pos");
-    let moved = w.mv_to(lib[0], ZoneKind::Hand);
+    let build = || -> (KWorld, Vec<ObjectId>) {
+        let mut w = KWorld::two();
+        let lib: Vec<_> = (0..3)
+            .map(|_| w.create_bottom(ZoneKind::Library, P1))
+            .collect();
+        w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
+            .expect("pos");
+        w.k.set_position_known(&w.zones, P2, P1, 2, lib[2])
+            .expect("pos");
+        (w, lib)
+    };
+    // observed draw
+    let (mut w, lib) = build();
+    let moved = w.mv_obs(lib[0], MoveRequest::new(ZoneKind::Hand), &[P2]);
     assert_ne!(moved.old, moved.new);
     let pos = w.positions(P2, P1);
     assert!(!pos.values().any(|id| *id == lib[0] || *id == moved.new));
-    // (iv): P2 held a position entry naming the drawn card, so P2 observed the draw
-    assert!(w.can(P2, moved.new), "P2 knew the card: memory follows it");
+    assert!(
+        w.can(P2, moved.new),
+        "P2 watched the draw: memory follows it"
+    );
     assert!(w.known_to(moved.new).contains(&P2));
     assert!(
         w.can(P2, lib[2]),
@@ -332,6 +342,20 @@ fn drawn_card_loses_position_entries() {
     // that hand-to-library move was hidden from P2: P2 forgot the card
     assert!(!w.known_to(back.new).contains(&P2));
     assert!(!w.can(P2, back.new));
+    // contrast: the same draw with no observers; the position entry alone is not observation
+    let (mut u, lib) = build();
+    let moved = u.mv_to(lib[0], ZoneKind::Hand);
+    assert!(
+        !u.can(P2, moved.new),
+        "unobserved draw: P2 forgets the card"
+    );
+    assert!(!u.known_to(moved.new).contains(&P2));
+    assert!(!u.can(P2, lib[2]), "non-observer forgets the library cards");
+    assert!(!u.known_to(lib[2]).contains(&P2));
+    assert!(
+        u.positions(P2, P1).is_empty(),
+        "non-observer loses every position entry of that library"
+    );
 }
 
 /// REQ-CORE-004, CR 400.7: object ids change on a zone move, but stored knowledge follows the
@@ -360,7 +384,7 @@ fn knowledge_follows_the_card_across_moves() {
 
 /// REQ-CORE-004 (hidden-source identity rule, design decision of the brief): the same moves
 /// unobserved by P3 make P3 forget the card: library to hand (step 0, P3 neither observer,
-/// nor able to see the hand, nor holding a position entry), and the card stays forgotten.
+/// nor able to see the hand, nor the hand's owner), and the card stays forgotten.
 #[test]
 fn knowledge_lost_across_unobserved_moves() {
     let mut w = KWorld::three();
@@ -558,18 +582,39 @@ fn draw_to_public_destination_is_observed() {
     assert_eq!(lib_known(&w1.view(P2), P1), set(&[cid(CARD_B)]), "B kept");
 }
 
-/// REQ-CORE-004, CR 401.2 (hidden-source identity rule (iv)): P2 holding a position entry on
-/// the top card knows which card was drawn; P2 keeps the drawn card and B.
+/// REQ-CORE-004, CR 401.2 (hidden-source identity rule (i)): P2 holds a position entry on the
+/// top card. A position entry alone does not make P2 an observer: an unobserved draw of the
+/// top card makes P2 forget the drawn card, B and its positions. When the selected position is
+/// public (a draw of the top card) the caller passes P2 in `observers`, and P2 keeps the drawn
+/// card and B.
 #[test]
-fn draw_with_position_entry_is_observed() {
+fn draw_with_position_entry_needs_explicit_observer() {
+    // observed: P2 passed in observers
     let (mut w1, _) = draw_twins();
     let top = w1.library(P1)[0];
     w1.k.set_position_known(&w1.zones, P2, P1, 0, top)
         .expect("pos");
-    let moved = w1.mv_to(top, ZoneKind::Hand);
+    let moved = w1.mv_obs(top, MoveRequest::new(ZoneKind::Hand), &[P2]);
     assert!(w1.can(P2, moved.new));
     assert_eq!(opp_hand_known(&w1.view(P2), P1), set(&[cid(CARD_A)]));
     assert_eq!(lib_known(&w1.view(P2), P1), set(&[cid(CARD_B)]));
+    // unobserved: the same draw with no observers, through on_move and on_move_observed(&[])
+    for plain in [true, false] {
+        let (mut w, _) = draw_twins();
+        let top = w.library(P1)[0];
+        w.k.set_position_known(&w.zones, P2, P1, 0, top)
+            .expect("pos");
+        let moved = if plain {
+            w.mv_to(top, ZoneKind::Hand)
+        } else {
+            w.mv_obs(top, MoveRequest::new(ZoneKind::Hand), &[])
+        };
+        assert!(!w.can(P2, moved.new), "plain {plain}");
+        let v = w.view(P2);
+        assert!(opp_hand_known(&v, P1).is_empty(), "plain {plain}");
+        assert!(lib_known(&v, P1).is_empty(), "plain {plain}");
+        assert!(w.positions(P2, P1).is_empty(), "plain {plain}");
+    }
 }
 
 /// REQ-CORE-004, CR 401.2 (hidden-source identity rule): an unobserved draw drops all of the
@@ -589,6 +634,155 @@ fn unobserved_draw_drops_all_positions_of_that_library() {
     obs.mv_obs(lib[0], MoveRequest::new(ZoneKind::Hand), &[P2]);
     assert!(obs.can(P2, lib[2]));
     assert_eq!(obs.library(P1)[1], lib[2]);
+}
+
+const CARD_Z: u64 = 22;
+
+/// The undisclosed-selection setup (PR #174 review finding): P1's library, top first, is
+/// X, A, B, Y, Z (fixed synthetic cards, ids in that order). P2 knows the position of A
+/// (index 1) and knows B as a member of the set; X, Y and Z are unknown to P2. With three
+/// players, P3 knows nothing. Returns the world and the library ids, top first.
+fn selection_world(players: &[PlayerId]) -> (KWorld, Vec<ObjectId>) {
+    let mut w = KWorld::with_players(players);
+    for c in [CARD_X, CARD_A, CARD_B, CARD_Y, CARD_Z] {
+        w.create_card(
+            cid(c),
+            P1,
+            KWorld::req_at(ZoneKind::Library, Position::Bottom),
+        );
+    }
+    let lib = w.library(P1);
+    assert_eq!(w.card(lib[1]), cid(CARD_A));
+    w.k.set_position_known(&w.zones, P2, P1, 1, lib[1])
+        .expect("pos");
+    w.k.add_known(&w.zones, lib[2], P2).expect("add");
+    assert_eq!(
+        lib_known(&w.view(P2), P1),
+        set(&[cid(CARD_A), cid(CARD_B)]),
+        "precondition: P2 knows A (and its position) and B"
+    );
+    assert_eq!(w.positions(P2, P1), [(1, lib[1])].into_iter().collect());
+    (w, lib)
+}
+
+/// REQ-CORE-004, CR 401.2, 402.3 (hidden-source identity rule, design decision of the brief;
+/// the PR #174 review finding): an UNDISCLOSED SELECTION. P1 secretly takes a library card into
+/// hand (`on_move`, no observers): world 1 takes A, whose position P2 knows; world 2 takes the
+/// unknown X with the same request. Knowing A's position does not tell P2 which position was
+/// selected, so P2 is not an observer in either world: P2's whole view and `position_known`
+/// are equal across the worlds, P2 can identify neither A nor B anywhere, and has no position
+/// entries left. Two- and three-player variants (P3 knows nothing; its views are equal too).
+#[test]
+fn undisclosed_selection_twin_no_leak() {
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        let (mut w1, lib) = selection_world(&players);
+        let (mut w2, lib2) = selection_world(&players);
+        assert_eq!(lib, lib2, "identical public structure");
+        for p in &players {
+            assert_eq!(w1.view(*p), w2.view(*p), "precondition {p:?}");
+        }
+        let req = MoveRequest::new(ZoneKind::Hand);
+        let m1 = w1.mv(lib[1], req); // A
+        let m2 = w2.mv(lib[0], req); // X
+        assert_eq!(m1.new, m2.new, "same new id");
+        assert_eq!((m1.from, m1.to), (m2.from, m2.to));
+        assert_eq!(w1.card(m1.new), cid(CARD_A));
+        assert_eq!(w2.card(m2.new), cid(CARD_X));
+        assert_eq!(
+            w1.view(P2),
+            w2.view(P2),
+            "{players:?}: P2 cannot tell which card was taken"
+        );
+        assert_eq!(w1.positions(P2, P1), w2.positions(P2, P1));
+        assert!(w1.positions(P2, P1).is_empty());
+        for w in [&w1, &w2] {
+            let v = w.view(P2);
+            assert!(
+                lib_known(&v, P1).is_empty(),
+                "{players:?}: A and B forgotten"
+            );
+            assert!(
+                opp_hand_known(&v, P1).is_empty(),
+                "{players:?}: hand unknown"
+            );
+            assert!(!view_cards(&v).contains(&cid(CARD_A)));
+            assert!(!view_cards(&v).contains(&cid(CARD_B)));
+            for id in w.zones.all_object_ids() {
+                assert!(!w.can(P2, id), "{players:?}: P2 identifies {:?}", w.rec(id));
+                assert!(!w.known_to(id).contains(&P2));
+            }
+        }
+        if players.contains(&P3) {
+            assert_eq!(w1.view(P3), w2.view(P3), "P3 knows nothing either way");
+            assert_eq!(w1.positions(P3, P1), w2.positions(P3, P1));
+        }
+        // control: the selecting player sees which card arrived in their hand (CR 402.3)
+        assert_ne!(w1.view(P1), w2.view(P1));
+        assert!(w1.can(P1, m1.new));
+        assert!(w2.can(P1, m2.new));
+    }
+}
+
+/// REQ-CORE-004, CR 401.2, 402.3 (hidden-source identity rule (i)): controls for the
+/// undisclosed selection. (1) The same pair of worlds with P2 passed in `observers` gives P2
+/// different views: an observer sees which card was taken. (2) A draw of the top card where P2
+/// knows the top card's position: with observers [P2] P2 identifies the drawn card; with no
+/// observers P2 forgets it (position knowledge alone is not observation). (3) The hand to
+/// library direction is unchanged: the hand's owner observes (iii).
+#[test]
+fn undisclosed_selection_controls() {
+    // (1) observed selection
+    for players in [vec![P1, P2], vec![P1, P2, P3]] {
+        let (mut w1, lib) = selection_world(&players);
+        let (mut w2, _) = selection_world(&players);
+        let req = MoveRequest::new(ZoneKind::Hand);
+        let m1 = w1.mv_obs(lib[1], req, &[P2]);
+        w2.mv_obs(lib[0], req, &[P2]);
+        assert_ne!(
+            w1.view(P2),
+            w2.view(P2),
+            "{players:?}: the observer can tell"
+        );
+        assert!(w1.can(P2, m1.new));
+        assert_eq!(opp_hand_known(&w1.view(P2), P1), set(&[cid(CARD_A)]));
+        assert_eq!(lib_known(&w1.view(P2), P1), set(&[cid(CARD_B)]));
+        assert!(opp_hand_known(&w2.view(P2), P1).is_empty());
+        assert_eq!(
+            lib_known(&w2.view(P2), P1),
+            set(&[cid(CARD_A), cid(CARD_B)])
+        );
+        if players.contains(&P3) {
+            assert_eq!(w1.view(P3), w2.view(P3), "P3 did not observe");
+        }
+    }
+    // (2) top-card draw where P2 knows the top card's position
+    for observers in [vec![P2], vec![]] {
+        let (mut w, lib) = selection_world(&[P1, P2]);
+        w.k.set_position_known(&w.zones, P2, P1, 0, lib[0])
+            .expect("pos");
+        assert!(w.can(P2, lib[0]));
+        let moved = w.mv_obs(lib[0], MoveRequest::new(ZoneKind::Hand), &observers);
+        let watched = observers.contains(&P2);
+        assert_eq!(w.can(P2, moved.new), watched, "{observers:?}");
+        let expected_hand = if watched {
+            set(&[cid(CARD_X)])
+        } else {
+            set(&[])
+        };
+        assert_eq!(opp_hand_known(&w.view(P2), P1), expected_hand);
+        assert_eq!(w.can(P2, lib[1]), watched, "A kept only by an observer");
+        assert_eq!(w.can(P2, lib[2]), watched, "B kept only by an observer");
+        if !watched {
+            assert!(w.positions(P2, P1).is_empty());
+        }
+    }
+    // (3) hand to library: the hand's owner observes (iii); P2 does not
+    let (mut w, lib) = selection_world(&[P1, P2]);
+    let h = w.mv(lib[3], MoveRequest::new(ZoneKind::Hand)); // Y, unobserved by P2
+    let back = w.mv(h.new, KWorld::req_at(ZoneKind::Library, Position::Top));
+    assert!(w.can(P1, back.new), "hand owner keeps the card (iii)");
+    assert!(w.known_to(back.new).contains(&P1));
+    assert!(!w.can(P2, back.new));
 }
 
 /// Hand of P1: A, B, X (fixed cards, ids in that order); P2 knows A and B.

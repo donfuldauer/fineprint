@@ -405,26 +405,43 @@ fn positions_never_in_projection() {
 
 /// REQ-CORE-004, CR 401.2: `on_library_changed` after a card is put on top outside `on_move`
 /// drops the entries that no longer match; drawing that card afterwards does not restore the
-/// old entry (the viewers observe the draw: P1 by its own hand, P2 as an observer).
+/// old entry (the viewers observe the draw: P1 by its own hand, P2 as an explicit observer).
+/// Contrast: the same draw with no observers makes P2 forget A (the hidden-source identity rule
+/// of the brief: holding position knowledge in the library never makes P2 an observer), while
+/// P1, the owner of the destination hand, keeps it.
 #[test]
 fn library_changed_drops_entries_not_restored_by_a_draw() {
-    let (mut w, lib) = lib_world(3, false);
-    for v in [P1, P2] {
-        w.k.set_position_known(&w.zones, v, P1, 0, lib[0])
-            .expect("pos");
-    }
-    let x = w.create(ZoneKind::Library, P1);
-    assert_eq!(w.library(P1)[0], x, "created on top, Zones only");
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
-    for v in [P1, P2] {
-        assert!(w.positions(v, P1).is_empty(), "{v:?}");
-    }
+    let build = || -> (KWorld, Vec<ObjectId>, ObjectId) {
+        let (mut w, lib) = lib_world(3, false);
+        for v in [P1, P2] {
+            w.k.set_position_known(&w.zones, v, P1, 0, lib[0])
+                .expect("pos");
+        }
+        let x = w.create(ZoneKind::Library, P1);
+        assert_eq!(w.library(P1)[0], x, "created on top, Zones only");
+        w.k.on_library_changed(&w.zones, P1).expect("changed");
+        for v in [P1, P2] {
+            assert!(w.positions(v, P1).is_empty(), "{v:?}");
+        }
+        (w, lib, x)
+    };
+    let (mut w, lib, x) = build();
     w.mv_obs(x, MoveRequest::new(ZoneKind::Hand), &[P2]);
     assert_eq!(w.library(P1)[0], lib[0], "A is back at index 0");
     for v in [P1, P2] {
         assert!(w.positions(v, P1).is_empty(), "{v:?}: not restored");
         assert!(w.can(v, lib[0]), "{v:?}: identity knowledge kept");
     }
+    // contrast: unobserved draw
+    let (mut u, lib, x) = build();
+    u.mv_to(x, ZoneKind::Hand);
+    assert_eq!(u.library(P1)[0], lib[0]);
+    for v in [P1, P2] {
+        assert!(u.positions(v, P1).is_empty(), "{v:?}: not restored");
+    }
+    assert!(u.can(P1, lib[0]), "P1 observed (destination is its hand)");
+    assert!(!u.can(P2, lib[0]), "P2 did not observe: A forgotten");
+    assert!(!u.known_to(lib[0]).contains(&P2));
 }
 
 /// REQ-CORE-004, CR 401.2: an insertion at a deeper index keeps the entries above it (smaller

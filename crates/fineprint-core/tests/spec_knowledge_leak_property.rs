@@ -5,7 +5,8 @@
 //! The leak / non-interference property of the redacted projection V(S, P) over generated
 //! states and knowledge sets (REQ-CORE-004 acceptance criterion 1; REQ-ZONE-001; CR 400.2,
 //! 400.7, 401.2, 401.3, 402.3, 406.3, 701.24a, 701.24b, 708.5, 708.9). Plain loops driven by a
-//! seeded LCG (R3): 8 seeds x 2 player counts x 250 steps. Black-box: written from the
+//! seeded LCG (R3): 8 seeds x 2 player counts x 250 steps.
+//! L3b (hidden-move twins) has no observation condition based on position knowledge. Black-box: written from the
 //! work-item brief only.
 //!
 //! The oracle is the independent `Shadow` model of the support file: it applies the brief's
@@ -75,6 +76,9 @@ struct Stats {
     twin_compared: usize,
     /// Hidden-move twins where an observer's views were shown to differ (the control).
     twin_control: usize,
+    /// Compared non-observers who held, before the move, a position entry on the moved or on
+    /// the alternative card (the case of the removed position-entry observation condition).
+    twin_pos_holder_compared: usize,
 }
 
 fn face_down_in(w: &KWorld, kinds: &[ZoneKind]) -> Vec<ObjectId> {
@@ -212,8 +216,14 @@ fn inject_move_errors(
 }
 
 /// A random move with random observers. For a hidden-source move to another zone, a twin
-/// world moves a DIFFERENT object of the same source zone with the same request and observers;
-/// every player who observed the move in neither world must have equal views (L3b).
+/// world moves a DIFFERENT object of the same source zone with the same request and observers
+/// (L3b). Observation (design rule of the brief, no CR) depends only on the observers list, the
+/// source zone and the destination record, which are identical in both worlds by construction,
+/// so the model's observed set must be the same in both worlds (the structural guard against a
+/// condition that depends on which card moved). Every player outside that common observed set
+/// must then have equal whole views and equal `position_known` for every library in both
+/// worlds, including a player holding a position entry on the moved or on the alternative card
+/// (a known position does not establish which position was selected).
 fn do_move(
     s: &mut World,
     rng: &mut Lcg,
@@ -262,6 +272,7 @@ fn do_move(
     let before = s.w.rec(id);
     let hidden_source = matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand);
     let mut twin = None;
+    let mut pos_holders: BTreeSet<PlayerId> = BTreeSet::new();
     if hidden_source && ZoneId::of(req.to, before.owner) != before.zone {
         let alts: Vec<ObjectId> =
             s.w.zones
@@ -271,6 +282,19 @@ fn do_move(
                 .collect();
         if !alts.is_empty() {
             let alt = rng.pick(&alts);
+            if let ZoneId::Library(owner) = before.zone {
+                // make position knowledge common in the source library, on both candidates and
+                // on random other cards, so a position-based leak is reachable (CR 401.2)
+                if rng.chance(2, 3) {
+                    seed_positions(s, rng, players, owner, &[id, alt]);
+                }
+                for p in players {
+                    let held = s.m.positions(&s.w.zones, *p, owner);
+                    if held.values().any(|o| *o == id || *o == alt) {
+                        pos_holders.insert(*p);
+                    }
+                }
+            }
             let mut t = s.clone();
             let (tm, tobs) = apply_move(&mut t, alt, req, &observers, plain, None);
             twin = Some((t, tm, tobs));
@@ -282,10 +306,17 @@ fn do_move(
     };
     check_model(&t, "hidden-move twin");
     assert_eq!(moved.new, tmoved.new, "twins issue the same new id");
+    assert_eq!(moved.from, tmoved.from, "twins share the source zone");
+    assert_eq!(moved.to, tmoved.to, "twins share the destination zone");
     let obs = observed.expect("step 0 applies to a hidden-source move");
     let tobs = tobserved.expect("step 0 applies to a hidden-source move");
+    // structural guard: observation never depends on which card moved
+    assert_eq!(
+        obs, tobs,
+        "L3b: observation must be world-independent ({before:?} -> {moved:?}, observers {observers:?})"
+    );
     for p in players {
-        if obs.contains(p) || tobs.contains(p) {
+        if obs.contains(p) {
             continue;
         }
         assert_eq!(
@@ -293,17 +324,57 @@ fn do_move(
             t.w.view(*p),
             "L3b: {p:?} did not observe {before:?} -> {moved:?} (observers {observers:?})"
         );
+        for owner in players {
+            assert_eq!(
+                s.w.positions(*p, *owner),
+                t.w.positions(*p, *owner),
+                "L3b position_known: {p:?} on {owner:?}'s library after {before:?} -> {moved:?}"
+            );
+        }
         stats.twin_compared += 1;
+        if pos_holders.contains(p) {
+            stats.twin_pos_holder_compared += 1;
+        }
     }
     // control: the owner of the destination hand sees which card arrived (CR 402.3)
     if let ZoneId::Hand(owner) = moved.to {
-        assert!(obs.contains(&owner) && tobs.contains(&owner));
+        assert!(obs.contains(&owner));
         assert_ne!(
             s.w.view(owner),
             t.w.view(owner),
             "L3b control: views differ"
         );
         stats.twin_control += 1;
+    }
+}
+
+/// Gives random players position entries in `owner`'s library on every card of `must` and on
+/// some random other cards (CR 401.2), in the implementation and in the model.
+fn seed_positions(
+    s: &mut World,
+    rng: &mut Lcg,
+    players: &[PlayerId],
+    owner: PlayerId,
+    must: &[ObjectId],
+) {
+    let lib = s.w.library(owner);
+    let mut targets: Vec<usize> = must
+        .iter()
+        .map(|o| {
+            lib.iter()
+                .position(|x| x == o)
+                .expect("candidate in library")
+        })
+        .collect();
+    for _ in 0..rng.below(3) {
+        targets.push(rng.idx(lib.len()));
+    }
+    for idx in targets {
+        let viewer = rng.pick(players);
+        s.w.k
+            .set_position_known(&s.w.zones, viewer, owner, idx, lib[idx])
+            .expect("pos");
+        s.m.set_position_known(&s.w.zones, viewer, owner, idx, lib[idx]);
     }
 }
 
@@ -699,6 +770,11 @@ fn run_all(players: &[PlayerId]) {
     }
     assert!(stats.twin_compared > 0, "L3b compared nothing: {stats:?}");
     assert!(stats.twin_control > 0, "L3b control never ran: {stats:?}");
+    assert!(
+        stats.twin_pos_holder_compared > 0,
+        "L3b never compared a position-holding non-observer: {stats:?}"
+    );
+    eprintln!("L3b stats {} players: {stats:?}", players.len());
 }
 
 /// REQ-CORE-004 (acceptance criterion 1), CR 400.2, 401.2, 402.3, 406.3, 708.5, 708.9: over
