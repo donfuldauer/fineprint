@@ -13,6 +13,7 @@ use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Tim
 use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
 
 use super::*;
+use crate::knowledge::{Knowledge, ObjectView};
 use crate::memory::{
     CharacteristicsProvider, LkiStore, MemoryError, MemoryTable, capture_lki_on_move,
 };
@@ -58,11 +59,12 @@ fn chars(name: &str) -> Characteristics {
 }
 
 /// Synthetic characteristics for every object except the ones in `missing`; provider counters
-/// for the ones in `counters`.
+/// for the ones in `counters`; provider attachments for the ones in `attached`.
 #[derive(Clone, Default)]
 struct TestProvider {
     missing: BTreeSet<ObjectId>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    attached: BTreeMap<ObjectId, Vec<ObjectId>>,
 }
 
 impl CharacteristicsProvider for TestProvider {
@@ -76,6 +78,10 @@ impl CharacteristicsProvider for TestProvider {
 
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
         self.counters.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn attached_here(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.attached.get(&id).cloned().unwrap_or_default()
     }
 }
 
@@ -611,9 +617,11 @@ fn req_event_001_lki_already_captured_error() {
     );
 }
 
-// REQ-EVENT-001: LKI counters merge the provider's counters with the events-held counters.
+// REQ-EVENT-001: CR 122.1, CR 122.2: ObjectMarkers is the single source of counters on
+// objects (DECISIONS "LKI sources"): AddCounters, RemoveCounters and the LKI record all read
+// the markers; the provider's counters are not consulted.
 #[test]
-fn req_event_001_lki_counters_merge() {
+fn req_event_001_lki_counters_single_source() {
     let mut w = World::new();
     let a = w.create(1, 1, ZoneKind::Battlefield);
     w.provider.counters.insert(
@@ -625,11 +633,71 @@ fn req_event_001_lki_counters_merge() {
         kind: "charge".into(),
         amount: 2,
     })
+    .unwrap()
     .unwrap();
+    assert_eq!(w.events.markers().counter(a, "charge"), 2);
+    // A kind only the provider reports is not held: removing it is no event.
+    assert_noop(
+        &mut w,
+        GameEvent::RemoveCounters {
+            target: CounterTarget::Object(a),
+            kind: "x".into(),
+            amount: 1,
+        },
+    );
+    let ex = w
+        .exec(GameEvent::RemoveCounters {
+            target: CounterTarget::Object(a),
+            kind: "charge".into(),
+            amount: 1,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(ex.outcome, Outcome::CountersRemoved { removed: 1 });
     w.exec(destroy(a)).unwrap();
     let rec = w.lki.get(a).unwrap();
-    assert_eq!(rec.counters().get("charge"), Some(&2));
-    assert_eq!(rec.counters().get("x"), Some(&1));
+    assert_eq!(rec.counters(), &BTreeMap::from([("charge".to_owned(), 1)]));
+
+    // Without the removal the record shows exactly the 2 the events put (not 6, no `x`).
+    let mut v = World::new();
+    let b = v.create(1, 1, ZoneKind::Battlefield);
+    v.provider.counters.insert(
+        b,
+        BTreeMap::from([("charge".to_owned(), 4), ("x".to_owned(), 1)]),
+    );
+    v.exec(GameEvent::AddCounters {
+        target: CounterTarget::Object(b),
+        kind: "charge".into(),
+        amount: 2,
+    })
+    .unwrap();
+    v.exec(destroy(b)).unwrap();
+    assert_eq!(
+        v.lki.get(b).unwrap().counters(),
+        &BTreeMap::from([("charge".to_owned(), 2)])
+    );
+}
+
+// REQ-EVENT-001: CR 701.3a, CR 701.3d, CR 603.10a: the permanent container is the only source
+// of the objects attached here; a stale provider attachment after Unattach is not in the LKI.
+#[test]
+fn req_event_001_lki_attachments_follow_permanents() {
+    let mut w = World::new();
+    let host = w.create(1, 1, ZoneKind::Battlefield);
+    let att = w.create(2, 1, ZoneKind::Battlefield);
+    w.exec(GameEvent::Attach {
+        attachment: att,
+        target: AttachTarget::Permanent(host),
+    })
+    .unwrap()
+    .unwrap();
+    w.exec(GameEvent::Unattach { attachment: att })
+        .unwrap()
+        .unwrap();
+    // The provider still (stale) reports the attachment.
+    w.provider.attached.insert(host, vec![att]);
+    w.exec(destroy(host)).unwrap().unwrap();
+    assert!(w.lki.get(host).unwrap().attached_here().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1348,6 +1416,260 @@ fn req_event_001_cr_701_27b_face_up_down() {
     );
 }
 
+/// The face status of `id` in the zone record and in the permanent container.
+fn face_states(w: &World, id: ObjectId) -> (bool, bool) {
+    (
+        w.zones.object(id).unwrap().face_down,
+        w.permanents.get(id).unwrap().status().face_down,
+    )
+}
+
+/// The battlefield view of `id` for `viewer` (REQ-CORE-004).
+fn battlefield_view(w: &World, viewer: u64, id: ObjectId) -> ObjectView {
+    Knowledge::new()
+        .project(&w.zones, p(viewer))
+        .unwrap()
+        .battlefield
+        .into_iter()
+        .find(|v| v.id == id)
+        .unwrap()
+}
+
+// REQ-EVENT-001: CR 708.8, CR 110.1: a permanent put onto the battlefield face down is face
+// down in the zone record and in the permanent container; TurnFaceUp then occurs and clears
+// both (CR 701.27b).
+#[test]
+fn req_event_001_cr_708_8_enter_face_down_synced() {
+    let mut w = World::new();
+    let h = w.create(1, 1, ZoneKind::Hand);
+    let mut req = MoveRequest::new(ZoneKind::Battlefield);
+    req.face_down = true;
+    let ex = w
+        .exec(GameEvent::ZoneChange {
+            object: h,
+            request: req,
+            cause: ZoneChangeCause::Other,
+        })
+        .unwrap()
+        .unwrap();
+    let a = moved_of(&ex).new;
+    assert_eq!(face_states(&w, a), (true, true));
+    let up = w
+        .exec(GameEvent::TurnFaceUp { object: a })
+        .unwrap()
+        .unwrap();
+    assert_eq!(up.outcome, Outcome::Applied);
+    assert_eq!(face_states(&w, a), (false, false));
+}
+
+// REQ-EVENT-001: CR 400.7, CR 708.8: a same-zone battlefield reposition that asks for face
+// down sets the zone record and the permanent face down together (same object).
+#[test]
+fn req_event_001_cr_400_7_battlefield_reposition_face_down_synced() {
+    let mut w = World::new();
+    let a = w.create(1, 1, ZoneKind::Battlefield);
+    let mut req = MoveRequest::new(ZoneKind::Battlefield);
+    req.face_down = true;
+    req.controller = Some(p(1));
+    let ex = w
+        .exec(GameEvent::ZoneChange {
+            object: a,
+            request: req,
+            cause: ZoneChangeCause::Other,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved_of(&ex).new, a);
+    assert_eq!(face_states(&w, a), (true, true));
+}
+
+// REQ-EVENT-001, REQ-CORE-004: CR 701.27b, CR 708.8, CR 400.7: TurnFaceDown turns the zone
+// record face down too (same id, controller, owner and card), so another player's redacted
+// view no longer identifies it; TurnFaceUp restores both.
+#[test]
+fn req_event_001_req_core_004_cr_701_27b_face_down_hides_identity() {
+    let mut w = World::new();
+    // Owned by P2, controlled by P1: the controller must survive the record update.
+    let h = w.create(1, 2, ZoneKind::Hand);
+    let mut req = MoveRequest::new(ZoneKind::Battlefield);
+    req.controller = Some(p(1));
+    let a = moved_of(
+        &w.exec(GameEvent::ZoneChange {
+            object: h,
+            request: req,
+            cause: ZoneChangeCause::Other,
+        })
+        .unwrap()
+        .unwrap(),
+    )
+    .new;
+    let other = w.create(2, 1, ZoneKind::Battlefield);
+    let record_before = *w.zones.object(a).unwrap();
+    let battlefield_before = w.zones.contents(ZoneId::Battlefield);
+    let ids_before = w.ids.clone();
+    let lki_before = w.lki.clone();
+    assert_eq!(battlefield_view(&w, 2, a).card, Some(c(1)));
+
+    let ex = w
+        .exec(GameEvent::TurnFaceDown { object: a })
+        .unwrap()
+        .unwrap();
+    assert_eq!(ex.outcome, Outcome::Applied);
+    assert!(!ex.lki_captured);
+    assert_eq!(face_states(&w, a), (true, true));
+    assert_eq!(w.zones.is_public_info(a), Some(false));
+    let record = *w.zones.object(a).unwrap();
+    assert_eq!(record.id, record_before.id);
+    assert_eq!(record.controller, p(1));
+    assert_eq!(record.owner, p(2));
+    assert_eq!(record.card, record_before.card);
+    assert_eq!(record.zone, ZoneId::Battlefield);
+    assert_eq!(w.zones.contents(ZoneId::Battlefield), battlefield_before);
+    assert!(w.ids == ids_before);
+    assert!(w.lki == lki_before);
+    assert_eq!(w.permanents.get(a).unwrap().controller(), p(1));
+    assert!(w.permanents.get(other).is_some());
+
+    // The opponent (here also the owner) sees a face-down object it cannot identify.
+    let theirs = battlefield_view(&w, 2, a);
+    assert!(theirs.face_down);
+    assert_eq!(theirs.card, None);
+    // CR 708.5 (knowledge unit): the controller may look at it.
+    let mine = battlefield_view(&w, 1, a);
+    assert!(mine.face_down);
+    assert_eq!(mine.card, Some(c(1)));
+
+    let up = w
+        .exec(GameEvent::TurnFaceUp { object: a })
+        .unwrap()
+        .unwrap();
+    assert_eq!(up.outcome, Outcome::Applied);
+    assert_eq!(face_states(&w, a), (false, false));
+    assert_eq!(w.zones.is_public_info(a), Some(true));
+    assert_eq!(w.zones.object(a).unwrap().controller, p(1));
+    assert_eq!(battlefield_view(&w, 2, a).card, Some(c(1)));
+}
+
+// REQ-EVENT-001: CR 701.27b, CR 603.10a, CR 400.7: a permanent turned face down and then
+// destroyed has a face-down LKI record and a face-down permanent snapshot.
+#[test]
+fn req_event_001_cr_701_27b_face_down_then_departure_lki() {
+    let mut w = World::new();
+    let a = w.create(1, 1, ZoneKind::Battlefield);
+    w.exec(GameEvent::TurnFaceDown { object: a })
+        .unwrap()
+        .unwrap();
+    assert!(w.exec(destroy(a)).unwrap().unwrap().lki_captured);
+    let rec = w.lki.get(a).unwrap();
+    assert!(rec.face_down());
+    assert!(rec.permanent().unwrap().status().face_down);
+}
+
+// REQ-EVENT-001, REQ-CORE-004: CR 701.27b: a batch [TurnFaceDown, failing event] rolls back
+// both the zone record and the permanent; errors are unchanged; a record/status disagreement
+// is repaired by the event (which then occurs).
+#[test]
+fn req_event_001_cr_701_27b_face_down_rollback_errors_repair() {
+    let mut w = World::new();
+    let a = w.create(1, 1, ZoneKind::Battlefield);
+    let h = w.create(2, 1, ZoneKind::Hand);
+    let before = w.parts();
+    assert_eq!(
+        w.batch(vec![
+            GameEvent::TurnFaceDown { object: a },
+            GameEvent::Tap {
+                object: ObjectId::new(99)
+            },
+        ]),
+        Err(EventError::UnknownObject(ObjectId::new(99)))
+    );
+    assert!(w.parts() == before);
+    assert_eq!(face_states(&w, a), (false, false));
+
+    assert_fails(
+        &mut w,
+        GameEvent::TurnFaceDown {
+            object: ObjectId::new(99),
+        },
+        EventError::UnknownObject(ObjectId::new(99)),
+    );
+    assert_fails(
+        &mut w,
+        GameEvent::TurnFaceDown { object: h },
+        EventError::NotOnBattlefield(h),
+    );
+    assert_fails(
+        &mut w,
+        GameEvent::TurnFaceUp { object: h },
+        EventError::NotOnBattlefield(h),
+    );
+
+    // Repair: the permanent says face down, the record says face up.
+    w.permanents.set_face_down(a, true).unwrap();
+    assert_eq!(face_states(&w, a), (false, true));
+    let ex = w
+        .exec(GameEvent::TurnFaceDown { object: a })
+        .unwrap()
+        .unwrap();
+    assert_eq!(ex.outcome, Outcome::Applied);
+    assert_eq!(face_states(&w, a), (true, true));
+    assert_noop(&mut w, GameEvent::TurnFaceDown { object: a });
+}
+
+// REQ-EVENT-001: CR 400.7, CR 603.10a: a same-zone reposition reports no LKI even when a later
+// draw of the same batch takes (and pre-captures) the same card; the draw reports it.
+#[test]
+fn req_event_001_cr_400_7_reposition_then_draw_lki_flag() {
+    let mut w = World::new();
+    let only = w.create(1, 1, ZoneKind::Library);
+    let mut bottom = MoveRequest::new(ZoneKind::Library);
+    bottom.position = Position::Bottom;
+    let out = w
+        .batch(vec![
+            GameEvent::ZoneChange {
+                object: only,
+                request: bottom,
+                cause: ZoneChangeCause::Other,
+            },
+            GameEvent::Draw { player: p(1) },
+        ])
+        .unwrap();
+    assert_eq!(out.events.len(), 2);
+    assert_eq!(moved_of(&out.events[0]).new, only);
+    assert!(!out.events[0].lki_captured);
+    assert_eq!(moved_of(&out.events[1]).old, only);
+    assert!(out.events[1].lki_captured);
+    assert_eq!(w.lki.ids(), vec![only]);
+}
+
+// REQ-EVENT-001, REQ-DSL-003: CR 111.8, CR 121.1: a token that left the battlefield for the
+// library remains there when drawn: the draw is no event (no move, no LKI, no card drawn, no
+// log entry) and is not an empty-library draw (CR 121.4).
+#[test]
+fn req_event_001_cr_111_8_token_in_library_not_drawn() {
+    let mut w = World::new();
+    let ex = w
+        .exec(GameEvent::CreateToken {
+            owner: p(1),
+            card: c(50),
+            controller: None,
+        })
+        .unwrap()
+        .unwrap();
+    let Outcome::TokenCreated { object } = ex.outcome else {
+        panic!("expected a token");
+    };
+    let in_library = moved_of(&w.exec(zc(object, ZoneKind::Library)).unwrap().unwrap()).new;
+    assert_eq!(w.zones.contents(ZoneId::Library(p(1))), vec![in_library]);
+    assert_noop(&mut w, GameEvent::Draw { player: p(1) });
+    assert_eq!(w.zones.contents(ZoneId::Library(p(1))), vec![in_library]);
+    assert_eq!(
+        w.hist(HistoryStat::CardsDrawn, HistoryScope::Game, Some(1)),
+        0
+    );
+    assert!(w.events.empty_library_draws().is_empty());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Batches and the log
 // ---------------------------------------------------------------------------------------------
@@ -1599,17 +1921,23 @@ fn req_dsl_003_history_basics() {
 
     let mut w = World::new();
     let a = w.create(1, 1, ZoneKind::Battlefield);
-    let _ = w.exec(GameEvent::Damage {
-        source: None,
-        source_controller: Some(p(1)),
-        target: DamageTarget::Object(a),
-        amount: 0,
-        combat: false,
-    });
-    let _ = w.exec(GameEvent::LifeChange {
-        player: p(1),
-        delta: 0,
-    });
+    assert_noop(
+        &mut w,
+        GameEvent::Damage {
+            source: None,
+            source_controller: Some(p(1)),
+            target: DamageTarget::Object(a),
+            amount: 0,
+            combat: false,
+        },
+    );
+    assert_noop(
+        &mut w,
+        GameEvent::LifeChange {
+            player: p(1),
+            delta: 0,
+        },
+    );
     assert!(w.events.history().is_empty());
 }
 
