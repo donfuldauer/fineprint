@@ -1165,16 +1165,15 @@ fn assert_positions_live(z: &Zones, k: &Knowledge) {
     }
 }
 
-/// The brief's on_move_observed rules applied to the test's own model `told`. `knew_position`
-/// are the players who had a position entry naming the moved object before the move; `z` is
-/// the container after the move.
+/// The brief's on_move_observed rules applied to the test's own model `told`; `z` is the
+/// container after the move. Knowing the moved card's position is not observation: only
+/// `observers` and the implicit rules on the new record and the source hand count.
 fn told_move(
     told: &mut Told,
     z: &Zones,
     before: &ObjectRecord,
     moved: &Moved,
     observers: &[PlayerId],
-    knew_position: &BTreeSet<PlayerId>,
 ) {
     let new = *z.object(moved.new).unwrap();
     let players = z.players();
@@ -1187,10 +1186,8 @@ fn told_move(
             .collect();
         candidates.push(new.card);
         for &v in &players {
-            let observed = observers.contains(&v)
-                || implicit(&new, v)
-                || before.zone == ZoneId::Hand(v)
-                || knew_position.contains(&v);
+            let observed =
+                observers.contains(&v) || implicit(&new, v) || before.zone == ZoneId::Hand(v);
             if !observed {
                 for card in &candidates {
                     if let Some(s) = told.get_mut(card) {
@@ -1232,17 +1229,9 @@ fn prop_move(
     observers: &[PlayerId],
 ) {
     let before = *z.object(id).unwrap();
-    let knew_position: BTreeSet<PlayerId> = match before.zone {
-        ZoneId::Library(owner) => z
-            .players()
-            .into_iter()
-            .filter(|&v| k.position_known(z, v, owner).values().any(|&o| o == id))
-            .collect(),
-        _ => BTreeSet::new(),
-    };
     let moved = z.move_object(ids, id, r).unwrap();
     k.on_move_observed(z, &before, &moved, observers).unwrap();
-    told_move(told, z, &before, &moved, observers, &knew_position);
+    told_move(told, z, &before, &moved, observers);
 }
 
 /// REQ-CORE-004 (R12, R-e), CR 400.2, CR 402.3, CR 406.3, CR 708.5, CR 708.9, CR 701.24a,
@@ -1619,24 +1608,87 @@ fn step0_hand_owner_observes() {
     assert_eq!(w.k.known_to(&w.z, m.new).unwrap(), set(&[P1]));
 }
 
-/// REQ-CORE-004, CR 401.2, step 0 (iv): a player with a position entry naming the moved object
-/// knew which card moved and keeps its set knowledge.
+/// REQ-CORE-004, CR 401.2, CR 402.3: knowing the moved card's position is not observation. P2
+/// knows A is on top; an unobserved draw of A makes P2 forget A and every library card, and
+/// P2's position entries for that library are gone. The same draw with P2 passed as an
+/// observer (the selected position is public) keeps A identifiable to P2.
 #[test]
-fn step0_position_entry_naming_moved_card_observes() {
+fn step0_position_knowledge_is_not_observation() {
     let mut w = World::new();
     let lib = w.fill_library(P1, 1, 3);
     w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
+    w.k.set_position_known(&w.z, P2, P1, 2, lib[2]).unwrap();
     w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let mut o = w.clone();
+
     let m = w.mv(lib[0], req(ZoneKind::Hand));
-    assert!(w.can(P2, m.new));
+    assert!(!w.can(P2, m.new));
+    assert!(!w.k.known_to(&w.z, m.new).unwrap().contains(&P2));
+    for &id in &lib[1..] {
+        assert!(!w.k.known_to(&w.z, id).unwrap().contains(&P2));
+    }
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+    assert!(!w.k.positions.contains_key(&(P2, P1)));
     assert_eq!(
         w.view(P2).players[&P1].hand,
+        HandView::Opponent {
+            count: 1,
+            known_cards: BTreeSet::new()
+        }
+    );
+    assert!(w.view(P2).players[&P1].library.known_cards.is_empty());
+
+    // Control: the caller passes P2 as an observer of the public top-card draw.
+    let n = o.mv_obs(lib[0], req(ZoneKind::Hand), &[P2]);
+    assert!(o.can(P2, n.new));
+    assert_eq!(
+        o.view(P2).players[&P1].hand,
         HandView::Opponent {
             count: 1,
             known_cards: cards(&[1])
         }
     );
-    assert_eq!(w.view(P2).players[&P1].library.known_cards, cards(&[2]));
+    assert_eq!(o.view(P2).players[&P1].library.known_cards, cards(&[2, 3]));
+}
+
+/// P1's library is A (card 1), B (card 2), X (card 3), card 4 (top first). P2 knows A's
+/// position (index 0) and B as a set member; X and card 4 are unknown to P2.
+fn selection_twin() -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 4);
+    w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    (w, lib[0], lib[2])
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2, CR 402.3 (CodeRabbit round 2, thread 4625001805): an
+/// undisclosed selection of a library card. P2 knows A's position, but P1 secretly selects a
+/// card: in world 1 A, in world 2 X, by the same request. P2's views and position knowledge
+/// are equal in both worlds. Controls: P1's views differ; with P2 passed as an observer in both
+/// worlds, P2's views differ.
+#[test]
+fn twin_worlds_undisclosed_selection_give_equal_views() {
+    let (mut w1, a, _) = selection_twin();
+    let (mut w2, _, x) = selection_twin();
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+
+    w1.mv(a, req(ZoneKind::Hand));
+    w2.mv(x, req(ZoneKind::Hand));
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+    assert!(w2.k.position_known(&w2.z, P2, P1).is_empty());
+    // Control: the worlds really differ (P1's own hand shows A vs X).
+    assert_ne!(w1.view(P1), w2.view(P1));
+
+    // Control: P2 watches the selection in both worlds, so P2 sees which card was taken.
+    o1.mv_obs(a, req(ZoneKind::Hand), &[P2]);
+    o2.mv_obs(x, req(ZoneKind::Hand), &[P2]);
+    assert_ne!(o1.view(P2), o2.view(P2));
 }
 
 /// REQ-CORE-004: a same-zone reposition (from == to) skips step 0; a hand reposition too.

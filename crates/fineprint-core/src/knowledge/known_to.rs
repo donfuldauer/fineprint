@@ -203,9 +203,13 @@ impl Knowledge {
     /// - (0) Only when `before` was in a library or a hand and `moved.from != moved.to`: a
     ///   player V observed the move iff V is in `observers`, or V may see the new object by the
     ///   implicit entitlements of [`Knowledge::can_identify`] (public face up, V's own hand, a
-    ///   face-down permanent or spell V controls), or the object left V's hand, or it left a
-    ///   library where V had a stored position entry naming `moved.old`. Every player who did
-    ///   NOT observe it forgets every card left in `moved.from` and the moved card (is removed
+    ///   face-down permanent or spell V controls), or the object left V's hand. Nothing else
+    ///   makes V an observer: in particular a viewer who knows the moved card's library
+    ///   position is an observer ONLY if the caller passes it in `observers`. The caller must
+    ///   do so when the selected position is itself public (for example a draw of the top card
+    ///   by a viewer who knows the top card, or a selection announced as "the card at index
+    ///   k"); `Knowledge` cannot tell a disclosed-position move from a secret selection.
+    ///   Every player who did NOT observe it forgets every card left in `moved.from` and the moved card (is removed
     ///   from their stored `KnownTo`), and, when the source is a library, loses every position
     ///   entry for that library: such a player knows a set but cannot tell which member moved,
     ///   so any of them could be the moved one (a design decision, see `docs/DECISIONS.md`,
@@ -298,15 +302,12 @@ impl Knowledge {
             .players()
             .into_iter()
             .filter(|&v| {
-                let knew_position = source_library.is_some_and(|owner| {
-                    self.positions
-                        .get(&(v, owner))
-                        .is_some_and(|entries| entries.values().any(|&o| o == moved.old))
-                });
+                // Every condition depends only on the observers, the destination record and the
+                // source zone, never on which candidate moved: knowing a position is not
+                // observation (a secret selection would otherwise leak).
                 let observed = observers.contains(&v)
                     || implicitly_identifies(record, v)
-                    || before.zone == ZoneId::Hand(v)
-                    || knew_position;
+                    || before.zone == ZoneId::Hand(v);
                 !observed
             })
             .collect();
