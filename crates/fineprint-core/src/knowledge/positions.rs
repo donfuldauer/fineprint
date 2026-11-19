@@ -41,30 +41,49 @@ impl Knowledge {
         positions.retain(|_, entries| !entries.is_empty());
     }
 
-    /// Drops every entry for the library of `owner` that does not match the live library.
-    pub(super) fn prune_library(&mut self, zones: &Zones, owner: PlayerId) {
-        let live = library(zones, owner);
-        self.retain_indexed(|_, o, index, object| o != owner || live.get(index) == Some(&object));
+    /// The single position rule for a change of library contents (REQ-CORE-004; a design
+    /// decision, not CR-derived, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge
+    /// survives a library change only for viewers who know the index").
+    ///
+    /// For every library owner in `owners` (the affected libraries) and every viewer NOT in
+    /// `index_known_by`: every entry for that library is dropped, because which entries a prune
+    /// keeps depends on the side of the hidden change they sit on. For a viewer in
+    /// `index_known_by`: an entry for an affected library is kept only if its object is still at
+    /// the recorded index of the live library and `keep_known(object)` holds. In addition every
+    /// entry of every viewer naming `gone` (the moved or removed object) is dropped. Entries for
+    /// libraries not in `owners` are otherwise untouched.
+    pub(super) fn apply_library_change(
+        &mut self,
+        zones: &Zones,
+        owners: &[PlayerId],
+        index_known_by: &[PlayerId],
+        gone: Option<ObjectId>,
+        keep_known: impl Fn(ObjectId) -> bool,
+    ) {
+        let live: BTreeMap<PlayerId, Vec<ObjectId>> = owners
+            .iter()
+            .map(|&owner| (owner, library(zones, owner)))
+            .collect();
+        let known: BTreeSet<PlayerId> = index_known_by.iter().copied().collect();
+        self.retain_indexed(|viewer, owner, index, object| {
+            if gone == Some(object) {
+                return false;
+            }
+            let Some(live) = live.get(&owner) else {
+                return true;
+            };
+            known.contains(&viewer) && live.get(index) == Some(&object) && keep_known(object)
+        });
     }
 
-    /// Re-checks position knowledge of the library of `owner` after an insertion that did not go
-    /// through [`Knowledge::on_move`] (REQ-CORE-004): drops every viewer's position entry for
-    /// that library whose object is no longer at the recorded index of the live library. It
-    /// only touches position entries, never `KnownTo`.
+    /// Like [`Knowledge::on_library_changed_indexed`] with nobody knowing the insertion index:
+    /// every viewer loses every position entry for the library of `owner` (REQ-CORE-004). It
+    /// only touches position entries, never `KnownTo`, so set knowledge of the library survives.
     ///
-    /// A library is one face-down pile whose order players can't look at or change (CR 401.2),
-    /// so a position entry is knowledge the engine tracked, not something a player can
-    /// re-check. Dropping an entry as soon as it no longer matches is the engine's own
-    /// conservative policy, not a CR rule: once stale, an entry is never allowed to become
-    /// valid again by coincidence when a later change restores the earlier shape of the
-    /// library.
-    ///
-    /// **Caller contract.** Call it after every [`Zones`] mutation that inserts into a library
-    /// outside `on_move`: `Zones::create_object` or `Zones::enter_from_outside` into a library.
-    /// After an insertion at index `n` (0 is the top), entries with an index `< n` are kept and
-    /// entries with an index `>= n` are dropped, because those objects shifted. Removals
-    /// (`Zones::send_outside` of a library or hand object) use
-    /// [`Knowledge::on_removed_from_hidden_zone`] instead, which also prunes the library.
+    /// **Caller contract.** Call it (or the indexed form) after every [`Zones`] mutation that
+    /// inserts into a library outside `on_move`: `Zones::create_object` or
+    /// `Zones::enter_from_outside` into a library. Removals (`Zones::send_outside` of a library
+    /// or hand object) use [`Knowledge::on_removed_from_hidden_zone`] instead.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`]`(owner)`; the state is then unchanged.
@@ -73,8 +92,46 @@ impl Knowledge {
         zones: &Zones,
         owner: PlayerId,
     ) -> Result<(), KnowledgeError> {
+        self.on_library_changed_indexed(zones, owner, &[])
+    }
+
+    /// Re-checks position knowledge of the library of `owner` after an insertion that did not go
+    /// through [`Knowledge::on_move_indexed`] (REQ-CORE-004). `index_known_by` are the players
+    /// who know the library index at which the card was inserted.
+    ///
+    /// Every viewer NOT in `index_known_by` loses every position entry for that library: had
+    /// the insertion been above or below an entry, keeping or dropping that entry would tell the
+    /// viewer which side it went (a design decision, see `docs/DECISIONS.md`, "#25 FP-024:
+    /// Position knowledge survives a library change only for viewers who know the index"). For a
+    /// viewer in `index_known_by`, after an insertion at index `n` (0 is the top), entries with
+    /// an index `< n` are kept and entries with an index `>= n` are dropped, because those
+    /// objects shifted. Never touches `KnownTo`.
+    ///
+    /// A library is one face-down pile whose order players can't look at or change (CR 401.2),
+    /// so a position entry is knowledge the engine tracked, not something a player can
+    /// re-check. Dropping an entry as soon as it no longer matches is the engine's own
+    /// conservative policy, not a CR rule: once stale, an entry is never allowed to become
+    /// valid again by coincidence when a later change restores the earlier shape of the
+    /// library.
+    ///
+    /// **Caller contract.** Pass a player in `index_known_by` only when the insertion index is
+    /// public to that player (for example a card put "third from the top" in view of all).
+    /// An announced identity is not an index.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownPlayer`]`(owner)`, then [`KnowledgeError::UnknownPlayer`] for the
+    /// first player of `index_known_by` not in `zones`. The state is then unchanged.
+    pub fn on_library_changed_indexed(
+        &mut self,
+        zones: &Zones,
+        owner: PlayerId,
+        index_known_by: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
         require_player(zones, owner)?;
-        self.prune_library(zones, owner);
+        for &player in index_known_by {
+            require_player(zones, player)?;
+        }
+        self.apply_library_change(zones, &[owner], index_known_by, None, |_| true);
         Ok(())
     }
 
@@ -83,9 +140,10 @@ impl Knowledge {
     /// any earlier entry of the same (viewer, library owner) naming the same object or the same
     /// index.
     ///
-    /// A position entry never makes `viewer` an observer of a later move out of that library:
-    /// pass `viewer` in the `observers` of [`Knowledge::on_move_observed`] when the moved
-    /// position is itself public, otherwise the move is unobserved for `viewer`.
+    /// A position entry never makes `viewer` an observer of a later move out of that library,
+    /// nor a player who knows the index of a later change: pass `viewer` in the `observers` and
+    /// `index_known_by` of [`Knowledge::on_move_indexed`] when the moved card and its position
+    /// are public to it; otherwise `viewer` loses its entries for that library.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`] (viewer, then library owner),
@@ -148,11 +206,10 @@ impl Knowledge {
             .collect()
     }
 
-    /// Shuffle of the library of `owner` (REQ-CORE-004). `excluded` are found cards that are
-    /// not part of the shuffle. Removes the position knowledge of every viewer for that library,
-    /// except entries whose object is in `excluded` and still at the recorded index in `zones`
-    /// (pass the zones as they are at shuffle time). Never touches `KnownTo`: identity
-    /// knowledge of the library as a set survives the shuffle (SRS 2.4).
+    /// Shuffle of the library of `owner` (REQ-CORE-004) with nobody told which found cards are
+    /// excluded: exactly [`Knowledge::shuffle_library_disclosed`] with an empty `known_by`, so
+    /// every viewer loses every position entry for that library. Never touches `KnownTo`:
+    /// identity knowledge of the library as a set survives the shuffle (SRS 2.4).
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`]`(owner)`; [`KnowledgeError::NotInLibrary`] for an
@@ -163,6 +220,31 @@ impl Knowledge {
         owner: PlayerId,
         excluded: &[ObjectId],
     ) -> Result<(), KnowledgeError> {
+        self.shuffle_library_disclosed(zones, owner, excluded, &[])
+    }
+
+    /// Shuffle of the library of `owner` (REQ-CORE-004). `excluded` are found cards that are
+    /// not part of the shuffle; `known_by` are the players who know which found cards are
+    /// excluded. Removes the position knowledge of every viewer for that library, except, for a
+    /// viewer in `known_by`, entries whose object is in `excluded` and still at the recorded
+    /// index in `zones` (pass the zones as they are at shuffle time). A viewer not in
+    /// `known_by` keeps nothing: keeping its entry for an excluded card would tell it which card
+    /// was found (a design decision, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge
+    /// survives a library change only for viewers who know the index"). Never touches
+    /// `KnownTo`: identity knowledge of the library as a set survives the shuffle (SRS 2.4).
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownPlayer`]`(owner)`; [`KnowledgeError::NotInLibrary`] for the
+    /// first excluded id that is unknown or not in that library; then
+    /// [`KnowledgeError::UnknownPlayer`] for the first player of `known_by` not in `zones`. The
+    /// state is then unchanged.
+    pub fn shuffle_library_disclosed(
+        &mut self,
+        zones: &Zones,
+        owner: PlayerId,
+        excluded: &[ObjectId],
+        known_by: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
         // CR 701.24a: after a shuffle no player knows the order of the shuffled cards.
         // CR 701.24b: found cards are not included in the shuffle.
         require_player(zones, owner)?;
@@ -171,10 +253,12 @@ impl Knowledge {
                 return Err(KnowledgeError::NotInLibrary { owner, object: id });
             }
         }
+        for &player in known_by {
+            require_player(zones, player)?;
+        }
         let excluded: BTreeSet<ObjectId> = excluded.iter().copied().collect();
-        let live = library(zones, owner);
-        self.retain_indexed(|_, o, index, object| {
-            o != owner || (excluded.contains(&object) && live.get(index) == Some(&object))
+        self.apply_library_change(zones, &[owner], known_by, None, |object| {
+            excluded.contains(&object)
         });
         Ok(())
     }

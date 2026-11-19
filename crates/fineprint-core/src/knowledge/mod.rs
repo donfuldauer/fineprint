@@ -16,9 +16,22 @@
 //!
 //! **Position knowledge** (SRS 2.4 `KnownPositions`). Per (viewer, library owner), a map from
 //! library index (0 is the top) to the object the viewer knows is there. Entries are filtered
-//! lazily against the live library ([`Knowledge::position_known`]) and pruned when a library
-//! changes through [`Knowledge::on_move`], [`Knowledge::on_removed_from_hidden_zone`] or
-//! [`Knowledge::on_library_changed`], so a stale entry never reports a position.
+//! lazily against the live library ([`Knowledge::position_known`]) and updated when a library
+//! changes through [`Knowledge::on_move_indexed`], [`Knowledge::on_removed_from_hidden_zone_indexed`],
+//! [`Knowledge::on_library_changed_indexed`] or [`Knowledge::shuffle_library_disclosed`] (or
+//! their shorthands), so a stale entry never reports a position.
+//!
+//! **Index disclosure.** Position knowledge about a library survives a change of its contents
+//! (a card moved out, in or within it, removed, inserted, or an excluded found card in a
+//! shuffle) ONLY for the players the caller passes as knowing the index of that change
+//! (`index_known_by`, or `known_by` for a shuffle); every other player loses all its position
+//! entries for each affected library. Otherwise which entries survive would depend on whether
+//! the hidden index was above or below them, and a viewer could tell the two apart (a design
+//! decision, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge survives a library change
+//! only for viewers who know the index"). The default (the shorthands, empty set) is nobody.
+//! Index disclosure never touches identity knowledge, which `observers` governs: an announced
+//! identity ("this card left the library") is not an index, and a known index does not make a
+//! player an observer.
 //!
 //! **Unobserved hidden moves.** When an object leaves a library or a hand for another zone,
 //! or is removed from one ([`Knowledge::on_removed_from_hidden_zone`]),
@@ -28,10 +41,14 @@
 //! it ambiguous (REQ-CORE-004; a design decision, see `docs/DECISIONS.md`). Knowing the
 //! moved card's library position does not make a player an observer: `Knowledge` cannot tell
 //! a disclosed-position move from a secret selection, so the caller passes such players as
-//! observers when the selected position is itself public.
+//! observers when the selected position is itself public. A draw of a top card the viewer
+//! knows needs that viewer in both `observers` (which card left) and `index_known_by` (from
+//! which index) to keep its other position entries.
 //!
 //! **Shuffles.** [`Knowledge::shuffle_library`] clears position knowledge of the shuffled
-//! cards (CR 701.24a, CR 701.24b) but keeps identity knowledge of the library as a set.
+//! cards (CR 701.24a, CR 701.24b) but keeps identity knowledge of the library as a set;
+//! [`Knowledge::shuffle_library_disclosed`] keeps the entries of excluded found cards for the
+//! players told which cards were excluded.
 //! [`Knowledge::shuffle_face_down_pile`] ends look permissions on the shuffled face-down cards
 //! (CR 701.24a, CR 406.3).
 //!
@@ -56,18 +73,24 @@
 //! form; the integration unit does that. The caller contract:
 //!
 //! - after every [`Zones::move_object`](crate::zones::Zones::move_object), call
-//!   [`Knowledge::on_move_observed`] with the players who watched the move (or
-//!   [`Knowledge::on_move`] when nobody is recorded as watching);
+//!   [`Knowledge::on_move_indexed`] with the players who watched the move and the players who
+//!   know its library index(es) (or [`Knowledge::on_move_observed`] / [`Knowledge::on_move`]
+//!   when nobody knows the index / nobody is recorded as watching);
 //! - after every [`Zones::send_outside`](crate::zones::Zones::send_outside) of a library or
-//!   hand object, call [`Knowledge::on_removed_from_hidden_zone`] with the record copied
-//!   before the removal and the players who watched which card left: the other players forget
-//!   the candidates as for an unobserved move, and the library's position entries are pruned;
+//!   hand object, call [`Knowledge::on_removed_from_hidden_zone_indexed`] (or
+//!   [`Knowledge::on_removed_from_hidden_zone`]) with the record copied before the removal,
+//!   the players who watched which card left and the players who know its index: the other
+//!   players forget the candidates as for an unobserved move, and the library's position
+//!   entries survive only for the index-knowing players;
 //! - after every other insertion into a library
 //!   ([`Zones::create_object`](crate::zones::Zones::create_object) or
 //!   [`Zones::enter_from_outside`](crate::zones::Zones::enter_from_outside) into a library),
-//!   call [`Knowledge::on_library_changed`] for that library: after an insertion at index `n`
-//!   (0 is the top), position entries with an index `>= n` are dropped because their objects
-//!   shifted, and entries with an index `< n` are kept.
+//!   call [`Knowledge::on_library_changed_indexed`] (or [`Knowledge::on_library_changed`])
+//!   for that library: players who do not know the insertion index lose every position entry
+//!   for it; for a player who knows it was index `n` (0 is the top), entries with an index
+//!   `>= n` are dropped because their objects shifted, and entries with an index `< n` are
+//!   kept;
+//! - pass a player as knowing an index only when that index is public to the player.
 
 mod error;
 mod known_to;

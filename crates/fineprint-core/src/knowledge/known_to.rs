@@ -178,7 +178,9 @@ impl Knowledge {
     }
 
     /// Updates knowledge after a zone move that no player is recorded as having watched
-    /// (REQ-CORE-004): exactly [`Knowledge::on_move_observed`] with no observers. Call it AFTER
+    /// (REQ-CORE-004): exactly [`Knowledge::on_move_indexed`] with no observers and nobody
+    /// knowing the library index, so every viewer loses its position entries for an affected
+    /// library. Call it AFTER
     /// [`Zones::move_object`] with `before` = the object's record copied before the move,
     /// `moved` = the returned [`Moved`] and `zones` = the container after the move.
     ///
@@ -191,10 +193,30 @@ impl Knowledge {
         before: &ObjectRecord,
         moved: &Moved,
     ) -> Result<(), KnowledgeError> {
-        self.on_move_observed(zones, before, moved, &[])
+        self.on_move_indexed(zones, before, moved, &[], &[])
     }
 
     /// Like on_move; `observers` are players who watched the move and so know which card moved.
+    /// Exactly [`Knowledge::on_move_indexed`] with an empty `index_known_by`: nobody keeps
+    /// position entries for a library the move left or entered.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownObject`]`(moved.new)` if that object is not in `zones`, then
+    /// [`KnowledgeError::UnknownPlayer`] for the first observer that is not a player of
+    /// `zones`. The state is then unchanged.
+    pub fn on_move_observed(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        observers: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
+        self.on_move_indexed(zones, before, moved, observers, &[])
+    }
+
+    /// Updates knowledge after a zone move (REQ-CORE-004). `observers` are players who watched
+    /// the move and so know which card moved; `index_known_by` are players who know the library
+    /// index(es) at which the move left or entered a library.
     ///
     /// Call it AFTER [`Zones::move_object`] with `before` = the object's record copied before
     /// the move, `moved` = the returned [`Moved`] and `zones` = the container after the move
@@ -209,8 +231,9 @@ impl Knowledge {
     ///   do so when the selected position is itself public (for example a draw of the top card
     ///   by a viewer who knows the top card, or a selection announced as "the card at index
     ///   k"); `Knowledge` cannot tell a disclosed-position move from a secret selection.
-    ///   Every player who did NOT observe it forgets every card left in `moved.from` and the moved card (is removed
-    ///   from their stored `KnownTo`), and, when the source is a library, loses every position
+    ///   Every player who did NOT observe it forgets every card left in `moved.from` and the
+    ///   moved card (is removed from their stored `KnownTo`), and, when the source is a
+    ///   library, loses every position
     ///   entry for that library: such a player knows a set but cannot tell which member moved,
     ///   so any of them could be the moved one (a design decision, see `docs/DECISIONS.md`,
     ///   "#25 FP-024: Unobserved hidden moves forget the candidates"). An observer's knowledge
@@ -221,26 +244,44 @@ impl Knowledge {
     /// - (c) `before` was face down on the battlefield or the stack: its controller knows it;
     ///   and when it moved from the battlefield to another zone, or from the stack to a zone
     ///   other than the battlefield, it is revealed to all players.
-    /// - (d) `before` was in a library: every position entry naming `moved.old` is dropped.
-    ///   Position entries of the libraries `moved` left or entered that no longer match the
-    ///   live library are pruned too (a known card whose index shifted becomes unknown).
+    /// - (d) Positions. The affected libraries are `moved.from` and `moved.to` when they are
+    ///   libraries (one library for a reposition within it). Every viewer NOT in
+    ///   `index_known_by` loses every position entry for an affected library: which entries a
+    ///   prune keeps depends on the side of the hidden index the change happened on (a design
+    ///   decision, see `docs/DECISIONS.md`, "#25 FP-024: Position knowledge survives a library
+    ///   change only for viewers who know the index"). For a viewer in `index_known_by`, every
+    ///   entry naming `moved.old` is dropped and entries of an affected library that no longer
+    ///   match the live library are pruned (a known card whose index shifted becomes unknown).
     ///
+    /// `observers` and `index_known_by` are independent: being in `index_known_by` does not
+    /// make a player an observer for (0), and does not restore the entries (0) dropped.
     /// Apart from (0), `KnownTo` persists across the move: it is stored per card.
+    ///
+    /// **Caller contract.** Pass a player in `index_known_by` only when the index is public to
+    /// that player (for example the draw of the top card, or a card put "third from the top"
+    /// in view of all). A draw of a top card the viewer knows needs that viewer in both
+    /// `observers` (it knows which card left) and `index_known_by` (it knows from where). An
+    /// announced identity ("this card left the library") is not an index.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownObject`]`(moved.new)` if that object is not in `zones`, then
     /// [`KnowledgeError::UnknownPlayer`] for the first observer that is not a player of
-    /// `zones`. The state is then unchanged.
-    pub fn on_move_observed(
+    /// `zones`, then for the first player of `index_known_by` that is not. The state is then
+    /// unchanged.
+    pub fn on_move_indexed(
         &mut self,
         zones: &Zones,
         before: &ObjectRecord,
         moved: &Moved,
         observers: &[PlayerId],
+        index_known_by: &[PlayerId],
     ) -> Result<(), KnowledgeError> {
         let record = record_of(zones, moved.new)?;
         for &observer in observers {
             require_player(zones, observer)?;
+        }
+        for &player in index_known_by {
+            require_player(zones, player)?;
         }
         let card = record.card;
         // (0) Design decision (not CR-derived): an unobserved move out of a hidden zone makes
@@ -282,16 +323,17 @@ impl Knowledge {
                 self.add_players(card, zones.players());
             }
         }
-        // (d) A card that moved within or out of a library is no longer at its known position.
-        if before.zone.kind() == ZoneKind::Library {
-            let old = moved.old;
-            self.retain_positions(|_, _, object| object != old);
-        }
-        for zone in [moved.from, moved.to] {
-            if let ZoneId::Library(owner) = zone {
-                self.prune_library(zones, owner);
-            }
-        }
+        // (d) A card that moved within or out of a library is no longer at its known position;
+        // positions of the affected libraries survive only for viewers who know the index.
+        let gone = (before.zone.kind() == ZoneKind::Library).then_some(moved.old);
+        let owners: Vec<PlayerId> = [moved.from, moved.to]
+            .into_iter()
+            .filter_map(|zone| match zone {
+                ZoneId::Library(owner) => Some(owner),
+                _ => None,
+            })
+            .collect();
+        self.apply_library_change(zones, &owners, index_known_by, gone, |_| true);
         Ok(())
     }
 
@@ -343,31 +385,10 @@ impl Knowledge {
         }
     }
 
-    /// Updates knowledge after an object left a library or a hand without a zone move
-    /// (REQ-CORE-004), the removal counterpart of step (0) of [`Knowledge::on_move_observed`].
-    ///
-    /// Call it AFTER [`Zones::send_outside`] (the object no longer exists in `zones`), with
-    /// `before` = the [`ObjectRecord`] copied BEFORE the removal. `observers` are the players
-    /// who watched which card was removed.
-    ///
-    /// **Caller contract.** Every [`Zones::send_outside`] of a library or hand object is
-    /// followed by this call. Pass in `observers` every player who knows which card left: for
-    /// example every player when the removal is announced, or a viewer who knows the position of
-    /// the top card when the top card is removed and that fact is public. Knowing a position
-    /// does not make a player an observer by itself.
-    ///
-    /// If `before.zone` is neither a library nor a hand, nothing happens and the result is `Ok`
-    /// (a removal from a public zone leaks nothing). Otherwise a player V observed the removal
-    /// iff V is in `observers` or `before.zone` is V's hand. Every player who did NOT observe it
-    /// forgets every card now in `before.zone` and the removed card (`before.card`), and, when
-    /// the source is a library, loses every position entry for that library: such a player
-    /// knows a set but cannot tell which member left (a design decision, see
-    /// `docs/DECISIONS.md`, "#25 FP-024: on_removed_from_hidden_zone"). Observers keep their
-    /// knowledge. When the source is a library, its position entries are then pruned against
-    /// the live library exactly as [`Knowledge::on_library_changed`] does (the entry naming
-    /// `before.id` goes, entries whose objects shifted go).
-    ///
-    /// The hook never inspects whether `before.id` still exists or where `before.card` went.
+    /// Exactly [`Knowledge::on_removed_from_hidden_zone_indexed`] with an empty
+    /// `index_known_by`: for a library source every viewer loses every position entry for that
+    /// library, observers included (an announced identity is not an index). Identity knowledge
+    /// is handled as described there.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`]`(o)` when `before.zone` is the library or hand of a
@@ -379,12 +400,60 @@ impl Knowledge {
         before: &ObjectRecord,
         observers: &[PlayerId],
     ) -> Result<(), KnowledgeError> {
+        self.on_removed_from_hidden_zone_indexed(zones, before, observers, &[])
+    }
+
+    /// Updates knowledge after an object left a library or a hand without a zone move
+    /// (REQ-CORE-004), the removal counterpart of step (0) of [`Knowledge::on_move_indexed`].
+    ///
+    /// Call it AFTER [`Zones::send_outside`] (the object no longer exists in `zones`), with
+    /// `before` = the [`ObjectRecord`] copied BEFORE the removal. `observers` are the players
+    /// who watched which card was removed; `index_known_by` are the players who know the
+    /// library index it was removed from.
+    ///
+    /// **Caller contract.** Every [`Zones::send_outside`] of a library or hand object is
+    /// followed by this call. Pass in `observers` every player who knows which card left: for
+    /// example every player when the removal is announced, or a viewer who knows the position of
+    /// the top card when the top card is removed and that fact is public. Knowing a position
+    /// does not make a player an observer by itself. Pass a player in `index_known_by` only
+    /// when the removed card's index is public to that player (for example the top card).
+    ///
+    /// If `before.zone` is neither a library nor a hand, nothing happens and the result is `Ok`
+    /// (a removal from a public zone leaks nothing). Otherwise a player V observed the removal
+    /// iff V is in `observers` or `before.zone` is V's hand. Every player who did NOT observe it
+    /// forgets every card now in `before.zone` and the removed card (`before.card`), and, when
+    /// the source is a library, loses every position entry for that library: such a player
+    /// knows a set but cannot tell which member left (a design decision, see
+    /// `docs/DECISIONS.md`, "#25 FP-024: on_removed_from_hidden_zone"). Observers keep their
+    /// identity knowledge. When the source is a library, every viewer NOT in `index_known_by`
+    /// then loses every position entry for that library (see `docs/DECISIONS.md`, "#25 FP-024:
+    /// Position knowledge survives a library change only for viewers who know the index"); for
+    /// a viewer in it the entries are pruned against the live library (the entry naming
+    /// `before.id` goes, entries whose objects shifted go).
+    ///
+    /// The hook never inspects whether `before.id` still exists or where `before.card` went.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownPlayer`]`(o)` when `before.zone` is the library or hand of a
+    /// player `o` not in `zones`, then [`KnowledgeError::UnknownPlayer`] for the first observer
+    /// that is not a player of `zones`, then for the first player of `index_known_by` that is
+    /// not. The state is then unchanged.
+    pub fn on_removed_from_hidden_zone_indexed(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
         let (ZoneId::Library(owner) | ZoneId::Hand(owner)) = before.zone else {
             return Ok(());
         };
         require_player(zones, owner)?;
         for &observer in observers {
             require_player(zones, observer)?;
+        }
+        for &player in index_known_by {
+            require_player(zones, player)?;
         }
         // Design decision (not CR-derived): an unobserved removal from a hidden zone makes every
         // candidate of that zone ambiguous to the players who did not watch it.
@@ -394,10 +463,10 @@ impl Knowledge {
             .filter(|&v| observers.contains(&v) || before.zone == ZoneId::Hand(v))
             .collect();
         self.forget_unobserved(zones, before.zone, before.card, &observed);
-        // CR 401.2: a library is one face-down pile whose order players can't look at; dropping
-        // the entries of shifted objects is the engine's own conservative policy.
+        // CR 401.2: a library is one face-down pile whose order players can't look at; keeping
+        // positions only for viewers who know the removal index is the engine's own policy.
         if before.zone == ZoneId::Library(owner) {
-            self.prune_library(zones, owner);
+            self.apply_library_change(zones, &[owner], index_known_by, Some(before.id), |_| true);
         }
         Ok(())
     }
