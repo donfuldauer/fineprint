@@ -17,10 +17,11 @@
 //! **Position knowledge** (SRS 2.4 `KnownPositions`). Per (viewer, library owner), a map from
 //! library index (0 is the top) to the object the viewer knows is there. Entries are filtered
 //! lazily against the live library ([`Knowledge::position_known`]) and pruned when a library
-//! changes through [`Knowledge::on_move`] or [`Knowledge::on_library_changed`], so a stale
-//! entry never reports a position.
+//! changes through [`Knowledge::on_move`], [`Knowledge::on_removed_from_hidden_zone`] or
+//! [`Knowledge::on_library_changed`], so a stale entry never reports a position.
 //!
 //! **Unobserved hidden moves.** When an object leaves a library or a hand for another zone,
+//! or is removed from one ([`Knowledge::on_removed_from_hidden_zone`]),
 //! a player who did not observe the move (see [`Knowledge::on_move_observed`]) forgets every
 //! card of the source zone and the moved card, and their position entries for a source
 //! library: they cannot tell which member of the set they knew moved, so the view must leave
@@ -57,11 +58,14 @@
 //! - after every [`Zones::move_object`](crate::zones::Zones::move_object), call
 //!   [`Knowledge::on_move_observed`] with the players who watched the move (or
 //!   [`Knowledge::on_move`] when nobody is recorded as watching);
-//! - after every other change that inserts into or removes from a library
+//! - after every [`Zones::send_outside`](crate::zones::Zones::send_outside) of a library or
+//!   hand object, call [`Knowledge::on_removed_from_hidden_zone`] with the record copied
+//!   before the removal and the players who watched which card left: the other players forget
+//!   the candidates as for an unobserved move, and the library's position entries are pruned;
+//! - after every other insertion into a library
 //!   ([`Zones::create_object`](crate::zones::Zones::create_object) or
-//!   [`Zones::enter_from_outside`](crate::zones::Zones::enter_from_outside) into a library,
-//!   [`Zones::send_outside`](crate::zones::Zones::send_outside) of a library card), call
-//!   [`Knowledge::on_library_changed`] for that library: after a change at index `n`
+//!   [`Zones::enter_from_outside`](crate::zones::Zones::enter_from_outside) into a library),
+//!   call [`Knowledge::on_library_changed`] for that library: after an insertion at index `n`
 //!   (0 is the top), position entries with an index `>= n` are dropped because their objects
 //!   shifted, and entries with an index `< n` are kept.
 
