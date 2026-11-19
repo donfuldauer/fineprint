@@ -1866,13 +1866,16 @@ fn req_event_002_mapping_remaining_rows() {
             same(EventKind::Untapped, 2),
             same(EventKind::TurnedFaceUp, 3),
             // CR 111.2: the creator is the owner; the controller is its own field.
+            // CR 701.7a, CR 603.6a: `to` is the battlefield; no `from`.
             TriggerEvent::new(vec![EventKind::TokenCreated, EventKind::Enters])
                 .with_object(None, Some(o(20)))
                 .with_player(p(1))
+                .with_field("to", zone_val(Zone::Battlefield))
                 .with_field("controller", EventField::Player(p(2))),
             TriggerEvent::new(vec![EventKind::TokenCreated, EventKind::Enters])
                 .with_object(None, Some(o(21)))
                 .with_player(p(1))
+                .with_field("to", zone_val(Zone::Battlefield))
                 .with_field("controller", EventField::Player(p(1))),
             same(EventKind::Attached, 5),
             same(EventKind::Unattached, 5),
@@ -2574,4 +2577,314 @@ fn req_event_002_waiting_queue() {
     );
     assert!(q.is_empty());
     assert!(q.take_all().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 2 (REQ-EVENT-002)
+// ---------------------------------------------------------------------------------------------
+
+/// A [`FakeEnv`] whose sources in `alive` survive the batch (e.g. phased out, CR 702.26d) even
+/// when no post-event registration lists them. Records every `source_survives` query.
+struct SurvivesEnv {
+    inner: FakeEnv,
+    alive: BTreeSet<ObjectId>,
+    asked: RefCell<Vec<ObjectId>>,
+}
+
+impl TriggerEnv for SurvivesEnv {
+    fn registrations(&self, view: StateView) -> Vec<TriggerRegistration> {
+        self.inner.registrations(view)
+    }
+
+    fn object_matches(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        object: ObjectId,
+        selector: &ObjectSelectorAST,
+    ) -> bool {
+        self.inner.object_matches(view, reg, object, selector)
+    }
+
+    fn player_matches(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        player: PlayerId,
+        group: &PlayerGroup,
+    ) -> bool {
+        self.inner.player_matches(view, reg, player, group)
+    }
+
+    fn predicate_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        pred: &PredicateAST,
+        field: Option<&EventField>,
+    ) -> bool {
+        self.inner.predicate_holds(view, reg, pred, field)
+    }
+
+    fn condition_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        self.inner.condition_holds(view, reg, pred, bindings)
+    }
+
+    fn is_visible_to_all(&self, object: ObjectId) -> bool {
+        self.inner.is_visible_to_all(object)
+    }
+
+    fn source_survives(&self, source: ObjectId) -> bool {
+        self.asked.borrow_mut().push(source);
+        self.alive.contains(&source)
+    }
+}
+
+// REQ-EVENT-002: CR 603.2h, CR 603.10b, CR 702.26d. A perGame:1 phases-out ability whose source
+// phases out (so it is listed only pre-event) still exists: its use is recorded, and the next
+// phase-out does not trigger it again.
+#[test]
+fn req_event_002_cr_702_26d_phased_out_source_keeps_limit() {
+    let phased = TriggerEvent::new(vec![EventKind::PhasedOut]).with_object(Some(o(5)), Some(o(5)));
+    let r = limited(
+        reg(
+            5,
+            1,
+            "a1",
+            with_subject(
+                matcher(EventKind::PhasedOut),
+                EventSubject::Object(self_sel()),
+            ),
+        ),
+        None,
+        Some(1),
+    );
+    let env = SurvivesEnv {
+        inner: FakeEnv::new().pre(r),
+        alive: BTreeSet::from([o(5)]),
+        asked: RefCell::new(Vec::new()),
+    };
+    let mut memory = MemoryTable::new();
+    let first = detect_with_pre_event_memory(
+        &env,
+        &MemoryTable::new(),
+        &mut memory,
+        1,
+        &[phased.clone(), phased.clone()],
+    );
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].look_back, Some(LookBackKind::PhasedOut));
+    // Asked once per source per call (cached).
+    assert_eq!(*env.asked.borrow(), vec![o(5)]);
+    assert_eq!(
+        memory
+            .get(o(5))
+            .unwrap()
+            .choice("trigger.limit.game_count:a1"),
+        Some(&ChoiceValue::Number(1))
+    );
+    // It phases in and out again later: the pre-event Memory holds the used limit.
+    let pre_memory = memory.clone();
+    let second = detect_with_pre_event_memory(
+        &env,
+        &pre_memory,
+        &mut memory,
+        2,
+        std::slice::from_ref(&phased),
+    );
+    assert!(second.is_empty());
+}
+
+// REQ-EVENT-002: CR 400.7, CR 603.2h. A source retired by a zone change (source_survives false)
+// still triggers but gets no Memory entry.
+#[test]
+fn req_event_002_cr_400_7_retired_source_gets_no_entry() {
+    let phased = TriggerEvent::new(vec![EventKind::PhasedOut]).with_object(Some(o(5)), Some(o(5)));
+    let r = limited(
+        reg(5, 1, "a1", matcher(EventKind::PhasedOut)),
+        None,
+        Some(1),
+    );
+    let env = SurvivesEnv {
+        inner: FakeEnv::new().pre(r),
+        alive: BTreeSet::new(),
+        asked: RefCell::new(Vec::new()),
+    };
+    let mut memory = MemoryTable::new();
+    let got = detect_with_pre_event_memory(
+        &env,
+        &MemoryTable::new(),
+        &mut memory,
+        1,
+        std::slice::from_ref(&phased),
+    );
+    assert_eq!(got.len(), 1);
+    assert!(memory.get(o(5)).is_none());
+    assert_eq!(*env.asked.borrow(), vec![o(5)]);
+}
+
+// REQ-EVENT-002: CR 603.2h. The default `source_survives` is post-event registration
+// membership by source: a source listed post-event (under any ability) survives, one listed
+// only pre-event does not.
+#[test]
+fn req_event_002_default_source_survives_is_post_event_membership() {
+    let r = limited(
+        reg(5, 1, "a1", matcher(EventKind::PhasedOut)),
+        None,
+        Some(1),
+    );
+    let pre_only = FakeEnv::new().pre(r.clone());
+    assert!(!pre_only.source_survives(o(5)));
+    let other_ability =
+        FakeEnv::new()
+            .pre(r.clone())
+            .post(reg(5, 1, "b1", matcher(EventKind::Tapped)));
+    assert!(other_ability.source_survives(o(5)));
+    assert!(!other_ability.source_survives(o(6)));
+    let phased = TriggerEvent::new(vec![EventKind::PhasedOut]).with_object(Some(o(5)), Some(o(5)));
+    let mut memory = MemoryTable::new();
+    assert_eq!(
+        detect(&pre_only, &mut memory, 1, std::slice::from_ref(&phased)).len(),
+        1
+    );
+    assert!(memory.get(o(5)).is_none());
+    let mut memory = MemoryTable::new();
+    assert_eq!(
+        detect(
+            &other_ability,
+            &mut memory,
+            1,
+            std::slice::from_ref(&phased)
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        memory
+            .get(o(5))
+            .unwrap()
+            .choice("trigger.limit.game_count:a1"),
+        Some(&ChoiceValue::Number(1))
+    );
+}
+
+// REQ-EVENT-002: CR 701.9a, CR 701.17a. A discard or mill's subject player is the owner of the
+// hand or library the card left; other causes (except sacrifice) have none.
+#[test]
+fn req_event_002_cr_701_9a_701_17a_discard_mill_subject_player() {
+    let discard = one(zone_change_exec(
+        1,
+        2,
+        ZoneId::Hand(p(2)),
+        ZoneId::Graveyard(p(2)),
+        ZoneChangeCause::Discard,
+    ))
+    .remove(0);
+    assert_eq!(discard.subject_player, Some(p(2)));
+    assert_eq!(
+        (discard.subject_pre, discard.subject_post),
+        (Some(o(1)), Some(o(2)))
+    );
+    assert_eq!(
+        kinds_set(&discard),
+        BTreeSet::from([
+            EventKind::ZoneChange,
+            EventKind::PutIntoGraveyard,
+            EventKind::Discarded
+        ])
+    );
+    assert_eq!(discard.fields.get("from"), Some(&zone_val(Zone::Hand)));
+    assert_eq!(discard.fields.get("to"), Some(&zone_val(Zone::Graveyard)));
+    let mill = one(zone_change_exec(
+        3,
+        4,
+        ZoneId::Library(p(2)),
+        ZoneId::Graveyard(p(2)),
+        ZoneChangeCause::Mill,
+    ))
+    .remove(0);
+    assert_eq!(mill.subject_player, Some(p(2)));
+    assert_eq!(
+        (mill.subject_pre, mill.subject_post),
+        (Some(o(3)), Some(o(4)))
+    );
+    assert_eq!(
+        kinds_set(&mill),
+        BTreeSet::from([
+            EventKind::ZoneChange,
+            EventKind::PutIntoGraveyard,
+            EventKind::Milled
+        ])
+    );
+    // A source zone with no owner gives no subject player.
+    let odd = one(zone_change_exec(
+        5,
+        6,
+        ZoneId::Battlefield,
+        ZoneId::Graveyard(p(1)),
+        ZoneChangeCause::Discard,
+    ))
+    .remove(0);
+    assert_eq!(odd.subject_player, None);
+    // Destroy keeps no subject player.
+    let destroyed = one(zone_change_exec(
+        7,
+        8,
+        ZoneId::Battlefield,
+        ZoneId::Graveyard(p(2)),
+        ZoneChangeCause::Destroy,
+    ))
+    .remove(0);
+    assert_eq!(destroyed.subject_player, None);
+    // A Players-subject DISCARDED matcher triggers for P2 and not for P1.
+    let m = with_subject(
+        matcher(EventKind::Discarded),
+        EventSubject::Players(PlayerGroup::AllPlayers),
+    );
+    let mut env = FakeEnv::new().both(reg(9, 1, "a1", m));
+    env.players.insert((StateView::PostEvent, p(2)));
+    env.players.insert((StateView::PreEvent, p(2)));
+    assert_eq!(run(&env, std::slice::from_ref(&discard)).len(), 1);
+    env.players.clear();
+    env.players.insert((StateView::PostEvent, p(1)));
+    env.players.insert((StateView::PreEvent, p(1)));
+    assert!(run(&env, &[discard]).is_empty());
+}
+
+// REQ-EVENT-002: CR 603.6a, CR 701.7a. A created token's occurrence has `to` = battlefield and
+// no `from`: an ENTERS matcher filtered on to: BATTLEFIELD matches it, one filtered on
+// from: GRAVEYARD does not.
+#[test]
+fn req_event_002_cr_701_7a_token_enters_to_battlefield() {
+    let tes = one(executed(
+        GameEvent::CreateToken {
+            owner: p(1),
+            card: CardId::new(9),
+            controller: None,
+        },
+        Outcome::TokenCreated { object: o(20) },
+    ));
+    assert_eq!(tes.len(), 1);
+    assert_eq!(tes[0].fields.get("to"), Some(&zone_val(Zone::Battlefield)));
+    assert!(!tes[0].fields.contains_key("from"));
+    assert!(!tes[0].kinds.contains(&EventKind::ZoneChange));
+    let to_bf = with_filter(
+        matcher(EventKind::Enters),
+        "to",
+        FilterValue::Zone(Zone::Battlefield),
+    );
+    let got = run(&FakeEnv::new().post(reg(9, 1, "a1", to_bf)), &tes);
+    assert_eq!(got.len(), 1);
+    let from_gy = with_filter(
+        matcher(EventKind::Enters),
+        "from",
+        FilterValue::Zone(Zone::Graveyard),
+    );
+    assert!(run(&FakeEnv::new().post(reg(9, 1, "a1", from_gy)), &tes).is_empty());
 }
