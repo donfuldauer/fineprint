@@ -188,3 +188,6 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 02-state-objects | #25 (PR #174 review round 6) | Classifier | Sonnet 5.5 | 1 | routed | — | pre-merge Linked Issues check: SRS 2.4 shuffle clears all positions; Orchestrator decision to conform; T1 two briefs |
 | 02-state-objects | #25 (PR #174 review round 6) | Fixer (src) | Sonnet 5.5 | 1 | done | lib tests 300 passed; clippy, rustfmt, guard clean | shuffle_library clears every viewer's entries; shuffle_library_disclosed removed |
 | 02-state-objects | #25 (PR #174 review round 6) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_knowledge_* all pass; clippy, rustfmt, guard clean | shuffle emptiness, excluded twin, resurrection probe; seeds 8 -> 16 |
+| 02-state-objects | #26 | Classifier | Opus 5.5 | 1 | routed | — | module blast radius, complex; T2 two briefs; no rules questions |
+| 02-state-objects | #26 | Implementer | Opus 5.5 | 1 | done | cargo test --workspace 1835 passed; fmt, clippy, guard clean; fineprint-core coverage 99.67% | txn module + 26 unit tests; 4 decisions; `pub mod txn;` in lib.rs |
+| 02-state-objects | #26 | Independent Tester | Opus 5.5 | 1 | done | spec_txn_* 48 passed; fmt, clippy, guard clean | no suspected defects; 1 decision entry |
