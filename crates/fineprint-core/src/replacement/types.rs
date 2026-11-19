@@ -275,13 +275,14 @@ impl CanonicalEncode for AmountOp {
     }
 }
 
-/// A rewrite of an event (REQ-EVENT-001, CR 614.1).
+/// A rewrite of an event (REQ-EVENT-001, CR 614.6).
 ///
 /// Canonical tags: `SetDestination` 0, `SetController` 1, `SetFaceDown` 2, `Amount` 3,
 /// `EntersAsCopyOf` 4, then the operand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modification {
-    /// `ZoneChange`: the destination zone kind; the rest of the request is kept.
+    /// `ZoneChange`: the destination zone kind; the rest of the request is kept, except that
+    /// the controller is cleared for a zone other than the battlefield and the stack.
     SetDestination(ZoneKind),
     /// `ZoneChange`/`CreateToken`: the controller it enters under.
     SetController(PlayerId),
@@ -290,8 +291,9 @@ pub enum Modification {
     /// `Damage`/`AddCounters`/`RemoveCounters`: the amount; `LifeChange`: the magnitude (sign
     /// kept). A result of 0 drops the event.
     Amount(AmountOp),
-    /// `ZoneChange` to the battlefield or `CreateToken`: after the event executes, a child
-    /// `BecomeCopy` of the new object is submitted to the bus.
+    /// `ZoneChange` to the battlefield or `CreateToken` (CR 614.1c): the new object becomes a
+    /// copy as part of its entry; the `BecomeCopy` is executed right after the entry, as its
+    /// own batch, without replacement collection.
     EntersAsCopyOf(ObjectId),
 }
 
@@ -323,7 +325,8 @@ impl CanonicalEncode for Modification {
     }
 }
 
-/// What a replacement or prevention effect does to the event (REQ-EVENT-001, CR 614.1, CR 615).
+/// What a replacement or prevention effect does to the event (REQ-EVENT-001, CR 614.6,
+/// CR 615.6).
 ///
 /// Canonical tags: `Modify` 0, `Skip` 1, `Instead` 2, `Prevent` 3, then the fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,10 +335,12 @@ pub enum Action {
     Modify(Modification),
     /// The event does not happen.
     Skip,
-    /// The event does not happen; these child events are submitted to the bus.
+    /// The event does not happen; these child events are submitted to the bus as the
+    /// modified event, keeping its applied effects (CR 614.5, CR 614.6).
     Instead(Vec<GameEvent>),
-    /// `Damage` only (CR 615): prevents all the damage (or, with [`Shield::Pool`], up to the
-    /// pool); the `then` child events are submitted to the bus.
+    /// `Damage` only (CR 615.6): prevents all the damage (or, with [`Shield::Pool`], up to the
+    /// pool, CR 615.7); the `then` child events are new events submitted to the bus
+    /// (CR 615.5).
     Prevent {
         /// Child events submitted after the batch executes.
         then: Vec<GameEvent>,
@@ -363,7 +368,8 @@ impl CanonicalEncode for Action {
     }
 }
 
-/// A use limit (REQ-EVENT-001, CR 615): the remaining uses or the remaining damage pool.
+/// A use limit (REQ-EVENT-001, CR 615.7, CR 615.8): the remaining uses or the remaining
+/// damage pool.
 ///
 /// Canonical tags: `Uses` 0 then the `u32`; `Pool` 1 then the `i64`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,7 +396,7 @@ impl CanonicalEncode for Shield {
     }
 }
 
-/// One replacement or prevention effect in force (REQ-EVENT-001, CR 614, CR 615).
+/// One replacement or prevention effect in force (REQ-EVENT-001, CR 614.6, CR 615.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplacementEffect {
     /// Its id; the registry orders by it.
@@ -524,11 +530,11 @@ impl ReplacementEffect {
         .with_description("shield counter: destruction")
     }
 
-    /// The damage half of a shield counter (CR 122.1c, CR 615): if damage would be dealt to
+    /// The damage half of a shield counter (CR 122.1c, CR 615.1): if damage would be dealt to
     /// `object`, prevent it and remove a shield counter from it.
     #[must_use]
     pub fn shield_counter_damage(id: EffectId, object: ObjectId) -> Self {
-        // CR 122.1c, CR 615
+        // CR 122.1c, CR 615.1
         let matcher = EventMatcher {
             affected_object: Some(object),
             requires_counter: Some((object, SHIELD.to_owned())),
@@ -546,7 +552,8 @@ impl ReplacementEffect {
     }
 
     /// A stun counter (CR 122.1d): if `object` would become untapped, instead remove a stun
-    /// counter from it.
+    /// counter from it. An untap of an untapped permanent is no event (CR 701.26b), so the bus
+    /// offers no effect for it and the counter stays.
     #[must_use]
     pub fn stun_counter(id: EffectId, object: ObjectId) -> Self {
         // CR 122.1d
@@ -742,6 +749,9 @@ pub enum BusError {
     DepthExceeded,
     /// More than [`MAX_REPEATS`](super::MAX_REPEATS) applications to one event.
     RepeatLimit,
+    /// More than [`MAX_BUS_EVENTS`](super::MAX_BUS_EVENTS) event instances taken up in one
+    /// call (the submitted batch and every child event).
+    WorkLimit,
 }
 
 impl fmt::Display for BusError {
@@ -760,6 +770,11 @@ impl fmt::Display for BusError {
                 f,
                 "more than {} replacement applications to one event",
                 super::MAX_REPEATS
+            ),
+            BusError::WorkLimit => write!(
+                f,
+                "more than {} events taken up by one bus call",
+                super::MAX_BUS_EVENTS
             ),
         }
     }
