@@ -268,3 +268,6 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 6) | Independent Tester | Opus 5.5 | 1 | done | 178 spec tests pass; fmt, clippy clean | spec_replacement_round6.rs; terminating chain re-specced (R10) |
 | 03-events | #29 (PR #178 review round 6) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
 | 03-events | #29 (PR #178 review rounds 5-6) | Verifier | Sonnet 5.5 | 1 | pass | 4f26359: workspace 2452 tests pass; fmt, clippy, coverage floors, guard, cr check ok | traced every finding of r5/r6 briefs to a passing test; R10 evidence present |
+| 03-events | #29 (PR #178 review round 6b) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 108 passed; fmt, clippy, guard clean | lineage-path schedule_key (r4633092145); unit work-budget test covers DepthExceeded and WorkLimit (R10) |
+| 03-events | #29 (PR #178 review round 6b) | Independent Tester | Opus 5.5 | 1 | done | all spec_replacement_* pass; round6 11/11 x3 | grandchild spec test; F7 re-specced as depth-or-work limit (R10) |
+| 03-events | #29 (PR #178 review round 6b) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |

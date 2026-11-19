@@ -9,6 +9,8 @@
 //!   `Instead` descendant of them are resolved one at a time in APNAP order of the event's
 //!   chooser, then submission position; a descendant takes the position of the event it replaces
 //!   and is resolved as soon as it is the earliest unresolved one after that event.
+//!   Recursively (thread r4633092145): a descendant's position is its parent's position followed
+//!   by its index in the parent's `Instead` list, so lineages expand depth-first.
 //! * D2 (thread r4632671485; CR 101.3, 614.6, 400.7, 701.3b, 608.2h): in a later batch of the
 //!   same call an event is ignored if it names, as its affected object, an `Attach` host or a
 //!   `BecomeCopy.copied` object, an object an earlier executed batch moved; the rest of that
@@ -276,6 +278,63 @@ fn req_event_001_r6_d1_direct_submission_order_unchanged() {
     assert!(r.result.is_ok(), "{:?}", r.result);
     assert_eq!(r.world().life(P1), STARTING_LIFE + 2, "P1");
     assert_eq!(r.world().life(P2), STARTING_LIFE + 1, "P2");
+}
+
+// REQ-EVENT-001, REQ-CORE-001, CR 616.1, 101.4 (D1, thread r4633092145): a descendant takes the
+// exact position of the event it replaces, recursively (its parent's position followed by its
+// index in the parent's `Instead` list). T, U are player 1's; e1: Tap T -> Instead[Tap U, P1
+// gains 3]; e2: Tap U -> Instead[P1 gains 1]; e9: a one-use doubling of a player-1 gain. The
+// grandchild gain of 1 sits at Tap U's position, before the gain of 3, so it is doubled: P1 ends
+// at +5 (2 + 3), applications [e1, e2, e9]. Control with e1's list [P1 gains 3, Tap U]: the gain
+// of 3 is doubled, +7, applications [e1, e9, e2]. A gain of player 2 submitted before or after
+// Tap T changes neither result.
+#[test]
+fn req_event_001_r6_lineage_grandchild_takes_parent_position() {
+    let base = |tap_u_first: bool| {
+        let mut w = World::new();
+        let t = w.create(ZoneKind::Battlefield, P1);
+        let u = w.create(ZoneKind::Battlefield, P1);
+        let list = if tap_u_first {
+            vec![tap(u), life_change(P1, 3)]
+        } else {
+            vec![life_change(P1, 3), tap(u)]
+        };
+        let p1_doubler = fx(
+            9,
+            EventMatcher {
+                affected_player: Some(P1),
+                ..EventMatcher::new(BusEventKind::LifeChange)
+            },
+            Action::Modify(Modification::Amount(AmountOp::Mul(2))),
+        )
+        .with_shield(Shield::Uses(1));
+        let effects = vec![
+            fx(
+                1,
+                object_matcher(BusEventKind::Tap, t),
+                Action::Instead(list),
+            ),
+            tap_to_gain(2, u, P1, 1),
+            p1_doubler,
+        ];
+        (Bus::new(w, effects), t)
+    };
+    for (tap_u_first, p1, apps) in [(true, 5, [1, 2, 9]), (false, 7, [1, 9, 2])] {
+        let (bus, t) = base(tap_u_first);
+        for events in [
+            vec![tap(t)],
+            vec![tap(t), life_change(P2, 1)],
+            vec![life_change(P2, 1), tap(t)],
+        ] {
+            let what = format!("Tap U first: {tap_u_first}, {events:?}");
+            let p2 = i64::from(events.len() == 2);
+            let r = batch_twice(&bus, events, false);
+            assert!(r.result.is_ok(), "{what}: {:?}", r.result);
+            assert_eq!(r.world().life(P1), STARTING_LIFE + p1, "{what}: P1");
+            assert_eq!(r.world().life(P2), STARTING_LIFE + p2, "{what}: P2");
+            assert_eq!(r.applications(), eids(&apps), "{what}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
