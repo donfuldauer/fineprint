@@ -10,6 +10,7 @@
 #[path = "spec_triggers_stack_support.rs"]
 mod support;
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use fineprint_base::ids::{ObjectId, PlayerId};
@@ -152,7 +153,7 @@ fn req_event_002_delayed_one_shot_triggers_once() {
     assert!(dt.is_empty());
     assert!(dt.registrations().is_empty());
     assert!(dt.take_triggered(&CondEnv::new(), 1, &waiting).is_empty());
-    assert_eq!(dt.fire(id, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, id), None);
     assert!(!dt.cancel(id));
 }
 
@@ -218,18 +219,18 @@ fn req_event_002_delayed_fire_and_cancel() {
     let lasting = dt.register(oid(8), P1, delayed_ability(), BTreeMap::new(), false);
     let gone = dt.register(oid(7), P1, delayed_ability(), BTreeMap::new(), false);
     assert!(dt.cancel(gone));
-    assert_eq!(dt.fire(gone, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, gone), None);
 
-    let p = dt.fire(once, 1).expect("fires");
+    let p = dt.fire(&FireEnv::new(true), 1, once).expect("fires");
     assert_eq!(p.origin, TriggerOrigin::Delayed);
     assert_eq!(p.source, Some(oid(9)));
     assert_eq!(p.controller, P2);
     assert_eq!(p.ability_id, s("delayed#0"));
     assert_eq!(p.bindings, captured);
-    assert_eq!(dt.fire(once, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, once), None);
 
     for _ in 0..2 {
-        let p = dt.fire(lasting, 1).expect("fires");
+        let p = dt.fire(&FireEnv::new(true), 1, lasting).expect("fires");
         assert_eq!(p.ability_id, s("delayed#1"));
         assert_eq!(p.controller, P1);
         assert!(p.bindings.is_empty());
@@ -252,7 +253,7 @@ fn req_event_002_delayed_copies_ability_fields() {
     let mut dt = DelayedTriggers::new();
     let id = dt.register(oid(9), P2, a, BTreeMap::new(), false);
     for p in [
-        dt.fire(id, 1).expect("fires"),
+        dt.fire(&FireEnv::new(true), 1, id).expect("fires"),
         dt.take_triggered(
             &CondEnv::new(),
             1,
@@ -769,9 +770,9 @@ fn req_event_002_fire_per_game_limit() {
         BTreeMap::new(),
         false,
     );
-    assert!(dt.fire(id, 1).is_some());
-    assert_eq!(dt.fire(id, 1), None);
-    assert_eq!(dt.fire(id, 2), None);
+    assert!(dt.fire(&FireEnv::new(true), 1, id).is_some());
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, id), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 2, id), None);
     assert_eq!(dt.len(), 1);
 }
 
@@ -786,9 +787,9 @@ fn req_event_002_fire_per_turn_limit_resets() {
         BTreeMap::new(),
         false,
     );
-    assert!(dt.fire(id, 5).is_some());
-    assert_eq!(dt.fire(id, 5), None);
-    assert!(dt.fire(id, 6).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 5, id).is_some());
+    assert_eq!(dt.fire(&FireEnv::new(true), 5, id), None);
+    assert!(dt.fire(&FireEnv::new(true), 6, id).is_some());
 }
 
 /// REQ-EVENT-002; CR 603.2h: per-turn limit 2: two fires then none in one turn; again in the next.
@@ -802,12 +803,12 @@ fn req_event_002_fire_per_turn_limit_two() {
         BTreeMap::new(),
         false,
     );
-    assert!(dt.fire(id, 3).is_some());
-    assert!(dt.fire(id, 3).is_some());
-    assert_eq!(dt.fire(id, 3), None);
-    assert!(dt.fire(id, 4).is_some());
-    assert!(dt.fire(id, 4).is_some());
-    assert_eq!(dt.fire(id, 4), None);
+    assert!(dt.fire(&FireEnv::new(true), 3, id).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 3, id).is_some());
+    assert_eq!(dt.fire(&FireEnv::new(true), 3, id), None);
+    assert!(dt.fire(&FireEnv::new(true), 4, id).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 4, id).is_some());
+    assert_eq!(dt.fire(&FireEnv::new(true), 4, id), None);
 }
 
 /// REQ-EVENT-002; CR 603.2h: the counters are shared: a triggering counted through
@@ -824,8 +825,8 @@ fn req_event_002_fire_limit_shared_take_then_fire() {
     );
     let out = detect_and_take(&mut dt, 5, &[gain(2)]);
     assert_eq!(out.len(), 1);
-    assert_eq!(dt.fire(id, 5), None);
-    assert_eq!(dt.fire(id, 6), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 5, id), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 6, id), None);
 }
 
 /// REQ-EVENT-002; CR 603.2h: the reverse: a triggering counted by `fire` makes `take_triggered`
@@ -840,7 +841,7 @@ fn req_event_002_fire_limit_shared_fire_then_take() {
         BTreeMap::new(),
         false,
     );
-    assert!(dt.fire(id, 5).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 5, id).is_some());
     assert!(detect_and_take(&mut dt, 5, &[gain(2)]).is_empty());
     assert!(detect_and_take(&mut dt, 6, &[gain(2)]).is_empty());
 }
@@ -857,9 +858,9 @@ fn req_event_002_fire_one_shot_refused_by_limit_is_kept() {
         BTreeMap::new(),
         true,
     );
-    assert_eq!(dt.fire(id, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, id), None);
     assert_eq!(dt.len(), 1);
-    assert_eq!(dt.fire(id, 2), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 2, id), None);
     assert_eq!(dt.len(), 1);
 }
 
@@ -868,9 +869,9 @@ fn req_event_002_fire_one_shot_refused_by_limit_is_kept() {
 fn req_event_002_fire_one_shot_without_limit_removed() {
     let mut dt = DelayedTriggers::new();
     let id = dt.register(oid(9), P2, delayed_ability(), BTreeMap::new(), true);
-    assert!(dt.fire(id, 1).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 1, id).is_some());
     assert!(dt.is_empty());
-    assert_eq!(dt.fire(id, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, id), None);
 }
 
 /// REQ-EVENT-002; CR 603.7b: a one-shot with room under its limit is removed once it fires.
@@ -884,7 +885,7 @@ fn req_event_002_fire_one_shot_with_limit_removed_on_success() {
         BTreeMap::new(),
         true,
     );
-    assert!(dt.fire(id, 1).is_some());
+    assert!(dt.fire(&FireEnv::new(true), 1, id).is_some());
     assert!(dt.is_empty());
 }
 
@@ -900,6 +901,297 @@ fn req_event_002_fire_unknown_or_cancelled_id() {
         false,
     );
     assert!(dt.cancel(id));
-    assert_eq!(dt.fire(id, 1), None);
-    assert_eq!(DelayedTriggers::new().fire(id, 1), None);
+    assert_eq!(dt.fire(&FireEnv::new(true), 1, id), None);
+    assert_eq!(
+        DelayedTriggers::new().fire(&FireEnv::new(true), 1, id),
+        None
+    );
+}
+
+// =============================================================================================
+// `fire` evaluates the intervening "if" before counting the limit (CR 603.4, 603.2h, 603.7b)
+// =============================================================================================
+
+/// One recorded `condition_holds` call.
+type FireCall = (StateView, TriggerRegistration, BTreeMap<String, EventField>);
+
+/// An environment whose `condition_holds` answer can be switched and whose calls are recorded.
+struct FireEnv {
+    holds: Cell<bool>,
+    calls: RefCell<Vec<FireCall>>,
+}
+
+impl FireEnv {
+    fn new(holds: bool) -> FireEnv {
+        FireEnv {
+            holds: Cell::new(holds),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl TriggerEnv for FireEnv {
+    fn registrations(&self, _view: StateView) -> Vec<TriggerRegistration> {
+        Vec::new()
+    }
+
+    fn object_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _object: ObjectId,
+        _selector: &ObjectSelectorAST,
+    ) -> bool {
+        true
+    }
+
+    fn player_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _player: PlayerId,
+        _group: &PlayerGroup,
+    ) -> bool {
+        true
+    }
+
+    fn predicate_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _field: Option<&EventField>,
+    ) -> bool {
+        false
+    }
+
+    fn condition_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        self.calls
+            .borrow_mut()
+            .push((view, reg.clone(), bindings.clone()));
+        self.holds.get()
+    }
+
+    fn is_visible_to_all(&self, _object: ObjectId) -> bool {
+        true
+    }
+}
+
+/// An ability with an intervening "if" and the given limit.
+fn if_limit_ability(per_turn: Option<u32>, per_game: Option<u32>) -> TriggeredAbilityAST {
+    let mut a = if_ability();
+    a.limit = Some(ActivationLimit { per_turn, per_game });
+    a
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.2h, 603.7b: per-game limit 1, duration registration: false
+/// occurrences do not use up the limit, so the first true one fires and the next true one does not.
+#[test]
+fn req_event_002_fire_if_false_before_true_per_game() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(None, Some(1)),
+        BTreeMap::new(),
+        false,
+    );
+    let no = FireEnv::new(false);
+    let yes = FireEnv::new(true);
+    assert_eq!(dt.fire(&no, 1, id), None);
+    assert_eq!(dt.fire(&no, 1, id), None);
+    assert_eq!(dt.len(), 1);
+    assert!(dt.fire(&yes, 1, id).is_some());
+    assert_eq!(dt.fire(&yes, 1, id), None);
+    assert_eq!(dt.fire(&yes, 2, id), None);
+    assert_eq!(dt.len(), 1);
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.2h: per-turn limit 1: a false occurrence in turn 5 counts nothing;
+/// one true occurrence fires, the next in the same turn does not, and turn 6 fires again.
+#[test]
+fn req_event_002_fire_if_false_before_true_per_turn() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let no = FireEnv::new(false);
+    let yes = FireEnv::new(true);
+    assert_eq!(dt.fire(&no, 5, id), None);
+    assert!(dt.fire(&yes, 5, id).is_some());
+    assert_eq!(dt.fire(&yes, 5, id), None);
+    assert!(dt.fire(&yes, 6, id).is_some());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7b: a one-shot whose condition is false returns None and stays
+/// registered; a later true occurrence fires it and removes it.
+#[test]
+fn req_event_002_fire_if_false_one_shot_kept_until_true() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(oid(9), P2, if_ability(), BTreeMap::new(), true);
+    assert_eq!(dt.fire(&FireEnv::new(false), 1, id), None);
+    assert_eq!(dt.len(), 1);
+    assert!(dt.fire(&FireEnv::new(true), 1, id).is_some());
+    assert_eq!(dt.len(), 0);
+    assert!(dt.is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.2h, 603.7b: a one-shot with a limit and a false condition is kept
+/// and counts nothing, so it still fires once the condition holds.
+#[test]
+fn req_event_002_fire_if_false_one_shot_with_limit_not_counted() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(None, Some(1)),
+        BTreeMap::new(),
+        true,
+    );
+    assert_eq!(dt.fire(&FireEnv::new(false), 1, id), None);
+    assert_eq!(dt.len(), 1);
+    assert!(dt.fire(&FireEnv::new(true), 1, id).is_some());
+    assert!(dt.is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7c: `fire` asks the post-event view, with exactly the captured
+/// bindings and the registration of the delayed trigger (`delayed#<n>`, the "if" kept, no limit).
+#[test]
+fn req_event_002_fire_if_condition_inputs() {
+    let mut dt = DelayedTriggers::new();
+    let _first = dt.register(oid(4), P1, delayed_ability(), BTreeMap::new(), false);
+    let captured = binds(&[
+        ("x", EventField::Object(oid(5))),
+        ("n", vint(3)),
+        ("p", EventField::Player(P1)),
+    ]);
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(Some(1), Some(1)),
+        captured.clone(),
+        false,
+    );
+    assert_eq!(id.get(), 1);
+    let env = FireEnv::new(true);
+    let p = dt.fire(&env, 7, id).expect("fires");
+    assert_eq!(p.bindings, captured);
+    assert_eq!(p.ability_id, s("delayed#1"));
+    assert_eq!(p.controller, P2);
+    assert_eq!(p.source, Some(oid(9)));
+    let calls = env.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    let (view, reg, bindings) = &calls[0];
+    assert_eq!(*view, StateView::PostEvent);
+    assert_eq!(*bindings, captured);
+    assert_eq!(reg.ability.base.ability_id, s("delayed#1"));
+    assert_eq!(reg.source, oid(9));
+    assert_eq!(reg.controller, P2);
+    assert!(reg.ability.intervening_if.is_some());
+    assert_eq!(reg.ability.limit, None);
+}
+
+/// REQ-EVENT-002; CR 603.4: a registration without an intervening "if" never consults the
+/// condition from `fire`; the per-turn limit still applies and resets with the turn.
+#[test]
+fn req_event_002_fire_no_if_never_consults_condition_per_turn() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        fire_ability(Some(2), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = FireEnv::new(false);
+    assert!(dt.fire(&env, 3, id).is_some());
+    assert!(dt.fire(&env, 3, id).is_some());
+    assert_eq!(dt.fire(&env, 3, id), None);
+    assert!(dt.fire(&env, 4, id).is_some());
+    assert!(env.calls.borrow().is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.2h, 603.7b: without an "if", a one-shot refused by `per_game: 0`
+/// returns None, stays registered, and the condition is never consulted.
+#[test]
+fn req_event_002_fire_no_if_one_shot_per_game_zero_kept() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        fire_ability(None, Some(0)),
+        BTreeMap::new(),
+        true,
+    );
+    let env = FireEnv::new(true);
+    assert_eq!(dt.fire(&env, 1, id), None);
+    assert_eq!(dt.len(), 1);
+    assert!(env.calls.borrow().is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4: with a true condition and per-turn 1, a triggering counted by
+/// `fire` stops `take_triggered` in the same turn and not in the next.
+#[test]
+fn req_event_002_fire_if_shared_fire_then_take() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = FireEnv::new(true);
+    let waiting = vec![wt(9, P2, "delayed#0", BTreeMap::new())];
+    assert!(dt.fire(&env, 5, id).is_some());
+    assert!(dt.take_triggered(&env, 5, &waiting).is_empty());
+    assert_eq!(dt.take_triggered(&env, 6, &waiting).len(), 1);
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4: the reverse: a triggering counted by `take_triggered` stops
+/// `fire` in the same turn and not in the next.
+#[test]
+fn req_event_002_fire_if_shared_take_then_fire() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = FireEnv::new(true);
+    let waiting = vec![wt(9, P2, "delayed#0", BTreeMap::new())];
+    assert_eq!(dt.take_triggered(&env, 5, &waiting).len(), 1);
+    assert_eq!(dt.fire(&env, 5, id), None);
+    assert!(dt.fire(&env, 6, id).is_some());
+}
+
+/// REQ-EVENT-002; CR 603.7b: an unknown or cancelled id gives None without consulting the
+/// condition.
+#[test]
+fn req_event_002_fire_if_unknown_or_cancelled_never_consults_env() {
+    let mut dt = DelayedTriggers::new();
+    let id = dt.register(
+        oid(9),
+        P2,
+        if_limit_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(dt.cancel(id));
+    let env = FireEnv::new(true);
+    assert_eq!(dt.fire(&env, 1, id), None);
+    assert_eq!(DelayedTriggers::new().fire(&env, 1, id), None);
+    assert!(env.calls.borrow().is_empty());
 }
