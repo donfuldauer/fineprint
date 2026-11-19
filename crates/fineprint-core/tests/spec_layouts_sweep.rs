@@ -297,8 +297,11 @@ fn sweep_variables_zero_off_the_stack_every_layout() {
                         if copy {
                             assert_eq!((on, off), (0, 0), "{what}");
                         } else {
-                            // 3 + 2 + 1 per counted cost (two for a fused split spell).
-                            assert!(on == off + 6 || on == off + 12, "{what}: {on} {off}");
+                            // 3 + 2 + 1 per counted cost; a fused split spell counts both
+                            // halves' costs (CR 202.3d), every other spell one (CR 202.3b).
+                            let fused = layout == LayoutBehavior::Split && cast == Cast::Fused;
+                            let expected = if fused { 12 } else { 6 };
+                            assert_eq!(on, off + expected, "{what}: {on} {off}");
                         }
                     }
                 }
