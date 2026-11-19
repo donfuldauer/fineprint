@@ -4280,7 +4280,11 @@ dealt, as for the direct [1 damage, 3 damage]; before, the 3 resumed first, was 
 to 4, and 5 was dealt); the executed batch orders the events that are not zone changes, and the
 kept zone changes, by (lineage path, member index) instead of (root, member index) (test
 `req_event_001_r6_execution_order_follows_lineage_path`: a grandchild move executes, and gets its
-new id, at its parent's place, as in the direct batch). Phase B is order-independent: the pool's
+new id, at its parent's place, as in the direct batch). Corrected under R10 by that execution
+order: the unit test `req_event_001_r6_lineage_path_grandchild_takes_parent_position` now expects
+the executed life deltas [(P1, +2), (P1, +3)] instead of [(P1, +3), (P1, +2)], because the direct
+batch [gain 1, gain 3] executes the doubled gain of 1 first (its life totals 25, 21 and 27 are
+unchanged). Phase B is order-independent: the pool's
 choosers are taken in APNAP order (rank, then id, independent of member indices), and the
 allocation sums each source's damage in a `BTreeMap` keyed by source. Members taken up after the
 resumption are scheduled by phase A. `DepthExceeded` is raised as soon as the too-deep generation
