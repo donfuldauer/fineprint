@@ -21,8 +21,8 @@ use crate::choice::{
     ChoiceSession, ChoiceTarget, ChoiceType, Interrupt, PendingChoiceRequest, Status,
 };
 use crate::events::{
-    CounterTarget, DamageTarget, EventBatch, EventContext, EventError, EventState, GameEvent,
-    Phase, ZoneChangeCause,
+    CounterTarget, DamageTarget, EventBatch, EventContext, EventError, EventInstance, EventState,
+    GameEvent, Phase, ZoneChangeCause,
 };
 use crate::memory::{CharacteristicsProvider, LkiStore, MemoryTable};
 use crate::objects::Characteristics;
@@ -266,7 +266,11 @@ fn drive(w: &World, events: Vec<GameEvent>, sba: bool, answers: &[u32]) -> Run {
 
 /// As [`drive`], with answers of any choice type.
 fn drive_with(w: &World, events: Vec<GameEvent>, sba: bool, answers: &[ChoiceResponse]) -> Run {
-    let batch = EventBatch::from_events(events);
+    drive_batch(w, EventBatch::from_events(events), sba, answers)
+}
+
+/// As [`drive_with`], for a batch of event instances (with their applied sets).
+fn drive_batch(w: &World, batch: EventBatch, sba: bool, answers: &[ChoiceResponse]) -> Run {
     let procedure = move |s: &mut World, ch: &mut ChoiceContext<'_>| run_bus(s, &batch, sba, ch);
     let mut session = ChoiceSession::start(w.clone(), procedure).unwrap();
     let mut asked = Vec::new();
@@ -3555,7 +3559,8 @@ fn req_event_001_r3_h2_c_skip_of_one_member_leaves_the_other() {
 /// REQ-EVENT-001, round 3 H2 (d): CR 122.1c, CR 701.8b, CR 704.7: the shield counter's
 /// destroy replacement applies to the destroy member only (once: the counter is removed, the
 /// effect is applied once); the sba member still moves the object to the graveyard; one
-/// executed move; both orders. The counter removal is processed before the move.
+/// executed move; both orders. Round 4 (J2, CR 704.3): the counter removal is part of the same
+/// executed batch, placed before the move.
 #[test]
 fn req_event_001_r3_h2_d_shield_counter_on_mixed_group() {
     let (mut w, x, card, events) = mixed_group();
@@ -3567,14 +3572,15 @@ fn req_event_001_r3_h2_d_shield_counter_on_mixed_group() {
     assert_eq!(zone_changes(report), 1);
     assert_eq!(run.state.counter(x, "shield"), 0);
     assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
-    // The removal batch, then the move.
-    assert_eq!(report.executed.len(), 2);
+    // One executed batch: the removal, then the move.
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 2);
     assert!(matches!(
         report.executed[0].events[0].instance.event(),
         GameEvent::RemoveCounters { .. }
     ));
     assert!(matches!(
-        report.executed[1].events[0].instance.event(),
+        report.executed[0].events[1].instance.event(),
         GameEvent::ZoneChange { .. }
     ));
     // The shield counter does not apply to a state-based move alone (CR 122.1c, CR 704.1).
@@ -3637,8 +3643,9 @@ fn req_event_001_r3_h2_g_union_of_candidates_one_request() {
     }
 }
 
-/// REQ-EVENT-001, REQ-CORE-001, round 3 H2: CR 704.7: both members replaced to
-/// different destinations: exactly one move, chosen by content, the same for both orders.
+/// REQ-EVENT-001, REQ-CORE-001, round 3 H2, round 4 J6: CR 704.7: both members replaced to
+/// different destinations: exactly one move, the least by canonical content (the hand), the
+/// same for both orders.
 #[test]
 fn req_event_001_r3_h2_divergent_destinations_one_move() {
     let (mut w, _, card, events) = mixed_group();
@@ -3652,8 +3659,10 @@ fn req_event_001_r3_h2_divergent_destinations_one_move() {
     let report = ok(&run);
     assert_eq!(report.applications, vec![e(1), e(2)]);
     assert_eq!(zone_changes(report), 1);
-    let zone = run.state.zone_of_card(card);
-    assert!(zone == Some(ZoneId::Exile) || zone == Some(ZoneId::Hand(p(1))));
+    // Round 4 J6: both members redirect (exile, hand), both differ from the original
+    // graveyard, so all compete by content: the hand's encoding tag (1) is below exile's (5)
+    // and the destination is encoded before the cause, so the hand move is the least.
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Hand(p(1))));
 }
 
 /// REQ-EVENT-001, round 3 H2 (h): CR 704.7: moves of two different objects never merge: a
@@ -3748,5 +3757,246 @@ fn req_event_001_r3_h5_allotted_members_take_the_pool_first() {
         );
         assert_eq!(run.state.life(2), 12);
         assert!(run.state.registry.get(e(1)).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 4
+// ---------------------------------------------------------------------------------------------
+
+/// The executed zone changes of `object` in `report`.
+fn moves_of(report: &BusReport, object: ObjectId) -> usize {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter(|ev| {
+            matches!(ev.instance.event(), GameEvent::ZoneChange { object: o, .. } if *o == object)
+        })
+        .count()
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 4 J1: CR 704.3, CR 704.7, CR 614.6, CR 614.7: a one-use
+/// `Instead` effect on destructions only, whose child moves the object to exile, applies to
+/// the destroy member of a [destroy, sba] group; the child move competes with the unmatched
+/// sba move and, being a redirect, wins: no `UnknownObject`, no rollback, one executed batch
+/// with exactly one move, the card in exile, both orders.
+#[test]
+fn req_event_001_r4_j1_instead_child_move_competes_with_group_move() {
+    let (mut w, x, card, events) = mixed_group();
+    w.add(by_cause(
+        1,
+        ZoneChangeCause::Destroy,
+        Action::Instead(vec![zc(x, ZoneKind::Exile, ZoneChangeCause::Other)]),
+    ));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(moves_of(report, x), 1);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(run.state.registry.is_empty());
+}
+
+/// REQ-EVENT-001, round 4 J1 (i): CR 704.7, CR 614.7: the `Instead` child moves the object to
+/// the graveyard (the group's own destination): one move, to the graveyard, both orders.
+#[test]
+fn req_event_001_r4_j1_i_instead_child_move_same_destination() {
+    let (mut w, x, card, events) = mixed_group();
+    w.add(by_cause(
+        1,
+        ZoneChangeCause::Destroy,
+        Action::Instead(vec![zc(x, ZoneKind::Graveyard, ZoneChangeCause::Other)]),
+    ));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(moves_of(report, x), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert!(run.state.registry.is_empty());
+}
+
+/// REQ-EVENT-001, round 4 J1 (ii): CR 616.2, CR 704.7: a second effect redirects the `Instead`
+/// child's move (exile to hand): the child's FINAL destination is used: one move, to the hand,
+/// both orders.
+#[test]
+fn req_event_001_r4_j1_ii_redirected_child_move_uses_final_destination() {
+    let (mut w, x, card, events) = mixed_group();
+    w.add(by_cause(
+        1,
+        ZoneChangeCause::Destroy,
+        Action::Instead(vec![zc(x, ZoneKind::Exile, ZoneChangeCause::Other)]),
+    ));
+    w.add(by_cause(
+        2,
+        ZoneChangeCause::Other,
+        Action::Modify(Modification::SetDestination(ZoneKind::Hand)),
+    ));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1), e(2)]);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(moves_of(report, x), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Hand(p(1))));
+    assert!(run.state.registry.is_empty());
+}
+
+/// REQ-EVENT-001, round 4 J1 (iii): CR 122.1c, CR 704.3, CR 704.7: an `Instead` child that is a
+/// counter removal (the shield counter's destroy half) keeps the object id live: ONE executed
+/// batch with the removal and then the plain sba move; the counter is removed; both orders.
+#[test]
+fn req_event_001_r4_j1_iii_counter_removal_child_keeps_plain_move() {
+    let (mut w, x, card, events) = mixed_group();
+    w.counters(x, "shield", 1);
+    w.add(ReplacementEffect::shield_counter_destroy(e(1), x));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(report.executed.len(), 1);
+    let kinds: Vec<BusEventKind> = report.executed[0]
+        .events
+        .iter()
+        .map(|ev| BusEventKind::of(ev.instance.event()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![BusEventKind::RemoveCounters, BusEventKind::ZoneChange]
+    );
+    assert_eq!(
+        report.executed[0].events[1].instance.event(),
+        &zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction)
+    );
+    assert_eq!(run.state.counter(x, "shield"), 0);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+/// Checks the J2 outcome of `run` for the shielded `x` (and `y`, if moved too).
+fn check_j2(run: &Run, x: ObjectId, y: Option<ObjectId>) {
+    let report = ok(run);
+    assert_eq!(report.applications, vec![e(1)]);
+    // One executed batch: the removal first, then the moves.
+    assert_eq!(report.executed.len(), 1);
+    let batch = &report.executed[0].events;
+    assert_eq!(batch.len(), 2 + usize::from(y.is_some()));
+    assert!(matches!(
+        batch[0].instance.event(),
+        GameEvent::RemoveCounters { target: CounterTarget::Object(o), .. } if *o == x
+    ));
+    assert_eq!(moves_of(report, x), 1);
+    // CR 704.8: the departing object's LKI is derived from the state before the batch,
+    // shield counter included.
+    let record = run
+        .state
+        .lki
+        .get(x)
+        .expect("no LKI for the departed object");
+    assert_eq!(record.counters().get("shield"), Some(&1));
+    // The counter counts are as before: none left on the old id, none on the new object.
+    let new = new_id_of(report, x);
+    assert_eq!(run.state.counter(x, "shield"), 0);
+    assert_eq!(run.state.counter(new, "shield"), 0);
+    if let Some(y) = y {
+        assert_eq!(moves_of(report, y), 1);
+        assert!(run.state.lki.get(y).is_some());
+    }
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 4 J2: CR 704.3, CR 704.8, CR 122.1c: a shielded permanent
+/// departs in a [destroy, sba] group (the shield replaces the destroy member; the sba member
+/// moves it): the removal and the move are one executed batch and the LKI record of the
+/// departed object holds the shield counter; with and without an unrelated sba move of a second
+/// object in the same batch; both orders of the group's members.
+#[test]
+fn req_event_001_r4_j2_lki_keeps_pre_sba_counters() {
+    let (mut w, x, _, events) = mixed_group();
+    w.counters(x, "shield", 1);
+    w.add(ReplacementEffect::shield_counter_destroy(e(1), x));
+    let run = both_orders(&w, &events, &[]);
+    check_j2(&run, x, None);
+    // With an unrelated sba move of Y in the same batch: the group's members swapped, Y last.
+    let y = w.create(1, ZoneKind::Battlefield);
+    let y_move = zc(y, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction);
+    let one = drive(
+        &w,
+        vec![events[0].clone(), events[1].clone(), y_move.clone()],
+        true,
+        &[],
+    );
+    let two = drive(
+        &w,
+        vec![events[1].clone(), events[0].clone(), y_move],
+        true,
+        &[],
+    );
+    assert_eq!(one.out, two.out);
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(one.state.registry, two.state.registry);
+    check_j2(&one, x, Some(y));
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 4 J3: CR 704.7, CR 616.1, CR 616.1f: e1 redirects the
+/// destroy member to exile; e2 sets the sba member's (already false) face-down flag to false,
+/// leaving its destination unchanged. Whatever is answered, the redirect wins: the card ends in
+/// exile, both orders. Control: with e2 alone the card goes to the graveyard.
+#[test]
+fn req_event_001_r4_j3_unchanged_destination_modification_does_not_beat_redirect() {
+    let (mut w, _, card, events) = mixed_group();
+    let face_up = by_cause(
+        2,
+        ZoneChangeCause::StateBasedAction,
+        Action::Modify(Modification::SetFaceDown(false)),
+    );
+    let mut only_e2 = w.clone();
+    w.add(by_cause(1, ZoneChangeCause::Destroy, to_exile()));
+    w.add(face_up.clone());
+    for (answer, applications) in [(0, vec![e(1), e(2)]), (1, vec![e(2), e(1)])] {
+        let run = both_orders(&w, &events, &[answer]);
+        assert_eq!(run.asked.len(), 1);
+        let report = ok(&run);
+        assert_eq!(report.applications, applications);
+        assert_eq!(zone_changes(report), 1);
+        assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+        assert!(run.state.registry.is_empty());
+    }
+    only_e2.add(face_up);
+    let run = both_orders(&only_e2, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(2)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 4 J4: CR 704.7, CR 707.5, CR 614.1c, CR 616.1c: two
+/// identical hand-to-battlefield moves of one object (`sba` true); one instance already has the
+/// enters-as-copy effect C in its applied set, so C applies only to the other. Both members end
+/// with equal events and applied sets; the one with the entry-copy plan wins: the object enters
+/// once, as a copy, in both submission orders, with equal reports and state hashes.
+#[test]
+fn req_event_001_r4_j4_entry_copy_plan_is_part_of_the_selection() {
+    let (w, original, h) = copy_world();
+    let enter = zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other);
+    let mut applied = crate::events::AppliedEffects::new();
+    applied.insert(e(1));
+    let seeded = EventInstance::new(enter.clone()).with_applied(applied);
+    let plain = EventInstance::new(enter);
+    let one = drive_batch(
+        &w,
+        EventBatch::new(vec![seeded.clone(), plain.clone()]),
+        true,
+        &[],
+    );
+    let two = drive_batch(&w, EventBatch::new(vec![plain, seeded]), true, &[]);
+    assert_eq!(one.out, two.out);
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(one.state.registry, two.state.registry);
+    for run in [&one, &two] {
+        let report = ok(run);
+        assert_eq!(report.applications, vec![e(1)]);
+        assert_eq!(report.executed.len(), 1);
+        assert_eq!(moves_of(report, h), 1);
+        let new = new_id_of(report, h);
+        assert_eq!(run.state.events.markers().copy_of(new), Some(original));
     }
 }

@@ -32,10 +32,14 @@
 //! with `DIVIDE_VALUE` before the batch is processed (CR 615.7).
 //!
 //! **State-based actions (CR 704.7).** With `sba` true, zone changes of the same object to the
-//! same destination are one group: the candidates are the union of the members' effects, one
-//! choice is made, the chosen effect is applied once to every member it matches (members it
-//! does not match still move the object), and the object moves at most once. Different
-//! objects never merge.
+//! same destination are one group: the candidates are the union of the members' effects; each
+//! round selects ONE effect (the chooser's pick, or the sole candidate applied without asking)
+//! and applies it once to every member it matches (members it does not match still move the
+//! object); the bus repeats collection until no candidate remains (CR 616.1f). The object moves
+//! at most once. The child events of an application to a group that still moves are part of
+//! the one executed batch and precede the move (CR 704.3, CR 704.8); a child move of the
+//! object competes with the group's move, a redirect winning. Other child events follow as a
+//! child batch. Different objects never merge.
 //!
 //! **Atomicity and suspension.** Any error restores the registry and every component of the
 //! event context. A pending choice propagates as [`BusInterrupt::Pending`]; the
