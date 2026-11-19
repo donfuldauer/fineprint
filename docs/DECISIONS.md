@@ -4974,3 +4974,25 @@ CR (CR 2026-11-06 wins):
 **Rationale:** R8; PROCESS.md P8 (SRS edits need a person).
 
 **Alternatives:** Edit the SRS here (rejected: P8).
+
+## #31 FP-030 CR round 1 — ordering labels
+
+**Decision:** The `ORDER_SIMULTANEOUS_TRIGGERS` payload keeps each trigger's
+`PendingTrigger::description()` as its label. Only when two or more triggers of the same group
+(same player, same CR 603.3b part) share that label is ` with ` and the trigger's chooser-visible
+bindings appended, in binding-name order: `<name>=player <n>` for a player binding and
+`<name>=object <n>` for an object binding that `PlacementEnv::is_public_object` accepts. Value
+bindings and non-public objects are never shown; with nothing to show the label stays the base
+description. `is_public_object` defaults to `false`, so by default no object is shown.
+`PendingTrigger::description()` and `ask_optional_trigger` are unchanged.
+
+**Rationale:** CR 603.3b and CR 101.4c let the controller choose the order, so the request should
+let them tell otherwise identical entries apart. Which objects a player may see is the
+hidden-information rule REQ-CORE-004, which belongs to the integration unit (DECISIONS "#31 FP-030
+— Real-state environments belong to the integration unit"); the safe default is to show nothing
+until that unit supplies the real visibility rule.
+
+**Alternatives:** Always show every binding (rejected: leaks private objects, R12, REQ-CORE-004);
+show the event indices (rejected: `PendingTrigger` does not carry them); change
+`description()` for every trigger (rejected: changes labels that are already unique and the
+optional-trigger request).
