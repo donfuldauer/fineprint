@@ -446,28 +446,39 @@ fn library_changed_drops_entries_not_restored_by_a_draw() {
 
 /// REQ-CORE-004, CR 401.2: an insertion at a deeper index keeps the entries above it (smaller
 /// indexes) and drops those at or below it in the pile (indexes at or after the insertion).
+/// Removing the inserted card again follows the caller contract (`send_outside`, then
+/// `on_removed_from_hidden_zone`): with P2 as an observer the dropped entries do not come back
+/// and the kept ones stay; with no observers P2 loses every entry for that library.
 #[test]
 fn library_changed_keeps_entries_above_the_insertion() {
-    let (mut w, lib) = lib_world(4, false);
-    for (i, id) in lib.iter().enumerate() {
-        w.k.set_position_known(&w.zones, P2, P1, i, *id)
-            .expect("pos");
-    }
-    let x = w.create_req(P1, KWorld::req_at(ZoneKind::Library, Position::Index(2)));
-    assert_eq!(w.library(P1), vec![lib[0], lib[1], x, lib[2], lib[3]]);
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
-    assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
-    // removing x without on_move: the dropped entries do not come back
-    w.zones
-        .send_outside(x, OutsidePool::Sideboard)
-        .expect("out");
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
+    let build = || -> (KWorld, Vec<ObjectId>, ObjectId) {
+        let (mut w, lib) = lib_world(4, false);
+        for (i, id) in lib.iter().enumerate() {
+            w.k.set_position_known(&w.zones, P2, P1, i, *id)
+                .expect("pos");
+        }
+        let x = w.create_req(P1, KWorld::req_at(ZoneKind::Library, Position::Index(2)));
+        assert_eq!(w.library(P1), vec![lib[0], lib[1], x, lib[2], lib[3]]);
+        w.k.on_library_changed(&w.zones, P1).expect("changed");
+        assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
+        (w, lib, x)
+    };
+    // removing x, watched by P2: the dropped entries do not come back
+    let (mut w, lib, x) = build();
+    w.send_out(x, &[P2]);
     assert_eq!(w.library(P1), lib);
     assert_eq!(w.positions(P2, P1), map(&[(0, lib[0]), (1, lib[1])]));
+    // removing x unobserved: P2 forgets every entry for that library (hidden-source rule)
+    let (mut u, lib, x) = build();
+    u.send_out(x, &[]);
+    assert_eq!(u.library(P1), lib);
+    assert!(u.positions(P2, P1).is_empty());
 }
 
-/// REQ-CORE-004, CR 401.2: removal (`send_outside`) and insertion (`enter_from_outside`) of
-/// library cards outside `on_move`, followed by `on_library_changed`.
+/// REQ-CORE-004, CR 401.2: removal (`send_outside` + `on_removed_from_hidden_zone`) and
+/// insertion (`enter_from_outside` + `on_library_changed`) of library cards outside `on_move`.
+/// P1 watches its own removals (passed in `observers`); an unobserved removal drops P1's
+/// entries for that library too (the owner of a library is not an observer by itself).
 #[test]
 fn library_changed_after_send_outside_and_enter_from_outside() {
     let (mut w, lib) = lib_world(3, false);
@@ -475,12 +486,12 @@ fn library_changed_after_send_outside_and_enter_from_outside() {
         w.k.set_position_known(&w.zones, P1, P1, i, *id)
             .expect("pos");
     }
-    // remove the bottom card: the entries above it still match
-    let card = w
-        .zones
-        .send_outside(lib[2], OutsidePool::Sideboard)
-        .expect("out");
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
+    // unobserved removal of the bottom card: P1 is not an observer, every entry goes
+    let mut u = w.clone();
+    u.send_out(lib[2], &[]);
+    assert!(u.positions(P1, P1).is_empty());
+    // observed removal of the bottom card: the entries above it still match
+    let (_, card) = w.send_out(lib[2], &[P1]);
     assert_eq!(w.positions(P1, P1), map(&[(0, lib[0]), (1, lib[1])]));
     // bring it back on top: everything shifts, nothing matches
     let back = w
@@ -496,12 +507,52 @@ fn library_changed_after_send_outside_and_enter_from_outside() {
     assert_eq!(w.library(P1), vec![back, lib[0], lib[1]]);
     w.k.on_library_changed(&w.zones, P1).expect("changed");
     assert!(w.positions(P1, P1).is_empty());
-    // remove it again: lib[0] and lib[1] are back at 0 and 1, but their entries stay dropped
-    w.zones
-        .send_outside(back, OutsidePool::Sideboard)
-        .expect("out");
-    w.k.on_library_changed(&w.zones, P1).expect("changed");
+    // remove it again (observed): lib[0] and lib[1] are back at 0 and 1, but their entries stay
+    // dropped
+    w.send_out(back, &[P1]);
     assert!(w.positions(P1, P1).is_empty());
+}
+
+/// REQ-CORE-004, CR 401.2, SRS 2.4: insertions stay position-only. P2 knows the set {A, B} of
+/// P1's library and no positions; P1 knows every position. A card entering from outside the
+/// game at index 2 (`enter_from_outside` + `on_library_changed`) leaves P2's stored KnownTo of
+/// A and B and its projected `known_cards` intact (set knowledge is not forgotten by an
+/// insertion); P1's entries below the insertion index are kept, those at or after it dropped.
+/// An insertion into P1's hand does not touch P2's knowledge of P1's hand cards either.
+#[test]
+fn insertion_from_outside_keeps_set_knowledge() {
+    let (mut w, lib) = lib_world(4, false);
+    let (a, b) = (lib[1], lib[3]);
+    w.k.add_known(&w.zones, a, P2).expect("add");
+    w.k.add_known(&w.zones, b, P2).expect("add");
+    for (i, id) in lib.iter().enumerate() {
+        w.k.set_position_known(&w.zones, P1, P1, i, *id)
+            .expect("pos");
+    }
+    let h = w.create(ZoneKind::Hand, P1);
+    w.k.add_known(&w.zones, h, P2).expect("add");
+    let (ca, cb) = (w.card(a), w.card(b));
+    let x = w.enter_fresh(P1, KWorld::req_at(ZoneKind::Library, Position::Index(2)));
+    assert_eq!(w.library(P1), vec![lib[0], lib[1], x, lib[2], lib[3]]);
+    assert!(w.known_to(a).contains(&P2), "set knowledge of A kept");
+    assert!(w.known_to(b).contains(&P2), "set knowledge of B kept");
+    assert!(w.can(P2, a) && w.can(P2, b));
+    assert_eq!(lib_known(&w.view(P2), P1), [ca, cb].into_iter().collect());
+    assert!(w.positions(P2, P1).is_empty());
+    assert_eq!(w.positions(P1, P1), map(&[(0, lib[0]), (1, lib[1])]));
+    assert!(w.known_to(lib[0]).contains(&P1), "P1 identity kept");
+    assert!(
+        w.known_to(lib[2]).contains(&P1),
+        "P1 identity kept (entry dropped)"
+    );
+    // an insertion into the hand
+    w.enter_fresh(P1, MoveRequest::new(ZoneKind::Hand));
+    assert!(w.known_to(h).contains(&P2));
+    assert_eq!(
+        opp_hand_known(&w.view(P2), P1),
+        [w.card(h)].into_iter().collect()
+    );
+    assert_eq!(lib_known(&w.view(P2), P1), [ca, cb].into_iter().collect());
 }
 
 /// REQ-CORE-004, R12: `on_library_changed` for an unknown owner is `UnknownPlayer` and

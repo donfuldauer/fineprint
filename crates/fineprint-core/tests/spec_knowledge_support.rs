@@ -18,7 +18,7 @@ use fineprint_core::knowledge::{
     HandView, Knowledge, LibraryView, ObjectView, PlayerZonesView, ZonesView,
 };
 use fineprint_core::zones::{
-    MoveRequest, Moved, ObjectRecord, Position, ZoneId, ZoneKind, Zones, ZonesConfig,
+    MoveRequest, Moved, ObjectRecord, OutsidePool, Position, ZoneId, ZoneKind, Zones, ZonesConfig,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -171,6 +171,42 @@ impl KWorld {
             .on_move_observed(&self.zones, &before, &moved, observers)
             .expect("on_move_observed succeeds");
         moved
+    }
+
+    /// Removes `id` from its zone to its owner's sideboard with `Zones::send_outside`, then
+    /// informs the knowledge with `on_removed_from_hidden_zone`, using the record copied BEFORE
+    /// the removal (the documented caller contract). `observers` watched which card was removed.
+    /// Returns that record and the removed card.
+    pub fn send_out(&mut self, id: ObjectId, observers: &[PlayerId]) -> (ObjectRecord, CardId) {
+        let before = self.rec(id);
+        let card = self
+            .zones
+            .send_outside(id, OutsidePool::Sideboard)
+            .expect("send_outside succeeds");
+        self.k
+            .on_removed_from_hidden_zone(&self.zones, &before, observers)
+            .expect("on_removed_from_hidden_zone succeeds");
+        (before, card)
+    }
+
+    /// Brings a fresh synthetic card from `owner`'s sideboard into the zone `req` names with
+    /// `Zones::enter_from_outside`; for a library it then calls `on_library_changed` (an
+    /// insertion: position-only). Returns the new object.
+    pub fn enter_fresh(&mut self, owner: PlayerId, req: MoveRequest) -> ObjectId {
+        let card = self.fresh_card();
+        self.zones
+            .add_outside_card(owner, OutsidePool::Sideboard, card)
+            .expect("add_outside_card succeeds");
+        let id = self
+            .zones
+            .enter_from_outside(&mut self.ids, owner, card, OutsidePool::Sideboard, req)
+            .expect("enter_from_outside succeeds");
+        if req.to == ZoneKind::Library {
+            self.k
+                .on_library_changed(&self.zones, owner)
+                .expect("on_library_changed succeeds");
+        }
+        id
     }
 
     pub fn mv_to(&mut self, id: ObjectId, kind: ZoneKind) -> Moved {
@@ -532,6 +568,60 @@ impl Shadow {
             }
         }
         observed
+    }
+
+    /// The players who observed a removal from a hidden zone (`on_removed_from_hidden_zone`),
+    /// by the brief's design rule (no CR): (i) listed in `observers`, or (iii) the source is the
+    /// player's own hand. Condition (ii) does not apply (there is no new object). `None` when the
+    /// source is not a library or a hand (the hook does nothing). Never depends on which object
+    /// was removed or on the stored knowledge.
+    pub fn removal_observed(
+        zones: &Zones,
+        before: &ObjectRecord,
+        observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        if !matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand) {
+            return None;
+        }
+        Some(
+            zones
+                .players()
+                .into_iter()
+                .filter(|v| observers.contains(v) || before.zone == ZoneId::Hand(*v))
+                .collect(),
+        )
+    }
+
+    /// The model of `on_removed_from_hidden_zone`, called after `Zones::send_outside` with the
+    /// record copied before the removal. Every non-observer forgets every card now in the source
+    /// zone and the removed card; for a library source the non-observer's position entries for
+    /// that library are dropped, then the library is pruned against the live library (CR 401.2).
+    /// A public source is a no-op. Returns the observed set (`None` for a public source).
+    pub fn removed_from_hidden_zone(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        let observed = Shadow::removal_observed(zones, before, observers)?;
+        let mut source: Vec<CardId> = zones
+            .contents(before.zone)
+            .into_iter()
+            .map(|id| Shadow::rec(zones, id).card)
+            .collect();
+        source.push(before.card);
+        for v in zones.players().iter().filter(|v| !observed.contains(v)) {
+            for c in &source {
+                self.remove(*c, *v);
+            }
+            if let ZoneId::Library(owner) = before.zone {
+                self.pos.remove(&(*v, owner));
+            }
+        }
+        if let ZoneId::Library(owner) = before.zone {
+            self.on_library_changed(zones, owner);
+        }
+        Some(observed)
     }
 
     /// CR 708.9: the face-down permanents and spells `p` owns are revealed to all.
