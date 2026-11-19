@@ -130,34 +130,26 @@ impl Knowledge {
 
     /// The entitlement rule on a validated record.
     pub(super) fn identifies(&self, record: &ObjectRecord, viewer: PlayerId) -> bool {
-        // CR 400.2: public zones show the cards' faces, except face-down cards.
-        if record.zone.kind().is_public() && !record.face_down {
-            return true;
-        }
-        // CR 402.3: a player may look at their own hand at any time.
-        if record.zone == ZoneId::Hand(viewer) {
-            return true;
-        }
-        // CR 708.5: a face-down spell or permanent may be looked at by its controller, and by no
-        // other player; face-down cards in any other zone can't be looked at.
-        if record.face_down
-            && matches!(record.zone, ZoneId::Battlefield | ZoneId::Stack)
-            && record.controller == viewer
-        {
-            return true;
-        }
-        self.known
-            .get(&record.card)
-            .is_some_and(|s| s.contains(&viewer))
+        implicitly_identifies(record, viewer)
+            || self
+                .known
+                .get(&record.card)
+                .is_some_and(|s| s.contains(&viewer))
     }
 
     /// Shuffle of a face-down pile of the objects `ids` (REQ-CORE-004). Clears the stored
     /// `KnownTo` of their cards, which ends every look permission on them, and removes every
     /// position entry naming them.
     ///
+    /// Only face-down cards in exile can form such a pile here: look permissions on face-down
+    /// cards exist only in exile (CR 406.3). A face-down card in a library is part of the
+    /// library and is shuffled with [`Knowledge::shuffle_library`]; a face-down permanent or
+    /// spell is not in a pile.
+    ///
     /// # Errors
     /// [`KnowledgeError::UnknownObject`] for an unknown id, [`KnowledgeError::NotFaceDown`] for
-    /// an object that is face up. Every id is checked first; the state is then unchanged.
+    /// an object that is face up or is face down in any zone other than exile. Every id is
+    /// checked first; the state is then unchanged.
     pub fn shuffle_face_down_pile(
         &mut self,
         zones: &Zones,
@@ -169,7 +161,7 @@ impl Knowledge {
         let mut cards = BTreeSet::new();
         for &id in ids {
             let record = record_of(zones, id)?;
-            if !record.face_down {
+            if !(record.face_down && record.zone == ZoneId::Exile) {
                 return Err(KnowledgeError::NotFaceDown(id));
             }
             cards.insert(record.card);
@@ -185,21 +177,10 @@ impl Knowledge {
         Ok(())
     }
 
-    /// Updates knowledge after a zone move (REQ-CORE-004). Call it AFTER
+    /// Updates knowledge after a zone move that no player is recorded as having watched
+    /// (REQ-CORE-004): exactly [`Knowledge::on_move_observed`] with no observers. Call it AFTER
     /// [`Zones::move_object`] with `before` = the object's record copied before the move,
-    /// `moved` = the returned [`Moved`] and `zones` = the container after the move. In order:
-    ///
-    /// - (a) `before` was in a public zone and face up: every player saw it and keeps tracking
-    ///   it (it is revealed to all).
-    /// - (b) `before` was in its owner's hand: the owner knows it.
-    /// - (c) `before` was face down on the battlefield or the stack: its controller knows it;
-    ///   and when it moved from the battlefield to another zone, or from the stack to a zone
-    ///   other than the battlefield, it is revealed to all players.
-    /// - (d) `before` was in a library: every position entry naming `moved.old` is dropped.
-    ///   Position entries of the libraries `moved` left or entered that no longer match the
-    ///   live library are pruned too (a known card whose index shifted becomes unknown).
-    ///
-    /// `KnownTo` persists across the move: it is stored per card.
+    /// `moved` = the returned [`Moved`] and `zones` = the container after the move.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownObject`]`(moved.new)` if that object is not in `zones`; the
@@ -210,8 +191,61 @@ impl Knowledge {
         before: &ObjectRecord,
         moved: &Moved,
     ) -> Result<(), KnowledgeError> {
+        self.on_move_observed(zones, before, moved, &[])
+    }
+
+    /// Like on_move; `observers` are players who watched the move and so know which card moved.
+    ///
+    /// Call it AFTER [`Zones::move_object`] with `before` = the object's record copied before
+    /// the move, `moved` = the returned [`Moved`] and `zones` = the container after the move
+    /// (REQ-CORE-004). In order:
+    ///
+    /// - (0) Only when `before` was in a library or a hand and `moved.from != moved.to`: a
+    ///   player V observed the move iff V is in `observers`, or V may see the new object by the
+    ///   implicit entitlements of [`Knowledge::can_identify`] (public face up, V's own hand, a
+    ///   face-down permanent or spell V controls), or the object left V's hand, or it left a
+    ///   library where V had a stored position entry naming `moved.old`. Every player who did
+    ///   NOT observe it forgets every card left in `moved.from` and the moved card (is removed
+    ///   from their stored `KnownTo`), and, when the source is a library, loses every position
+    ///   entry for that library: such a player knows a set but cannot tell which member moved,
+    ///   so any of them could be the moved one (a design decision, see `docs/DECISIONS.md`,
+    ///   "#25 FP-024: Unobserved hidden moves forget the candidates"). An observer's knowledge
+    ///   is kept as it was.
+    /// - (a) `before` was in a public zone and face up: every player saw it and keeps tracking
+    ///   it (it is revealed to all).
+    /// - (b) `before` was in its owner's hand: the owner knows it.
+    /// - (c) `before` was face down on the battlefield or the stack: its controller knows it;
+    ///   and when it moved from the battlefield to another zone, or from the stack to a zone
+    ///   other than the battlefield, it is revealed to all players.
+    /// - (d) `before` was in a library: every position entry naming `moved.old` is dropped.
+    ///   Position entries of the libraries `moved` left or entered that no longer match the
+    ///   live library are pruned too (a known card whose index shifted becomes unknown).
+    ///
+    /// Apart from (0), `KnownTo` persists across the move: it is stored per card.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownObject`]`(moved.new)` if that object is not in `zones`, then
+    /// [`KnowledgeError::UnknownPlayer`] for the first observer that is not a player of
+    /// `zones`. The state is then unchanged.
+    pub fn on_move_observed(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        observers: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
         let record = record_of(zones, moved.new)?;
+        for &observer in observers {
+            require_player(zones, observer)?;
+        }
         let card = record.card;
+        // (0) Design decision (not CR-derived): an unobserved move out of a hidden zone makes
+        // every candidate of that zone ambiguous to the players who did not watch it.
+        if matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand)
+            && moved.from != moved.to
+        {
+            self.forget_unobserved(zones, before, moved, &record, observers);
+        }
         // (a) CR 400.2: the face of a face-up card in a public zone was seen by all players.
         if before.zone.kind().is_public() && !before.face_down {
             self.add_players(card, zones.players());
@@ -243,6 +277,67 @@ impl Knowledge {
             }
         }
         Ok(())
+    }
+
+    /// Step (0) of [`Knowledge::on_move_observed`]: every player who did not observe the move
+    /// out of a hidden zone forgets the cards of the source zone and the moved card, and their
+    /// position entries for a source library.
+    fn forget_unobserved(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        record: &ObjectRecord,
+        observers: &[PlayerId],
+    ) {
+        let source_library = match before.zone {
+            ZoneId::Library(owner) => Some(owner),
+            _ => None,
+        };
+        let blind: BTreeSet<PlayerId> = zones
+            .players()
+            .into_iter()
+            .filter(|&v| {
+                let knew_position = source_library.is_some_and(|owner| {
+                    self.positions
+                        .get(&(v, owner))
+                        .is_some_and(|entries| entries.values().any(|&o| o == moved.old))
+                });
+                let observed = observers.contains(&v)
+                    || implicitly_identifies(record, v)
+                    || before.zone == ZoneId::Hand(v)
+                    || knew_position;
+                !observed
+            })
+            .collect();
+        if blind.is_empty() {
+            return;
+        }
+        let candidates: BTreeSet<CardId> = zones
+            .contents(moved.from)
+            .into_iter()
+            .filter_map(|id| zones.object(id).map(|r| r.card))
+            .chain([record.card])
+            .collect();
+        let touched = candidates.iter().any(|c| {
+            self.known
+                .get(c)
+                .is_some_and(|s| s.iter().any(|v| blind.contains(v)))
+        });
+        if touched {
+            let known = Arc::make_mut(&mut self.known);
+            for c in &candidates {
+                if let Some(players) = known.get_mut(c) {
+                    players.retain(|v| !blind.contains(v));
+                    if players.is_empty() {
+                        known.remove(c);
+                    }
+                }
+            }
+        }
+        if let Some(owner) = source_library {
+            self.retain_positions(|v, o, _| o != owner || !blind.contains(&v));
+        }
     }
 
     /// The third sentence of CR 708.9: when `player` leaves the game, every face-down permanent
@@ -283,4 +378,22 @@ impl Knowledge {
             }
         }
     }
+}
+
+/// The implicit entitlements of [`Knowledge::can_identify`] (rules 1-3), ignoring the stored
+/// `KnownTo`.
+fn implicitly_identifies(record: &ObjectRecord, viewer: PlayerId) -> bool {
+    // CR 400.2: public zones show the cards' faces, except face-down cards.
+    if record.zone.kind().is_public() && !record.face_down {
+        return true;
+    }
+    // CR 402.3: a player may look at their own hand at any time.
+    if record.zone == ZoneId::Hand(viewer) {
+        return true;
+    }
+    // CR 708.5: a face-down spell or permanent may be looked at by its controller, and by no
+    // other player; face-down cards in any other zone can't be looked at.
+    record.face_down
+        && matches!(record.zone, ZoneId::Battlefield | ZoneId::Stack)
+        && record.controller == viewer
 }

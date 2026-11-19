@@ -47,6 +47,30 @@ impl Knowledge {
         self.retain_indexed(|_, o, index, object| o != owner || live.get(index) == Some(&object));
     }
 
+    /// Re-checks position knowledge of the library of `owner` after a change that did not go
+    /// through [`Knowledge::on_move`] (REQ-CORE-004): drops every viewer's position entry for
+    /// that library whose object is no longer at the recorded index of the live library.
+    ///
+    /// **Caller contract.** Call it after every [`Zones`] mutation that inserts into or removes
+    /// from a library outside `on_move`: `Zones::create_object` or `Zones::enter_from_outside`
+    /// into a library, and `Zones::send_outside` of a library card. After an insertion or a
+    /// removal at index `n` (0 is the top), entries with an index `< n` are kept and entries
+    /// with an index `>= n` are dropped, because those objects shifted. Without this call a stale
+    /// entry could become valid again by coincidence when a later move restores the earlier
+    /// shape of the library.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownPlayer`]`(owner)`; the state is then unchanged.
+    pub fn on_library_changed(
+        &mut self,
+        zones: &Zones,
+        owner: PlayerId,
+    ) -> Result<(), KnowledgeError> {
+        require_player(zones, owner)?;
+        self.prune_library(zones, owner);
+        Ok(())
+    }
+
     /// Records that `viewer` knows the object `id` is at `index` (0 is the top) of the library
     /// of `library_owner`, and adds `viewer` to the card's `KnownTo` (REQ-CORE-004). Replaces
     /// any earlier entry of the same (viewer, library owner) naming the same object or the same

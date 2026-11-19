@@ -17,7 +17,14 @@
 //! **Position knowledge** (SRS 2.4 `KnownPositions`). Per (viewer, library owner), a map from
 //! library index (0 is the top) to the object the viewer knows is there. Entries are filtered
 //! lazily against the live library ([`Knowledge::position_known`]) and pruned when a library
-//! changes through [`Knowledge::on_move`], so a stale entry never reports a position.
+//! changes through [`Knowledge::on_move`] or [`Knowledge::on_library_changed`], so a stale
+//! entry never reports a position.
+//!
+//! **Unobserved hidden moves.** When an object leaves a library or a hand for another zone,
+//! a player who did not observe the move (see [`Knowledge::on_move_observed`]) forgets every
+//! card of the source zone and the moved card, and their position entries for a source
+//! library: they cannot tell which member of the set they knew moved, so the view must leave
+//! it ambiguous (REQ-CORE-004; a design decision, see `docs/DECISIONS.md`).
 //!
 //! **Shuffles.** [`Knowledge::shuffle_library`] clears position knowledge of the shuffled
 //! cards (CR 701.24a, CR 701.24b) but keeps identity knowledge of the library as a set.
@@ -42,8 +49,18 @@
 //! is a cheap, independent snapshot.
 //!
 //! **Standalone scope.** Nothing here is wired into `GameState`, its Merkle layout or its wire
-//! form; the integration unit does that. The caller calls [`Knowledge::on_move`] after every
-//! [`Zones::move_object`](crate::zones::Zones::move_object).
+//! form; the integration unit does that. The caller contract:
+//!
+//! - after every [`Zones::move_object`](crate::zones::Zones::move_object), call
+//!   [`Knowledge::on_move_observed`] with the players who watched the move (or
+//!   [`Knowledge::on_move`] when nobody is recorded as watching);
+//! - after every other change that inserts into or removes from a library
+//!   ([`Zones::create_object`](crate::zones::Zones::create_object) or
+//!   [`Zones::enter_from_outside`](crate::zones::Zones::enter_from_outside) into a library,
+//!   [`Zones::send_outside`](crate::zones::Zones::send_outside) of a library card), call
+//!   [`Knowledge::on_library_changed`] for that library: after a change at index `n`
+//!   (0 is the top), position entries with an index `>= n` are dropped because their objects
+//!   shifted, and entries with an index `< n` are kept.
 
 mod error;
 mod known_to;
