@@ -3700,3 +3700,988 @@ requests (CHOOSE_CARD_NAME is always a validator by design).
 **Alternatives:** (i) Merging repeated entries (rejected: silently reinterprets the answer);
 tracking objects across all methods (rejected: not stated by SRS 15.3, may break legitimate
 overlap). (ii) A count-based check in `well_formed` reusing generate.rs (rejected, reasons above).
+
+## #29 FP-028 — Spec-test choices
+
+**Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_replacement_*.rs`)
+read the brief as follows where it is silent, and assert only the common ground:
+(1) The bus is always driven through a `ChoiceSession` over a test state holding the world
+components and the `ReplacementRegistry` (a `ChoiceContext` is only handed out by a session); a
+`BusInterrupt::Error` becomes the procedure's output so that clause k (registry and world unchanged
+on error) can be checked on the final state. World components are compared by canonical bytes
+(`GameState` and `IdGenerator` by value), as in "#27 FP-026 — Spec-test choices".
+(2) Whether an empty parent batch (every event dropped) appears in `BusReport::executed` is not
+asserted: tests look only at batches that hold events, and at the logged batches (an empty batch is
+never logged, clause l).
+(3) An effect id already present in an incoming event's applied set is expected to stay in the
+executed event's applied set (it was applied to that event); only `contains` is asserted.
+(4) `reason.source` is asserted as `Some(object)` for object events and `None` for a Draw (no
+affected object). The request's options, bounds and default are not asserted.
+(5) The remaining amount of a `Shield::Pool` is checked only behaviourally (the next damage event)
+and by the registry's canonical bytes changing; `ReplacementRegistry::get(..).shield` is not
+asserted to reflect the remainder.
+(6) The "903.9b repeated application" regression is tested two ways: a bounded ZoneChange loop (an
+override effect "to hand -> command zone" applies again after a non-override effect "command zone ->
+hand"; applications `[override, other, override]`), and an override that keeps matching forever
+(`RepeatLimit`, nothing changed).
+(7) 704.7 merging (review round 1, brief clause j): with `sba = true` only `ZoneChange` members
+merge, and only when they affect the same object with the same destination (same object, same kind
+of result); such a group makes one request (none with one candidate), one application, one shield
+use and one executed event. Members for different objects never merge, whatever their kind,
+candidate set or chooser; non-ZoneChange members never merge. Tests with several groups assert the
+multiset of requests where the order is not fixed by APNAP/submission order. Cross-kind and
+non-ZoneChange same-result merges (for example two different SBAs that both cause a player to lose
+the game) are out of scope and untested. With `sba = false` a duplicate move of one object is only
+asserted to fail and roll back (the error variant is not asserted). Review rounds 2 (F2) and 3
+(H2), member-wise groups: with `sba = true` the group key is (object, destination) over ZoneChange
+members; the candidates of a group are the effects eligible for at least one member (an effect
+matching only one member's cause is offered); one `CHOOSE_REPLACEMENT_EFFECT` request when more
+than one candidate is left after the tier filter, none otherwise; the chosen effect is applied once
+(one `applications` entry, one shield use) to every member it matches, and members it does not
+match are unchanged and still move the object; further effects are then considered again
+(616.1f). The object moves at most once: members left with one destination are one move; when the
+surviving destinations differ, the member whose destination differs from the group's original
+destination wins (so a redirect matching only one member's cause still exiles the object; amended in
+review round 4, (20) and (22), from "a member modified by an application wins"). That rule is the
+brief's reading, not a CR statement. If every member is dropped the object does
+not move (not tested directly; covered only by the property's at-most-once check). Every group test
+runs both submission orders and compares output, registry bytes, world snapshot and state hash.
+`shield_counter_destroy` matches `ZoneChangeCause::Destroy` only (CR 122.1c, 701.8b): with
+[Destroy, StateBasedAction] it is applied once, the counter is removed, and the StateBasedAction
+member moves the object to the graveyard once. In the two-cause-specific-effects case (Destroy-only
+exile, StateBasedAction-only skip) the round-4 test asserts: one request offering both, no error,
+`applications` equal to [chosen, other] (the other is then the only candidate and applies without
+a request, 616.1f), exactly one move, to exile (the only surviving move is the redirected Destroy
+member), both one-use effects removed from the registry, and order independence for the same
+answer. The H2 property answers by effect-id preference (effect 1, then 2) so the
+answer does not depend on the option order, and checks that its cases reach requests,
+applications, moved and unmoved outcomes.
+(8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
+with `amount_below`) and uses only events and children no generated effect can loop on, so every
+case must end with `Ok`; invariant (1) is checked as "a non-override effect appears in
+`applications` at most once per submitted event". Generated damage comes from one of two fixed
+battlefield source objects or from no source, so pool shields meet multi-source damage; the runner
+answers a CR 615.7 `DIVIDE_VALUE` request as (17) states, and one test asserts that at least one
+generated case raises such a request.
+(9) F3 (stack chooser): the public zones API creates a stack object with an explicit controller
+(`Zones::create_object` with `MoveRequest { to: Stack, controller: Some(p) }`), so the spell case is
+tested directly on the stack (owned by player 1, controlled by player 2, and the reverse).
+(10) F7 (work budget): the test world holds `MAX_BUS_EVENTS` plain `LifeChange` events in one batch,
+so the boundary is tested directly (4096 succeed, 4097 is `WorkLimit`, nothing changed), plus a
+children case (4095 members + one replaced Draw with one child is 4097: `WorkLimit`; one member
+fewer succeeds). "Returns quickly" is not asserted on wall-clock time (R7); the doubling-override
+case simply has to finish. Amended in review round 6 (thread r4633092145; item 34).
+(11) F8 (pool allocation): when a source's allotment is 0, whether the pool effect still counts as
+applied to that source's event is not asserted (only that it appears in `applications` and the
+damage outcome); exact application lists are asserted only where unambiguous ((A:3,B:0): once;
+(A:1,B:2): twice). Only one pool is used per test, so the order of simultaneous allocation requests
+of several pools is not tested. The request's options are asserted as
+`Enumerated([Object(A), Object(B)])`, `min = max = 2`; its default follows the capped fill of (17)
+(for pool 3 against 3 + 3 that is (A:3, B:0)). The round-1 readings "the allocation request precedes
+every other request of the batch" and "an allotment a source cannot use stays in the pool" are
+withdrawn by review round 2 (G2, G4): see (15) and (17).
+(12) F6 (enters as copy): the copy is part of the entry (CR 707.5): the call executes and logs ONE
+non-empty batch for the entry, holding the entering event and no `BecomeCopy` event (the log gains
+one batch, not two); a `Skip` effect on `BecomeCopy` is not applied; `copy_of(new id)` is the
+original. Whether an empty batch also appears in `BusReport::executed` is not asserted ((2)). The
+rollback when the copy step fails is provoked with a copied object id that does not exist; only
+`BusError::Event(_)` and an unchanged state are asserted, not the inner `EventError`.
+(13) F11/F4: an Untap of an untapped permanent and zero damage are asserted to leave the state
+completely unchanged and log nothing; a Tap of a tapped permanent executing on its own is not
+tested (brief: unchanged, no CR text). Amended in review round 6 (D6, clause B4, thread
+r4632818842; CR 701.26a, 614.7), replacing the round-5 amendment: a Tap of a tapped permanent would
+not happen, exactly like an Untap of an untapped permanent, so it offers no replacement or
+prevention effect (no request, no application, no shield use) and changes nothing (nothing executed
+or logged); `req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect` asserts this, with an
+untapped control. The terminating chain no longer starts from a tapped permanent (item 29).
+(14) G1 (copy source, CR 608.2h, SRS 2.3): the entry copy succeeds when the original is destroyed in
+the SAME batch as the entering event, in both submission orders, for a zone-change entry and a
+token; the copy link is the original's (old) id and the original's executed move ends in a
+graveyard. How the source's characteristics are resolved (current information or last known
+information) is not asserted. The lenient source check is only for the entry copy: a standalone
+`BecomeCopy` whose copied object left the battlefield in an earlier call fails with
+`BusError::Event(_)` and changes nothing. A copied id that never existed still rolls back the whole
+call ((12)).
+(15) G2 (phased allocation, CR 615.7, 616.1f, 616.2): the allocation request is made when the pool
+is about to apply, over the members' current damage. Tested: a self-replacement doubling (1 + 1 ->
+2 + 2 > 3: one request, total 3; (A:1,B:2) leaves A dealing 1, (A:2,B:1) leaves B dealing 1); a
+self-replacement reduction (2 + 2 -> 1 + 1 <= 3: no request, 2 prevented, the pool keeps 1 point,
+checked against a later event with the modifier removed from the registry); the doubling and the
+pool in the same tier: choosing the pool first gives [CHOOSE, CHOOSE] and no division, choosing the
+doubling first gives [CHOOSE, CHOOSE, DIVIDE_VALUE]; the order of the two choice requests between
+A's and B's events is not asserted beyond preceding the division. A request a member makes before
+the pool applies (the active player's Draw choice) precedes the `DIVIDE_VALUE`
+(`req_event_001_r2_g2_allocation_follows_earlier_choices`, which replaces
+`req_event_001_r1_f8_allocation_request_comes_first`). The replay of the doubled allocation is
+compared by output, registry bytes, canonical state and hash.
+(16) G3 (shield-counter follow-ups, CR 122.1c, 615.13): the CR does not settle how many shield
+counters simultaneous damage to one permanent removes; the tests pin the Orchestrator's reading
+(R8) that ONE counter is removed for all simultaneous damage to that permanent: a shield-less
+`Prevent { then }` effect queues its follow-up once per (effect, recipient) per batch, while every
+damage event is still fully prevented and counted in `prevented`. Separate calls remove one counter
+each; two permanents with their own shields each lose one; a generic follow-up (`LifeChange` of
+player 1) on damage to player 2 from two sources executes once. `BusReport::applications` is
+asserted to list the effect once per prevented damage event ([e1, e1]); this is a reading given by
+the brief, not derived from the CR.
+(17) G4 (allotment caps, CR 615.7): each allotment is capped at its source's current damage. An
+over-cap answer (pool 4 with A 3, B 2: (A:1,B:3), (A:4,B:0), (A:0,B:4); pool 3: (A:0,B:3)) is
+asserted as rejected in either manifestation: the session refuses the answer and stays pending with
+its base unchanged, or the call ends with a bus error and the world and registry unchanged; the
+error variant is not asserted. The timeout default fills recipients in ascending id order up to each
+source's damage (pool 4, A 3, B 2: (A:3,B:1); pool 3: (A:3,B:0)), and answering with it is
+asserted to complete. With valid answers a batch that asked drains the pool and removes the effect;
+a later damage event is dealt in full. The property runner answers every allocation request with the
+request's own `default_on_timeout` (it cannot see current damage after generated modifications, so
+any other division could exceed a cap); it checks that the default divides the total among exactly
+the request's recipients, each at least its minimum, and the "every case ends Ok" invariant is
+kept. Sourceless damage (review round 3, H5) is outside the division: it is never a
+`DIVIDE_VALUE` recipient (CR 120.1), and it takes only what the division leaves, after the members
+that hold an allotment have taken theirs.
+(18) H4 (overriding pool, CR 614.5, 615.7): a pool of 3 with `with_overrides_614_5(true)` against
+3 + 3 from two sources is tested for all four valid divisions (A:1,B:2), (A:2,B:1), (A:3,B:0),
+(A:0,B:3): `Ok` (no `RepeatLimit`), `prevented == 3`, each source deals its damage minus its share
+(a 0 remainder means no executed event), the pool effect removed; the same four for a
+non-overriding pool; and an overriding pool with a single source (one event of 5: 3 prevented, 2
+dealt; two events of 3: 3 prevented, 3 dealt) with no request. `applications` is not asserted
+for these cases.
+(19) H5 (sourceless damage in a divided pool, CR 120.1, 615.7): pool 4 against sourceless 4, A 4
+and B 4, in the submission orders [sourceless, A, B], [A, B, sourceless] and [B, sourceless, A],
+answered (A:4,B:0), (A:2,B:2) and (A:0,B:4): exactly one request whose recipients are A and B
+(total 4), `prevented == 4`, A and B deal 4 minus their share, the sourceless 4 is dealt in full,
+the pool removed, and the registry bytes agree across the three orders. Sourceless damage with
+only ONE source (no division) has no round-2 test to carry over and none is added (the brief adds
+no new expectation for it).
+(20) J1 (review round 4, CR 704.3, 704.7, 614.6, 614.7): an `Instead` child of the group's
+application that moves the group's object competes with the group's surviving moves; a move whose
+final destination differs from the group's original destination wins, never an error and never a
+rollback, and the object moves exactly once (counted over every executed batch by its old id). The
+child goes through the bus itself and its FINAL destination is used (exile redirected to hand puts
+the card in its owner's hand, `applications` [e1, e2]). A child dropped by a Skip leaves the
+surviving StateBasedAction member to move the object to the graveyard; `applications` is not
+asserted there. "The card ends in zone Z" is asserted as: the new object of the single executed
+move carries the same card and is in `Zones::contents(Z)`, and the old id is in no zone.
+(21) J2 (CR 704.8, 122.1c): the departing object's LKI record is the state before any of the
+group's events: `ctx.lki.get(old id).counters()` holds ("shield", n) for n = 1 and n = 2, while
+the shield removes one counter. The RemoveCounters and the move share ONE executed batch, the
+removal first, and exactly one RemoveCounters is executed. "No other executed batch" is asserted
+over the non-empty executed batches and the non-empty logged batches (whether empty batches are
+listed is not asserted). With a second object Y moved by an unrelated StateBasedAction, Y's LKI
+exists and X's still holds the counter; because different objects are processed in submission
+order, whole-run equality (output, registry bytes, world, hash) is asserted only between the two
+orders of X's members with Y at the same position (Y first, last, and between X's members), not
+across different placements of Y.
+(22) J3 (CR 704.7, 616.1f): a modification that leaves the destination alone (`SetFaceDown(false)`
+on a face-up object, `SetController(P1)`) never beats a redirect: the card ends in exile for both
+answer preferences and both submission orders; only the common ground is asserted (no error, at
+most one request, one move, both effects applied once and consumed; the order of the two
+applications is not asserted). This is the brief's reading, not a CR statement: the CR is silent
+on one object moving to two zones in one event. With two redirects to different zones (exile,
+hand) only exactly one move, a zone in {exile, hand}, no error and order independence for the same
+answer are asserted.
+(23) J4 (CR 704.7, 707.5): of two identical entries hand to battlefield with `sba = true`, the
+member carrying the entry-copy plan (C applied to it) wins over the one whose applied set already
+held C: the card enters once, as a copy, with no `BecomeCopy` event executed or logged, one
+application of C, C consumed, in both orders. This is the brief's reading, not a CR statement.
+Controls: both applied sets empty (one application, a copy); both holding C (no application, C
+kept, not a copy).
+(24) K2/K3/K5/E2/E3 (review round 5, CR 704.3, 614.6, 616.2; tests in
+`spec_replacement_round5.rs`): an `Instead` lineage is part of the ONE executed batch of the call
+whatever it descends from (a CR 704.7 group member, a singleton, an `sba = false` member, a
+grandchild of a nested lineage); "one batch" is asserted over the non-empty executed batches and
+the non-empty logged batches, the logged batch equal in canonical bytes to the reported one. The
+order inside the batch is asserted only where the brief states it: a non-move final event (a
+`RemoveCounters` child) precedes the surviving zone changes. A fully replaced group or singleton
+(its only result a counter removal) leaves the object on the battlefield and still shares the
+batch with the other object's move. E2: a child removing a counter from an object that moves in
+the same batch leaves that object's LKI at the pre-batch count (CR 704.8). K5 (reading Q3): the
+grandchild's `RemoveCounters` of a counter the object does not have is still replaced (nothing
+executes between generations); the variant whose grandchild moves to the group's own destination
+asserts only Ok, one move and the graveyard.
+(25) K4 (CR 615.5, 615.13, 122.1c, reading Q1: the CR is silent on simultaneous additional effects
+of prevention): K4 is not a defect. The group case (the damage to A is the `Instead` child of a
+group member) equals the plain batch [damage A, damage B]: the two follow-ups (1 damage to Q each)
+are one later batch and Q's shield removes ONE counter (2 -> 1). The inverse (a lineage damage to
+Q simultaneous with a submitted damage to Q) shares one removal too and reports the same
+`prevented` (2) as the control [damage Q, damage Q] in a fresh world. The prevention effects on A
+and B carry no shield. Follow-ups whose object was moved by the call's earlier batch (damage to X,
+a move of X) are asserted to be ignored (Ok, the earlier batch kept, the follow-up not executed,
+one non-empty batch); a follow-up naming a never-issued id fails with an unknown-object error at
+any event layer (`EventError::UnknownObject` or the zone, permanent or memory variant) and the call
+rolls back.
+(26) E1/E4 (CR 704.3, 704.7, 400.7): one object with several submitted destinations and no
+effects (two singletons; two groups; a group and a singleton) moves once, without error or
+rollback, in both the submitted and the reverse order, with equal report, registry bytes, state
+hash and zone. The test asserts only "one of {graveyard, exile}, the same for both orders".
+Observation (not asserted): with the round-5 implementation all three shapes put the card in the
+graveyard.
+(27) B3 (reading Q2: the CR is silent on one object moving twice in one simultaneous event): a
+move produced or redirected by a replacement (its final destination differs from its own submitted
+member's, or it descends from a member of another object) beats a plain submitted move. K2 (c)
+with `sba = false` (X's move replaced by a child exiling Y, Y's own move submitted) is therefore
+NOT a caller duplicate and succeeds; the `sba = false` failure for two SUBMITTED moves of one object
+(`req_event_001_r1_f2_no_coalescing_without_sba`) stays as (7) states. N1: of two entries hand to
+battlefield, one with cause Other and C already applied, the other with cause StateBasedAction and
+no applied effect, the Other move wins on canonical event content (the test checks first that
+`bytes` of the Other event sorts before the StateBasedAction one) and the losing move cannot supply
+its copy plan: no copy link on the new id, both orders equal. N2 strengthens
+`req_event_001_r4_j1_instead_child_same_destination`: the only executed move of X across all
+batches is the child `zone_change(X, Graveyard, Other)` (encoding precondition checked the same
+way). N3: a child starting at the group's destination and redirected to exile is a redirect by its
+FINAL destination and wins (exile, `applications` [e1, e2]).
+(28) C1 (clause B1; CR 614.6 "a modified event occurs instead", CR 704.3; REQ-EVENT-001
+"replacement-generated events re-enter the bus"): `req_event_001_executed_batches_parent_then_children`
+is corrected from three non-empty batches (Tap; life(P1, +1); life(P2, -1)) to ONE batch
+[life(P1, +1), life(P2, -1), Tap]: the damage's lineage (in the order the effect listed it, the
+Draw child replaced in place by life(P2, -1)) precedes the later member's Tap; the logged batch
+equals the reported one (bytes and index), the life totals and `applications` [1, 2] are kept.
+(29) C2 (clause B4, reading Q3; CR 614.6, 616.1f): `req_event_001_override_effect_applies_again_to_instead_child`
+keeps its scenario but now asserts `DepthExceeded` with the state unchanged: the lineage is judged
+against the pre-call state, so the overriding effect keeps matching its own child Tap (the charge
+counter is never removed between generations). Its old purpose (CR 614.5 override semantics) moves
+to `req_event_001_override_effect_terminating_chain_applies_again`, re-specified in review round 6
+(D6, clause B4, thread r4632818842; CR 701.26a, 614.7: the round-5 chain started with a Tap of a
+tapped permanent, which now offers no effect): an UNTAPPED permanent, e1 (Tap ->
+Instead[AddCounters charge 1], overriding) and e2 (AddCounters -> Instead[Tap]), every event
+possible against the pre-call state: Ok, `applications` [e1, e2, e1], the permanent untapped with
+one charge counter, ONE batch holding exactly one AddCounters with applied set {e1, e2}.
+(30) B6 (CodeRabbit K1): separate results (different objects, separate groups) are scheduled in
+APNAP order then submission order and may compete for a one-use effect, and an object's new id and
+the batch order depend on the position of its move; so whole-run equality (report, registry bytes,
+world snapshot, canonical state, state hash, and a re-run) is asserted only between the two orders
+of ONE group's members, or of one object's two events, with every other event at the same position.
+Other reorderings (K2 b) assert only final zones and counts. Amended in review round 6 (clause B1):
+an `Instead` descendant takes the submission position of the event it replaces (item 31).
+(31) D1 (review round 6, clause B1, thread r4632671472; CR 101.4, 616.1, SRS 8.1 [2]; tests in
+`spec_replacement_round6.rs`): a descendant is resolved in APNAP order of its own chooser at the
+submission position of the event it replaces, as soon as that event has resolved. The tests observe
+this only through which simultaneous life gain takes a one-use doubler (a descendant gain of the
+active player wins in both submission orders, also when its parent's chooser is the nonactive
+player; two gains of one player go by the parent's position) and through the chooser of the first
+two `CHOOSE_REPLACEMENT_EFFECT` requests (`PendingChoiceRequest::chooser`, as in
+`spec_replacement_choice.rs`); the total number of requests is asserted only as at least two. No
+existing spec test pinned the old "descendants after the cohort" order: none needed correcting.
+(32) D2 (review round 6, clause B2, thread r4632671485; CR 101.3, 614.6, 400.7, 701.3b, 608.2h):
+in a later batch of the call (a `Prevent { then }` follow-up, or the `Instead` descendants of one),
+the roles checked against objects an earlier batch moved are the affected object, the
+`Attach` host (`AttachTarget::Permanent`) and `BecomeCopy.copied` (an engine limitation: the rules
+would copy last known information); such an event is ignored and the rest of its batch executes. A
+damage source is not a role: damage from a moved source is still dealt (CR 608.2h). A never-issued
+id still fails with `UnknownObject` and rolls the call back. Each shape runs directly and via an
+`Instead` of the follow-up gain (with a gain of 2 in place of 1).
+(33) D6 (review round 6, clause B4, thread r4632818842; CR 701.26a, 614.7): a Tap of a tapped
+permanent offers no effect and is a no-op (items 13 and 29).
+(34) Lineage positions (review round 6, thread r4633092145; CR 616.1, 101.4): a descendant's
+position is its parent's position followed by its index in the parent's `Instead` list, recursively,
+so lineages expand depth-first. `req_event_001_r6_lineage_grandchild_takes_parent_position`: Tap T
+-> Instead[Tap U, P1 gains 3], Tap U -> Instead[P1 gains 1], a one-use doubler of player 1's gains:
+the grandchild gain of 1 is doubled (P1 +5, applications [e1, e2, e9]); with the list [gains 3,
+Tap U] the gain of 3 is (+7, [e1, e9, e2]); each also with a gain of player 2 before and after the
+Tap. Corrected under R10: `req_event_001_r1_f7_doubling_override_is_work_limit` is renamed
+`req_event_001_r1_f7_runaway_override_is_depth_or_work_limit` (the old name became wrong): the
+narrow overriding chain Draw -> Instead[Draw, Draw] now asserts `DepthExceeded` (it reaches the
+child-depth limit before the work budget); a wide shallow fan-out added to the same test (41
+submitted gains of player 2, each replaced without override by 100 gains of player 1, 4100
+descendants at depth 1) asserts `WorkLimit`. A shallow fan-out was chosen over the suggested
+overriding 100-per-level fan-out because whether that one hits the depth or the work limit first
+depends on how the budget counts unresolved descendants, which the brief leaves open. Both cases
+assert the state hash, the canonical state and the registry bytes unchanged.
+(35) Lineage position beyond resolution (CodeRabbit review 5980983595; CR 615.7, 616.1, 101.4):
+an `Instead` descendant behaves exactly as if submitted at the position of the event it replaces,
+recursively, also (a) when stopped damage resumes after a pool prevention and (b) in the order of
+execution. Observed only by comparison with the equivalent direct batch:
+`req_event_001_r6_pool_resumes_in_lineage_order` (one source, one chooser preferring the pool e1
+over the one-use doubler e9 of damage below 3: Tap T -> Instead[Tap U, 3 damage], Tap U ->
+Instead[1 damage] ends at 17 like the direct [1, 3]; with [3 damage, Tap U] at 15 like [3, 1];
+life, damage prevented and the executed (source, amount) list equal the control) and
+`req_event_001_r6_execution_follows_lineage_order` (Tap T -> Instead[Tap U, exile Y], Tap U ->
+Instead[exile X]: executed and logged zone changes [X, Y], with the same new ids and zone bytes as
+the direct [exile X, exile Y]; control [Y, X]). The number of requests and the applied sets are not
+compared with the control (the lineage carries extra applied effects). No existing spec test
+pinned creation-order execution or resumption: none needed correcting.
+**Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
+silent, assert the reading every conforming implementation shares.
+**Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
+order between merge groups of one chooser (each over-specifies what the brief leaves open).
+
+## #29 FP-028 — Contained effects are filtered before the tier restriction
+
+**Decision:** When the bus collects R(E'), contained effects (`ReplacementEffect::contained`) are
+removed from the candidates while at least one non-contained effect applies to E'. The tier
+restriction (first non-empty tier of CR 616.1a-e) is applied afterwards to what remains. A
+contained effect becomes choosable once no non-contained effect applies.
+**Rationale:** CR 616.1g (text supplied by the rules-researcher): "While following the steps in
+616.1a-f, one replacement or prevention effect may apply to an event, and another may apply to an
+event contained within the first event. In this case, the second effect can't be chosen until
+after the first effect has been chosen." "Can't be chosen" makes a contained effect ineligible at
+every tier step. Filtering by tier first would give an empty choice when the tier-winning set is
+all contained.
+**Alternatives:** Tier first, then the contained filter (rejected: empty choice sets, see above).
+
+## #29 FP-028 — CR 704.7 merging of state-based-action batches
+
+**Decision:** (Review round 1, F2/F5; amended in review round 2, F2, and replaced by member-wise
+semantics in review round 3, H2; execution restructured in review round 4, J1-J4, and in review round 5, K1-K5.) With `sba = true` only `ZoneChange` members merge. Members form a
+group when they have the same affected object and the same destination (`request.to`) as
+submitted: the same object and the same kind of result. Every member stays in the list, tagged
+with its group; the group is resolved at the position of its first member in submission order
+(for APNAP and execution order). Collection: an effect is a candidate for the group if it is
+eligible (the per-member filters: not already applied to that member unless it overrides
+CR 614.5, shield left, matcher matching that member's CURRENT event) for at least one member;
+candidates are deduplicated by `EffectId`, and the CR 616.1g contained filter and the tier
+restriction run on that union. One choice is made for the group (asked of the object's chooser;
+no request if the restricted set has one effect). The chosen effect is applied ONCE (one
+`BusReport::applications` entry, one shield use, one set of `Instead` or `Prevent` child events,
+taken from the first matched member in content order) to EVERY member it is eligible for and
+matches; each such member's event is modified or dropped and the effect is added to its applied
+set. Members it does not match are unchanged and keep resolving: the loop repeats over the group
+with the union rule until no candidate remains (CR 616.1f). Execution (review round 4; detail in
+"CR 704.7 group execution: one resolved batch"): the batch is first resolved completely, then
+executed as ONE batch. The object moves at most once. Every `Instead` descendant, of a group
+member or of any other member, is resolved through the bus as a member of the same batch (not
+executed separately) and its final events are part of the same executed batch; a final `Instead`
+move of an object is not executed on its own but competes with that object's other final moves.
+The executed move (round 5, "Two destinations for one object"): if a candidate is a redirect
+(its final destination differs from its root's submitted destination, or its root was not a move
+of this object), only redirects compete, otherwise all do; the least by (canonical `GameEvent`
+bytes, canonical `AppliedEffects` bytes, entry-copy plan) wins and is executed at the position
+of the least root among the object's candidates; the others are dropped (not executed, not
+logged). If every member was dropped (`Skip` or `Instead` on all), the replacement events of the
+fully replaced group stay in the same executed batch (review round 5, K3); if only some were
+dropped, the remaining members still move it. The result never depends on submission order within a
+group: both orders give the same `BusReport`, registry and state hash. Members for different
+objects never merge, whether or not they share kind, candidate set or chooser; each is processed
+on its own (own request if it has two or more candidates, own application, own shield use) in
+APNAP and submission order. Non-`ZoneChange` events never merge. With `sba = false` nothing
+merges and equal duplicate moves are not coalesced (the second fails with `UnknownObject` and the
+batch rolls back).
+**Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
+event; CR 704.5g and CR 704.5h both destroy, and CR 701.8b makes those state-based actions
+destructions, so two state-based actions destroying one permanent are one result. CR 704.7: "If
+multiple state-based actions would have the same result at the same time, a single replacement
+effect will replace all of them." The CR text does not define the key of "the same result"; per
+R8 same object and same destination is the narrowest reading that covers the lethal-damage-plus-
+deathtouch case, and CR 616.1 makes each affected object's choice its own, so different
+permanents are distinct results. Rules-researcher conclusions (review round 3): the CR gives no
+rule that a replacement matching one state-based action cancels the others, so each replacement
+applies to the members it matches (one replacement replaces all same-result actions it applies
+to) and members it does not match still move the object; considering only one member's cause
+hides a replacement that matches another member; same-cause duplicates merge and one replacement
+covers both; CR 704.5f and CR 704.5g/h are mutually exclusive (toughness), so real mixed-cause
+groups are for example a CR 704.5g destruction plus a move that is not a destruction. The
+execution rule for differing destinations follows CR 704.7 (the replacement replaces the result
+of the actions it applies to, so the object ends where the replacement sent it); unmatched
+members still move the object, except when a surviving move to a different destination than the
+group's original one (a redirect) takes precedence (CR 704.7; the object cannot move twice in
+one batch). Determinism (R3, REQ-CORE-001): candidates are iterated by `EffectId`, matched members
+in content order, and the executed move chosen by destination and content, so submission order
+within a group has no effect.
+**Alternatives:** Grouping by kind, candidate set and chooser (round 0; rejected in review:
+different permanents are not the same result); deduplicating by event kind or destination alone
+(rejected: merges different objects); merging only equal events (rejected: a cause difference
+such as lethal damage versus deathtouch would keep two moves of one object); keeping the first
+submitted member (round 1; rejected in round 2: submission order changed which cause-sensitive
+replacement applied); survivor-only collection (round 2; rejected in round 3: it hides a
+replacement matching a discarded member's cause); any matching replacement cancels the whole
+merged move (rejected: the CR has no such rule; unmatched members still move the object); a
+precedence among causes (still rejected: not settled by the supplied rules text); the union of
+the members' applied sets (rejected: it would apply CR 614.5 to the history of an event that did
+not happen); running the child events of a group application after the move (rejected: a child
+such as the shield counter's removal would name an object that has already left, and the batch
+would fail); running the group's child events as a separate batch before the move (round 3;
+superseded in round 4: it retired the object id before the group's own move (J1) and captured
+LKI after the shield counter's removal (J2, CR 704.8)); preferring members that were `modified`
+(round 3; superseded: a modification that leaves the destination unchanged must not beat a
+redirect, J3); breaking ties by index (superseded: the entry-copy plan is part of the execution
+inputs, J4).
+
+## #29 FP-028 — CR 704.7 group execution: one resolved batch
+
+**Decision:** (Review round 4 J1-J4; replaced in round 5, K1-K5; scheduling revised in round 6,
+D1.) The bus processes a batch in two
+stages. RESOLVE runs the SRS 8.1 loop for every member and executes nothing. A member is a
+submitted event or an `Action::Instead` descendant of one (a lineage member): an applied
+`Instead` queues its events (charged against the work budget, each with the parent's applied set
+after the application, CR 614.5), and right after the parent has resolved they are taken up as new
+members of the SAME batch, with the parent's root (the submitted member, or the first member of its CR 704.7
+group), the root's submitted (object, destination) and depth parent + 1 (above `MAX_CHILD_DEPTH`
+is `DepthExceeded`). The loop: phase A repeatedly takes the not-started member with the least key
+(APNAP rank of its chooser, chooser, lineage path, member index; a group at its first member, its other
+members started with it; only submitted members are grouped), resolves it and at once takes up the
+`Instead` events it queued, which then compete by the same key (see "Descendant scheduling and the
+roles of the impossible-instruction check (round 6)"); when nothing is unstarted, phases B and C
+allocate the lowest stopped CR 615.7 pool per chooser in APNAP order over all members and resume
+each chooser's stopped members in the phase A key order (lineage path; members with an allotment
+before sourceless ones, round 6 review 5980983595), then take up their `Instead` events; the loop ends when nothing is pending. All
+members share one queue: one `prevented_once` set and one entry-copy list. The `Prevent { then }`
+follow-ups of the whole batch, lineage members included, form ONE following child batch
+(`depth + 1`, `sba` false), as before. RECONCILE: the final `ZoneChange`s of every member are
+gathered per object and at most one is executed per object. One candidate is executed as is.
+Exception: with `sba = false` and every candidate a submitted member, all are kept (a caller's
+duplicate still fails with `UnknownObject` and rolls back). Otherwise a candidate is a redirect if
+its root's submitted move is not a move of this object, or its FINAL `request.to` differs from its
+root's submitted destination (the final destination counts, not the initial one: N3); if a
+redirect exists only redirects compete; the winner is the least by (canonical event bytes,
+canonical applied-set bytes, entry-copy plan: a candidate with a plan before one without, then the
+lesser plan by `ObjectId` sequence), the candidate position breaking a remaining tie between
+interchangeable inputs. The winner's plan is executed; the losers (and their plans) are not
+executed, logged or reported; this never fails. EXECUTE: ONE `execute_batch_with_entry_copies`
+call: first the final events that are not zone changes, ordered by (lineage path, member index),
+then the kept zone changes, each at the least (lineage path, member index) of its object's
+candidates (round 6 review 5980983595; before, (root, member index); identical for submitted
+members, whose path is [root]). Non-moves
+come first because `Tap`, `Attach`, `RemoveCounters` and the like need a live permanent (a shield
+counter's removal precedes its object's move). This also changes the order of `sba = false`
+batches: [move Y, tap Y] used to fail with `UnknownObject` and now succeeds. K1: the choice among
+ONE object's competing moves depends on content, not on submission position; results of
+DIFFERENT objects or separate groups are resolved in APNAP order, then submission order, and may
+compete for a one-use effect, so reversing the submission can change which object a one-use
+redirect applies to. Tests: `req_event_001_r4_j1_*`, `req_event_001_r4_j2_*`,
+`req_event_001_r4_j3_*`, `req_event_001_r4_j4_*`, `req_event_001_r5_k2_*`, `req_event_001_r5_k3_*`,
+`req_event_001_r5_e3_*`, `req_event_001_r5_k5_*`, `req_event_001_r5_e1_e4_*`,
+`req_event_001_r5_e2_*`, `req_event_001_r5_n1_*`, `req_event_001_r5_n3_*`,
+`req_event_001_children_reenter_bus` (the `Instead` child executes in the same batch as its
+sibling), `req_event_001_r6_d1_*` (round 6 scheduling).
+**Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
+event, and CR 614.6 makes a replacement's modified event occur instead of the replaced one, so
+the modified event, at any generation, takes the replaced event's place inside the same event
+(rules-researcher, rounds 4 and 5). CR 704.8 derives a departing permanent's last known
+information from the game state before any of those state-based actions; the events layer
+captures LKI for every object a batch moves before any event of that batch, so one executed batch
+gives that by construction. One object with several final moves is settled by "Two destinations
+for one object" (researcher Q2). Rounds 3 and 4 kept a separate path for children of a group that
+still moved and deferred every other `Instead` child to a later batch; every round found a new
+shape where the two paths met (K2: a child move of an object with a plain move, K3: a fully
+replaced group, K5: a grandchild move, K4-inverse: a second `prevented_once`), each a retired id
+and a rollback or a split simultaneous event. One rule for every lineage removes the seam.
+**Alternatives:** Patching K2, K3 and K5 separately (rejected: the same patch-on-patch structure
+as rounds 3 and 4); a separate batch per lineage (rejected: splits one simultaneous event and
+`prevented_once`); one batch per `Prevent` follow-up (rejected: changes the plain K4 shape from one
+counter removal to two); executing children and reconciling afterwards (rejected: the object id is
+already retired and LKI already captured); a change in `events/` (not needed).
+
+## #29 FP-028 — Instead lineage joins the batch and is judged against the pre-batch state
+
+**Decision:** (Review round 5, K2/K3/K5, researcher Q3.) Every `Action::Instead` lineage is part of
+the same simultaneous batch as the event it replaces, at every generation, whether or not the
+replaced member is in a CR 704.7 group (see "CR 704.7 group execution: one resolved batch"). Since
+nothing executes while a batch resolves, a lineage member is collected against the state before
+the batch: a replacement that needs a counter sees it even if another part of the same modified
+event removes it. Consequence: an `overrides_614_5` effect with `requires_counter` whose `Instead`
+output matches itself again (Tap -> Instead[remove the counter, Tap]) no longer stops after a
+staged execution removed the counter; it applies at every generation until `DepthExceeded`, and
+everything is rolled back (unit test
+`req_event_001_r5_override_matching_own_instead_output_exceeds_depth`; the Independent Tester's
+spec test of an overriding chain is rewritten as a terminating chain). An event of a LATER batch of
+the same call (a `Prevent` follow-up or its `Instead` lineage) that names, as its affected object or as the host of an `Attach` or the copied object of a `BecomeCopy`, the old id
+of an object an executed batch of this call moved to another zone is an impossible instruction
+(the roles: "Descendant scheduling and the roles of the impossible-instruction check (round 6)"):
+it is ignored (not offered to effects, not executed, no error, the earlier batches kept; test
+`req_event_001_r5_follow_up_naming_moved_object_is_ignored`). An id that was never issued, or
+that left in an earlier call, is still `UnknownObject` (tests
+`req_event_001_r1_f6_enters_as_copy_is_not_replaced`,
+`req_event_001_r2_g1_source_stays_and_standalone_stays_strict`).
+**Rationale:** CR 614.6: "If an event is replaced, it never happens. A modified event occurs
+instead, which may in turn be replaced"; for the ignored events, CR 101.3 ("Any part of an
+instruction that's impossible to perform is ignored"; SRS REQ-ARCH-002: the rest is still carried
+out) and CR 614.6: "the modified event may
+contain instructions that can't be carried out, in which case the impossible instruction is simply
+ignored", CR 614.7 and CR 400.7 (the moved object is a new object); CR 616.1f repeats the process "taking into account only
+replacement or prevention effects that would now be applicable"; CR 616.2: an effect can become
+applicable as the result of another that modifies the event; CR 120.4d: "Finally, the damage event
+occurs." The state changes only when the modified event occurs. The CR does not say this
+verbatim; the structure implies it (rules-researcher, round 5, Q3).
+**Alternatives:** Staged execution per generation (rejected: it splits one simultaneous event,
+retires object ids that a later generation names, and captures LKI after part of the event).
+
+## #29 FP-028 — Two destinations for one object
+
+**Decision:** (Review round 5, K2/K5/E1/E4, researcher Q2; an R8 judgement.) In one executed batch
+an object moves EXACTLY ONCE. Its candidates are the final zone changes of every member that
+names it (group members, ungrouped members, `Instead` lineage moves). A move produced or redirected
+by a replacement (a redirect: its root was not submitted as a move of this object, or its final
+destination differs from its root's submitted destination) beats a plain submitted move; among
+redirects, or among plain moves if there is no redirect, the least by (canonical event bytes,
+canonical applied-set bytes, entry-copy plan) wins. This never fails and never rolls back. With
+`sba = false` and only submitted candidates nothing is reconciled (the caller's duplicate fails in
+the events layer, as before; test `req_event_001_r1_f2_same_object_sba_moves_execute_once`). For
+example [X to the graveyard (sba), X to exile (sba)] moves X to the graveyard: the destination is
+encoded before the cause and the graveyard's tag (3) is below exile's (5) (test
+`req_event_001_r5_e1_e4_two_destinations_one_object_moves_once`).
+**Rationale:** The CR is silent on one object moving twice in one simultaneous event. No pair of
+CR 704.5 state-based actions sends one object to different zones; different zones arise only
+through a replacement, so the case reduces to a replacement-produced move, which is the modified
+event that occurs instead (CR 614.6) and so takes precedence over the plain move; the plain move
+then finds the object gone and does nothing, by analogy with CR 614.7 and CR 400.7, not as a
+rule. CR 704.3 and CR 704.7 make the state-based actions one event, so the result must not depend
+on submission order (researcher Q2).
+**Alternatives:** Failing or rolling back (rejected: the engine must never fail on it); the first
+submitted move wins (rejected: submission-order dependence); the last wins (rejected: the same).
+
+## #29 FP-028 — Known limitations of the one-batch resolution (round 5)
+
+**Decision:** Recorded, not fixed in this unit. (b) A CR 615.7 allocation of a pool happens on the
+damage stopped at that moment; damage that a lineage member produces later (an `Instead` applied
+in phase C) is allocated afresh: if the pool is left after the first allocation, the later damage
+triggers a second allocation, which may be a division (test
+`req_event_001_r5_limit_b_lineage_damage_after_division`: pool e1 is allocated without a division
+on 2 + 2 and keeps 1; lineage damage from two sources asks a second division of the remaining 1).
+A full division uses the whole pool, so no division follows a division of the same pool. (d) The
+events that are not zone changes execute before the zone changes, which changes the order for
+`sba = false` batches ([move Y, tap Y] now succeeds). (e) Results of DIFFERENT objects or groups
+still compete for a one-use effect in APNAP order of their choosers, then submission order (an
+`Instead` descendant at the position of the event it replaces, recursively), so reversing the
+submission can change which object such an effect applies to (K1; documented). Since round 6 (D1)
+descendants are no longer deferred behind the members that were not yet started with their parent:
+each is scheduled as soon as its parent has resolved.
+(f) "Instead, do A, then B" where B names a new object made by A cannot be expressed as
+`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit. (g) Closed in round 6
+(D2) except one limitation: the impossible-instruction check now covers the affected object, the
+host of an `Attach` and the copied object of a `BecomeCopy`; a damage source is deliberately not
+covered (CR 608.2h). The remaining limitation: a `BecomeCopy` whose copied object this call
+already moved is ignored instead of copying its last known information (CR 608.2h); that needs an
+events-layer change in a later unit.
+(h) Recorded after review 5981232036 (bus.rs:466, outside the diff). Phase C resumes all of one
+chooser's stopped pool members before any `Instead` descendant created during that resumption is
+taken up. Such a descendant is scheduled by phase A only after the pool round, not at the position
+of the event it replaces. A one-use effect can therefore go to a later stopped member first.
+Example: two simultaneous 3-damage events to P1 from one source; pool e1 of 1 applies to both;
+e2 replaces damage below 3 with Instead[1 damage to P1] on the first; e9 doubles damage once.
+P1 ends at 13, where the lineage-position rule would give 15. Both outcomes are legal orders for
+simultaneous events; the engine is deterministic either way; only the internal lineage-position
+rule is not met inside phase C. A fix must run each resumed member's descendants, with their
+choices and any pool they stop at, before the next stopped member resumes; a later unit.
+**Rationale:** (b) is rare (it needs an `Instead` on partly prevented damage); (e) follows from
+CR 616.1 (each object's choice is its own, choosers in APNAP order); (f) needs sequenced
+sub-events, outside this unit; (h) needs nested resolution inside phase C, needs an `Instead` on
+damage partly prevented by a pool plus a one-use effect matching a sibling, and is an ordering
+choice among simultaneous events rather than a rules violation.
+**Alternatives:** Re-running the allocation for all damage whenever lineage damage appears
+(rejected: it would undo prevention already applied); content order across objects (rejected:
+CR 616.1 orders by chooser, and the one-use effect's choice belongs to the first chooser).
+
+## #29 FP-028 — Descendant scheduling and the roles of the impossible-instruction check (round 6)
+
+**Decision:** (Review round 6, D1, D2 and thread r4633092145.) Scheduling: every not-yet-started
+member of a batch, submitted or `Instead` descendant, is ordered by ONE key: (APNAP rank of its
+chooser, chooser id, lineage path compared lexicographically, member index). The rank is the
+chooser's position in the APNAP order; choosers outside it come last by ascending id. The lineage
+path of a submitted member is [its index] ([the group's first index] for a CR 704.7 group member);
+a descendant's path is its parent's path followed by its position in the parent's `Instead`
+output. So a descendant takes the exact position of the event it replaces, recursively: a
+grandchild sorts at its parent's place among the parent's siblings, not after them (test
+`req_event_001_r6_lineage_path_grandchild_takes_parent_position`: T -> Instead[tap U, gain 3],
+U -> Instead[gain 1], a one-use doubler: the gain of 1 takes it, 2 + 3 = 25). The member index
+only separates a group's members, which share a path. The first round-6 version ordered by
+(root, member index), so every descendant of one submitted event shared one position and creation
+order decided (27 in that shape); rejected in review (r4633092145). Consequence: lineages are
+expanded depth-first, so an overriding `Instead` chain with a small fan-out (a draw doubled at
+every level) reaches `MAX_CHILD_DEPTH` (about 130 events) before `MAX_BUS_EVENTS` and is
+`DepthExceeded`, not `WorkLimit`; a wide fan-out (100 per level) still hits `WorkLimit`; both roll
+everything back (unit test `req_event_001_r1_f7_work_budget`, corrected under R10). Phase A takes the not-started member with the least key (a group at its first member, the
+group's other members started with it), resolves it, and at once takes up the `Instead` events it
+queued as not-started members. A descendant can start only after its parent resolved; if its
+chooser ranks before members that already resolved, it simply runs next. Requests for a
+descendant's choices come in this order. For submitted members only, the key is the previous
+(rank, chooser, index) order. The same path order is used everywhere members are ordered by
+position (CodeRabbit review 5980983595): phase C resumes a chooser's stopped pool members in this
+key order (allotted members before sourceless ones, a stable sort), not by creation index, so a
+descendant that phase A stopped first also resumes first (test
+`req_event_001_r6_pool_resumption_follows_lineage_path`: T -> Instead[tap U, 3 damage],
+U -> Instead[1 damage], pool 1, a one-use doubler of damage below 3: the 1 is prevented and 3 is
+dealt, as for the direct [1 damage, 3 damage]; before, the 3 resumed first, was cut to 2, doubled
+to 4, and 5 was dealt); the executed batch orders the events that are not zone changes, and the
+kept zone changes, by (lineage path, member index) instead of (root, member index) (test
+`req_event_001_r6_execution_order_follows_lineage_path`: a grandchild move executes, and gets its
+new id, at its parent's place, as in the direct batch). Corrected under R10 by that execution
+order: the unit test `req_event_001_r6_lineage_path_grandchild_takes_parent_position` now expects
+the executed life deltas [(P1, +2), (P1, +3)] instead of [(P1, +3), (P1, +2)], because the direct
+batch [gain 1, gain 3] executes the doubled gain of 1 first (its life totals 25, 21 and 27 are
+unchanged). Phase B is order-independent: the pool's
+choosers are taken in APNAP order (rank, then id, independent of member indices), and the
+allocation sums each source's damage in a `BTreeMap` keyed by source. Members taken up after the
+resumption are scheduled by phase A. `DepthExceeded` is raised as soon as the too-deep generation
+is taken up (same error, same rollback). Impossible-instruction roles: an event of a later batch
+of the same call is ignored if it names a retired id (an object an executed batch of this call
+moved) as (i) its affected object, (ii) the host of an `Attach` to a permanent, or (iii) the copied
+object of a `BecomeCopy`. The source of a `Damage` does NOT count: damage from a source that has
+left its zone is still dealt. (iii) is an engine limitation: the events layer's standalone
+`BecomeCopy` accepts only a copied object in a zone and would roll back the whole call, so the bus
+ignores such an event instead of copying last known information. Ids never issued, or retired in
+an earlier call, still fail with `UnknownObject`. Tests: `req_event_001_r6_d1_*`,
+`req_event_001_r6_d2_*` (in one batch, an `Attach` onto X executes before X's move and Z ends
+unattached: the permanent container ends attachments to an object that leaves the battlefield).
+**Rationale:** CR 101.4 and CR 616.1 order simultaneous choices APNAP; SRS 8.1 step [2]
+"Simultaneous choosers -> APNAP". Lineage members are judged against the pre-batch state, so their
+choices are simultaneous with the submitted members' choices; the outcome must not depend on
+whether a gain was submitted directly or produced by `Instead` (review D1: a one-use effect went to
+P2's gain because P1's descendant waited for the whole cohort). CR 101.3: "Any part of an
+instruction that's impossible to perform is ignored", and SRS REQ-ARCH-002: the rest is still
+carried out, so an impossible `Attach` is dropped and the other events of its batch execute
+(before: `UnknownObject` rolled back the whole call). CR 614.6: "the impossible instruction is
+simply ignored"; CR 400.7: the moved object is a new object; CR 701.3b: an attach to an object it
+can't be attached to does not move the attachment. CR 608.2h: "it's the object as it exists—or as
+it most recently existed—that does it", so the damage source keeps dealing damage, and a copy would
+use last known information.
+**Alternatives:** Scheduling descendants after the whole cohort of members not yet started with
+their parent (round 5; rejected, D1); ordering descendants by (root, creation index) (round 6 first
+version; rejected, r4633092145: a grandchild lost its parent's place among the parent's siblings);
+dropping a damage event whose source moved
+(rejected: CR 608.2h); letting a `BecomeCopy` of a moved object fail (rejected: rolls back the
+whole call); changing `events/` to copy from last known information (outside this unit's paths; a
+later unit).
+
+## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
+
+**Decision:** CR 704.7 merging here covers only `ZoneChange` events of the same object to the same
+destination. Merges across kinds (for example two different state-based actions that both cause a
+game loss) and merges of non-`ZoneChange` events are out of scope; there is no game-loss
+`BusEventKind` in this unit. Pool prevention across simultaneous damage is not a CR 704.7 merge;
+see "Pool prevention is allocated by the affected player".
+**Rationale:** The result comparison for other kinds needs event kinds this unit does not have;
+the zone-change key is the one review round 1 required.
+**Alternatives:** A result-equivalence relation across kinds (deferred to the unit that adds
+game-loss events).
+## #29 FP-028 — A tier set with one effect is applied without asking
+
+**Decision:** When the choosable set (after the contained filter and the tier restriction) has
+exactly one effect, it is applied with no `CHOOSE_REPLACEMENT_EFFECT` request; with two or more
+the chooser is asked.
+**Rationale:** Brief requirement 2; a one-option choice carries no decision and would only add a
+round trip and a request id.
+**Alternatives:** Always ask (rejected: noise for clients, changes request numbering).
+
+## #29 FP-028 — Chooser, APNAP order and the turn-order fallback
+
+**Decision:** The chooser of an event: for `CreateToken`, its controller if set, else its owner;
+for an affected object, the controller in the permanent container if it is a permanent; else its
+zone record's rules controller (`ObjectRecord::rules_controller`, set on the stack, so a spell
+owned by P1 and controlled by P2 is P2's choice); only an object with no controller falls back to
+its owner (an unknown object is `BusError::Event(UnknownObject)`); for an affected player, that
+player; otherwise the first player of the APNAP order (the active player). APNAP order is
+`GameState::turn_order()` rotated to start at the active player; if the turn order is empty, the
+players in ascending id order; with no active player, unrotated. Events are processed in that
+order of their choosers (as submitted), submission order within one chooser; choosers outside the
+order come last by ascending id. An `Instead` descendant is scheduled with the same order as the
+submitted events, at the position of the event it replaces (recursively, by lineage path), as soon
+as that event has resolved (round 6, D1 and r4633092145; CR 101.4, CR 616.1). The chooser asked at a request is recomputed from the event as
+modified so far (a `SetController` on a token changes who chooses next).
+**Rationale:** SRS 8.1 step [2]; CR 616.1 "the affected object's controller (or its owner if it
+has no controller)"; CR 112.2 every spell has a controller; CR 109.4 only objects on the stack or
+the battlefield have one (review round 1, F3). `GameState` has a turn-order API, so the
+ascending-id fallback is needed only when the order is empty.
+**Alternatives:** Owner for every non-permanent (round 0; rejected in review: asks the wrong
+player for a spell controlled by another player); fixing the chooser at submission time
+(rejected: the affected object's controller can change through an earlier application).
+## #29 FP-028 — Bus limits MAX_CHILD_DEPTH and MAX_REPEATS
+
+**Decision:** `MAX_CHILD_DEPTH = 64`: the submitted batch is depth 0; an `Instead` lineage member
+is one deeper than the event it replaces, within the same batch (review round 5: the depth counts
+`Instead` lineage generations, and a lineage deeper than 64 is `BusError::DepthExceeded`, rolled
+back); a `Prevent` follow-up batch is one deeper than the batch that queued it, as before, and its
+lineages count on from there. `MAX_REPEATS = 256`: an event may receive at most 256
+applications; the next is `BusError::RepeatLimit`. Review round 1 (F7) adds
+`MAX_BUS_EVENTS = 4096` and `BusError::WorkLimit`: within one `process_batch`/`process_event`
+call every event instance the bus takes up (the submitted members and every child at every depth)
+is charged against one budget, before the children are queued; exactly 4096 is allowed, one more
+is `WorkLimit`. The budget is a plain counter in the call, not time. All three errors roll
+everything back. The copy of an enters-as-copy entry is executed directly and not charged.
+**Rationale:** Self-feeding `Instead` effects and unbounded CR 614.5 overrides (CR 903.9b-style)
+would otherwise loop forever. The depth and repeat bounds alone are not enough: an overriding
+`Instead` that replaces one event with two doubles the work at each level, so it exhausts memory
+(about 740 MB at depth 22) long before depth 64. The budget keeps the bus total in time and space;
+the bounds are far above any real chain.
+**Alternatives:** No bound (non-terminating); depth and repeat bounds only (round 0; rejected in
+review: exponential growth); a time budget (rejected: R3/R7, not deterministic).
+## #29 FP-028 — API details and additions beyond the fixed API
+
+**Decision:** The fixed API is implemented unchanged. Additions: `AmountOp::apply` (public),
+`impl From<BusError> for BusInterrupt`, `impl From<EventError> for BusInterrupt`,
+`impl From<EventError> for BusError`, `Display` for `BusInterrupt`, and `CanonicalEncode` for
+`BusEventKind`, `Tier`, `EventMatcher`, `AmountOp`, `Modification`, `Action`, `Shield` and
+`ReplacementEffect` (the registry encoding is built from them; zone kinds use their one-byte tag).
+The request's enumerated options are `ChoiceOption::Number(i)` for each index `i` of the payload's
+effect list, `min = max = 1`, `reveal_to` empty. `BusReport::executed` lists only batches in which
+an event occurred (as the event log does). `EntersAsCopyOf` takes effect only when the executed
+event's outcome is a token creation or a zone change into the battlefield from another zone;
+review round 2 (G1/F6) sets the copy link as part of that entering event, with no replacement
+collection (see "Enters-as-copy is applied as part of the entry event"). `SetDestination` keeps the rest of the request,
+except that review round 1 (F9) clears the controller when the new zone is neither the
+battlefield nor the stack (only those zones take a controller, CR 109.4; `Zones` rejects the
+combination with `ControllerNotApplicable`). Review round 1 (F7) adds `pub const
+MAX_BUS_EVENTS: usize = 4096` and `BusError::WorkLimit` to the public API. On
+`BusInterrupt::Pending` the registry and the context are also restored, so a caller outside a
+`ChoiceSession` sees no partial change either.
+**Rationale:** Index options are unambiguous even with equal descriptions; the conversions let
+procedures use `?`; the encodings make the registry hashable.
+**Alternatives:** Text options with the descriptions (ambiguous when two descriptions are equal).
+
+## #29 FP-028 — Instead children inherit the applied set
+
+**Decision:** (Review round 1, F1.) An event produced by `Action::Instead` is the modified event
+that replaces its parent: it carries the parent's applied set as it stands after that
+application, the applying effect included. Events that are independent new events start with an
+empty applied set: `Prevent { then }` follow-ups and every member of the submitted batch (history
+is per batch member, never shared). An enters-as-copy is not an event: its copy link is set as
+part of the entering event. `overrides_614_5` effects still apply again.
+**Rationale:** CR 614.5: a replacement effect "gets only one opportunity to affect an event or any
+modified events that may replace that event"; CR 614.6: a replaced event never happens and the
+modified event occurs instead. With fresh sets two effects that replace each other's output
+alternate until `DepthExceeded` and roll the event back. CR 615.5: a prevention's additional
+effect takes place immediately afterward; it is a separate event, so it starts fresh. This is the
+conservative reading the rules-researcher gave.
+**Alternatives:** Fresh sets for every child (round 0; rejected in review: ping-pong loops);
+inheriting for `then` children too (rejected: they are new events, not modified events).
+
+## #29 FP-028 — Events that would not happen offer no effects
+
+**Decision:** (Review round 1, F4/F11; round 6, D6.) Before collection the bus checks whether the
+event would happen at all: a `Damage` with amount <= 0, an `Untap` of an object that is not a
+tapped permanent, and a `Tap` of an object that is not an untapped permanent (a permanent that is
+already tapped, or an object that is not a held permanent) would not. For such an event the
+choosable set is empty: no request, no application, no shield consumption; the event goes
+unchanged to the executor, which treats it as a no-op. An `Instead` lineage is judged against the
+pre-batch state, so a lineage `Tap` of a permanent that is untapped before the batch stays
+possible. Test: `req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect`.
+**Rationale:** CR 614.7: an effect that would replace an event that never happens does nothing;
+CR 614.7a and CR 120.8: a source that would deal 0 damage deals no damage; CR 701.26b: only
+tapped permanents can be untapped, so CR 122.1d's stun counter replaces only a real untap;
+CR 701.26a: "Only untapped permanents can be tapped." Round 0 let 0 damage consume a one-use
+shield and an untapped permanent lose its stun counter.
+**Alternatives:** Dropping the event in the bus (rejected: the executor already treats it as a
+no-op and logs nothing); keeping `Tap` of a tapped permanent replaceable (rejected: CR 701.26a,
+CR 614.7; review round 6 D6).
+
+## #29 FP-028 — Pool prevention is allocated by the affected player
+
+**Decision:** (Review round 1, F8; amended in review round 2, G2 and G4, and in review round 3, H4 and
+H5.) The allocation is made on
+the damage as it stands when the shield applies. Each member's resolve loop is resumable: a member
+stops immediately before it would apply a `Shield::Pool` effect P not yet allocated for it (after
+any `CHOOSE_REPLACEMENT_EFFECT` that selected P, or when P is the single candidate of its tier),
+and nowhere else. Phase A: every member, in APNAP order, runs until it stops or finishes. Phase B:
+for the lowest `EffectId` pool among stopped members, the stopped members of that pool are
+grouped by chooser (APNAP order of choosers); for each group in turn the bus builds the table
+from the members' CURRENT events: eligible members are the group's `Damage` events with
+`source = Some(_)`, current amount > 0, matched by P now. If they come from at least two
+distinct sources and their total exceeds what is left of P's pool, the chooser is asked once
+with the existing `DIVIDE_VALUE` choice (no change to `choice/`): total = the remaining pool,
+recipients = the sources in ascending `ObjectId` order with minimum 0, `min = max` = the number
+of recipients, options `ChoiceOption::Object` per source, reason `CR 615.7`. Otherwise nothing is
+asked and P applies in order. Phase C: P is applied to that group's members in APNAP order, each
+running on until its next stop or finish; then the next group, and Phase B repeats while any
+member is stopped (a member reaching another pool joins that pool's group; a new table for the
+same pool and chooser replaces the old one). Caps (G4): `cap(s)` is the sum of the current
+amounts of source s's eligible members; the allotment total is min(remaining pool, total
+eligible damage), and a request is made only when the total exceeds the pool, so the shares sum
+to the pool. The bus rejects an answer whose share for a source exceeds its cap with
+`BusError::Choice(ChoiceError::Procedure(..))` naming the source and its cap (the call fails and
+everything rolls back), after the choice layer's own validation; the timeout default fills the
+sources in ascending `ObjectId` order, each up to its cap, until the pool is used (pool 4 with
+A:3, B:2 gives (A:3, B:1)). When P applies to a member in the table it prevents the minimum of
+the source's unused allotment, the member's current damage and the pool left; events of one
+source use its allotment in APNAP and submission order. A member whose source's allotment is used
+up or 0 is not given P (no application) and continues; this includes a member that chose P over
+another effect and then finds its allotment 0. A pool that is allocated for a member and whose
+allotment for that member's source is used up is not offered again, so an overriding (CR 614.5
+exception) pool cannot loop on a spent allotment (review round 3, H4). Sourceless damage is not
+in the table (a sourceless share cannot be offered in `DIVIDE_VALUE`; every damage has a source
+object, CR 120.1) and draws on what the division leaves, after the allotted members of that
+chooser: in Phase C the group is stably sorted so members with an allotment take P first
+(review round 3, H5). With valid answers every point of the pool is used by the batch whenever the
+eligible damage allows it, so a batch that asked for an allocation leaves the pool drained and P
+removed from the registry. Request order: the `DIVIDE_VALUE` request comes after every request
+members make before reaching the pool (for example the active player's unrelated
+`CHOOSE_REPLACEMENT_EFFECT` in the same batch) and before any request made after the pool is
+applied. `Shield::Uses` shields are unchanged. Known limitations: a pool can keep points when the
+total eligible damage was below it, or when a modification applied after the allocation (in
+Phase C) changed the damage; the grouping is per chooser, not per shielded object or player; a
+member that chose P and finds its allotment 0 continues without it; a member stopped at a
+different pool is outside that pool's division, but every allocation of the damage remains
+reachable because the player chooses the order of the pools through CHOOSE_REPLACEMENT_EFFECT and
+divides each pool among the members that chose it (review round 3, H1; not a defect).
+**Rationale:** CR 615.7: "If damage would be dealt to the shielded permanent or player by two or
+more applicable sources at the same time, the player or the controller of the permanent chooses
+which damage the shield prevents. Once the shield has been reduced to 0, any remaining damage is
+dealt normally. Such effects count only the amount of damage; the number of events or sources
+dealing it doesn't matter." CR 616.1f: "Once the chosen effect has been applied, this process is
+repeated (taking into account only replacement or prevention effects that would now be
+applicable) until there are no more left to apply." CR 616.2: "A replacement or prevention
+effect can become applicable to an event as the result of another replacement or prevention
+effect that modifies the event." So the division is decided on the damage after earlier
+modifications, and whether a same-tier modification or the shield goes first is the chooser's
+CR 616.1e choice. Damage is dealt normally only once the shield is 0, so a share above its
+source's damage must not leave the shield with points while damage is dealt: capping is the
+correction chosen. The DIVIDE_VALUE payload carries only per-recipient minimums, so the maximum
+is enforced by the bus. In round 0 the submission order made the choice; in round 1 the table
+was fixed before any modification.
+**Alternatives:** Asking per event (rejected: the shield counts amounts, not events); a new choice
+type (rejected: `DIVIDE_VALUE` already validates a division); one allocation before any member is
+resolved (round 1; rejected in round 2: modifications changed the damage after the table was
+fixed); a lazy check at the pool's first application (rejected: an earlier member draws on the
+pool before a later member's modifications exist); redistributing an unused allotment to the
+remaining damage (rejected for the cap, which keeps the answer exactly what the player chose);
+adding a per-recipient maximum to `choice/` (outside this unit).
+
+## #29 FP-028 — SBA destruction and the shield counter's destroy replacement
+
+**Decision:** (Review round 3, H2.) `ZoneChangeCause::Destroy` is destruction as the result of an
+effect; `ReplacementEffect::shield_counter_destroy` matches `Destroy` only and is unchanged. A
+caller that models lethal damage or deathtouch (CR 704.5g, CR 704.5h) submits
+`ZoneChangeCause::StateBasedAction`, to which the shield counter does not apply and which
+regeneration (not in this unit) would replace. A mixed `Destroy` + `StateBasedAction` group is
+the only way one object's CR 704.7 group has a shield-matching member and a non-matching one;
+member-wise semantics apply the shield to the `Destroy` member only: the counter is spent (its
+removal is part of the same executed batch, placed before the move, and the departing object's
+last known information is captured before the batch with the counter still on it (CR 704.8;
+test `req_event_001_r4_j2_lki_keeps_pre_sba_counters`)), the `Destroy` member does not move, and the
+`StateBasedAction` member still moves the object to the graveyard (test
+`req_event_001_r3_h2_d_shield_counter_on_mixed_group`).
+**Rationale:** CR 701.8b: state-based actions that check for lethal damage or deathtouch damage
+destroy; CR 122.1c: the shield counter replaces destruction "as the result of an effect"; a
+state-based action is not the result of an effect (CR 704.1; rules-researcher, review round 3).
+So an SBA destruction is a destruction, but not one the shield counter replaces.
+**Alternatives:** Letting the shield counter match `StateBasedAction` (rejected: contradicts
+CR 122.1c); a separate "SBA destroy" cause (not needed: `StateBasedAction` already carries it,
+and no regeneration effect exists in this unit).
+
+## #29 FP-028 — SRS erratum: state-based-action table rows 704.5g and 704.5h
+
+**Decision:** `docs/SRS.md` is not edited (only a person edits it, PROCESS.md P8). The erratum is recorded here and a P8 line in `docs/HUMAN_QUEUE.md` proposes the edit. The CR 2026-11-06 text wins over the SRS. Two rows of the SRS state-based-action table disagree with it: (1) the 704.5g row says "It is destroyed. Regeneration and shield counters can replace this."; CR 704.5g says only "Regeneration can replace this event.", and the shield counter's destroy replacement (CR 122.1c) applies only to destruction "as the result of an effect", which a state-based action is not (CR 701.8b); (2) the 704.5h row says "It is destroyed." and omits that "Regeneration can replace this event." (CR 704.5h). The bus follows the CR: `ReplacementEffect::shield_counter_destroy` matches `ZoneChangeCause::Destroy` only (destruction as the result of an effect), so it does not apply to a move submitted with `ZoneChangeCause::StateBasedAction`; regeneration is not part of this unit.
+**Rationale:** The SRS rules baseline (CR 2026-11-06) is the normative source for rule text, and the SRS rows are summaries of it. The proposed rows: 704.5g "It is destroyed. Regeneration can replace this." and 704.5h "It is destroyed. Regeneration can replace this." (shield counters removed from the 704.5g row).
+**Alternatives:** Implementing the SRS row as written, so that the shield counter replaces lethal-damage destruction (rejected: contradicts CR 122.1c and 701.8b); editing the SRS in this PR (not allowed for agents, P8).
+
+## #29 FP-028 — CR 704.7 group with two cause-specific effects: request sequence
+
+**Decision:** (Review round 3, H2 (g).) With e1 (one use, `Destroy` only, redirect to exile) and
+e2 (one use, `StateBasedAction` only, `Skip`) on a [`Destroy`, `StateBasedAction`] group of one
+permanent of P1: one `CHOOSE_REPLACEMENT_EFFECT` request to P1 offering both effects (the union);
+the chosen effect applies to its member; the other is then the only candidate and applies without
+a request (CR 616.1f). Answer e1: applications [e1, e2]; answer e2: applications [e2, e1]. In both
+cases the `StateBasedAction` member is skipped and the `Destroy` member moves the card to exile;
+both effects are removed; the same for both submission orders (test
+`req_event_001_r3_h2_g_union_of_candidates_one_request`).
+**Rationale:** Derived from the member-wise rules of "CR 704.7 merging of state-based-action
+batches" (union collection, one choice per round, application to matching members only,
+repetition until no candidate remains).
+**Alternatives:** Two separate requests, one per member (rejected: CR 704.7 makes the group one
+event with one choice per round).
+
+## #29 FP-028 — Enters-as-copy is applied as part of the entry event
+
+**Decision:** (Review round 1, F6; replaced in review round 2, G1/F6.) `Modification::EntersAsCopyOf`
+does not queue a `BecomeCopy` child and is not routed through replacement collection, so nothing
+can skip it. The bus executes the surviving events with
+`EventContext::execute_batch_with_entry_copies`, which sets the new object's copy link
+(`copy_of(new) == Some(copied)`) inside the entering event's own execution, in the one executed
+batch of the entry, before the next event of the batch and before the batch is logged:
+`BusReport::executed` and the event log show one batch for the entry, holding the entering event
+and no `BecomeCopy` event. The round 1 separate `BecomeCopy` batch is withdrawn. The source is
+taken from its current information while it is in a zone, or from its last known information
+when it left earlier in the same batch (LKI captured before the batch's moves) or in an earlier
+call; the copy, and the whole call, fails with `UnknownObject` only when the source never existed
+(no zone record and no LKI). A source that leaves later in the same batch is still in its zone
+when the copy is set. `copy_of` may therefore name a retired id; resolving the copiable values
+through `memory::information_for` / `LkiStore` belongs to the layer unit (#40 FP-039 / #38
+FP-037) and is not implemented here. A `BecomeCopy` submitted on its own (a genuine post-entry
+copy) still goes through replacement and stays strict. The CR 614.12 ETB look-ahead (projected
+characteristics for other replacement effects) is still deferred to #40 FP-039 / #38 FP-037.
+**Rationale:** CR 707.5: an object that enters "as a copy" "becomes a copy as it enters the
+battlefield. It doesn't enter the battlefield, and then become a copy of that permanent." CR
+603.6d: such an effect occurs as part of the event that puts the permanent onto the battlefield;
+CR 614.1c makes "enters as" effects replacement effects; CR 616.1c ranks enter-as-copy effects;
+CR 614.12a: a choice for an enter-modifying effect is made before the permanent enters. CR 707.2:
+the copy takes the copiable values of the original. CR 608.2h and SRS 2.3 (REQ-CORE-003): an
+effect that needs information about an object that left its zone uses its last known
+information; in round 1 a source destroyed in the same call made the copy fail.
+**Alternatives:** The round 1 separate copy batch right after the entry batch (rejected in round
+2: the permanent existed for one executed batch as a non-copy, which CR 707.5 forbids); a
+`BecomeCopy` child through the bus (round 0; rejected in round 1: another effect could skip it).
+
+## #29 FP-028 — Scope note: enters-as-copy is part of the entry, through a new events entry point
+
+**Decision:** (Review round 2, G1/F6.) The bus sets an enters-as-copy link through one new,
+additive public method in `events/exec.rs`:
+`EventContext::execute_batch_with_entry_copies(&mut self, batch: &EventBatch, copies: &[(usize,
+ObjectId)]) -> Result<ExecutedBatch, EventError>`, each pair being (index into `batch.events()`
+of an entering event, copied object). It has exactly the semantics of `execute_batch` (planning
+run, LKI capture before any move of the batch, all-or-nothing, one logged `ExecutedBatch` iff an
+event occurred) plus, in the real run only, the copy link set right after a listed event that put
+an object onto the battlefield; the copied object must have a zone record or an LKI record (the
+planning run does not check, as LKI for same-batch departures does not exist there yet).
+`execute_batch` keeps its signature and behaviour and delegates with an empty list; `execute`
+is unchanged. A standalone `GameEvent::BecomeCopy` stays strict: `UnknownObject` for a copied
+object with no zone record, even when an LKI record exists. The method is used only by the bus.
+This is not a P3 contract change and no R2 request was filed: the P3 contract list (state model,
+canonical state hash, choice protocol and the others) does not include `EventContext`'s method
+set; no signature, `GameEvent` / `EventState` / `EventLog` encoding, state hash or replay format
+changes. Editing `events/exec.rs` is an R1 exception granted by the work item for this one
+additive method (and its unit test in `events/tests.rs`).
+**Rationale:** CR 707.5 forbids entering and then becoming a copy, so the link must be written
+inside the entering event's execution; the bus alone cannot do it, because `set_copy` is
+`pub(super)` to `events` and the link is only written by the executor, and a separate executed
+batch is exactly what CR 707.5 rules out. Loosening `become_copy` to accept LKI was rejected:
+`LkiStore` is never purged, so any long-departed id would become a valid standalone copy source.
+CR 608.2h and SRS 2.3 supply the LKI fallback for the source.
+**Alternatives:** Loosening `become_copy` (rejected, above); a `BecomeCopy` batch after the entry
+(round 1; rejected, CR 707.5); a new `GameEvent` variant or a field on `ZoneChange` /
+`CreateToken` (rejected: a P3 encoding and replay change).
+
+## #29 FP-028 — One prevention follow-up per effect and recipient per batch
+
+**Decision:** (Review round 2, G3; an R8 judgement; extended in review round 5, K4.) Within one bus
+batch (one simultaneous batch of members, its `Instead` lineage members included since round 5;
+the `Prevent` follow-up batch is separate), a prevention effect without a shield
+(`effect.shield.is_none()`) whose action is `Prevent { then }` queues its `then` follow-up events
+once per key (effect id, affected object, affected player), however many simultaneous damage
+events to that recipient it prevents. Every one of those damage events is still fully prevented
+and counted in `BusReport::prevented`. This applies to every shield-less `Prevent { then }`
+effect, not only shield counters: a generic effect that prevents damage to one player from two
+simultaneous sources and then gains life queues its life gain once. `Shield::Uses` and
+`Shield::Pool` effects are unchanged (they count their own consumption and queue a follow-up per
+application). A later batch, a later call and a child batch each start with a fresh set, so
+separate damage batches remove separately. The work budget is charged only for follow-ups
+actually queued. `BusReport::applications` still lists the effect once per prevented damage event
+(each executed or prevented event's applied set contains it, and the field is "every application
+of an effect"); only the follow-up is grouped. The CR 704.7 merge and the pool and uses
+accounting are unchanged.
+**Rationale:** CR 122.1c: "One or more shield counters on a permanent create a single replacement
+effect and a single prevention effect that protect the permanent", whose prevention half is "If
+damage would be dealt to this permanent, prevent that damage and remove a shield counter from it."
+CR 615.13 speaks of a prevention effect being "applied to one or more simultaneous damage events",
+which treats one application as covering simultaneous damage. Without the grouping, each
+simultaneous damage event saw the counter before the queued removals ran and two counters were
+removed for one simultaneous strike. The counter-argument, CR 615.10's per-event wording, is
+limited to fixed-amount prevention. The CR does not settle the question; this is the
+better-supported reading, recorded as an R8 judgement. Round 5 (K4, rules-researcher Q1, also an
+R8 judgement: the CR is silent): the additional effects produced while applying prevention to
+simultaneous damage events are simultaneous and form one modified event (CR 615.5: "the rest of
+the effect takes place immediately afterward"; CR 120.4's example: the damage event "becomes
+[5 damage is dealt to the defending player, the defending player gains 5 life]"; CR 615.13), so
+follow-up damage of two prevented events of one batch to a permanent with two shield counters
+costs ONE counter (CR 122.1c). All `Prevent` follow-ups of a batch form one child batch; the
+group case equals the plain case (tests `req_event_001_r5_k4_group_case_equals_plain_batch`,
+`req_event_001_r5_k4_inverse_simultaneous_damage_shares_one_removal`).
+**Alternatives:** One follow-up per damage event (round 1; rejected in round 2: two counters for
+one simultaneous strike); grouping only counter-backed effects (rejected: a matcher-specific rule
+the bus would have to special-case); reporting one application per group (rejected: the applied
+sets of the prevented events each contain the effect).
+
+## #29 FP-028 — Tiers are declarative data
+
+**Decision:** An effect's `Tier` is data on the effect. The bus does not check that a
+`Modification` fits its tier (for example that a `BackFaceEtb` effect turns a face). The
+back-face-up tier (CR 616.1d) is therefore only as correct as the effect's author, the DSL
+toolchain, which validates `tierHint` against CR 616.1b-d.
+**Rationale:** The engine has no face-turning modification yet; tier validation belongs to the
+toolchain (SRS 14.4.4).
+**Alternatives:** Inferring tiers from actions (cannot see self-replacement or back faces).
+
+## #29 FP-028 — Standalone replacement registry
+
+**Decision:** `ReplacementRegistry` is a separate component passed to `process_batch` next to the
+`EventContext`. It is not joined to `GameState`, its Merkle layout or its wire form. The caller
+keeps it equal to the effects in force; the bus only consumes shields and removes exhausted
+effects.
+**Rationale:** Same approach as "#27 FP-026 — Standalone event state and the rollback set"; the
+integration unit joins the components.
+**Alternatives:** Storing the registry in `GameState` now (outside the owned paths).
