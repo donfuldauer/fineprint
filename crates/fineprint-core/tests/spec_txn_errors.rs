@@ -46,6 +46,37 @@ fn never_issued_id_is_unknown() {
     let _ = r;
 }
 
+/// REQ-CORE-005 (PR #175 finding 3): an id issued by another instance B, whose number matches
+/// no open frame of this instance A (B advanced far past A), is `UnknownTxn(id)` for `commit`,
+/// `commit_durable` and `rollback` on A at depth 0; A's state, state hash and depth are
+/// unchanged.
+///
+/// A `TxnId` is valid only on the instance that issued it. A foreign id whose number equals an
+/// open frame of A is documented as a caller error with an unspecified result, so that case is
+/// intentionally not asserted here.
+#[test]
+fn foreign_instance_id_matching_no_open_frame_is_unknown() {
+    let mut b = Transactions::new(game(2));
+    let mut foreign = None;
+    for _ in 0..40 {
+        let id = b.checkpoint();
+        b.rollback(id).unwrap();
+        foreign = Some(id);
+    }
+    let foreign = foreign.unwrap();
+    let mut a = Transactions::new(game(2));
+    let state = a.state().clone();
+    let hash = a.state().state_hash();
+    assert_eq!(a.depth(), 0);
+    for call in ALL_CALLS {
+        expect_err(&mut a, call, foreign, &TxnError::UnknownTxn(foreign));
+    }
+    assert_eq!(a.state(), &state);
+    assert_eq!(a.state().state_hash(), hash);
+    assert_eq!(a.depth(), 0);
+    assert_eq!(a.into_state().unwrap(), state);
+}
+
 /// REQ-CORE-005, semantics f: an id is stale after commit, after commit_durable and after
 /// rollback; every call on it is `UnknownTxn` and changes nothing.
 #[test]
