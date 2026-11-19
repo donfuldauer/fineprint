@@ -327,18 +327,6 @@ impl KWorld {
         }
     }
 
-    /// `shuffle_library_disclosed(owner, excluded, known_by)`.
-    pub fn shuffle_disclosed(
-        &mut self,
-        owner: PlayerId,
-        excluded: &[ObjectId],
-        known_by: &[PlayerId],
-    ) {
-        self.k
-            .shuffle_library_disclosed(&self.zones, owner, excluded, known_by)
-            .expect("shuffle_library_disclosed succeeds");
-    }
-
     pub fn mv_to(&mut self, id: ObjectId, kind: ZoneKind) -> Moved {
         self.mv(id, MoveRequest::new(kind))
     }
@@ -569,27 +557,12 @@ impl Shadow {
         self.add_known(zones, id, viewer);
     }
 
-    /// `shuffle_library` (the no-disclosure shorthand): every entry of that library is cleared,
-    /// for every viewer.
-    pub fn shuffle_library(&mut self, zones: &Zones, owner: PlayerId, excluded: &[ObjectId]) {
-        self.shuffle_library_disclosed(zones, owner, excluded, &[]);
-    }
-
-    /// CR 701.24a, 701.24b and the brief's index-disclosure rule (a design decision): every entry
-    /// of that library is cleared, except an entry whose object is excluded and still at its
-    /// recorded index, kept only for a viewer in `known_by`. KnownTo is never touched (SRS 2.4).
-    pub fn shuffle_library_disclosed(
-        &mut self,
-        zones: &Zones,
-        owner: PlayerId,
-        excluded: &[ObjectId],
-        known_by: &[PlayerId],
-    ) {
-        let lib = zones.contents(ZoneId::Library(owner));
-        for ((v, o), e) in &mut self.pos {
+    /// CR 701.24a, 701.24b, SRS 2.4: a shuffle clears every position entry of that library for
+    /// every viewer, excluded found cards included. KnownTo is never touched.
+    pub fn shuffle_library(&mut self, _zones: &Zones, owner: PlayerId, _excluded: &[ObjectId]) {
+        for ((_, o), e) in &mut self.pos {
             if *o == owner {
-                let knows = known_by.contains(v);
-                e.retain(|i, obj| knows && excluded.contains(obj) && lib.get(*i) == Some(obj));
+                e.clear();
             }
         }
     }
