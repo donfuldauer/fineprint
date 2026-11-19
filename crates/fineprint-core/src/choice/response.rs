@@ -111,7 +111,8 @@ pub enum ChoiceResponse {
     PayCosts {
         /// `true`: use the request's auto-pay suggestion; the other fields must then be empty.
         auto_pay: bool,
-        /// Payment-method uses: `(method index, objects used)`.
+        /// Payment-method uses: `(method index, objects used)`. Each method index appears at
+        /// most once; list all objects for one method in a single entry.
         methods: Vec<(u32, Vec<ObjectId>)>,
         /// Mana abilities to activate: `(source, ability id)` as listed in the request.
         mana_abilities: Vec<(ObjectId, String)>,
