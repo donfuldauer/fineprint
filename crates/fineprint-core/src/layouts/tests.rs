@@ -1130,7 +1130,12 @@ fn is_defined_error(e: &LayoutError, layout: LayoutBehavior) -> bool {
             *l == layout
         }
         LayoutError::Object(_) => true,
-        LayoutError::UnsupportedLayout(_) | LayoutError::LayoutMismatch { .. } => false,
+        LayoutError::UnsupportedLayout(_)
+        | LayoutError::LayoutMismatch { .. }
+        | LayoutError::NotMeldPair
+        | LayoutError::AlreadyPrepared
+        | LayoutError::TooFewComponents { .. }
+        | LayoutError::InvalidStationSymbols { .. } => false,
     }
 }
 
