@@ -333,7 +333,7 @@ impl Knowledge {
                 _ => None,
             })
             .collect();
-        self.apply_library_change(zones, &owners, index_known_by, gone, |_| true);
+        self.apply_library_change(zones, &owners, index_known_by, gone);
         Ok(())
     }
 
@@ -466,7 +466,7 @@ impl Knowledge {
         // CR 401.2: a library is one face-down pile whose order players can't look at; keeping
         // positions only for viewers who know the removal index is the engine's own policy.
         if before.zone == ZoneId::Library(owner) {
-            self.apply_library_change(zones, &[owner], index_known_by, Some(before.id), |_| true);
+            self.apply_library_change(zones, &[owner], index_known_by, Some(before.id));
         }
         Ok(())
     }
