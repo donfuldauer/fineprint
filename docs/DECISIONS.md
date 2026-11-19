@@ -4043,16 +4043,19 @@ inputs, J4).
 
 ## #29 FP-028 — CR 704.7 group execution: one resolved batch
 
-**Decision:** (Review round 4 J1-J4; replaced in round 5, K1-K5.) The bus processes a batch in two
+**Decision:** (Review round 4 J1-J4; replaced in round 5, K1-K5; scheduling revised in round 6,
+D1.) The bus processes a batch in two
 stages. RESOLVE runs the SRS 8.1 loop for every member and executes nothing. A member is a
 submitted event or an `Action::Instead` descendant of one (a lineage member): an applied
 `Instead` queues its events (charged against the work budget, each with the parent's applied set
-after the application, CR 614.5), and after each phase they are taken up as new members of the
-SAME batch, with the parent's root (the submitted member, or the first member of its CR 704.7
+after the application, CR 614.5), and right after the parent has resolved they are taken up as new
+members of the SAME batch, with the parent's root (the submitted member, or the first member of its CR 704.7
 group), the root's submitted (object, destination) and depth parent + 1 (above `MAX_CHILD_DEPTH`
-is `DepthExceeded`). The loop: phase A runs the members not yet started (APNAP order among them,
-submission order within one chooser; a group at its first member; only submitted members are
-grouped) and takes up the queued `Instead` events; when nothing is unstarted, phases B and C
+is `DepthExceeded`). The loop: phase A repeatedly takes the not-started member with the least key
+(APNAP rank of its chooser, chooser, root, member index; a group at its first member, its other
+members started with it; only submitted members are grouped), resolves it and at once takes up the
+`Instead` events it queued, which then compete by the same key (see "Descendant scheduling and the
+roles of the impossible-instruction check (round 6)"); when nothing is unstarted, phases B and C
 allocate the lowest stopped CR 615.7 pool per chooser in APNAP order over all members and resume
 its members, then take up their `Instead` events; the loop ends when nothing is pending. All
 members share one queue: one `prevented_once` set and one entry-copy list. The `Prevent { then }`
@@ -4081,7 +4084,7 @@ redirect applies to. Tests: `req_event_001_r4_j1_*`, `req_event_001_r4_j2_*`,
 `req_event_001_r5_e3_*`, `req_event_001_r5_k5_*`, `req_event_001_r5_e1_e4_*`,
 `req_event_001_r5_e2_*`, `req_event_001_r5_n1_*`, `req_event_001_r5_n3_*`,
 `req_event_001_children_reenter_bus` (the `Instead` child executes in the same batch as its
-sibling).
+sibling), `req_event_001_r6_d1_*` (round 6 scheduling).
 **Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
 event, and CR 614.6 makes a replacement's modified event occur instead of the replaced one, so
 the modified event, at any generation, takes the replaced event's place inside the same event
@@ -4113,15 +4116,18 @@ staged execution removed the counter; it applies at every generation until `Dept
 everything is rolled back (unit test
 `req_event_001_r5_override_matching_own_instead_output_exceeds_depth`; the Independent Tester's
 spec test of an overriding chain is rewritten as a terminating chain). An event of a LATER batch of
-the same call (a `Prevent` follow-up or its `Instead` lineage) whose affected object is the old id
-of an object an executed batch of this call moved to another zone is an impossible instruction:
+the same call (a `Prevent` follow-up or its `Instead` lineage) that names, as its affected object or as the host of an `Attach` or the copied object of a `BecomeCopy`, the old id
+of an object an executed batch of this call moved to another zone is an impossible instruction
+(the roles: "Descendant scheduling and the roles of the impossible-instruction check (round 6)"):
 it is ignored (not offered to effects, not executed, no error, the earlier batches kept; test
 `req_event_001_r5_follow_up_naming_moved_object_is_ignored`). An id that was never issued, or
 that left in an earlier call, is still `UnknownObject` (tests
 `req_event_001_r1_f6_enters_as_copy_is_not_replaced`,
 `req_event_001_r2_g1_source_stays_and_standalone_stays_strict`).
 **Rationale:** CR 614.6: "If an event is replaced, it never happens. A modified event occurs
-instead, which may in turn be replaced"; for the ignored events, CR 614.6: "the modified event may
+instead, which may in turn be replaced"; for the ignored events, CR 101.3 ("Any part of an
+instruction that's impossible to perform is ignored"; SRS REQ-ARCH-002: the rest is still carried
+out) and CR 614.6: "the modified event may
 contain instructions that can't be carried out, in which case the impossible instruction is simply
 ignored", CR 614.7 and CR 400.7 (the moved object is a new object); CR 616.1f repeats the process "taking into account only
 replacement or prevention effects that would now be applicable"; CR 616.2: an effect can become
@@ -4165,20 +4171,69 @@ triggers a second allocation, which may be a division (test
 on 2 + 2 and keeps 1; lineage damage from two sources asks a second division of the remaining 1).
 A full division uses the whole pool, so no division follows a division of the same pool. (d) The
 events that are not zone changes execute before the zone changes, which changes the order for
-`sba = false` batches ([move Y, tap Y] now succeeds). (e) Results of different objects or groups
-are resolved in APNAP order, then submission order, and can compete for a one-use effect, so
-reversing the submission can change which object such an effect applies to (K1; documented).
+`sba = false` batches ([move Y, tap Y] now succeeds). (e) Results of DIFFERENT objects or groups
+still compete for a one-use effect in APNAP order of their choosers, then submission order (an
+`Instead` descendant at the submission position of the event it replaces), so reversing the
+submission can change which object such an effect applies to (K1; documented). Since round 6 (D1)
+descendants are no longer deferred behind the members that were not yet started with their parent:
+each is scheduled as soon as its parent has resolved.
 (f) "Instead, do A, then B" where B names a new object made by A cannot be expressed as
-`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit. (g) The
-impossible-instruction check for a later batch of one call looks only at the event's affected
-object: an event that names an object this call already moved in another role (a damage source,
-the `copied` object of a copy event) is not dropped and reaches the events layer as before.
+`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit. (g) Closed in round 6
+(D2) except one limitation: the impossible-instruction check now covers the affected object, the
+host of an `Attach` and the copied object of a `BecomeCopy`; a damage source is deliberately not
+covered (CR 608.2h). The remaining limitation: a `BecomeCopy` whose copied object this call
+already moved is ignored instead of copying its last known information (CR 608.2h); that needs an
+events-layer change in a later unit.
 **Rationale:** (b) is rare (it needs an `Instead` on partly prevented damage); (e) follows from
 CR 616.1 (each object's choice is its own, choosers in APNAP order); (f) needs sequenced
 sub-events, outside this unit.
 **Alternatives:** Re-running the allocation for all damage whenever lineage damage appears
 (rejected: it would undo prevention already applied); content order across objects (rejected:
 CR 616.1 orders by chooser, and the one-use effect's choice belongs to the first chooser).
+
+## #29 FP-028 — Descendant scheduling and the roles of the impossible-instruction check (round 6)
+
+**Decision:** (Review round 6, D1 and D2.) Scheduling: every not-yet-started member of a batch,
+submitted or `Instead` descendant, is ordered by ONE key: (APNAP rank of its chooser, chooser id,
+root, member index). The rank is the chooser's position in the APNAP order; choosers outside it
+come last by ascending id. `root` is the submitted member the lineage descends from (the first
+member of a CR 704.7 group for a group's lineage), so a descendant takes the submission position
+of the event it replaces; among members with the same chooser and root the earlier-created goes
+first. Phase A takes the not-started member with the least key (a group at its first member, the
+group's other members started with it), resolves it, and at once takes up the `Instead` events it
+queued as not-started members. A descendant can start only after its parent resolved; if its
+chooser ranks before members that already resolved, it simply runs next. Requests for a
+descendant's choices come in this order. For submitted members only, the key is the previous
+(rank, chooser, index) order. Phases B and C (CR 615.7) are unchanged; members taken up after the
+resumption are scheduled by phase A. `DepthExceeded` is raised as soon as the too-deep generation
+is taken up (same error, same rollback). Impossible-instruction roles: an event of a later batch
+of the same call is ignored if it names a retired id (an object an executed batch of this call
+moved) as (i) its affected object, (ii) the host of an `Attach` to a permanent, or (iii) the copied
+object of a `BecomeCopy`. The source of a `Damage` does NOT count: damage from a source that has
+left its zone is still dealt. (iii) is an engine limitation: the events layer's standalone
+`BecomeCopy` accepts only a copied object in a zone and would roll back the whole call, so the bus
+ignores such an event instead of copying last known information. Ids never issued, or retired in
+an earlier call, still fail with `UnknownObject`. Tests: `req_event_001_r6_d1_*`,
+`req_event_001_r6_d2_*` (in one batch, an `Attach` onto X executes before X's move and Z ends
+unattached: the permanent container ends attachments to an object that leaves the battlefield).
+**Rationale:** CR 101.4 and CR 616.1 order simultaneous choices APNAP; SRS 8.1 step [2]
+"Simultaneous choosers -> APNAP". Lineage members are judged against the pre-batch state, so their
+choices are simultaneous with the submitted members' choices; the outcome must not depend on
+whether a gain was submitted directly or produced by `Instead` (review D1: a one-use effect went to
+P2's gain because P1's descendant waited for the whole cohort). CR 101.3: "Any part of an
+instruction that's impossible to perform is ignored", and SRS REQ-ARCH-002: the rest is still
+carried out, so an impossible `Attach` is dropped and the other events of its batch execute
+(before: `UnknownObject` rolled back the whole call). CR 614.6: "the impossible instruction is
+simply ignored"; CR 400.7: the moved object is a new object; CR 701.3b: an attach to an object it
+can't be attached to does not move the attachment. CR 608.2h: "it's the object as it exists—or as
+it most recently existed—that does it", so the damage source keeps dealing damage, and a copy would
+use last known information.
+**Alternatives:** Scheduling descendants after the whole cohort of members not yet started with
+their parent (round 5; rejected, D1); depth-first scheduling by lineage path (equivalent for these
+shapes; rejected as more state for no observable gain); dropping a damage event whose source moved
+(rejected: CR 608.2h); letting a `BecomeCopy` of a moved object fail (rejected: rolls back the
+whole call); changing `events/` to copy from last known information (outside this unit's paths; a
+later unit).
 
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
@@ -4211,7 +4266,9 @@ player; otherwise the first player of the APNAP order (the active player). APNAP
 `GameState::turn_order()` rotated to start at the active player; if the turn order is empty, the
 players in ascending id order; with no active player, unrotated. Events are processed in that
 order of their choosers (as submitted), submission order within one chooser; choosers outside the
-order come last by ascending id. The chooser asked at a request is recomputed from the event as
+order come last by ascending id. An `Instead` descendant is scheduled with the same order as the
+submitted events, at the submission position of the event it replaces, as soon as that event has
+resolved (round 6, D1; CR 101.4, CR 616.1). The chooser asked at a request is recomputed from the event as
 modified so far (a `SetController` on a token changes who chooses next).
 **Rationale:** SRS 8.1 step [2]; CR 616.1 "the affected object's controller (or its owner if it
 has no controller)"; CR 112.2 every spell has a controller; CR 109.4 only objects on the stack or
@@ -4282,18 +4339,22 @@ inheriting for `then` children too (rejected: they are new events, not modified 
 
 ## #29 FP-028 — Events that would not happen offer no effects
 
-**Decision:** (Review round 1, F4/F11.) Before collection the bus checks whether the event would
-happen at all: a `Damage` with amount <= 0 and an `Untap` of an object that is not a tapped
-permanent would not. For such an event the choosable set is empty: no request, no application,
-no shield consumption; the event goes unchanged to the executor, which treats it as a no-op. A
-`Tap` of an already tapped permanent is deliberately unchanged (no CR text was obtained for it).
+**Decision:** (Review round 1, F4/F11; round 6, D6.) Before collection the bus checks whether the
+event would happen at all: a `Damage` with amount <= 0, an `Untap` of an object that is not a
+tapped permanent, and a `Tap` of an object that is not an untapped permanent (a permanent that is
+already tapped, or an object that is not a held permanent) would not. For such an event the
+choosable set is empty: no request, no application, no shield consumption; the event goes
+unchanged to the executor, which treats it as a no-op. An `Instead` lineage is judged against the
+pre-batch state, so a lineage `Tap` of a permanent that is untapped before the batch stays
+possible. Test: `req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect`.
 **Rationale:** CR 614.7: an effect that would replace an event that never happens does nothing;
 CR 614.7a and CR 120.8: a source that would deal 0 damage deals no damage; CR 701.26b: only
-tapped permanents can be untapped, so CR 122.1d's stun counter replaces only a real untap. Round
-0 let 0 damage consume a one-use shield and an untapped permanent lose its stun counter.
+tapped permanents can be untapped, so CR 122.1d's stun counter replaces only a real untap;
+CR 701.26a: "Only untapped permanents can be tapped." Round 0 let 0 damage consume a one-use
+shield and an untapped permanent lose its stun counter.
 **Alternatives:** Dropping the event in the bus (rejected: the executor already treats it as a
-no-op and logs nothing); treating `Tap` of a tapped permanent the same way (deferred until a
-rules question settles it).
+no-op and logs nothing); keeping `Tap` of a tapped permanent replaceable (rejected: CR 701.26a,
+CR 614.7; review round 6 D6).
 
 ## #29 FP-028 — Pool prevention is allocated by the affected player
 

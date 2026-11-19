@@ -4633,3 +4633,381 @@ fn req_event_001_r5_follow_up_naming_moved_object_is_ignored() {
         assert_eq!(run.state.life(1), 20);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review round 6 (D1, D2, D6)
+// ---------------------------------------------------------------------------------------------
+
+/// A one-use effect that doubles any life change (no player restriction).
+fn doubler() -> ReplacementEffect {
+    ReplacementEffect::new(
+        e(9),
+        EventMatcher::new(BusEventKind::LifeChange),
+        Action::Modify(Modification::Amount(AmountOp::Mul(2))),
+    )
+    .with_shield(Shield::Uses(1))
+}
+
+/// An effect replacing a tap of `object` by `instead`.
+fn tap_instead(id: u64, object: ObjectId, instead: Vec<GameEvent>) -> ReplacementEffect {
+    ReplacementEffect::new(
+        e(id),
+        EventMatcher {
+            affected_object: Some(object),
+            ..EventMatcher::new(BusEventKind::Tap)
+        },
+        Action::Instead(instead),
+    )
+}
+
+/// Drives `events` twice on `w` and checks both runs give the same output and hash
+/// (REQ-CORE-001, REQ-CORE-006).
+fn drive_twice(w: &World, events: Vec<GameEvent>, sba: bool, answers: &[u32]) -> Run {
+    let run = drive(w, events.clone(), sba, answers);
+    let again = drive(w, events, sba, answers);
+    assert_eq!(run.out, again.out);
+    assert_eq!(run.hash, again.hash);
+    run
+}
+
+/// The executed `LifeChange` deltas of `report`, in execution order.
+fn life_deltas(report: &BusReport) -> Vec<(PlayerId, i64)> {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter_map(|ev| match ev.instance.event() {
+            GameEvent::LifeChange { player, delta } => Some((*player, *delta)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D1: CR 101.4, CR 616.1, SRS 8.1 step [2]: P1's tap
+/// becomes a P1 life gain (`Instead`); with P2's gain submitted at the same time, P1's
+/// descendant takes P1's APNAP turn and gets the one-use doubler, in both submission orders,
+/// exactly as a P1 gain submitted directly does.
+#[test]
+fn req_event_001_r6_d1_descendant_takes_its_choosers_apnap_turn() {
+    let mut w = World::new();
+    let t = w.create(1, ZoneKind::Battlefield);
+    w.add(tap_instead(1, t, vec![life(1, 1)]));
+    w.add(doubler());
+    for events in [
+        vec![GameEvent::Tap { object: t }, life(2, 1)],
+        vec![life(2, 1), GameEvent::Tap { object: t }],
+    ] {
+        let run = drive_twice(&w, events, false, &[]);
+        let report = ok(&run);
+        assert_eq!(report.applications, vec![e(1), e(9)]);
+        assert_eq!(run.state.life(1), 22);
+        assert_eq!(run.state.life(2), 21);
+        assert!(run.state.registry.get(e(9)).is_none());
+    }
+    // Control: the same gains submitted directly.
+    let mut w = World::new();
+    w.add(doubler());
+    let run = drive_twice(&w, vec![life(1, 1), life(2, 1)], false, &[]);
+    assert_eq!(run.state.life(1), 22);
+    assert_eq!(run.state.life(2), 21);
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D1: CR 101.4, CR 616.1: both submitted events are
+/// P2's; once P2's tap has resolved, its P1 descendant ranks before P2's pending gain and takes
+/// the one-use doubler.
+#[test]
+fn req_event_001_r6_d1_descendant_of_p2_event_with_p1_chooser() {
+    let mut w = World::new();
+    let t2 = w.create(2, ZoneKind::Battlefield);
+    w.add(tap_instead(1, t2, vec![life(1, 1)]));
+    w.add(doubler());
+    let run = drive_twice(
+        &w,
+        vec![GameEvent::Tap { object: t2 }, life(2, 1)],
+        false,
+        &[],
+    );
+    assert_eq!(ok(&run).applications, vec![e(1), e(9)]);
+    assert_eq!(run.state.life(1), 22);
+    assert_eq!(run.state.life(2), 21);
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D1: CR 101.4, CR 616.1: within one chooser a
+/// descendant takes the submission position of the event it replaces: [tap, gain 3] gives the
+/// doubler to the tap's gain of 1 (2 + 3 = 25); [gain 3, tap] gives it to the gain of 3
+/// (6 + 1 = 27).
+#[test]
+fn req_event_001_r6_d1_descendant_takes_parent_submission_position() {
+    let mut w = World::new();
+    let t = w.create(1, ZoneKind::Battlefield);
+    w.add(tap_instead(1, t, vec![life(1, 1)]));
+    w.add(doubler());
+    let run = drive_twice(
+        &w,
+        vec![GameEvent::Tap { object: t }, life(1, 3)],
+        false,
+        &[],
+    );
+    assert_eq!(run.state.life(1), 25);
+    assert_eq!(life_deltas(ok(&run)), vec![(p(1), 2), (p(1), 3)]);
+    let run = drive_twice(
+        &w,
+        vec![life(1, 3), GameEvent::Tap { object: t }],
+        false,
+        &[],
+    );
+    assert_eq!(run.state.life(1), 27);
+    assert_eq!(life_deltas(ok(&run)), vec![(p(1), 6), (p(1), 1)]);
+}
+
+/// REQ-EVENT-001, round 6 D1: CR 101.4, CR 616.1: without `Instead` the order is unchanged
+/// (APNAP, then submission): P1's gain takes the one-use doubler although P2's was submitted
+/// first. Passes before and after the round 6 change.
+#[test]
+fn req_event_001_r6_d1_submitted_only_order_unchanged() {
+    let mut w = World::new();
+    w.add(doubler());
+    let run = drive_twice(&w, vec![life(2, 1), life(1, 1)], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(9)]);
+    assert_eq!(run.state.life(1), 22);
+    assert_eq!(run.state.life(2), 21);
+}
+
+/// REQ-EVENT-001, round 6 D1: CR 101.4, CR 616.1: the `CHOOSE_REPLACEMENT_EFFECT` request for
+/// P1's descendant (of P1's tap) comes before the request for P2's submitted gain.
+#[test]
+fn req_event_001_r6_d1_descendant_choice_asked_in_key_order() {
+    let mut w = World::new();
+    let t = w.create(1, ZoneKind::Battlefield);
+    w.add(tap_instead(1, t, vec![life(1, 1)]));
+    w.add(add_one(3, BusEventKind::LifeChange));
+    w.add(add_one(4, BusEventKind::LifeChange));
+    let run = drive_twice(
+        &w,
+        vec![GameEvent::Tap { object: t }, life(2, 1)],
+        false,
+        &[0, 0],
+    );
+    assert_eq!(run.asked.len(), 2);
+    assert_eq!(run.asked[0].chooser, p(1));
+    assert_eq!(run.asked[1].chooser, p(2));
+    assert_eq!(run.state.life(1), 23);
+    assert_eq!(run.state.life(2), 23);
+}
+
+/// The round 6 D2 world: A (P2's) takes 1 damage, prevented by a shield-less effect whose
+/// follow-up is `follow_up` (directly, or with `via_instead` through a `LifeChange` gain of 1
+/// that a one-use effect replaces by `instead`), while X (P1's) is put into the graveyard by a
+/// state-based action. Returns the world, X and Z (another permanent of P1).
+fn d2_world(
+    via_instead: bool,
+    follow_up: impl Fn(ObjectId, ObjectId) -> Vec<GameEvent>,
+    instead: impl Fn(ObjectId, ObjectId) -> Vec<GameEvent>,
+) -> (World, ObjectId, ObjectId, Vec<GameEvent>) {
+    let mut w = World::new();
+    let a = w.create(2, ZoneKind::Battlefield);
+    let x = w.create(1, ZoneKind::Battlefield);
+    let z = w.create(1, ZoneKind::Battlefield);
+    let then = if via_instead {
+        w.add(
+            ReplacementEffect::new(
+                e(2),
+                EventMatcher::new(BusEventKind::LifeChange),
+                Action::Instead(instead(x, z)),
+            )
+            .with_shield(Shield::Uses(1)),
+        );
+        vec![life(1, 1)]
+    } else {
+        follow_up(x, z)
+    };
+    w.add(ReplacementEffect::new(
+        e(1),
+        EventMatcher {
+            affected_object: Some(a),
+            ..EventMatcher::new(BusEventKind::Damage)
+        },
+        Action::Prevent { then },
+    ));
+    let events = vec![
+        damage_object(a, 1),
+        zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+    ];
+    (w, x, z, events)
+}
+
+/// Whether `report` executed an event of `kind`.
+fn executed_kind(report: &BusReport, kind: BusEventKind) -> bool {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .any(|ev| BusEventKind::of(ev.instance.event()) == kind)
+}
+
+fn attach(attachment: ObjectId, host: ObjectId) -> GameEvent {
+    GameEvent::Attach {
+        attachment,
+        target: crate::permanent::AttachTarget::Permanent(host),
+    }
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D2: CR 101.3, CR 614.6, CR 400.7, CR 701.3b: a
+/// follow-up `Attach` (directly, or through its `Instead`) onto X, which the executed batch of
+/// this call already moved, is ignored; the rest of the follow-up batch (a life gain) is still
+/// carried out, and the earlier batch is kept.
+#[test]
+fn req_event_001_r6_d2_follow_up_attach_onto_moved_host_is_ignored() {
+    for via_instead in [false, true] {
+        let (w, x, z, events) = d2_world(
+            via_instead,
+            |x, z| vec![attach(z, x), life(1, 1)],
+            |x, z| vec![attach(z, x), life(1, 2)],
+        );
+        let card = w.card_of(x);
+        let z_card = w.card_of(z);
+        let run = drive_twice(&w, events, true, &[]);
+        let report = ok(&run);
+        assert_eq!(report.prevented, 1);
+        assert_eq!(moves_of(report, x), 1);
+        assert!(!executed_kind(report, BusEventKind::Attach));
+        assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+        assert_eq!(run.state.zone_of_card(z_card), Some(ZoneId::Battlefield));
+        assert_eq!(run.state.permanents.attached_to(z), None);
+        assert_eq!(run.state.life(1), if via_instead { 22 } else { 21 });
+    }
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D2: CR 101.3 does not cover an id that was never
+/// issued: a follow-up `Attach` onto it (directly or through `Instead`) fails with
+/// `UnknownObject` and the whole call is rolled back.
+#[test]
+fn req_event_001_r6_d2_attach_onto_never_issued_host_fails() {
+    let ghost = ObjectId::new(999);
+    for via_instead in [false, true] {
+        let (w, _x, _z, events) = d2_world(
+            via_instead,
+            |_, z| vec![attach(z, ghost)],
+            |_, z| vec![attach(z, ghost)],
+        );
+        let before = w.state_hash();
+        let run = drive_twice(&w, events, true, &[]);
+        assert_eq!(
+            run.out,
+            Err(BusError::Event(EventError::UnknownObject(ghost)))
+        );
+        assert_eq!(run.hash, before);
+    }
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D2: CR 608.2h: a damage source is not a role the
+/// impossible-instruction check covers: follow-up damage from X, which the executed batch
+/// already moved, is still dealt in the follow-up batch (directly or through `Instead`).
+/// Passes before and after the round 6 change.
+#[test]
+fn req_event_001_r6_d2_follow_up_damage_from_moved_source_is_dealt() {
+    let from_x = |x: ObjectId| GameEvent::Damage {
+        source: Some(x),
+        source_controller: Some(p(1)),
+        target: DamageTarget::Player(p(2)),
+        amount: 1,
+        combat: false,
+    };
+    for via_instead in [false, true] {
+        let (w, x, _z, events) =
+            d2_world(via_instead, |x, _| vec![from_x(x)], |x, _| vec![from_x(x)]);
+        let run = drive_twice(&w, events, true, &[]);
+        let report = ok(&run);
+        assert_eq!(report.executed.len(), 2);
+        assert!(
+            report.executed[1]
+                .events
+                .iter()
+                .any(|ev| *ev.instance.event() == from_x(x))
+        );
+        assert_eq!(run.state.life(2), 19);
+        assert_eq!(run.state.life(1), 20);
+    }
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D2: CR 101.3, CR 400.7 (CR 608.2h limitation, see
+/// DECISIONS): a follow-up `BecomeCopy` of X, which the executed batch already moved, is
+/// ignored (no rollback); the life gain of the same follow-up batch is carried out.
+#[test]
+fn req_event_001_r6_d2_follow_up_copy_of_moved_object_is_ignored() {
+    let copy = |x: ObjectId, z: ObjectId| GameEvent::BecomeCopy {
+        object: z,
+        copied: x,
+    };
+    for via_instead in [false, true] {
+        let (w, _x, z, events) = d2_world(
+            via_instead,
+            |x, z| vec![copy(x, z), life(1, 1)],
+            |x, z| vec![copy(x, z), life(1, 2)],
+        );
+        let run = drive_twice(&w, events, true, &[]);
+        let report = ok(&run);
+        assert!(!executed_kind(report, BusEventKind::BecomeCopy));
+        assert_eq!(run.state.events.markers().copy_of(z), None);
+        assert_eq!(run.state.life(1), if via_instead { 22 } else { 21 });
+    }
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 D2: CR 704.3: in ONE batch, an `Attach` of Z onto X
+/// and X's state-based move both execute (the events that are not zone changes first), so the
+/// attach happens while X is still there. Pinned: afterwards Z is attached to nothing (the
+/// permanent container ends attachments to an object that leaves the battlefield); Z itself stays on the battlefield.
+#[test]
+fn req_event_001_r6_d2_same_batch_attach_before_host_moves() {
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let z = w.create(1, ZoneKind::Battlefield);
+    let card = w.card_of(x);
+    let z_card = w.card_of(z);
+    let events = vec![
+        attach(z, x),
+        zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+    ];
+    let run = drive_twice(&w, events, true, &[]);
+    let report = ok(&run);
+    let kinds: Vec<BusEventKind> = report.executed[0]
+        .events
+        .iter()
+        .map(|ev| BusEventKind::of(ev.instance.event()))
+        .collect();
+    assert_eq!(kinds, vec![BusEventKind::Attach, BusEventKind::ZoneChange]);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(run.state.zone_of_card(z_card), Some(ZoneId::Battlefield));
+    assert_eq!(run.state.permanents.attached_to(z), None);
+}
+
+/// REQ-EVENT-001, round 6 D6: CR 701.26a (only untapped permanents can be tapped), CR 614.7: a
+/// tap of a tapped permanent would not happen, so it offers no effect: nothing is asked or
+/// applied, the one-use effect keeps its use, nothing is executed and the state is unchanged.
+/// The same tap of the untapped permanent is replaced.
+#[test]
+fn req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect() {
+    let mut w = World::new();
+    let obj = w.create(1, ZoneKind::Battlefield);
+    w.setup(GameEvent::Tap { object: obj });
+    w.add(tap_instead(1, obj, vec![life(1, 1)]).with_shield(Shield::Uses(1)));
+    let before = w.state_hash();
+    let registry_before = encode_to_vec(&w.registry);
+    let run = drive_twice(&w, vec![GameEvent::Tap { object: obj }], false, &[]);
+    let report = ok(&run);
+    assert!(run.asked.is_empty());
+    assert!(report.applications.is_empty());
+    assert!(report.executed.is_empty());
+    assert_eq!(encode_to_vec(&run.state.registry), registry_before);
+    assert_eq!(run.state.life(1), 20);
+    assert_eq!(run.hash, before);
+
+    // The untapped case: the effect applies.
+    let mut w = World::new();
+    let obj = w.create(1, ZoneKind::Battlefield);
+    w.add(tap_instead(1, obj, vec![life(1, 1)]).with_shield(Shield::Uses(1)));
+    let run = drive_twice(&w, vec![GameEvent::Tap { object: obj }], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.life(1), 21);
+    assert!(!run.state.permanents.get(obj).unwrap().status().tapped);
+}

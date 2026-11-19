@@ -17,15 +17,22 @@
 //! the chosen effect modifies the event and joins its applied set. [5] Repeat on the modified
 //! event (CR 616.1f, CR 616.2). The events of an applied [`Action::Instead`] keep the replaced
 //! event's applied set (CR 614.5) and are part of the same simultaneous batch, at every
-//! generation (CR 614.6, CR 704.3); they are resolved against the state before the batch. The
-//! final events execute together as ONE batch through
-//! [`EventContext::execute_batch`](crate::events::EventContext::execute_batch) (the events that
-//! are not zone changes first, then at most one zone change per object); the
-//! [`Action::Prevent`] follow-up events (`then`, starting fresh, CR 615.5) of the whole batch
-//! then form one child batch that goes through the same bus. A [`Modification::EntersAsCopyOf`] copy is executed right after the
-//! entry, without replacement collection (CR 614.1c, CR 616.1c). Events that would not happen
-//! (0 damage, untapping an untapped permanent) offer no effect (CR 614.7, CR 614.7a). One call
-//! takes up at most [`MAX_BUS_EVENTS`] events.
+//! generation (CR 614.6, CR 704.3); they are resolved against the state before the batch, as
+//! soon as the event they replace has resolved, in the same APNAP order at that event's
+//! submission position (CR 101.4). The final events execute together as ONE batch through
+//! [`EventContext::execute_batch_with_entry_copies`](crate::events::EventContext::execute_batch_with_entry_copies)
+//! (the events that are not zone changes first, then at most one zone change per object, except
+//! the `sba` false caller's duplicate below); the [`Action::Prevent`] follow-up events (`then`,
+//! starting fresh, CR 615.5) of the whole batch then form one child batch that goes through
+//! the same bus. An object that a [`Modification::EntersAsCopyOf`] effect makes enter as a copy
+//! enters as that copy as part of its own entering event in the executed batch (CR 707.5,
+//! CR 614.1c, CR 616.1c): there is no separate `BecomeCopy` event and the copy is not offered
+//! to replacement effects; this is distinct from the ETB look-ahead of CR 614.12, a later unit.
+//! Events that would not happen (0 damage, untapping an untapped permanent, tapping a tapped
+//! permanent) offer no effect (CR 614.7, CR 614.7a, CR 701.26a). An event of a later batch of
+//! the call that names an object an earlier batch moved, as its affected object, an `Attach`
+//! host or a `BecomeCopy` copied object, is ignored (CR 101.3, CR 400.7). One call takes up at
+//! most [`MAX_BUS_EVENTS`] events.
 //!
 //! **Prevention (CR 615.1, CR 615.6, CR 615.7).** Prevention effects are [`Action::Prevent`] effects; [`Shield`]s
 //! limit uses or the damage pool and exhausted effects leave the registry. Counter-backed
@@ -43,9 +50,14 @@
 //! executed batch (CR 614.6, CR 704.3, CR 704.8: last known information is captured before
 //! it). An object moves at most once: its final zone changes (group members, other members and
 //! `Instead` moves) compete, a move produced or redirected by a replacement winning, then the
-//! least by content; the choice does not depend on submission order. Results of different
-//! objects or groups are resolved in APNAP order, then submission order, and may compete for a
-//! one-use effect.
+//! least by content; the choice does not depend on submission order. Exception: with `sba`
+//! false, when every competing move of an object was submitted directly (no `Instead`
+//! descendant among them), nothing is reconciled: all are executed, the second fails with
+//! `UnknownObject` and the call rolls back (a caller's duplicate). Results of different
+//! objects or groups are resolved in APNAP order of their choosers, then submission order (an
+//! `Instead` descendant taking the submission position of the event it replaces), and may
+//! compete for a one-use effect, so reversing the submission can change which object such an
+//! effect applies to.
 //!
 //! **Atomicity and suspension.** Any error restores the registry and every component of the
 //! event context. A pending choice propagates as [`BusInterrupt::Pending`]; the

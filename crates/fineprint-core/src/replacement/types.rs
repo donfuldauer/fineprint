@@ -14,6 +14,7 @@ use fineprint_dsl::ability::TierHint;
 
 use crate::choice::{ChoiceError, Interrupt, PendingChoiceRequest};
 use crate::events::{CounterTarget, DamageTarget, EventError, GameEvent, ZoneChangeCause};
+use crate::permanent::AttachTarget;
 use crate::zones::ZoneKind;
 
 /// The kind of a [`GameEvent`], as a replacement effect's matcher names it (REQ-EVENT-001).
@@ -871,6 +872,35 @@ pub(super) fn affected_object(event: &GameEvent) -> Option<ObjectId> {
         } => Some(*o),
         _ => None,
     }
+}
+
+/// CR 101.3, CR 614.6, CR 400.7: the objects `event` names in a role that needs the object as
+/// it is now, so that the event is an instruction that can't be carried out once such an
+/// object has left its zone (see `Bus::impossible`):
+///
+/// - the affected object of every event ([`affected_object`]);
+/// - the host of an `Attach` to a permanent (CR 701.3b: an attachment to an object it can't be
+///   attached to doesn't happen; a moved object is a new object, CR 400.7);
+/// - the copied object of a `BecomeCopy` (engine limitation: CR 608.2h would copy its last
+///   known information, but the events layer's standalone `BecomeCopy` takes only an object
+///   in a zone; see DECISIONS "Descendant scheduling and the roles of the
+///   impossible-instruction check (round 6)").
+///
+/// Not named here: the source of `Damage` (CR 608.2h: the object as it most recently existed
+/// deals the damage) and players (never retired).
+pub(super) fn required_objects(event: &GameEvent) -> Vec<ObjectId> {
+    let mut objects: Vec<ObjectId> = affected_object(event).into_iter().collect();
+    match event {
+        // CR 701.3b
+        GameEvent::Attach {
+            target: AttachTarget::Permanent(host),
+            ..
+        } => objects.push(*host),
+        // CR 608.2h (limitation, see above)
+        GameEvent::BecomeCopy { copied, .. } => objects.push(*copied),
+        _ => {}
+    }
+    objects
 }
 
 /// The affected player of `event` (see [`EventMatcher`]).
