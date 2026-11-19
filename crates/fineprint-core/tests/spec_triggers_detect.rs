@@ -870,6 +870,144 @@ fn spec_triggers_detect_limit_old_api_unchanged() {
 }
 
 // =============================================================================================
+// J4. limits of sources that survive without an active registration (CR 603.2h, 603.10b, 702.26d)
+// =============================================================================================
+
+/// Source 9 with a `PHASED_OUT` ability limited to once per game, listed in the pre-event view
+/// only (a phased-out permanent's ability is no longer active after the event).
+fn phase_env() -> FakeEnv {
+    FakeEnv::new().with_pre(reg(
+        9,
+        P1,
+        with_limit(ability("ph", m(K::PhasedOut)), None, Some(1)),
+    ))
+}
+
+fn phase_event() -> TriggerEvent {
+    ev_obj(&[K::PhasedOut], Some(9), Some(9))
+}
+
+// REQ-EVENT-002, CR 603.2h, 603.10b, 702.26d: a source that is live after the batch (a phased-out
+// permanent still exists) gets its limit counters written even though it has no post-event
+// registration; a later call with those counts as the pre-event memory is blocked by perGame,
+// on the same turn and on a later one.
+#[test]
+fn spec_triggers_detect_limit_phased_out_source_records_use() {
+    let env = phase_env().with_live(&[9]);
+    let mut memory = MemoryTable::new();
+    let out =
+        detect_with_pre_event_memory(&env, &MemoryTable::new(), &mut memory, 1, &[phase_event()]);
+    assert_eq!(summary(&out), vec![(9, s("ph"), vec![0])]);
+    assert!(memory.get(oid(9)).is_some(), "the live source's counters");
+
+    let pre_memory = memory.clone();
+    for turn in [1, 2] {
+        let mut fresh = MemoryTable::new();
+        let out =
+            detect_with_pre_event_memory(&env, &pre_memory, &mut fresh, turn, &[phase_event()]);
+        assert!(out.is_empty(), "turn {turn}: {out:?}");
+    }
+}
+
+// REQ-EVENT-002, CR 603.2h, 400.7: a source that is not live after the batch (retired by a zone
+// change) still triggers from the pre-event view but gets no memory entry; counts already in the
+// pre-event memory still block it.
+#[test]
+fn spec_triggers_detect_limit_retired_source_no_memory() {
+    let live = phase_env().with_live(&[9]);
+    let mut first = MemoryTable::new();
+    let out =
+        detect_with_pre_event_memory(&live, &MemoryTable::new(), &mut first, 1, &[phase_event()]);
+    assert_eq!(out.len(), 1);
+    assert!(first.get(oid(9)).is_some());
+
+    let retired = phase_env().with_live(&[]);
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(
+        &retired,
+        &MemoryTable::new(),
+        &mut memory,
+        1,
+        &[phase_event()],
+    );
+    assert_eq!(summary(&out), vec![(9, s("ph"), vec![0])]);
+    assert!(memory.get(oid(9)).is_none(), "no entry for a retired id");
+
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(&retired, &first, &mut memory, 1, &[phase_event()]);
+    assert!(out.is_empty(), "{out:?}");
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(&retired, &first, &mut memory, 2, &[phase_event()]);
+    assert!(out.is_empty(), "{out:?}");
+    assert!(memory.get(oid(9)).is_none());
+}
+
+// REQ-EVENT-002, CR 603.2h: with the default `source_survives` (some post-event registration has
+// the source), a source in both views writes its counters and a pre-only source does not.
+#[test]
+fn spec_triggers_detect_limit_default_source_survives() {
+    let r = reg(
+        9,
+        P1,
+        with_limit(ability("ph", m(K::PhasedOut)), None, Some(1)),
+    );
+    let both = FakeEnv::new().with_both(r.clone());
+    let mut memory = MemoryTable::new();
+    let out =
+        detect_with_pre_event_memory(&both, &MemoryTable::new(), &mut memory, 1, &[phase_event()]);
+    assert_eq!(out.len(), 1);
+    assert!(memory.get(oid(9)).is_some());
+
+    let pre_only = FakeEnv::new().with_pre(r);
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(
+        &pre_only,
+        &MemoryTable::new(),
+        &mut memory,
+        1,
+        &[phase_event()],
+    );
+    assert_eq!(out.len(), 1);
+    assert!(memory.get(oid(9)).is_none());
+}
+
+// =============================================================================================
+// J5. destination filters on token entry (CR 701.7a, 603.6a)
+// =============================================================================================
+
+// REQ-EVENT-002, CR 701.7a, 603.6a: an ENTERS matcher filtered on `to: BATTLEFIELD` triggers on a
+// created token (which has `to` and no `from`) and on a graveyard -> battlefield move; a
+// `from: GRAVEYARD` filter does not match the token but matches the move.
+#[test]
+fn spec_triggers_detect_enters_to_filter_token_and_move() {
+    let token = ev_obj(&[K::TokenCreated, K::Enters], None, Some(30))
+        .with_field("to", vzone(Zone::Battlefield));
+    let moved = ev_obj(&[K::ZoneChange, K::Enters], Some(40), Some(41))
+        .with_field("from", vzone(Zone::Graveyard))
+        .with_field("to", vzone(Zone::Battlefield));
+    let env_for = |key: &str, z: Zone| {
+        FakeEnv::new().with_post(reg(1, P1, ability("en", filt(m(K::Enters), key, zone(z)))))
+    };
+
+    let to_bf = env_for("to", Zone::Battlefield);
+    assert_eq!(
+        summary(&run(&to_bf, std::slice::from_ref(&token))),
+        vec![(1, s("en"), vec![0])]
+    );
+    assert_eq!(
+        summary(&run(&to_bf, std::slice::from_ref(&moved))),
+        vec![(1, s("en"), vec![0])]
+    );
+
+    let from_gy = env_for("from", Zone::Graveyard);
+    assert!(run(&from_gy, std::slice::from_ref(&token)).is_empty());
+    assert_eq!(
+        summary(&run(&from_gy, std::slice::from_ref(&moved))),
+        vec![(1, s("en"), vec![0])]
+    );
+}
+
+// =============================================================================================
 // K. non-event triggers and degenerate inputs
 // =============================================================================================
 
