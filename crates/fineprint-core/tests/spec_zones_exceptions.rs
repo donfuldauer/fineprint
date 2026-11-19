@@ -88,8 +88,9 @@ fn registry_has_twelve_entries_matching_all() {
     let _: &[ExceptionEntry; 12] = &EXCEPTIONS;
 }
 
-// REQ-CORE-002, CR 400.7a-400.7k, 400.7m: each entry's apply currently reports its own
-// exception as not implemented, for any pair of ids.
+// REQ-CORE-002, CR 400.7a-400.7k, 400.7m: each entry's apply reports its own exception, for any
+// pair of ids: Applies for CR 400.7d and 400.7j (REQ-CORE-007, #24 FP-023), NotImplemented for
+// the other ten.
 #[test]
 fn every_entry_reports_not_implemented_for_itself() {
     let pairs = [
@@ -99,9 +100,14 @@ fn every_entry_reports_not_implemented_for_itself() {
     ];
     for entry in EXCEPTIONS.iter() {
         for (old, new) in pairs {
+            // REQ-CORE-007: CR 400.7d and CR 400.7j are implemented (#24 FP-023).
+            let expected = match entry.exception {
+                Exception400_7::D | Exception400_7::J => ExceptionOutcome::Applies(entry.exception),
+                other => ExceptionOutcome::NotImplemented(other),
+            };
             assert_eq!(
                 (entry.apply)(old, new),
-                ExceptionOutcome::NotImplemented(entry.exception),
+                expected,
                 "{}",
                 entry.exception.rule()
             );
@@ -109,10 +115,14 @@ fn every_entry_reports_not_implemented_for_itself() {
     }
     assert_eq!(
         (EXCEPTIONS[3].apply)(ObjectId::new(1), ObjectId::new(2)),
-        ExceptionOutcome::NotImplemented(Exception400_7::D)
+        ExceptionOutcome::Applies(Exception400_7::D)
     );
     assert_eq!(
         (EXCEPTIONS[11].apply)(ObjectId::new(1), ObjectId::new(2)),
         ExceptionOutcome::NotImplemented(Exception400_7::M)
+    );
+    assert_eq!(
+        (EXCEPTIONS[9].apply)(ObjectId::new(1), ObjectId::new(2)),
+        ExceptionOutcome::Applies(Exception400_7::J)
     );
 }
