@@ -12,13 +12,17 @@ mod support;
 
 use std::collections::BTreeMap;
 
+use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_core::memory::MemoryTable;
 use fineprint_core::triggers::{
-    DelayedTriggers, EventField, PendingTrigger, TriggerEvent, TriggerOrigin, TriggerRegistration,
-    detect, reflexive_triggers,
+    DelayedTriggers, EventField, PendingTrigger, TriggerEnv, TriggerEvent, TriggerOrigin,
+    TriggerRegistration, detect, reflexive_triggers,
 };
 use fineprint_core::triggers::{LookBackKind, StateView};
-use fineprint_dsl::ability::{EventKind, FilterValue, Trigger, TriggeredAbilityAST};
+use fineprint_dsl::ability::{
+    ActivationLimit, EventKind, FilterValue, Trigger, TriggeredAbilityAST,
+};
+use fineprint_dsl::expr::{ObjectSelectorAST, PlayerGroup, PredicateAST};
 use support::*;
 
 fn vint(n: i64) -> EventField {
@@ -111,7 +115,7 @@ fn req_event_002_delayed_captured_bindings_win() {
         "delayed#0",
         binds(&[("$P", EventField::Player(P3)), ("$N", vint(4))]),
     )];
-    let out = dt.take_triggered(&CondEnv::new(), &waiting);
+    let out = dt.take_triggered(&CondEnv::new(), 1, &waiting);
     assert_eq!(
         out,
         vec![PendingTrigger {
@@ -142,12 +146,12 @@ fn req_event_002_delayed_one_shot_triggers_once() {
         wt(9, P2, "delayed#0", binds(&[("$N", vint(1))])),
         wt(9, P2, "delayed#0", binds(&[("$N", vint(2))])),
     ];
-    let out = dt.take_triggered(&CondEnv::new(), &waiting);
+    let out = dt.take_triggered(&CondEnv::new(), 1, &waiting);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].bindings, binds(&[("$N", vint(1))]));
     assert!(dt.is_empty());
     assert!(dt.registrations().is_empty());
-    assert!(dt.take_triggered(&CondEnv::new(), &waiting).is_empty());
+    assert!(dt.take_triggered(&CondEnv::new(), 1, &waiting).is_empty());
     assert_eq!(dt.fire(id), None);
     assert!(!dt.cancel(id));
 }
@@ -163,7 +167,7 @@ fn req_event_002_delayed_with_duration_triggers_each_time() {
         wt(9, P2, "delayed#0", binds(&[("$N", vint(2))])),
     ];
     for _ in 0..2 {
-        let out = dt.take_triggered(&CondEnv::new(), &waiting);
+        let out = dt.take_triggered(&CondEnv::new(), 1, &waiting);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].bindings, binds(&[("$N", vint(1))]));
         assert_eq!(out[1].bindings, binds(&[("$N", vint(2))]));
@@ -183,14 +187,14 @@ fn req_event_002_delayed_ignores_others_and_keeps_input_order() {
         wt(8, P2, "delayed#0", BTreeMap::new()),
         wt(9, P2, "delayed#5", BTreeMap::new()),
     ];
-    assert!(dt.take_triggered(&CondEnv::new(), &others).is_empty());
+    assert!(dt.take_triggered(&CondEnv::new(), 1, &others).is_empty());
     assert_eq!(dt.len(), 2);
     let waiting = vec![
         wt(9, P2, "test.trigger_other", BTreeMap::new()),
         wt(7, P1, "delayed#1", BTreeMap::new()),
         wt(9, P2, "delayed#0", BTreeMap::new()),
     ];
-    let out = dt.take_triggered(&CondEnv::new(), &waiting);
+    let out = dt.take_triggered(&CondEnv::new(), 1, &waiting);
     let ids: Vec<(Option<u64>, String)> = out
         .iter()
         .map(|p| (p.source.map(|o| o.get()), p.ability_id.clone()))
@@ -249,9 +253,13 @@ fn req_event_002_delayed_copies_ability_fields() {
     let id = dt.register(oid(9), P2, a, BTreeMap::new(), false);
     for p in [
         dt.fire(id).expect("fires"),
-        dt.take_triggered(&CondEnv::new(), &[wt(9, P2, "delayed#0", BTreeMap::new())])
-            .pop()
-            .expect("triggers"),
+        dt.take_triggered(
+            &CondEnv::new(),
+            1,
+            &[wt(9, P2, "delayed#0", BTreeMap::new())],
+        )
+        .pop()
+        .expect("triggers"),
     ] {
         assert!(p.optional);
         assert!(p.responds_to_trigger);
@@ -297,7 +305,7 @@ fn req_event_002_delayed_end_to_end_with_detect() {
     let waiting = detect(&env, &mut MemoryTable::new(), 1, &events);
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].ability_id, s("delayed#0"));
-    let out = dt.take_triggered(&env, &waiting);
+    let out = dt.take_triggered(&env, 1, &waiting);
     assert_eq!(out.len(), 1);
     let p = &out[0];
     assert_eq!(p.origin, TriggerOrigin::Delayed);
@@ -347,7 +355,7 @@ fn req_event_002_delayed_if_sees_captured_bindings() {
         "delayed#0",
         binds(&[("x", EventField::Object(oid(2)))]),
     )];
-    let out = dt.take_triggered(&env, &waiting);
+    let out = dt.take_triggered(&env, 1, &waiting);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].bindings, binds(&[("x", EventField::Object(oid(1)))]));
     assert_eq!(out[0].ability_id, s("delayed#0"));
@@ -372,7 +380,7 @@ fn req_event_002_delayed_if_false_keeps_one_shot() {
         "delayed#0",
         binds(&[("x", EventField::Object(oid(2)))]),
     )];
-    assert!(dt.take_triggered(&env, &waiting).is_empty());
+    assert!(dt.take_triggered(&env, 1, &waiting).is_empty());
     assert_eq!(dt.len(), 1);
     assert!(!dt.is_empty());
 }
@@ -388,11 +396,11 @@ fn req_event_002_delayed_if_one_shot_second_element_fires() {
         wt(9, P2, "delayed#0", binds(&[("n", vint(1))])),
         wt(9, P2, "delayed#0", binds(&[("n", vint(2))])),
     ];
-    let out = dt.take_triggered(&env, &waiting);
+    let out = dt.take_triggered(&env, 1, &waiting);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].bindings, binds(&[("n", vint(2))]));
     assert!(dt.is_empty());
-    assert!(dt.take_triggered(&env, &waiting).is_empty());
+    assert!(dt.take_triggered(&env, 1, &waiting).is_empty());
 }
 
 /// REQ-EVENT-002; CR 603.4, 603.7b: with a stated duration, one pending trigger per passing
@@ -408,7 +416,7 @@ fn req_event_002_delayed_if_duration_one_per_passing_element() {
         wt(9, P2, "delayed#0", binds(&[("n", vint(2)), ("k", vint(7))])),
     ];
     for _ in 0..2 {
-        let out = dt.take_triggered(&env, &waiting);
+        let out = dt.take_triggered(&env, 1, &waiting);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].bindings, binds(&[("n", vint(2))]));
         assert_eq!(out[1].bindings, binds(&[("n", vint(2)), ("k", vint(7))]));
@@ -442,10 +450,241 @@ fn req_event_002_delayed_if_view_follows_look_back() {
     let mut looked = wt(9, P2, "delayed#0", BTreeMap::new());
     looked.look_back = Some(LookBackKind::LeavesBattlefield);
     let plain = wt(9, P2, "delayed#0", BTreeMap::new());
-    let out = dt.take_triggered(&env, &[looked, plain]);
+    let out = dt.take_triggered(&env, 1, &[looked, plain]);
     assert_eq!(out.len(), 2);
     let views: Vec<StateView> = env.calls.borrow().iter().map(|c| c.0).collect();
     assert_eq!(views, vec![StateView::PreEvent, StateView::PostEvent]);
+}
+
+// =============================================================================================
+// delayed triggers: intervening "if" and limit are applied by `take_triggered` (CR 603.2h,
+// 603.4, 603.7b)
+// =============================================================================================
+
+/// An environment listing the registrations of a `DelayedTriggers` whose `condition_holds` reads
+/// the bindings map: a condition holds only when the binding `n` equals 2.
+struct LimitEnv {
+    regs: Vec<TriggerRegistration>,
+}
+
+impl LimitEnv {
+    fn of(dt: &DelayedTriggers) -> LimitEnv {
+        LimitEnv {
+            regs: dt.registrations(),
+        }
+    }
+}
+
+impl TriggerEnv for LimitEnv {
+    fn registrations(&self, _view: StateView) -> Vec<TriggerRegistration> {
+        self.regs.clone()
+    }
+
+    fn object_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _object: ObjectId,
+        _selector: &ObjectSelectorAST,
+    ) -> bool {
+        true
+    }
+
+    fn player_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _player: PlayerId,
+        _group: &PlayerGroup,
+    ) -> bool {
+        true
+    }
+
+    fn predicate_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _field: Option<&EventField>,
+    ) -> bool {
+        false
+    }
+
+    fn condition_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        bindings.get("n") == Some(&vint(2))
+    }
+
+    fn is_visible_to_all(&self, _object: ObjectId) -> bool {
+        true
+    }
+}
+
+/// A delayed ability on a life-gain event binding the amount to `n`, with the intervening "if"
+/// `test.cond` and the given limit.
+fn limited_ability(per_turn: Option<u32>, per_game: Option<u32>) -> TriggeredAbilityAST {
+    let mut a = with_if(
+        ability_with(
+            "test.trigger_delayed_limited",
+            Trigger::Event(bind(m(EventKind::LifeGained), "amount", "n")),
+        ),
+        "test.cond",
+    );
+    a.limit = Some(ActivationLimit { per_turn, per_game });
+    a
+}
+
+fn gain(n: i64) -> TriggerEvent {
+    TriggerEvent::new(vec![EventKind::LifeGained])
+        .with_player(P1)
+        .with_field("amount", vint(n))
+}
+
+/// One `detect` call over `events` (fresh Memory) in `turn`, then `take_triggered`.
+fn detect_and_take(
+    dt: &mut DelayedTriggers,
+    turn: u64,
+    events: &[TriggerEvent],
+) -> Vec<PendingTrigger> {
+    let env = LimitEnv::of(dt);
+    let waiting = detect(&env, &mut MemoryTable::new(), turn, events);
+    dt.take_triggered(&env, turn, &waiting)
+}
+
+fn amounts(out: &[PendingTrigger]) -> Vec<EventField> {
+    out.iter().map(|p| p.bindings["n"].clone()).collect()
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4, 603.7b: one batch, limit once per turn, the "if" holds only
+/// for the second of two events: `detect` must not spend the limit on the failing first event,
+/// so exactly one pending trigger, for the second event.
+#[test]
+fn req_event_002_delayed_limit_one_batch_failing_first_does_not_consume() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let out = detect_and_take(&mut dt, 5, &[gain(1), gain(2)]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(amounts(&out), vec![vint(2)]);
+    assert_eq!(dt.len(), 1);
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4: two calls in the same turn: a failing event first leaves the
+/// limit unspent, so a passing event in the second call triggers.
+#[test]
+fn req_event_002_delayed_limit_two_calls_failing_then_passing() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    assert!(detect_and_take(&mut dt, 5, &[gain(1)]).is_empty());
+    let out = detect_and_take(&mut dt, 5, &[gain(2)]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(amounts(&out), vec![vint(2)]);
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.7b: the per-turn limit is still enforced within a call and
+/// across calls of one turn, and a new turn resets it.
+#[test]
+fn req_event_002_delayed_limit_per_turn_enforced_and_reset() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let out = detect_and_take(&mut dt, 5, &[gain(2), gain(2)]);
+    assert_eq!(out.len(), 1);
+    assert!(detect_and_take(&mut dt, 5, &[gain(2)]).is_empty());
+    assert_eq!(detect_and_take(&mut dt, 6, &[gain(2)]).len(), 1);
+    assert!(detect_and_take(&mut dt, 6, &[gain(2)]).is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.7b: the per-game limit is never reset by a new turn.
+#[test]
+fn req_event_002_delayed_limit_per_game_never_reset() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(None, Some(1)),
+        BTreeMap::new(),
+        false,
+    );
+    assert_eq!(detect_and_take(&mut dt, 5, &[gain(2)]).len(), 1);
+    assert!(detect_and_take(&mut dt, 6, &[gain(2)]).is_empty());
+    assert!(detect_and_take(&mut dt, 7, &[gain(2)]).is_empty());
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4: `detect` leaves the Memory untouched for a delayed ability
+/// with a limit: no `trigger.limit.*` entry is written.
+#[test]
+fn req_event_002_delayed_detect_writes_no_limit_memory() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(Some(1), Some(3)),
+        BTreeMap::new(),
+        false,
+    );
+    let env = LimitEnv::of(&dt);
+    let mut memory = MemoryTable::new();
+    let before = memory.clone();
+    let waiting = detect(&env, &mut memory, 5, &[gain(1), gain(2), gain(2)]);
+    assert_eq!(waiting.len(), 3);
+    assert_eq!(memory, before);
+    assert!(memory.get(oid(9)).is_none());
+}
+
+/// REQ-EVENT-002; CR 603.2h, 603.4: `registrations()` lists the ability without its intervening
+/// "if" and without its limit (both are applied by `take_triggered`).
+#[test]
+fn req_event_002_delayed_registrations_drop_if_and_limit() {
+    let mut dt = DelayedTriggers::new();
+    let a = limited_ability(Some(1), Some(2));
+    assert!(a.intervening_if.is_some() && a.limit.is_some());
+    dt.register(oid(9), P2, a, BTreeMap::new(), false);
+    let regs = dt.registrations();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].ability.intervening_if, None);
+    assert_eq!(regs[0].ability.limit, None);
+    assert_eq!(regs[0].ability.base.ability_id, s("delayed#0"));
+}
+
+/// REQ-EVENT-002; CR 603.4, 603.7b: a one-shot registration with a limit whose only element
+/// fails its condition stays registered and fires on a later passing element.
+#[test]
+fn req_event_002_delayed_one_shot_with_limit_survives_failing_element() {
+    let mut dt = DelayedTriggers::new();
+    dt.register(
+        oid(9),
+        P2,
+        limited_ability(Some(1), None),
+        BTreeMap::new(),
+        true,
+    );
+    assert!(detect_and_take(&mut dt, 5, &[gain(1)]).is_empty());
+    assert_eq!(dt.len(), 1);
+    let out = detect_and_take(&mut dt, 5, &[gain(2)]);
+    assert_eq!(amounts(&out), vec![vint(2)]);
+    assert!(dt.is_empty());
 }
 
 // =============================================================================================
