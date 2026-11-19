@@ -2604,3 +2604,109 @@ found. The unit tests no longer pin printed values to a face-down top.
 issue #39 FP-038; this module selects base characteristics and copiable values before layer 1b.
 **Alternatives:** Modelling face-down values in this module (rejected: it duplicates layer 1b and
 pins an unsettled rule).
+
+## #24 FP-023 — Memory and LKI API shape; capture before move
+
+**Decision:** A new standalone module `fineprint_core::memory` holds `DurableRef`, `LinkEntry`,
+`LinkedStore`, `MoveFinder`, `ChoiceValue`, `SpellHistory`, `Memory`, `MemoryTable`, the
+`CharacteristicsProvider` trait, `LkiRecord`, `LkiStore`, `capture_lki_on_move`,
+`information_for` and `MemoryError`, exactly as fixed by the brief. Nothing is wired into
+`GameState`. The protocol is *capture before move*: the caller calls `capture_lki_on_move` before
+`Zones::move_object` (afterwards the old record is gone), then calls
+`MemoryTable::apply_zone_change` with the returned `Moved`. For simultaneous state-based
+departures (CR 704.8) the caller captures every departing object first and only then moves them.
+A capture is made iff the request makes the object leave its zone (destination differs, or exile
+-> exile / command -> command, CR 400.8, 406.7, 400.10), which matches exactly when
+`Zones::move_object` issues a new id; same-zone repositions return `Ok(false)`. Records are keyed
+by the old id and never overwritten (`AlreadyCaptured`). Counters with an amount below 1 are
+dropped and `attached_here` is sorted and deduplicated at capture, so the record is canonical
+whatever the provider returns.
+`apply_zone_change`: a same-zone reposition (`old == new`) changes nothing and returns `false`
+(Orchestrator clarification of brief clause 4); for a real zone change it returns `true` iff the
+old object had a Memory, and the new object then always gets a fresh Memory (possibly empty); an
+object with no Memory gives the new object none.
+Extras beyond the fixed API: `LinkedStore::define` (a link that is defined but empty, distinct
+from undefined, CR 607.5a), `Memory::set_link_source`, `Memory::is_empty`, `MemoryTable::ids`.
+**Rationale:** The zone primitive is the single place that forgets the old object (#19 FP-018), so
+LKI must be taken before it runs; making the caller sequence capture-then-move is the only way to
+get the CR 704.8 "state before any of those actions" semantics without wiring into `GameState`.
+**Alternatives:** A wrapper that captures and moves in one call (rejected: cannot express
+simultaneous departures and would need write access to zones/); capturing after the move from a
+pre-move clone (rejected: costs a full snapshot per move).
+
+## #24 FP-023 — "Generation" of a durable reference
+
+**Decision:** The generation of a `DurableRef` is the `ObjectId` the object had when the link was
+made. A reference resolves iff `Zones::object_of_card(card) == Some(generation)` (and the zone kind
+matches if one is expected). Any zone change, including exile -> exile, therefore breaks the link
+(CR 400.7, 607.2a). The only ways past this are `MoveFinder` (CR 400.7j, scoped to one effect or
+cost) and the explicit carry-overs of `apply_zone_change`.
+**Rationale:** Object ids are never reused (#19 high-water mark), so the id is a unique generation
+counter for free; SRS 2.6 asks for "CardId plus the ObjectId generation at the moment of linking".
+**Alternatives:** A separate per-card generation counter (redundant with never-reused ids).
+
+## #24 FP-023 — Registry outcome `Applies`; logic lives in memory/
+
+**Decision:** `ExceptionOutcome` gains `Applies(Exception400_7)`. `exception_400_7d_spell_information`
+and `exception_400_7j_effect_finds_moved_object` return `Applies(D)` / `Applies(J)` and their doc
+comments name `MemoryTable::apply_zone_change` (D) and `MoveFinder` (J). The other ten stay
+`NotImplemented`. The zones module does not import memory/ (doc comments name the items as plain
+code text, not intra-doc links), so there is no dependency cycle. The existing registry tests in
+`src/zones/tests.rs` and `tests/spec_zones_exceptions.rs` were corrected to assert exactly that
+(R10); the two D/J stub tests in `src/zones/tests.rs` were renamed `exception_400_7d_applies` /
+`exception_400_7j_applies`.
+**Rationale:** The registry signature `fn(ObjectId, ObjectId)` cannot carry the Memory table or an
+effect's finder, so the stateful behaviour must live where the state is; the registry stays the
+named, tested index of the exceptions (SRS 2.2).
+**Alternatives:** Changing the registry signature (a contract change touching every entry);
+making zones/ depend on memory/ (an import cycle).
+
+## #24 FP-023 — Characteristics encoding
+
+**Decision:** `Characteristics` has no canonical encoding, so `LkiRecord` encodes it field by field
+in declaration order: `names`, `supertypes`, `card_types`, `subtypes` as canonical string sets; the
+mana cost as `Option` of its canonical text (`Display`); the color indicator as `Option<u8>` bits;
+colors as `u8` bits; loyalty, defense, hand and life modifiers as `Option<i64>`. The placeholder
+DSL trees (`rules_text`, `abilities`, `power`, `toughness`) are encoded as tag `0` plus the RFC 8785
+canonical JSON bytes (`fineprint_dsl::canonical::to_canonical_vec`, length-prefixed); if that fails
+(an integer outside the JSON safe range, a noncharacter), tag `1` plus the rmp-serde bytes; if
+both fail, tag `2` alone. The zone id is its kind tag plus the `Option` owner.
+**Rationale:** Canonical JSON is already the DSL's hash form (key order and number spelling fixed),
+so equal values give equal bytes and any difference changes them; the fallback keeps the encoding
+total without panicking (R12). No `Debug` output is used.
+**Alternatives:** rmp-serde for everything (float `-0.0`/`0.0` and map-order concerns); `Debug`
+text (not a stable format); adding `CanonicalEncode` to `Characteristics` (outside owned paths).
+When the real DSL ASTs land (FP-011/012/013) they may get their own canonical encoding; this
+function is the one place to switch.
+
+## #24 FP-023 — SRS precision notes (LKI and Memory)
+
+**Decision:** (1) REQ-CORE-007 attaches "(CR 614.12c)" to all choices made as an object enters,
+but 614.12c covers only anchor words; chosen values come from 614.12a with the links of 607.2d and
+607.2f. `ChoiceValue` covers both; only `Anchor` cites 614.12c. (2) CR 604.7 (static abilities
+can't use last known information) and CR 704.8 (LKI of simultaneous SBA departures is derived from
+the state before any of them) apply to LKI but are not cited in SRS 2.3; both are implemented here
+(`InformationUser::StaticAbility` gets no LKI; the capture-before-move protocol). A one-line SRS
+edit could be proposed in docs/HUMAN_QUEUE.md as a P8 item; this unit does not add it.
+**Rationale:** Implement what the CR says; record where the SRS citation is narrower.
+**Alternatives:** Follow the SRS citation literally (would miss 604.7 and 704.8).
+
+## #24 FP-023 — CR 607.2q inside SpellHistory; other readings
+
+**Decision:** (1) The cards exiled to pay a permanent spell's cost are stored as
+`SpellHistory::exiled_to_pay: Vec<DurableRef>` and travel with the spell history from the stack to
+the battlefield only (CR 607.2q, 400.7d); they are not copied into the Linked Store. Their durable
+references still resolve only while each card stays the exiled generation. (2) A choice key holds
+one value: `set_choice` and `set_persistent_choice` each remove the key from the other map, so the
+last choice wins ("the last chosen [value]", CR 607.2d). (3) Only the persistent choices (CR
+607.2p) survive every zone change; ordinary choices, the Linked Store and link sources never do
+(rules-researcher reading: 400.7e/j "can find" is a tracked reference, not a carry-over of Memory).
+(4) `MoveFinder` maps each recorded old generation to the newest object; a move into a hidden zone
+drops the chain (CR 400.7j says "public zone"); a reposition is never recorded. (5)
+`information_for` returns `Current` only when the held id is in a zone of the expected kind; since
+a moved object has a new id, a public -> hidden move falls through to LKI (CR 608.2h).
+(6) `capture_lki_on_move` takes the permanent state only when the object is on the battlefield.
+**Rationale:** Keeps 607.2q data next to the 400.7d data it belongs to and makes the one
+carry-over rule (stack -> battlefield) cover both.
+**Alternatives:** Writing exiled_to_pay into the Linked Store under a reserved link id
+(rejected: no hardcoded link registry, SRS 2.6).

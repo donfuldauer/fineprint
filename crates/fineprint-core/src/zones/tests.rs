@@ -1530,11 +1530,13 @@ fn registry_has_twelve_entries_in_rule_order() {
     }
     let rule_set: BTreeSet<&str> = rules.iter().copied().collect();
     assert_eq!(rule_set.len(), 12);
+    // REQ-CORE-007: CR 400.7d and CR 400.7j are implemented (#24 FP-023); the other ten are not.
     for entry in EXCEPTIONS {
-        assert_eq!(
-            (entry.apply)(ObjectId::new(1), ObjectId::new(2)),
-            ExceptionOutcome::NotImplemented(entry.exception)
-        );
+        let expected = match entry.exception {
+            Exception400_7::D | Exception400_7::J => ExceptionOutcome::Applies(entry.exception),
+            other => ExceptionOutcome::NotImplemented(other),
+        };
+        assert_eq!((entry.apply)(ObjectId::new(1), ObjectId::new(2)), expected);
     }
 }
 
@@ -1565,12 +1567,12 @@ fn exception_400_7c_stub_is_not_implemented() {
     );
 }
 
-// REQ-CORE-002, CR 400.7d: stub. The issue that implements this exception replaces this test.
+// REQ-CORE-002, REQ-CORE-007, CR 400.7d: implemented by the memory module (#24 FP-023).
 #[test]
-fn exception_400_7d_stub_is_not_implemented() {
+fn exception_400_7d_applies() {
     assert_eq!(
         exception_400_7d_spell_information(ObjectId::new(1), ObjectId::new(2)),
-        ExceptionOutcome::NotImplemented(Exception400_7::D)
+        ExceptionOutcome::Applies(Exception400_7::D)
     );
 }
 
@@ -1619,12 +1621,12 @@ fn exception_400_7i_stub_is_not_implemented() {
     );
 }
 
-// REQ-CORE-002, CR 400.7j: stub. The issue that implements this exception replaces this test.
+// REQ-CORE-002, REQ-CORE-007, CR 400.7j: implemented by the memory module (#24 FP-023).
 #[test]
-fn exception_400_7j_stub_is_not_implemented() {
+fn exception_400_7j_applies() {
     assert_eq!(
         exception_400_7j_effect_finds_moved_object(ObjectId::new(1), ObjectId::new(2)),
-        ExceptionOutcome::NotImplemented(Exception400_7::J)
+        ExceptionOutcome::Applies(Exception400_7::J)
     );
 }
 

@@ -7,8 +7,10 @@
 //! CR 400.7 makes an object that changes zones a new object with no memory of its previous
 //! existence, with the lettered exceptions CR 400.7a-k and CR 400.7m (there is no letter l, so
 //! there are twelve). Each exception is a named function taking the old and the new object id
-//! from a [`Moved`](super::Moved). The bodies are filled in by the units that need them; until
-//! then each returns [`ExceptionOutcome::NotImplemented`].
+//! from a [`Moved`](super::Moved). The bodies are filled in by the units that need them. CR 400.7d
+//! and CR 400.7j are implemented: their functions return [`ExceptionOutcome::Applies`] and the
+//! logic lives in `fineprint_core::memory` (`MemoryTable::apply_zone_change` and `MoveFinder`).
+//! The other ten still return [`ExceptionOutcome::NotImplemented`].
 
 use fineprint_base::ids::ObjectId;
 
@@ -103,6 +105,10 @@ impl Exception400_7 {
 pub enum ExceptionOutcome {
     /// The exception's behaviour is not implemented yet.
     NotImplemented(Exception400_7),
+    /// The exception is implemented by `fineprint_core::memory`; the caller applies it with the
+    /// function the exception's registry function names (the registry cannot hold state: its
+    /// signature is `fn(ObjectId, ObjectId)`).
+    Applies(Exception400_7),
 }
 
 /// One registry entry: an exception and the function that applies it (REQ-CORE-002).
@@ -200,15 +206,17 @@ pub fn exception_400_7c_prevention_effects(old: ObjectId, new: ObjectId) -> Exce
     ExceptionOutcome::NotImplemented(Exception400_7::C)
 }
 
-/// CR 400.7d: A permanent's abilities can reference information about the spell it came from, such as costs paid and mana spent. (REQ-CORE-002)
+/// CR 400.7d: A permanent's abilities can reference information about the spell it came from, such as costs paid and mana spent. (REQ-CORE-002, REQ-CORE-007)
 ///
-/// Not implemented yet: returns [`ExceptionOutcome::NotImplemented`]. The unit that needs this
-/// exception fills in the body.
+/// Implemented: returns [`ExceptionOutcome::Applies`]. The caller applies it with
+/// `fineprint_core::memory::MemoryTable::apply_zone_change`, which carries the spell history
+/// (including the cards exiled to pay its cost, CR 607.2q) from the stack object to the
+/// permanent it becomes, and nowhere else.
 #[must_use]
 pub fn exception_400_7d_spell_information(old: ObjectId, new: ObjectId) -> ExceptionOutcome {
     // CR 400.7d
     let _ = (old, new);
-    ExceptionOutcome::NotImplemented(Exception400_7::D)
+    ExceptionOutcome::Applies(Exception400_7::D)
 }
 
 /// CR 400.7e: Zone-change triggers can find the new object in the destination zone, if that zone is public. (REQ-CORE-002)
@@ -269,10 +277,12 @@ pub fn exception_400_7i_play_land_effect_finds_permanent(
     ExceptionOutcome::NotImplemented(Exception400_7::I)
 }
 
-/// CR 400.7j: An effect (or a cost) that moves an object to a public zone can find that object. (REQ-CORE-002)
+/// CR 400.7j: An effect (or a cost) that moves an object to a public zone can find that object. (REQ-CORE-002, REQ-CORE-007)
 ///
-/// Not implemented yet: returns [`ExceptionOutcome::NotImplemented`]. The unit that needs this
-/// exception fills in the body.
+/// Implemented: returns [`ExceptionOutcome::Applies`]. The caller applies it with
+/// `fineprint_core::memory::MoveFinder`: the effect or cost records each move it makes
+/// (`MoveFinder::record`) and finds the new object, only in a public zone, through
+/// `MoveFinder::find`, `MoveFinder::resolve` or `LinkedStore::resolve_objects_with`.
 #[must_use]
 pub fn exception_400_7j_effect_finds_moved_object(
     old: ObjectId,
@@ -280,7 +290,7 @@ pub fn exception_400_7j_effect_finds_moved_object(
 ) -> ExceptionOutcome {
     // CR 400.7j
     let _ = (old, new);
-    ExceptionOutcome::NotImplemented(Exception400_7::J)
+    ExceptionOutcome::Applies(Exception400_7::J)
 }
 
 /// CR 400.7k: After a madness trigger resolves, effects referencing the discarded card can find it if it went to a public zone uncast. (REQ-CORE-002)
