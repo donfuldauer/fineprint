@@ -76,6 +76,10 @@ impl Knowledge {
     /// any earlier entry of the same (viewer, library owner) naming the same object or the same
     /// index.
     ///
+    /// A position entry never makes `viewer` an observer of a later move out of that library:
+    /// pass `viewer` in the `observers` of [`Knowledge::on_move_observed`] when the moved
+    /// position is itself public, otherwise the move is unobserved for `viewer`.
+    ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`] (viewer, then library owner),
     /// [`KnowledgeError::UnknownObject`], [`KnowledgeError::NotInLibrary`] if the object is not
