@@ -11,6 +11,8 @@
 //!   and is resolved as soon as it is the earliest unresolved one after that event.
 //!   Recursively (thread r4633092145): a descendant's position is its parent's position followed
 //!   by its index in the parent's `Instead` list, so lineages expand depth-first.
+//!   A descendant behaves exactly as if submitted at that position, also when stopped damage
+//!   resumes after a pool prevention (CR 615.7) and in execution order (review 5980983595).
 //! * D2 (thread r4632671485; CR 101.3, 614.6, 400.7, 701.3b, 608.2h): in a later batch of the
 //!   same call an event is ignored if it names, as its affected object, an `Attach` host or a
 //!   `BecomeCopy.copied` object, an object an earlier executed batch moved; the rest of that
@@ -334,6 +336,182 @@ fn req_event_001_r6_lineage_grandchild_takes_parent_position() {
             assert_eq!(r.world().life(P2), STARTING_LIFE + p2, "{what}: P2");
             assert_eq!(r.applications(), eids(&apps), "{what}");
         }
+    }
+}
+
+/// Drives `call` twice, choosing the first id of `prefer` each request offers; asserts both runs
+/// agree (REQ-CORE-001).
+fn preferring_twice(base: &Bus, call: Call, prefer: &[u64]) -> Run {
+    let a = run_preferring(base.clone(), call.clone(), prefer);
+    let b = run_preferring(base.clone(), call, prefer);
+    assert_same(&a, &b, "a re-run differs");
+    a
+}
+
+/// The executed Damage events of a run as `(source, amount)`, in execution order.
+fn dealt(r: &Run) -> Vec<(Option<ObjectId>, i64)> {
+    r.executed()
+        .iter()
+        .filter_map(|e| match e.instance.event() {
+            GameEvent::Damage { source, amount, .. } => Some((*source, *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+// REQ-EVENT-001, REQ-CORE-001, CR 615.7, 616.1, 101.4 (D1, CodeRabbit review 5980983595): a
+// stopped damage event resumes after the pool allocation in lineage-position order, as if each
+// descendant had been submitted at the position of the event it replaces. A (player 1's) is the
+// source of every damage; e1 is a prevention pool of 1 on damage to player 1; e9 a one-use
+// doubling of damage to player 1 below 3; e2: Tap T -> Instead[Tap U, A deals 3 to P1]; e3: Tap
+// U -> Instead[A deals 1 to P1]; the chooser prefers e1. The grandchild damage of 1 sits before
+// the damage of 3: P1 ends at 17, as the direct batch [1, 3]. Control with e2's list [A deals 3,
+// Tap U]: P1 ends at 15, as the direct batch [3, 1]. Each case equals its direct control in life,
+// damage prevented and damage dealt (source, amount, order).
+#[test]
+fn req_event_001_r6_pool_resumes_in_lineage_order() {
+    let world = || {
+        let mut w = World::new();
+        let a = w.create(ZoneKind::Battlefield, P1);
+        let t = w.create(ZoneKind::Battlefield, P1);
+        let u = w.create(ZoneKind::Battlefield, P1);
+        (w, a, t, u)
+    };
+    let common = || {
+        vec![
+            fx(1, m_dmg_player(P1), Action::Prevent { then: Vec::new() })
+                .with_shield(Shield::Pool(1)),
+            fx(
+                9,
+                EventMatcher {
+                    amount_below: Some(3),
+                    ..m_dmg_player(P1)
+                },
+                Action::Modify(Modification::Amount(AmountOp::Mul(2))),
+            )
+            .with_shield(Shield::Uses(1)),
+        ]
+    };
+    for (tap_u_first, life) in [(true, 17), (false, 15)] {
+        let what = format!("Tap U first: {tap_u_first}");
+        let (w, a, t, u) = world();
+        let list = if tap_u_first {
+            vec![tap(u), dmg_from(a, P1, 3)]
+        } else {
+            vec![dmg_from(a, P1, 3), tap(u)]
+        };
+        let mut effects = common();
+        effects.push(fx(
+            2,
+            object_matcher(BusEventKind::Tap, t),
+            Action::Instead(list),
+        ));
+        effects.push(fx(
+            3,
+            object_matcher(BusEventKind::Tap, u),
+            Action::Instead(vec![dmg_from(a, P1, 1)]),
+        ));
+        let lineage = preferring_twice(
+            &Bus::new(w.clone(), effects),
+            Call::batch(vec![tap(t)], false),
+            &[1, 9],
+        );
+        let direct_events = if tap_u_first {
+            vec![dmg_from(a, P1, 1), dmg_from(a, P1, 3)]
+        } else {
+            vec![dmg_from(a, P1, 3), dmg_from(a, P1, 1)]
+        };
+        let direct = preferring_twice(
+            &Bus::new(w, common()),
+            Call::batch(direct_events, false),
+            &[1, 9],
+        );
+        for (name, r) in [("lineage", &lineage), ("direct", &direct)] {
+            assert!(r.result.is_ok(), "{what}, {name}: {:?}", r.result);
+            assert_eq!(r.world().life(P1), life, "{what}, {name}: P1");
+        }
+        assert_eq!(
+            lineage.report().prevented,
+            direct.report().prevented,
+            "{what}: prevented"
+        );
+        assert_eq!(dealt(&lineage), dealt(&direct), "{what}: damage dealt");
+    }
+}
+
+// REQ-EVENT-001, REQ-CORE-001, CR 616.1, 101.4 (D1, CodeRabbit review 5980983595): executed
+// events follow lineage position. e1: Tap T -> Instead[Tap U, exile Y]; e2: Tap U -> Instead[exile
+// X]. The executed (and logged) zone changes are [X, Y], and the moved objects get the same new
+// ids and zones as with the direct batch [exile X, exile Y]. Control with e1's list [exile Y, Tap
+// U]: [Y, X], as the direct batch [exile Y, exile X].
+#[test]
+fn req_event_001_r6_execution_follows_lineage_order() {
+    for x_first in [true, false] {
+        let what = format!("X first: {x_first}");
+        let mut w = World::new();
+        let t = w.create(ZoneKind::Battlefield, P1);
+        let u = w.create(ZoneKind::Battlefield, P1);
+        let x = w.create(ZoneKind::Battlefield, P1);
+        let y = w.create(ZoneKind::Battlefield, P1);
+        let exile = |o| zone_change(o, ZoneKind::Exile, ZoneChangeCause::Other);
+        let list = if x_first {
+            vec![tap(u), exile(y)]
+        } else {
+            vec![exile(y), tap(u)]
+        };
+        let effects = vec![
+            fx(
+                1,
+                object_matcher(BusEventKind::Tap, t),
+                Action::Instead(list),
+            ),
+            fx(
+                2,
+                object_matcher(BusEventKind::Tap, u),
+                Action::Instead(vec![exile(x)]),
+            ),
+        ];
+        let order = if x_first { [x, y] } else { [y, x] };
+        let lineage = batch_twice(&Bus::new(w.clone(), effects), vec![tap(t)], false);
+        let direct = batch_twice(
+            &Bus::new(w, Vec::new()),
+            order.iter().map(|&o| exile(o)).collect(),
+            false,
+        );
+        // (event, new id) of every executed zone change, in execution order.
+        let moves = |r: &Run| -> Vec<(GameEvent, ObjectId)> {
+            r.executed()
+                .iter()
+                .filter(|e| matches!(e.instance.event(), GameEvent::ZoneChange { .. }))
+                .map(|e| (e.instance.event().clone(), new_id(&e.outcome)))
+                .collect()
+        };
+        let logged = |r: &Run| -> Vec<GameEvent> {
+            r.new_log()
+                .iter()
+                .flat_map(|b| b.events.iter().map(|e| e.instance.event().clone()))
+                .collect()
+        };
+        for (name, r) in [("lineage", &lineage), ("direct", &direct)] {
+            assert!(r.result.is_ok(), "{what}, {name}: {:?}", r.result);
+            let objects: Vec<GameEvent> = moves(r).into_iter().map(|(e, _)| e).collect();
+            assert_eq!(
+                objects,
+                vec![exile(order[0]), exile(order[1])],
+                "{what}, {name}: execution order"
+            );
+            assert_eq!(logged(r), objects, "{what}, {name}: log order");
+        }
+        assert_eq!(
+            moves(&lineage),
+            moves(&direct),
+            "{what}: events and new ids"
+        );
+        assert_eq!(
+            bytes(&lineage.world().zones),
+            bytes(&direct.world().zones),
+            "{what}: zones"
+        );
     }
 }
 
