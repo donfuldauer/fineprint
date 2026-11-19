@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::ability::{
-    AbilityBase, EventKind, EventMatcher, FilterValue, ModeAST, ModeSetAST, TargetSlotAST, Trigger,
-    TriggeredAbilityAST,
+    AbilityBase, ActivationLimit, EventKind, EventMatcher, FilterValue, ModeAST, ModeSetAST,
+    TargetSlotAST, Trigger, TriggeredAbilityAST,
 };
 use fineprint_dsl::expr::{ObjectSelectorAST, PlayerGroup, PredicateAST, ReferenceAST};
 
@@ -567,6 +567,7 @@ fn req_event_002_delayed_registrations_and_captured_bindings() {
 
     let got = d.take_triggered(
         &Env::default(),
+        1,
         &[
             waiting(10, 2, "delayed#0", &[("it", 99), ("other", 5)]),
             waiting(10, 2, "plain", &[]),
@@ -599,6 +600,7 @@ fn req_event_002_delayed_one_shot_and_duration() {
     let lasting = d.register(o(2), p(1), a, BTreeMap::new(), false);
     let got = d.take_triggered(
         &Env::default(),
+        1,
         &[
             waiting(1, 1, "delayed#0", &[("e", 1)]),
             waiting(2, 1, "delayed#1", &[("e", 2)]),
@@ -622,7 +624,7 @@ fn req_event_002_delayed_one_shot_and_duration() {
     assert!(!d.cancel(once));
     // A later event no longer triggers the one-shot.
     assert!(
-        d.take_triggered(&Env::default(), &[waiting(1, 1, "delayed#0", &[])])
+        d.take_triggered(&Env::default(), 1, &[waiting(1, 1, "delayed#0", &[])])
             .is_empty()
     );
     assert!(d.cancel(lasting));
@@ -706,7 +708,7 @@ fn req_event_002_delayed_end_to_end_with_detect() {
     ];
     let found = detect(&env, &mut MemoryTable::new(), 1, &events);
     assert_eq!(found.len(), 2);
-    let got = d.take_triggered(&env, &found);
+    let got = d.take_triggered(&env, 1, &found);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].ability_id, format!("delayed#{}", id.get()));
     assert_eq!(got[0].bindings["n"], EventField::Value(FilterValue::Int(3)));
@@ -1725,7 +1727,7 @@ fn req_event_002_delayed_intervening_if_uses_captured_value() {
     };
     let found = detect(&env, &mut MemoryTable::new(), 1, &[attack_event(99, 1)]);
     assert_eq!(found.len(), 1);
-    let got = d.take_triggered(&env, &found);
+    let got = d.take_triggered(&env, 1, &found);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].ability_id, format!("delayed#{}", id.get()));
     assert_eq!(got[0].bindings["it"], EventField::Object(o(40)));
@@ -1751,7 +1753,7 @@ fn req_event_002_delayed_intervening_if_ignores_event_value_of_captured_name() {
     };
     let found = detect(&env, &mut MemoryTable::new(), 1, &[attack_event(99, 1)]);
     assert_eq!(found.len(), 1);
-    assert!(d.take_triggered(&env, &found).is_empty());
+    assert!(d.take_triggered(&env, 1, &found).is_empty());
     assert_eq!(
         d.len(),
         1,
@@ -1777,7 +1779,7 @@ fn req_event_002_delayed_one_shot_skips_element_failing_condition() {
     ];
     let found = detect(&env, &mut MemoryTable::new(), 1, &events);
     assert_eq!(found.len(), 3);
-    let got = d.take_triggered(&env, &found);
+    let got = d.take_triggered(&env, 1, &found);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].bindings["e"], EventField::Object(o(2)));
     assert_eq!(got[0].bindings["it"], EventField::Object(o(40)));
@@ -1806,6 +1808,7 @@ fn req_event_002_delayed_condition_views_and_duration() {
     pre.look_back = Some(LookBackKind::LeavesBattlefield);
     let got = d.take_triggered(
         &env,
+        1,
         &[
             waiting(6, 2, "delayed#0", &[("e", 1)]),
             pre,
@@ -2030,4 +2033,209 @@ fn req_event_002_modes_enumerated_below_limit() {
         r.options,
         ChoiceOptions::Enumerated((0..15).map(ChoiceOption::Mode).collect())
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR round 2: delayed trigger limits are counted after the intervening "if"
+// ---------------------------------------------------------------------------------------------
+
+/// `delayed_if_ability` (an intervening "if") with the trigger limit `per_turn` / `per_game`.
+fn limited_if_ability(per_turn: Option<u32>, per_game: Option<u32>) -> TriggeredAbilityAST {
+    let mut a = delayed_if_ability();
+    a.limit = Some(ActivationLimit { per_turn, per_game });
+    a
+}
+
+/// A `BindEnv` listing `d`'s registrations whose condition holds iff `e` is bound to object 2.
+fn passes_on_e2(d: &DelayedTriggers) -> BindEnv {
+    BindEnv {
+        regs: d.registrations(),
+        want: want(&[("e", 2)]),
+        ..BindEnv::default()
+    }
+}
+
+/// detect, then take_triggered, for `turn`; the `e` binding of every pending trigger.
+fn detect_and_take(
+    d: &mut DelayedTriggers,
+    env: &BindEnv,
+    memory: &mut MemoryTable,
+    turn: u64,
+    events: &[TriggerEvent],
+) -> Vec<EventField> {
+    let found = detect(env, memory, turn, events);
+    assert_eq!(found.len(), events.len(), "detect never applies the limit");
+    d.take_triggered(env, turn, &found)
+        .iter()
+        .map(|g| g.bindings["e"].clone())
+        .collect()
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.4, CR 603.7b: one batch: a delayed ability with a stated
+/// duration and a limit of once each turn; of two matching events the first fails the
+/// intervening "if" and the second passes it. The failing event uses up nothing, so exactly one
+/// pending trigger results, from the second event.
+#[test]
+fn req_event_002_delayed_limit_after_condition_one_batch() {
+    let mut d = DelayedTriggers::new();
+    d.register(
+        o(6),
+        p(2),
+        limited_if_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = passes_on_e2(&d);
+    let mut memory = MemoryTable::new();
+    let got = detect_and_take(
+        &mut d,
+        &env,
+        &mut memory,
+        1,
+        &[attack_event(1, 1), attack_event(1, 2)],
+    );
+    assert_eq!(got, vec![EventField::Object(o(2))]);
+    assert_eq!(d.len(), 1);
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.4, CR 603.7b: two calls in the same turn: the first event
+/// fails the intervening "if" (no trigger, no limit used); a passing event later that turn
+/// triggers.
+#[test]
+fn req_event_002_delayed_limit_after_condition_two_calls_same_turn() {
+    let mut d = DelayedTriggers::new();
+    d.register(
+        o(6),
+        p(2),
+        limited_if_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = passes_on_e2(&d);
+    let mut memory = MemoryTable::new();
+    assert!(detect_and_take(&mut d, &env, &mut memory, 5, &[attack_event(1, 1)]).is_empty());
+    assert_eq!(
+        detect_and_take(&mut d, &env, &mut memory, 5, &[attack_event(1, 2)]),
+        vec![EventField::Object(o(2))]
+    );
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.7b: the limit still applies: once each turn gives one
+/// trigger from two passing events, none from a third that turn, and one again the next turn;
+/// once each game (no per-turn limit, no intervening "if") does not trigger again the next turn.
+/// detect keeps no limit counters in Memory for delayed abilities.
+#[test]
+fn req_event_002_delayed_limit_per_turn_and_per_game() {
+    let mut d = DelayedTriggers::new();
+    d.register(
+        o(6),
+        p(2),
+        limited_if_ability(Some(1), None),
+        BTreeMap::new(),
+        false,
+    );
+    let env = passes_on_e2(&d);
+    let mut memory = MemoryTable::new();
+    let two = [attack_event(1, 2), attack_event(3, 2)];
+    assert_eq!(
+        detect_and_take(&mut d, &env, &mut memory, 5, &two),
+        vec![EventField::Object(o(2))]
+    );
+    assert!(detect_and_take(&mut d, &env, &mut memory, 5, &[attack_event(1, 2)]).is_empty());
+    assert_eq!(
+        detect_and_take(&mut d, &env, &mut memory, 6, &[attack_event(1, 2)]),
+        vec![EventField::Object(o(2))]
+    );
+    assert_eq!(memory, MemoryTable::new(), "no trigger.limit.* entries");
+
+    let mut g = DelayedTriggers::new();
+    let mut a = event_ability("orig", EventKind::Attacks);
+    let mut bind = BTreeMap::new();
+    bind.insert("num".to_owned(), "e".to_owned());
+    if let Trigger::Event(m) = &mut a.trigger {
+        m.bind = Some(bind);
+    }
+    a.limit = Some(ActivationLimit {
+        per_turn: None,
+        per_game: Some(1),
+    });
+    g.register(o(7), p(2), a, BTreeMap::new(), false);
+    let genv = BindEnv {
+        regs: g.registrations(),
+        ..BindEnv::default()
+    };
+    assert_eq!(
+        detect_and_take(&mut g, &genv, &mut memory, 5, &[attack_event(1, 4)]),
+        vec![EventField::Object(o(4))]
+    );
+    assert!(detect_and_take(&mut g, &genv, &mut memory, 6, &[attack_event(1, 4)]).is_empty());
+    assert!(detect_and_take(&mut g, &genv, &mut memory, 7, &[attack_event(1, 4)]).is_empty());
+    assert!(genv.calls.borrow().is_empty(), "no intervening if to check");
+    assert_eq!(memory, MemoryTable::new());
+    assert_eq!(g.len(), 1);
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.4: the registrations listed for detect carry neither the
+/// intervening "if" nor the limit; the condition check inside take_triggered still sees the
+/// condition; detect writes nothing to Memory for the delayed ability.
+#[test]
+fn req_event_002_delayed_registrations_hide_limit() {
+    let mut d = DelayedTriggers::new();
+    d.register(
+        o(6),
+        p(2),
+        limited_if_ability(Some(1), Some(3)),
+        BTreeMap::new(),
+        false,
+    );
+    let regs = d.registrations();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].ability.intervening_if, None);
+    assert_eq!(regs[0].ability.limit, None);
+    let env = passes_on_e2(&d);
+    let mut memory = MemoryTable::new();
+    assert_eq!(
+        detect_and_take(&mut d, &env, &mut memory, 1, &[attack_event(1, 2)]).len(),
+        1
+    );
+    assert!(memory.get(o(6)).is_none());
+    assert_eq!(memory, MemoryTable::new());
+    assert_eq!(
+        *env.calls.borrow(),
+        vec![(StateView::PostEvent, "delayed#0".to_owned(), true)]
+    );
+}
+
+/// REQ-EVENT-002, CR 603.2h, CR 603.4, CR 603.7b: a one-shot whose every element is dropped,
+/// one by its intervening "if" and one by its limit, does not trigger and stays registered.
+/// (A one-shot that triggers is removed, so its limit can only be reached here with a limit of
+/// zero, which the DSL rejects but the AST can carry.)
+#[test]
+fn req_event_002_delayed_one_shot_dropped_by_condition_or_limit_stays() {
+    let mut d = DelayedTriggers::new();
+    d.register(
+        o(6),
+        p(2),
+        limited_if_ability(Some(0), None),
+        BTreeMap::new(),
+        true,
+    );
+    let env = passes_on_e2(&d);
+    let mut memory = MemoryTable::new();
+    assert!(
+        detect_and_take(
+            &mut d,
+            &env,
+            &mut memory,
+            1,
+            &[attack_event(1, 1), attack_event(1, 2)]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        d.len(),
+        1,
+        "a one-shot that did not trigger stays registered"
+    );
+    assert_eq!(env.calls.borrow().len(), 2, "both conditions were checked");
 }
