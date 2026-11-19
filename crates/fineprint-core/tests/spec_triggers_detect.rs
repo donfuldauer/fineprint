@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use fineprint_core::memory::MemoryTable;
 use fineprint_core::triggers::{
     EventField, LookBackKind, StateView, TriggerEvent, TriggerRegistration, WaitingTriggers,
-    detect, look_back_kind,
+    detect, detect_with_pre_event_memory, look_back_kind,
 };
 use fineprint_dsl::ability::{EventBatch as DslBatch, EventKind, StepId, Trigger};
 use fineprint_dsl::expr::{PlayerGroup, PlayerSelectorAST, PredicateAST, Zone};
@@ -663,6 +663,213 @@ fn spec_triggers_detect_no_limit_unbounded() {
 }
 
 // =============================================================================================
+// J2. ONE_OR_MORE across views (CR 603.2c, 603.10a)
+// =============================================================================================
+
+/// A batch of two zone changes into a hand: event 0 is (pre 10, post 11), event 1 is
+/// (pre 20, post 21).
+fn two_hand_moves() -> Vec<TriggerEvent> {
+    [(10, 11), (20, 21)]
+        .into_iter()
+        .map(|(pre, post)| {
+            ev_obj(&[K::ZoneChange], Some(pre), Some(post))
+                .with_field("from", vzone(Zone::Library))
+                .with_field("to", vzone(Zone::Hand))
+        })
+        .collect()
+}
+
+/// Source 1, in both views, with a ZONE_CHANGE{to: HAND} ability (object subject, binding
+/// `$X`) of batch mode `b`; both views accept every id of [`two_hand_moves`]; `visible` ids are
+/// visible to all.
+fn hand_env(b: Option<DslBatch>, visible: &[u64]) -> FakeEnv {
+    let mm = batch(
+        bind(
+            subj_obj(filt(m(K::ZoneChange), "to", zone(Zone::Hand))),
+            "object",
+            "$X",
+        ),
+        b,
+    );
+    FakeEnv::new()
+        .accept(PreEvent, &[10, 20])
+        .accept(PostEvent, &[11, 21])
+        .visible(visible)
+        .with_both(reg(1, P1, ability("a1", mm)))
+}
+
+// REQ-EVENT-002, CR 603.2c, 603.10a: a ONE_OR_MORE ability present in both views triggers ONCE per
+// detect call even when its events fall in different views: the first matching event fixes the view
+// (here: event 0 visible to all, so look-back), the bindings and the look-back flag; the indices
+// list every matching event.
+#[test]
+fn spec_triggers_detect_one_or_more_mixed_views_visible_first() {
+    let env = hand_env(Some(DslBatch::OneOrMore), &[10]);
+    let out = run(&env, &two_hand_moves());
+    assert_eq!(summary(&out), vec![(1, s("a1"), vec![0, 1])], "{out:?}");
+    assert_eq!(out[0].look_back, Some(LookBackKind::ToHandOrLibrary));
+    assert_eq!(
+        out[0].bindings.get("$X"),
+        Some(&EventField::Object(oid(10)))
+    );
+    assert_eq!(out[0].controller, P1);
+}
+
+// REQ-EVENT-002, CR 603.2c, 603.10a: the reverse order: event 0 is hidden, event 1 visible: one
+// trigger from the post view, no look-back, bindings from event 0 (its post id).
+#[test]
+fn spec_triggers_detect_one_or_more_mixed_views_hidden_first() {
+    let env = hand_env(Some(DslBatch::OneOrMore), &[20]);
+    let out = run(&env, &two_hand_moves());
+    assert_eq!(summary(&out), vec![(1, s("a1"), vec![0, 1])], "{out:?}");
+    assert_eq!(out[0].look_back, None);
+    assert_eq!(
+        out[0].bindings.get("$X"),
+        Some(&EventField::Object(oid(11)))
+    );
+}
+
+// REQ-EVENT-002, CR 603.2c: control: the same batch with an EACH matcher gives two triggers, one
+// per event, each in its own view.
+#[test]
+fn spec_triggers_detect_each_mixed_views_two_triggers() {
+    for b in [None, Some(DslBatch::Each)] {
+        let env = hand_env(b, &[10]);
+        let out = run(&env, &two_hand_moves());
+        assert_eq!(
+            summary(&out),
+            vec![(1, s("a1"), vec![0]), (1, s("a1"), vec![1])],
+            "{b:?}"
+        );
+        assert_eq!(out[0].look_back, Some(LookBackKind::ToHandOrLibrary));
+        assert_eq!(out[1].look_back, None);
+        assert_eq!(
+            out[0].bindings.get("$X"),
+            Some(&EventField::Object(oid(10)))
+        );
+        assert_eq!(
+            out[1].bindings.get("$X"),
+            Some(&EventField::Object(oid(21)))
+        );
+    }
+}
+
+// =============================================================================================
+// J3. limits read from the pre-event memory (CR 603.2h)
+// =============================================================================================
+
+/// Source 1 with a death-trigger ability limited to `per_turn`, listed in the views given.
+fn death_env(per_turn: u32, pre: bool, post: bool) -> FakeEnv {
+    let r = reg(
+        1,
+        P1,
+        with_limit(ability("a1", m(K::Dies)), Some(per_turn), None),
+    );
+    let mut env = FakeEnv::new();
+    if pre {
+        env = env.with_pre(r.clone());
+    }
+    if post {
+        env = env.with_post(r);
+    }
+    env
+}
+
+// REQ-EVENT-002, CR 603.2h: limit counts are read from the pre-event memory; a source that departs
+// (no post-event registration) gets no entry in the written memory. A departed source whose
+// pre-event memory shows the turn's use is suppressed on the same turn, and triggers on the next
+// turn; in both cases it leaves no entry behind.
+#[test]
+fn spec_triggers_detect_limit_departed_source_pre_event_memory() {
+    // First call: the source survives, triggers once, and its limit is recorded.
+    let survives = death_env(1, true, true);
+    let mut first_mem = MemoryTable::new();
+    let first = run_in(&survives, &mut first_mem, 1, &[dies_event(5, 6)]);
+    assert_eq!(first.len(), 1);
+    let pre_memory = first_mem.clone();
+
+    // (a) Same turn, the source has departed: suppressed; no memory entry.
+    let departed = death_env(1, true, false);
+    let mut memory = MemoryTable::new();
+    let out =
+        detect_with_pre_event_memory(&departed, &pre_memory, &mut memory, 1, &[dies_event(7, 8)]);
+    assert!(out.is_empty(), "{out:?}");
+    assert!(memory.get(oid(1)).is_none());
+
+    // (b) Next turn: the per-turn count is fresh, so it triggers; still no memory entry.
+    let mut memory = MemoryTable::new();
+    let out =
+        detect_with_pre_event_memory(&departed, &pre_memory, &mut memory, 2, &[dies_event(7, 8)]);
+    assert_eq!(summary(&out), vec![(1, s("a1"), vec![0])]);
+    assert!(memory.get(oid(1)).is_none());
+}
+
+// REQ-EVENT-002, CR 603.2h: a source listed in both views triggers and gets a memory entry; a
+// repeat in the same turn is suppressed.
+#[test]
+fn spec_triggers_detect_limit_surviving_source_memory() {
+    let env = death_env(1, true, true);
+    let pre_memory = MemoryTable::new();
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(&env, &pre_memory, &mut memory, 1, &[dies_event(5, 6)]);
+    assert_eq!(summary(&out), vec![(1, s("a1"), vec![0])]);
+    assert!(memory.get(oid(1)).is_some(), "the survivor's counters");
+
+    let pre_again = memory.clone();
+    let out = detect_with_pre_event_memory(&env, &pre_again, &mut memory, 1, &[dies_event(7, 8)]);
+    assert!(out.is_empty(), "{out:?}");
+}
+
+// REQ-EVENT-002, CR 603.2h: perTurn: 2 with two accepted occurrences in one call (EACH): both
+// trigger; a third event in the same call does not.
+#[test]
+fn spec_triggers_detect_limit_in_batch_tally() {
+    let env = death_env(2, true, true);
+    let pre_memory = MemoryTable::new();
+
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(
+        &env,
+        &pre_memory,
+        &mut memory,
+        1,
+        &[dies_event(5, 6), dies_event(7, 8)],
+    );
+    assert_eq!(
+        summary(&out),
+        vec![(1, s("a1"), vec![0]), (1, s("a1"), vec![1])]
+    );
+
+    let mut memory = MemoryTable::new();
+    let out = detect_with_pre_event_memory(
+        &env,
+        &pre_memory,
+        &mut memory,
+        1,
+        &[dies_event(5, 6), dies_event(7, 8), dies_event(9, 10)],
+    );
+    assert_eq!(
+        summary(&out),
+        vec![(1, s("a1"), vec![0]), (1, s("a1"), vec![1])]
+    );
+    // The recorded count blocks a further event next call (same turn).
+    let pre_again = memory.clone();
+    let out = detect_with_pre_event_memory(&env, &pre_again, &mut memory, 1, &[dies_event(11, 12)]);
+    assert!(out.is_empty(), "{out:?}");
+}
+
+// REQ-EVENT-002, CR 603.2h: `detect` behaves as before: its own memory is the pre-event table:
+// the first call triggers, a second call in the same turn is suppressed.
+#[test]
+fn spec_triggers_detect_limit_old_api_unchanged() {
+    let env = death_env(1, true, true);
+    let mut mem = MemoryTable::new();
+    assert_eq!(run_in(&env, &mut mem, 1, &[dies_event(5, 6)]).len(), 1);
+    assert!(run_in(&env, &mut mem, 1, &[dies_event(7, 8)]).is_empty());
+    assert_eq!(run_in(&env, &mut mem, 2, &[dies_event(7, 8)]).len(), 1);
+}
+
+// =============================================================================================
 // K. non-event triggers and degenerate inputs
 // =============================================================================================
 
@@ -975,6 +1182,41 @@ fn spec_triggers_detect_property_registration_order() {
     }
 }
 
+/// Makes a batch single-view: when it mixes events with and without a pre-event subject, the
+/// missing ones get one (their post id, else 1), so a ONE_OR_MORE ability cannot see two views.
+fn make_single_view(events: &mut [TriggerEvent]) {
+    let some = events.iter().any(|e| e.subject_pre.is_some());
+    let none = events.iter().any(|e| e.subject_pre.is_none());
+    if some && none {
+        for e in events.iter_mut() {
+            if e.subject_pre.is_none() {
+                e.subject_pre = Some(e.subject_post.unwrap_or(oid(1)));
+            }
+        }
+    }
+}
+
+// REQ-EVENT-002, CR 603.10a: a single RETURNED_TO_HAND occurrence with no pre-event object id has
+// nothing to ask is_visible_to_all about: it triggers from a post-event registration with the
+// registration's controller and no look-back; a pre-event-only registration does not trigger.
+#[test]
+fn spec_triggers_detect_to_hand_without_pre_event_subject() {
+    let r = reg(1, P2, ability("a1", m(K::ReturnedToHand)));
+    assert_eq!(
+        look_back_kind(&m(K::ReturnedToHand)),
+        Some(LookBackKind::ToHandOrLibrary)
+    );
+    let event = ev_obj(&[K::ReturnedToHand], None, Some(5));
+    let env = FakeEnv::new().with_post(r.clone());
+    let out = run(&env, std::slice::from_ref(&event));
+    assert_eq!(summary(&out), vec![(1, s("a1"), vec![0])]);
+    assert_eq!(out[0].look_back, None);
+    assert_eq!(out[0].controller, P2);
+
+    let env = FakeEnv::new().with_pre(r);
+    assert!(run(&env, &[event]).is_empty());
+}
+
 // REQ-EVENT-002, CR 603.10: a trigger has look_back Some iff its matcher's look_back_kind is
 // Some, and then equal to it (every object visible).
 #[test]
@@ -983,7 +1225,8 @@ fn spec_triggers_detect_property_look_back_flag() {
     let mut seen_some = 0;
     let mut seen_none = 0;
     for _ in 0..600 {
-        let sc = gen_scenario(&mut rng);
+        let mut sc = gen_scenario(&mut rng);
+        make_single_view(&mut sc.events);
         let out = detect(&sc.env, &mut MemoryTable::new(), 1, &sc.events);
         for t in &out {
             let r = sc
@@ -995,29 +1238,43 @@ fn spec_triggers_detect_property_look_back_flag() {
                 panic!("only event triggers are detected");
             };
             let derived = look_back_kind(mm);
-            // Barring the invisible ToHandOrLibrary case: with no pre-event id there is nothing
-            // to ask is_visible_to_all about, so such triggers are not judged here.
-            if derived == Some(LookBackKind::ToHandOrLibrary)
-                && t.event_indices
-                    .iter()
-                    .any(|&i| sc.events[i].subject_pre.is_none())
-            {
-                continue;
-            }
-            assert_eq!(t.look_back, derived, "{t:?}");
             assert_eq!(t.controller, r.controller);
-            if t.look_back.is_some() {
-                seen_some += 1;
+            // CR 603.10a: with no pre-event subject there is nothing to ask is_visible_to_all
+            // about, so a ToHandOrLibrary ability falls back to the post-event view: no
+            // look-back and a post-event registration. (The batches are single-view; the
+            // mixed-view ONE_OR_MORE batch has its own tests.)
+            let no_pre = t
+                .event_indices
+                .iter()
+                .any(|&i| sc.events[i].subject_pre.is_none());
+            if derived == Some(LookBackKind::ToHandOrLibrary) && no_pre {
                 assert!(
-                    sc.env.pre.contains(r),
-                    "look-back uses a pre-event registration"
+                    t.event_indices
+                        .iter()
+                        .all(|&i| sc.events[i].subject_pre.is_none()),
+                    "single-view batch: {t:?}"
                 );
-            } else {
-                seen_none += 1;
+                assert_eq!(t.look_back, None, "{t:?}");
                 assert!(
                     sc.env.post.contains(r),
-                    "others use a post-event registration"
+                    "the post-event fallback uses a post-event registration"
                 );
+                seen_none += 1;
+            } else {
+                assert_eq!(t.look_back, derived, "{t:?}");
+                if t.look_back.is_some() {
+                    seen_some += 1;
+                    assert!(
+                        sc.env.pre.contains(r),
+                        "look-back uses a pre-event registration"
+                    );
+                } else {
+                    seen_none += 1;
+                    assert!(
+                        sc.env.post.contains(r),
+                        "others use a post-event registration"
+                    );
+                }
             }
         }
     }

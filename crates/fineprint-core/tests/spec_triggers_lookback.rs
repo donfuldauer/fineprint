@@ -9,9 +9,16 @@
 #[path = "spec_triggers_support.rs"]
 mod support;
 
+#[path = "spec_events_support.rs"]
+mod esupport;
+
+use esupport::World;
+use fineprint_core::events::{GameEvent, Outcome, ZoneChangeCause};
 use fineprint_core::triggers::{
-    EventField, LookBackKind, StateView, TriggerEvent, TriggerRegistration, look_back_kind,
+    EventField, LookBackKind, StateView, TriggerEvent, TriggerRegistration, events_from_batch,
+    look_back_kind,
 };
+use fineprint_core::zones::{MoveRequest, ZoneKind};
 use fineprint_dsl::ability::{EventBatch as DslBatch, EventKind, EventMatcher};
 use fineprint_dsl::expr::Zone;
 use support::*;
@@ -129,6 +136,25 @@ fn spec_triggers_lookback_kind_other_categories() {
     assert_eq!(lb(K::Planeswalked, &[]), Some(LookBackKind::Planeswalked));
 }
 
+// REQ-EVENT-002, CR 701.8a, 701.8b, 603.6c, 603.10a: a destroyed permanent moves from the
+// battlefield to its owner's graveyard, so DESTROYED is a leaves-the-battlefield look-back kind,
+// with or without filters; PUT_INTO_GRAVEYARD without a from filter (or from anywhere but the
+// battlefield) is not.
+#[test]
+fn spec_triggers_lookback_kind_destroyed() {
+    assert_eq!(lb(K::Destroyed, &[]), Some(LookBackKind::LeavesBattlefield));
+    assert_eq!(
+        lb(K::Destroyed, &[("from", Zone::Battlefield)]),
+        Some(LookBackKind::LeavesBattlefield)
+    );
+    assert_eq!(
+        lb(K::Destroyed, &[("to", Zone::Graveyard)]),
+        Some(LookBackKind::LeavesBattlefield)
+    );
+    assert_eq!(lb(K::PutIntoGraveyard, &[]), None);
+    assert_eq!(lb(K::PutIntoGraveyard, &[("to", Zone::Graveyard)]), None);
+}
+
 // REQ-EVENT-002, CR 603.10, 603.6a: kinds outside the CR 603.10 list are not look-back.
 #[test]
 fn spec_triggers_lookback_kind_not_look_back() {
@@ -138,7 +164,6 @@ fn spec_triggers_lookback_kind_not_look_back() {
         K::Discarded,
         K::Milled,
         K::Cycled,
-        K::Destroyed,
         K::Cast,
         K::Activated,
         K::Tapped,
@@ -491,35 +516,60 @@ fn spec_triggers_lookback_plain_stack_to_graveyard_not_look_back() {
 // C. pre-event-only visibility (acceptance criterion)
 // =============================================================================================
 
-// REQ-EVENT-002, CR 603.10, 603.6a: an object the matcher sees only pre-event triggers a
-// look-back matcher (DIES) and not a non-look-back matcher (ENTERS) over the same event.
+// REQ-EVENT-002, CR 603.10, 603.6c: one real battlefield-to-graveyard move, seen only in the
+// pre-event state, triggers a look-back matcher (DIES) and not an unfiltered PUT_INTO_GRAVEYARD
+// matcher (which never looks back): normalisation supplies both kinds and both ids.
 #[test]
 fn spec_triggers_lookback_pre_event_only_object() {
-    let event = ev_obj(&[K::ZoneChange, K::Dies, K::Enters], Some(30), Some(31));
+    let mut w = World::new();
+    let a = w.create(ZoneKind::Battlefield, P1);
+    let batch = w
+        .batch(vec![GameEvent::ZoneChange {
+            object: a,
+            request: MoveRequest::new(ZoneKind::Graveyard),
+            cause: ZoneChangeCause::Other,
+        }])
+        .expect("batch executes");
+    let moved = match batch.events[0].outcome {
+        Outcome::ZoneChange(m) => m,
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(moved.old, moved.new);
+    let events = events_from_batch(&batch);
+    assert_eq!(events.len(), 1);
+    let event = events[0].clone();
+    assert!(event.kinds.contains(&K::Dies));
+    assert!(event.kinds.contains(&K::PutIntoGraveyard));
+    assert_eq!(event.subject_pre, Some(moved.old));
+    assert_eq!(event.subject_post, Some(moved.new));
+    let (pre_id, post_id) = (moved.old.get(), moved.new.get());
+
     let dies = reg(1, P1, ability("dies", subj_obj(m(K::Dies))));
-    let enters = reg(2, P1, ability("enters", subj_obj(m(K::Enters))));
+    let put = reg(2, P1, ability("put", subj_obj(m(K::PutIntoGraveyard))));
     let env = FakeEnv::new()
-        .accept(PreEvent, &[30])
+        .accept(PreEvent, &[pre_id])
         .with_both(dies.clone())
-        .with_both(enters.clone());
+        .with_both(put.clone());
     let out = run(&env, std::slice::from_ref(&event));
     assert_eq!(summary(&out), vec![(1, "dies".to_string(), vec![0])]);
     assert_eq!(out[0].look_back, Some(LookBackKind::LeavesBattlefield));
 
-    // Control: once the object is also seen post-event, ENTERS triggers too (no look-back).
+    // Control: once the object is also seen post-event, PUT_INTO_GRAVEYARD triggers too (no
+    // look-back).
     let env = FakeEnv::new()
-        .accept(PreEvent, &[30])
-        .accept(PostEvent, &[31])
+        .accept(PreEvent, &[pre_id])
+        .accept(PostEvent, &[post_id])
         .with_both(dies)
-        .with_both(enters);
+        .with_both(put);
     let out = run(&env, &[event]);
     assert_eq!(
         summary(&out),
         vec![
             (1, "dies".to_string(), vec![0]),
-            (2, "enters".to_string(), vec![0])
+            (2, "put".to_string(), vec![0])
         ]
     );
+    assert_eq!(out[0].look_back, Some(LookBackKind::LeavesBattlefield));
     assert_eq!(out[1].look_back, None);
 }
 
@@ -695,4 +745,52 @@ fn spec_triggers_lookback_example_one_or_more() {
     let out = run(&env, &wipe(&[3, 1, 2]));
     assert_eq!(summary(&out), vec![(1, "a1".to_string(), vec![0, 2])]);
     assert_eq!(out[0].bindings.get("$X"), Some(&EventField::Object(oid(3))));
+}
+
+// REQ-EVENT-002, CR 701.8a, 701.8b, 603.10a: a destroy-all: the observer is destroyed together with
+// another permanent. A DESTROYED matcher on the observer triggers (it looks back as a
+// leaves-the-battlefield ability), from a registration that exists only in the pre-event list.
+#[test]
+fn spec_triggers_lookback_destroy_all_observer() {
+    // Observer 1 and permanent 2 are destroyed together (new ids +100).
+    let destroyed =
+        |pre: u64| dies_event(pre, pre + 100).with_object(Some(oid(pre)), Some(oid(pre + 100)));
+    let mut events: Vec<TriggerEvent> = [1, 2].into_iter().map(destroyed).collect();
+    for e in &mut events {
+        e.kinds.push(K::Destroyed);
+    }
+    let mm = bind(subj_obj(m(K::Destroyed)), "object", "$X");
+    assert_eq!(look_back_kind(&mm), Some(LookBackKind::LeavesBattlefield));
+    let observer = reg(9, P1, ability("obs", mm));
+    let env = FakeEnv::new()
+        .accept(PreEvent, &[1, 2])
+        .with_pre(observer.clone());
+    let out = run(&env, &events);
+    assert_eq!(
+        summary(&out),
+        vec![
+            (9, "obs".to_string(), vec![0]),
+            (9, "obs".to_string(), vec![1])
+        ]
+    );
+    for t in &out {
+        assert_eq!(t.look_back, Some(LookBackKind::LeavesBattlefield));
+        assert_eq!(t.controller, P1);
+    }
+    assert_eq!(out[0].bindings.get("$X"), Some(&EventField::Object(oid(1))));
+    assert_eq!(out[1].bindings.get("$X"), Some(&EventField::Object(oid(2))));
+
+    // The observer itself, listed only in the pre-event state, is among the destroyed.
+    let own = reg(1, P1, ability("self", subj_obj(m(K::Destroyed))));
+    let env = FakeEnv::new().accept(PreEvent, &[1]).with_pre(own.clone());
+    let out = run(&env, &events);
+    assert_eq!(summary(&out), vec![(1, "self".to_string(), vec![0])]);
+    assert_eq!(out[0].look_back, Some(LookBackKind::LeavesBattlefield));
+
+    // Control: a post-event-only registration does not trigger.
+    let env = FakeEnv::new()
+        .accept(PreEvent, &[1, 2])
+        .accept(PostEvent, &[101, 102])
+        .with_post(own);
+    assert!(run(&env, &events).is_empty());
 }
