@@ -2368,3 +2368,71 @@ CDA, and a `NotOnStack` split evaluated with an on-stack context counted X.
 **Alternatives:** `Option<ColorBitmask>` (cannot express add versus override of a non-empty
 mask); a bool `colorless` flag (covers only devoid); keeping a plain mask (rejected by the
 finding); making `NotOnStack` honour `ctx` (contradicts CR 202.3e).
+
+## #22 FP-021 — SRS 4.1/4.2 gaps
+
+**Decision:** The CR baseline 2026-11-06 wins (P1); the unit follows it where SRS 4.1/4.2 is
+silent or too coarse. (1) SPLIT battlefield cell "N/A (instant or sorcery)": instants and
+sorceries cannot enter the battlefield (CR 304.4, 307.4), permanent split cards are ROOM
+(CR 709.5, out of scope here); the cell should also cite CR 709.3b and 709.4a-d. This unit's
+`SplitLayout` still returns the combined characteristics on the battlefield without error
+(CR 709.4 says every zone except the stack). (2) FLIP: only name, text box, type line and
+power/toughness switch; mana cost, color and mana value are unchanged (CR 710.1c). Selection is
+by flipped status, which is status and not copied (CR 110.5, 707.2, 707.3), so the SRS 4.2
+lead-in "all alternative characteristics are copiable" does not apply to flip. (3) DFC_MODAL
+battlefield "The face chosen": add CR 712.9, 712.10, 712.11, 712.11a; CR 712.13 (cannot be turned
+face down) applies to every double-faced permanent. (4) LEVELER: band base P/T and abilities are
+static abilities (CR 711.2a, 711.2b, layer 7b); base characteristics carry the uppermost P/T
+below the first band and off the battlefield (CR 711.5, 711.6); level bands are not applied in
+this unit. (5) The SRS 4.1 CR 202.3a bullet should read "except the back face of a nonmodal
+double-faced permanent or spell, and melded permanents" (a modal back face with no cost has mana
+value 0). (6) PROTOTYPE battlefield cell "Same as on the stack" holds only if cast prototyped;
+otherwise normal characteristics (CR 719.4).
+**Rationale:** CR text wins (P1); only a person edits the SRS, so the proposed SRS edit is a
+HUMAN_QUEUE line added by the Orchestrator.
+**Alternatives:** Follow the SRS cells literally (contradicts CR 710.1c, 712.6e, 719.4).
+
+## #22 FP-021 — Layouts API
+
+**Decision:** `fineprint_core::layouts` exposes the API pinned in the brief: `CastChoice`,
+`FaceUp`, `LayoutStatus`, `LayoutQuery`, `LayoutError`, the `Layout` trait with one unit struct
+per supported layout (NORMAL, SPLIT, FLIP, DFC_NONMODAL, DFC_MODAL, ADVENTURER, OMEN, PROTOTYPE,
+LEVELER, SAGA, CLASS, CASE), `layout_for`, the free functions `base_characteristics`,
+`mana_value`, `gating`, and `Gating`. Every other `LayoutBehavior` (ROOM and MELD included) is
+`UnsupportedLayout`. The module is standalone: not wired into `GameState`, the Merkle layout or
+the wire form. The cast choice is consulted only on the stack and, for PROTOTYPE, the
+battlefield. Copies are not modelled except the `copying_back_face` mana-value flag (nonmodal
+only, CR 202.3b, 712.6d). Faces are looked up by `face_kind`; the face set must be exact.
+Errors: `LayoutMismatch`, then `BadFaces`, then `InvalidCast`, then `Object`. SPLIT combined
+characteristics: names are the set of both names; the mana cost is the left symbols followed by
+the right symbols (`None` when neither half has a cost); the color indicator is the union of the
+halves' indicators (`None` when both are `None`); colors, supertypes, card types and subtypes are
+unions; rules text and abilities are left then right; power, toughness, loyalty, defense, hand
+and life modifiers are `None`. Judgement calls: (a) `mana_value` runs the same selection as
+`base_characteristics` first, so both return the same error for the same query (a type-line
+error of the selected face makes mana value fail too); (b) only the faces a query selects are
+passed to `Characteristics::from_face` (a bad type line on an unselected face is not reported);
+(c) `gating` checks only the layout and the face set (no type-line validation), and returns
+`Ok(None)` for the eight non-gating layouts once those checks pass.
+**Rationale:** The brief pins the API for the Independent Tester; making `mana_value` and
+`base_characteristics` agree on errors keeps callers from seeing a mana value for an object whose
+characteristics cannot be built; validating only selected faces matches the selection tables
+("face X chars"); gating is data-only and needs no type line.
+**Alternatives:** Validate every face on every call (rejects an object for a face it does not
+have in that zone); compute mana value from the raw faces without validation (the two functions
+could disagree); `gating` returning `None` without any check for non-gating layouts
+(inconsistent error precedence).
+
+## #22 FP-021 — Gating data is printed abilities
+
+**Decision:** `Gating` carries the Main face's printed abilities in definition order and, for
+LEVELER, the printed (uppermost) power/toughness of the Main face. Structured gating data (level
+bands with their ranges and P/T, chapter numbers and the final chapter, class level bars, Case
+to-solve and solved abilities) lands with the real ability AST; this unit exposes the printed
+abilities and the uppermost P/T. No JSON convention inside the placeholder `AbilityAST` is
+invented.
+**Rationale:** `AbilityAST` is an opaque placeholder today (FP-011/012/013 replace it), so band
+and chapter structure cannot be read without inventing a format the real AST would contradict.
+**Alternatives:** A provisional JSON shape inside `AbilityAST` (would need migrating and could
+diverge from the real AST); omitting `Gating` until the AST lands (the issue requires gating
+data now).
