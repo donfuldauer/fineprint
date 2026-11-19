@@ -142,6 +142,20 @@ pub enum LayoutError {
     },
     /// A selected face's type line was rejected ([`Characteristics::from_face`]).
     Object(ObjectError),
+    /// Two meld definitions do not name each other as meld partners, or are the same card.
+    NotMeldPair,
+    /// A permanent that already has the prepared designation was asked to become prepared.
+    AlreadyPrepared,
+    /// A merged permanent needs at least two components.
+    TooFewComponents {
+        /// The number of components given.
+        count: usize,
+    },
+    /// A station card has one or two station symbols.
+    InvalidStationSymbols {
+        /// The number of station symbols given.
+        count: usize,
+    },
 }
 
 impl From<ObjectError> for LayoutError {
@@ -167,6 +181,17 @@ impl fmt::Display for LayoutError {
                 )
             }
             LayoutError::Object(e) => write!(f, "{e}"),
+            LayoutError::NotMeldPair => write!(f, "the two definitions are not a meld pair"),
+            LayoutError::AlreadyPrepared => write!(f, "the permanent is already prepared"),
+            LayoutError::TooFewComponents { count } => {
+                write!(
+                    f,
+                    "a merged permanent needs at least 2 components, got {count}"
+                )
+            }
+            LayoutError::InvalidStationSymbols { count } => {
+                write!(f, "a station card has 1 or 2 station symbols, got {count}")
+            }
         }
     }
 }

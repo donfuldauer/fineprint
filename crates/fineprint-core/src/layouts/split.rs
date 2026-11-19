@@ -54,7 +54,7 @@ fn select<'a>(
 }
 
 /// The characteristics of the two halves combined (CR 709.4, 709.4a, 709.4b, 709.4c).
-fn combined(left: Characteristics, right: Characteristics) -> Characteristics {
+pub(super) fn combined(left: Characteristics, right: Characteristics) -> Characteristics {
     // CR 709.4b: the combined mana cost keeps the separate symbols, left then right; a half
     // with no mana cost contributes nothing, and neither having one is no mana cost.
     let symbols: Vec<ManaSymbol> = [&left.mana_cost, &right.mana_cost]
@@ -98,7 +98,7 @@ fn combined(left: Characteristics, right: Characteristics) -> Characteristics {
     }
 }
 
-fn union(mut a: BTreeSet<String>, b: BTreeSet<String>) -> BTreeSet<String> {
+pub(super) fn union(mut a: BTreeSet<String>, b: BTreeSet<String>) -> BTreeSet<String> {
     a.extend(b);
     a
 }
