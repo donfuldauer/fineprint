@@ -76,6 +76,22 @@ impl World {
         moved
     }
 
+    /// Moves `id` and applies `on_move_indexed` with `observers` and `index_known_by`.
+    fn mv_idx(
+        &mut self,
+        id: ObjectId,
+        req: MoveRequest,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
+    ) -> Moved {
+        let before = *self.z.object(id).unwrap();
+        let moved = self.z.move_object(&mut self.ids, id, req).unwrap();
+        self.k
+            .on_move_indexed(&self.z, &before, &moved, observers, index_known_by)
+            .unwrap();
+        moved
+    }
+
     /// The object currently holding `card`.
     fn obj(&self, card: u64) -> ObjectId {
         self.z.object_of_card(c(card)).unwrap()
@@ -250,8 +266,9 @@ fn reveal_then_shuffle_in() {
 // Test 3: CR 701.24b
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-CORE-004, CR 701.24b: an excluded found card keeps its entry while still at its index;
-/// non-excluded entries are cleared.
+/// REQ-CORE-004, CR 701.24b: for viewers who know which card is excluded, an excluded found
+/// card keeps its entry while still at its index; non-excluded entries are cleared. Contrast:
+/// the shorthand `shuffle_library` (nobody told) clears every entry, set knowledge stays.
 #[test]
 fn shuffle_excluded_card_keeps_position_while_in_place() {
     let mut w = World::new();
@@ -259,7 +276,9 @@ fn shuffle_excluded_card_keeps_position_while_in_place() {
     w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
     w.k.set_position_known(&w.z, P1, P1, 2, lib[2]).unwrap();
     w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
-    w.k.shuffle_library(&w.z, P1, &[lib[0]]).unwrap();
+    let mut shorthand = w.clone();
+    w.k.shuffle_library_disclosed(&w.z, P1, &[lib[0]], &[P1, P2])
+        .unwrap();
     assert_eq!(
         w.k.position_known(&w.z, P1, P1),
         BTreeMap::from([(0, lib[0])])
@@ -268,6 +287,14 @@ fn shuffle_excluded_card_keeps_position_while_in_place() {
         w.k.position_known(&w.z, P2, P1),
         BTreeMap::from([(0, lib[0])])
     );
+
+    shorthand
+        .k
+        .shuffle_library(&shorthand.z, P1, &[lib[0]])
+        .unwrap();
+    assert!(shorthand.k.positions.is_empty());
+    assert!(shorthand.can(P2, lib[0]));
+    assert!(shorthand.can(P1, lib[2]));
 }
 
 /// REQ-CORE-004, CR 701.24b: an excluded card no longer at its recorded index loses its entry.
@@ -394,18 +421,23 @@ fn on_move_reposition_in_library_drops_entry() {
     assert!(w.k.position_known(&w.z, P2, P1).is_empty());
 }
 
-/// REQ-CORE-004: a card put on the bottom leaves an entry above it untouched.
+/// REQ-CORE-004: a card put on the bottom leaves an entry above it untouched for a viewer who
+/// knows the insertion index. Contrast: with the shorthand (index undisclosed) the entry goes.
 #[test]
 fn on_move_keeps_entries_that_still_match() {
     let mut w = World::new();
     let lib = w.fill_library(P1, 10, 3);
     w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
     let h = w.create(1, P1, req(ZoneKind::Hand));
-    w.mv(h, at(ZoneKind::Library, Position::Bottom));
+    let mut shorthand = w.clone();
+    w.mv_idx(h, at(ZoneKind::Library, Position::Bottom), &[], &[P1]);
     assert_eq!(
         w.k.position_known(&w.z, P1, P1),
         BTreeMap::from([(0, lib[0])])
     );
+    shorthand.mv(h, at(ZoneKind::Library, Position::Bottom));
+    assert!(shorthand.k.positions.is_empty());
+    assert!(shorthand.can(P1, lib[0]));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1217,7 +1249,8 @@ fn told_move(
     }
 }
 
-/// Moves `id` in the property loop: applies on_move_observed and the model.
+/// Moves `id` in the property loop: applies on_move_indexed and the model. Position entries of
+/// an affected library survive only for players in `index_known_by` (round 4 rule).
 #[allow(clippy::too_many_arguments)]
 fn prop_move(
     z: &mut Zones,
@@ -1227,11 +1260,28 @@ fn prop_move(
     id: ObjectId,
     r: MoveRequest,
     observers: &[PlayerId],
+    index_known_by: &[PlayerId],
 ) {
     let before = *z.object(id).unwrap();
     let moved = z.move_object(ids, id, r).unwrap();
-    k.on_move_observed(z, &before, &moved, observers).unwrap();
+    k.on_move_indexed(z, &before, &moved, observers, index_known_by)
+        .unwrap();
     told_move(told, z, &before, &moved, observers);
+    for zone in [moved.from, moved.to] {
+        if let ZoneId::Library(owner) = zone {
+            assert_only_index_known(k, owner, index_known_by);
+        }
+    }
+}
+
+/// No player outside `index_known_by` holds a stored position entry for `owner`'s library.
+fn assert_only_index_known(k: &Knowledge, owner: PlayerId, index_known_by: &[PlayerId]) {
+    for &(v, o) in k.positions.keys() {
+        assert!(
+            o != owner || index_known_by.contains(&v),
+            "{v:?} kept {o:?}"
+        );
+    }
 }
 
 /// REQ-CORE-004 (R12, R-e), CR 400.2, CR 402.3, CR 406.3, CR 708.5, CR 708.9, CR 701.24a,
@@ -1264,7 +1314,14 @@ fn property_random_sequences_never_leak() {
                     next_card += 1;
                     if kind == ZoneKind::Library {
                         // The caller contract for insertions outside on_move.
-                        k.on_library_changed(&z, owner).unwrap();
+                        let index_known_by: Vec<PlayerId> = players
+                            .iter()
+                            .copied()
+                            .filter(|_| rng.below(2) == 0)
+                            .collect();
+                        k.on_library_changed_indexed(&z, owner, &index_known_by)
+                            .unwrap();
+                        assert_only_index_known(&k, owner, &index_known_by);
                     }
                 }
                 2 | 3 => {
@@ -1288,7 +1345,21 @@ fn property_random_sequences_never_leak() {
                             .copied()
                             .filter(|_| rng.below(3) == 0)
                             .collect();
-                        prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &observers);
+                        let index_known_by: Vec<PlayerId> = players
+                            .iter()
+                            .copied()
+                            .filter(|_| rng.below(2) == 0)
+                            .collect();
+                        prop_move(
+                            &mut z,
+                            &mut k,
+                            &mut ids,
+                            &mut told,
+                            id,
+                            r,
+                            &observers,
+                            &index_known_by,
+                        );
                     }
                 }
                 4 => {
@@ -1342,14 +1413,21 @@ fn property_random_sequences_never_leak() {
                             continue;
                         }
                         let r = at(ZoneKind::Library, Position::Index(rng.below(lib.len())));
-                        prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &[]);
+                        prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &[], &players);
                     }
-                    k.shuffle_library(&z, owner, &excluded).unwrap();
+                    let known_by: Vec<PlayerId> = players
+                        .iter()
+                        .copied()
+                        .filter(|_| rng.below(2) == 0)
+                        .collect();
+                    k.shuffle_library_disclosed(&z, owner, &excluded, &known_by)
+                        .unwrap();
                     for v in players {
                         for (_, id) in k.position_known(&z, v, owner) {
                             assert!(excluded.contains(&id));
                         }
                     }
+                    assert_only_index_known(&k, owner, &known_by);
                 }
                 _ => {
                     // CR 406.3: only face-down exiled cards form a pile; any other face-down
@@ -1533,9 +1611,11 @@ fn step0_unobserved_forgets_candidates_and_positions() {
     w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
     w.k.add_known(&w.z, lib[1], P2).unwrap();
     w.k.add_known(&w.z, lib[3], P2).unwrap();
-    // P1 knows its own top card; P1 sees the moved card arrive in its hand.
+    // P1 knows its own top card; P1 sees the moved card arrive in its hand and knows the
+    // index it left (P1 is in index_known_by; P2 is in neither set).
     w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
-    let m = w.mv(lib[3], req(ZoneKind::Hand));
+    let mut shorthand = w.clone();
+    let m = w.mv_idx(lib[3], req(ZoneKind::Hand), &[], &[P1]);
     assert!(w.k.position_known(&w.z, P2, P1).is_empty());
     assert!(!w.can(P2, m.new));
     assert!(w.view(P2).players[&P1].library.known_cards.is_empty());
@@ -1551,6 +1631,11 @@ fn step0_unobserved_forgets_candidates_and_positions() {
     // The stored map holds no empty set.
     assert!(w.k.known.values().all(|s| !s.is_empty()));
     assert!(!w.k.known.contains_key(&c(2)));
+
+    // Contrast: the shorthand (index undisclosed) also drops P1's entry; identity is the same.
+    shorthand.mv(lib[3], req(ZoneKind::Hand));
+    assert!(shorthand.k.positions.is_empty());
+    assert_eq!(shorthand.k.known, w.k.known);
 }
 
 /// REQ-CORE-004 step 0 (i): a player in `observers` keeps every piece of knowledge.
@@ -1756,22 +1841,29 @@ fn on_library_changed_prevents_coincidental_revival() {
     w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
     let x = w.create(9, P1, at(ZoneKind::Library, Position::Top));
     let mut control = w.clone();
-    w.k.on_library_changed(&w.z, P1).unwrap();
-    w.mv(x, req(ZoneKind::Hand));
+    let mut shorthand = w.clone();
+    // P1 knows both indexes (the insertion and the draw of the top card).
+    w.k.on_library_changed_indexed(&w.z, P1, &[P1]).unwrap();
+    w.mv_idx(x, req(ZoneKind::Hand), &[], &[P1]);
     assert!(w.k.position_known(&w.z, P1, P1).is_empty());
     // Set knowledge of A is kept.
     assert!(w.can(P1, lib[0]));
 
-    control.mv(x, req(ZoneKind::Hand));
+    control.mv_idx(x, req(ZoneKind::Hand), &[], &[P1]);
     assert_eq!(
         control.k.position_known(&control.z, P1, P1),
         BTreeMap::from([(0, lib[0])])
     );
+
+    // Contrast: the shorthand drops every entry at once; set knowledge stays.
+    shorthand.k.on_library_changed(&shorthand.z, P1).unwrap();
+    assert!(shorthand.k.positions.is_empty());
+    assert!(shorthand.can(P1, lib[0]));
 }
 
-/// REQ-CORE-004: after an insertion at index n, entries below n are kept and entries at or
-/// after n are dropped; another library is untouched; an unknown owner is an error with the
-/// state unchanged.
+/// REQ-CORE-004: for a viewer who knows the insertion index n, entries below n are kept and
+/// entries at or after n are dropped; another library is untouched; an unknown owner is an
+/// error with the state unchanged. Contrast: the shorthand drops every entry of that library.
 #[test]
 fn on_library_changed_keeps_entries_above_insertion() {
     let mut w = World::new();
@@ -1788,19 +1880,31 @@ fn on_library_changed_keeps_entries_above_insertion() {
         Err(KnowledgeError::UnknownPlayer(NOBODY))
     );
     assert_eq!(w.k, snapshot);
-    w.k.on_library_changed(&w.z, P1).unwrap();
+    let mut shorthand = w.clone();
+    w.k.on_library_changed_indexed(&w.z, P1, &[P2]).unwrap();
     assert_eq!(
         w.k.positions[&(P2, P1)],
         BTreeMap::from([(0, lib[0]), (1, lib[1])])
     );
+    shorthand.k.on_library_changed(&shorthand.z, P1).unwrap();
+    assert!(!shorthand.k.positions.contains_key(&(P2, P1)));
+    assert_eq!(
+        shorthand.k.position_known(&shorthand.z, P1, P2),
+        BTreeMap::from([(1, other[1])])
+    );
+    assert_eq!(shorthand.k.known, w.k.known);
     assert_eq!(
         w.k.position_known(&w.z, P1, P2),
         BTreeMap::from([(1, other[1])])
     );
-    // Unchanged library: a no-op.
+    // Unchanged library, index known to the viewer: a no-op.
     let snapshot = w.k.clone();
-    w.k.on_library_changed(&w.z, P2).unwrap();
+    w.k.on_library_changed_indexed(&w.z, P2, &[P1]).unwrap();
     assert_eq!(w.k, snapshot);
+    // The shorthand drops P1's entries for that library.
+    w.k.on_library_changed(&w.z, P2).unwrap();
+    assert!(!w.k.positions.contains_key(&(P1, P2)));
+    assert_eq!(w.k.known, snapshot.known);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1815,6 +1919,21 @@ impl World {
         self.z.send_outside(id, OutsidePool::Sideboard).unwrap();
         self.k
             .on_removed_from_hidden_zone(&self.z, &before, observers)
+            .unwrap();
+        before
+    }
+
+    /// Like [`World::remove`] with `on_removed_from_hidden_zone_indexed`.
+    fn remove_idx(
+        &mut self,
+        id: ObjectId,
+        observers: &[PlayerId],
+        index_known_by: &[PlayerId],
+    ) -> ObjectRecord {
+        let before = *self.z.object(id).unwrap();
+        self.z.send_outside(id, OutsidePool::Sideboard).unwrap();
+        self.k
+            .on_removed_from_hidden_zone_indexed(&self.z, &before, observers, index_known_by)
             .unwrap();
         before
     }
@@ -1920,9 +2039,11 @@ fn removal_from_hand_forgets_for_non_observers() {
     );
 }
 
-/// REQ-CORE-004, CR 401.2 (thread 4625229511): an unobserved removal drops every position
-/// entry of P2 for that library (other libraries untouched); an observed removal keeps the
-/// entries above the removal index and drops the removed card's entry and the shifted ones.
+/// REQ-CORE-004, CR 401.2 (threads 4625229511, 4625492354): an unobserved removal drops every
+/// position entry of P2 for that library (other libraries untouched); an observed removal with
+/// the index known to P2 keeps the entries above the removal index and drops the removed card's
+/// entry and the shifted ones; an observed removal without the index drops every entry but
+/// keeps the set knowledge.
 #[test]
 fn removal_from_library_position_entries() {
     let mut w = World::new();
@@ -1933,6 +2054,7 @@ fn removal_from_library_position_entries() {
     }
     w.k.set_position_known(&w.z, P2, P2, 0, other[0]).unwrap();
     let mut o = w.clone();
+    let mut s = w.clone();
 
     w.remove(lib[2], &[]);
     assert!(w.k.position_known(&w.z, P2, P1).is_empty());
@@ -1943,7 +2065,7 @@ fn removal_from_library_position_entries() {
         BTreeMap::from([(0, other[0])])
     );
 
-    o.remove(lib[2], &[P2]);
+    o.remove_idx(lib[2], &[P2], &[P2]);
     assert_eq!(
         o.k.positions[&(P2, P1)],
         BTreeMap::from([(0, lib[0]), (1, lib[1])])
@@ -1952,11 +2074,23 @@ fn removal_from_library_position_entries() {
         o.view(P2).players[&P1].library.known_cards,
         cards(&[1, 2, 4, 5])
     );
-    // The removal of the bottom card by an observer keeps every remaining entry.
-    o.remove(lib[4], &[P2]);
+    // The removal of the bottom card with its index known keeps every remaining entry.
+    o.remove_idx(lib[4], &[P2], &[P2]);
     assert_eq!(
         o.k.positions[&(P2, P1)],
         BTreeMap::from([(0, lib[0]), (1, lib[1])])
+    );
+
+    // Contrast: observed (P2 knows which card left) but the index undisclosed.
+    s.remove(lib[2], &[P2]);
+    assert!(!s.k.positions.contains_key(&(P2, P1)));
+    assert_eq!(
+        s.view(P2).players[&P1].library.known_cards,
+        cards(&[1, 2, 4, 5])
+    );
+    assert_eq!(
+        s.k.position_known(&s.z, P2, P2),
+        BTreeMap::from([(0, other[0])])
     );
 }
 
@@ -2024,4 +2158,385 @@ fn twin_worlds_undisclosed_selection_to_face_down_exile() {
     assert!(o1.can(P2, n1.new));
     assert!(!o2.can(P2, n2.new));
     assert_ne!(o1.view(P2), o2.view(P2));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test 15: position knowledge survives a library change only for viewers who know the index
+// (PR #174 round 4, threads 4625492354 and 4625492361)
+// ---------------------------------------------------------------------------------------------
+
+/// P1's library in the given card order (top first). P2 knows the position of card 1 (A) and
+/// the set membership of card 2 (B). Returns the world and the object of card 3 (X).
+fn index_twin(order: &[u64]) -> (World, ObjectId) {
+    let mut w = World::new();
+    for &k in order {
+        w.create(k, P1, at(ZoneKind::Library, Position::Bottom));
+    }
+    let a = w.obj(1);
+    let a_index = order.iter().position(|&k| k == 1).unwrap();
+    w.k.set_position_known(&w.z, P2, P1, a_index, a).unwrap();
+    let b = w.obj(2);
+    w.k.add_known(&w.z, b, P2).unwrap();
+    let x = w.obj(3);
+    (w, x)
+}
+
+/// X is above A (index 0) in world 1 and below A (index 2) in world 2; A is at index 1 in both.
+const ABOVE: [u64; 4] = [3, 1, 2, 4];
+const BELOW: [u64; 4] = [4, 1, 3, 2];
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2 (F1, thread 4625492354): P2 is told which card left
+/// (X) but not where it was. Removing X from above A and from below A gives P2 equal position
+/// knowledge (empty) and equal views. Control: with the index disclosed to P2, A's entry goes
+/// when X was above it and stays when X was below; P1's own view is not changed by the hook.
+#[test]
+fn twin_worlds_removal_index_undisclosed() {
+    let (mut w1, x1) = index_twin(&ABOVE);
+    let (mut w2, x2) = index_twin(&BELOW);
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let (mut c1, mut c2) = (w1.clone(), w2.clone());
+
+    w1.remove(x1, &[P2]);
+    w2.remove(x2, &[P2]);
+    assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert_eq!(w1.view(P2), w2.view(P2));
+    // P2 was an observer: its set knowledge {A, B} stays.
+    assert_eq!(w1.view(P2).players[&P1].library.known_cards, cards(&[1, 2]));
+
+    // Control: P2 knows the removal index.
+    let a = c1.obj(1);
+    c1.remove_idx(x1, &[P2], &[P2]);
+    c2.remove_idx(x2, &[P2], &[P2]);
+    assert!(c1.k.position_known(&c1.z, P2, P1).is_empty());
+    assert_eq!(c2.k.position_known(&c2.z, P2, P1), BTreeMap::from([(1, a)]));
+
+    // P1's own view does not depend on the hook.
+    let (mut h, x) = index_twin(&ABOVE);
+    let record = *h.z.object(x).unwrap();
+    h.z.send_outside(x, OutsidePool::Sideboard).unwrap();
+    let before_hook = h.view(P1);
+    h.k.on_removed_from_hidden_zone(&h.z, &record, &[P2])
+        .unwrap();
+    assert_eq!(h.view(P1), before_hook);
+}
+
+/// P1's library is B (card 2), A (card 1), card 5; P2 knows A at index 1 and the set {B}.
+fn insertion_twin() -> World {
+    let (w, _) = index_twin(&[2, 1, 3]);
+    w
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2 (F2, thread 4625492361): a card inserted at index 0
+/// (above A) or at index 2 (below A) with the index undisclosed leaves P2 no position entries
+/// in both worlds, equal views, and P2's set knowledge of A and B intact. Control: with the
+/// index disclosed to P2, the insertion at 0 drops A@1 and the insertion at 2 keeps it. Also
+/// `enter_from_outside` once.
+#[test]
+fn twin_worlds_insertion_index_undisclosed() {
+    let mut worlds = [insertion_twin(), insertion_twin()];
+    let mut controls = worlds.clone();
+    for (w, i) in worlds.iter_mut().zip([0, 2]) {
+        w.create(9, P1, at(ZoneKind::Library, Position::Index(i)));
+        w.k.on_library_changed(&w.z, P1).unwrap();
+        assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+        for card in [1, 2] {
+            assert!(w.k.known_to(&w.z, w.obj(card)).unwrap().contains(&P2));
+        }
+    }
+    assert_eq!(worlds[0].view(P2), worlds[1].view(P2));
+
+    for (w, i) in controls.iter_mut().zip([0, 2]) {
+        w.create(9, P1, at(ZoneKind::Library, Position::Index(i)));
+        w.k.on_library_changed_indexed(&w.z, P1, &[P2]).unwrap();
+    }
+    assert!(
+        controls[0]
+            .k
+            .position_known(&controls[0].z, P2, P1)
+            .is_empty()
+    );
+    let a = controls[1].obj(1);
+    assert_eq!(
+        controls[1].k.position_known(&controls[1].z, P2, P1),
+        BTreeMap::from([(1, a)])
+    );
+
+    // enter_from_outside below A, index undisclosed: P2 keeps no entry, set knowledge stays.
+    let mut e = insertion_twin();
+    e.z.add_outside_card(P1, OutsidePool::Sideboard, c(9))
+        .unwrap();
+    e.z.enter_from_outside(
+        &mut e.ids,
+        P1,
+        c(9),
+        OutsidePool::Sideboard,
+        at(ZoneKind::Library, Position::Bottom),
+    )
+    .unwrap();
+    let mut ec = e.clone();
+    e.k.on_library_changed(&e.z, P1).unwrap();
+    assert!(e.k.position_known(&e.z, P2, P1).is_empty());
+    assert!(e.can(P2, e.obj(1)));
+    ec.k.on_library_changed_indexed(&ec.z, P1, &[P2]).unwrap();
+    let a = ec.obj(1);
+    assert_eq!(ec.k.position_known(&ec.z, P2, P1), BTreeMap::from([(1, a)]));
+}
+
+/// Runs `r` on X in both twin worlds (X above A, X below A) with `on_move_indexed`.
+fn move_twin(r: MoveRequest, observers: &[PlayerId], index_known_by: &[PlayerId]) -> [World; 2] {
+    [ABOVE, BELOW].map(|order| {
+        let (mut w, x) = index_twin(&order);
+        w.mv_idx(x, r, observers, index_known_by);
+        w
+    })
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2, CR 400.2, CR 406.3 (class instance (a)): a move of X
+/// out of P1's library from above or below A, index undisclosed, leaves P2 equal (empty)
+/// position knowledge: to P1's hand (P2 observing), to the graveyard and to face-down exile.
+/// Control: with P2 observing and the index disclosed, a move from above drops A@1 and one
+/// from below keeps it.
+#[test]
+fn twin_worlds_move_out_index_undisclosed() {
+    let dests = [
+        (req(ZoneKind::Hand), vec![P2]),
+        (req(ZoneKind::Graveyard), vec![]),
+        (face_down(ZoneKind::Exile), vec![]),
+    ];
+    for (r, observers) in &dests {
+        let [w1, w2] = move_twin(*r, observers, &[]);
+        assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+        assert!(w2.k.position_known(&w2.z, P2, P1).is_empty());
+        assert_eq!(w1.view(P2), w2.view(P2));
+        // The shorthand gives the same result.
+        let (mut s, x) = index_twin(&ABOVE);
+        let before = *s.z.object(x).unwrap();
+        let moved = s.z.move_object(&mut s.ids, x, *r).unwrap();
+        s.k.on_move_observed(&s.z, &before, &moved, observers)
+            .unwrap();
+        assert_eq!(s.k, w1.k);
+
+        let [c1, c2] = move_twin(*r, &[P2], &[P2]);
+        assert!(c1.k.position_known(&c1.z, P2, P1).is_empty());
+        let a = c2.obj(1);
+        assert_eq!(c2.k.position_known(&c2.z, P2, P1), BTreeMap::from([(1, a)]));
+    }
+    // Knowing the index does not make P2 an observer: an unobserved secret move to face-down
+    // exile drops P2's entries at step 0 even with P2 in index_known_by.
+    let [_, u] = move_twin(face_down(ZoneKind::Exile), &[], &[P2]);
+    assert!(u.k.position_known(&u.z, P2, P1).is_empty());
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2 (class instance (b)): a card moves into P1's library
+/// at index 0 (above A) or index 2 (below A), from P1's hand and once from the graveyard.
+/// Shorthand: P2 has no position entry in both worlds. Control with the index disclosed to P2:
+/// the insertion at 0 drops A@1, the one at 2 keeps it.
+#[test]
+fn twin_worlds_move_in_index_undisclosed() {
+    for source in [ZoneKind::Hand, ZoneKind::Graveyard] {
+        let run = |i: usize, index_known_by: &[PlayerId]| {
+            let mut w = insertion_twin();
+            let h = w.create(7, P1, req(source));
+            w.mv_idx(
+                h,
+                at(ZoneKind::Library, Position::Index(i)),
+                &[],
+                index_known_by,
+            );
+            w
+        };
+        let (w1, w2) = (run(0, &[]), run(2, &[]));
+        assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+        assert!(w2.k.position_known(&w2.z, P2, P1).is_empty());
+        assert_eq!(
+            w1.view(P2).players[&P1].library,
+            w2.view(P2).players[&P1].library
+        );
+        let (c1, c2) = (run(0, &[P2]), run(2, &[P2]));
+        assert!(c1.k.position_known(&c1.z, P2, P1).is_empty());
+        let a = c2.obj(1);
+        assert_eq!(c2.k.position_known(&c2.z, P2, P1), BTreeMap::from([(1, a)]));
+    }
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2 (class instance (c)): P1's library is X, B, card 5, A,
+/// card 4 (top first); P2 knows A at index 3. X moves from index 0 to the bottom (A shifts to
+/// 2) or to index 2 (A stays at 3). Shorthand: P2 has no entry in either world. Control with
+/// the index disclosed: the move to the bottom drops A@3, the move to index 2 keeps it.
+#[test]
+fn twin_worlds_reposition_index_undisclosed() {
+    let run = |position: Position, index_known_by: &[PlayerId]| {
+        let (mut w, x) = index_twin(&[3, 2, 5, 1, 4]);
+        let m = w.mv_idx(x, at(ZoneKind::Library, position), &[], index_known_by);
+        assert_eq!(m.from, m.to);
+        w
+    };
+    let (w1, w2) = (run(Position::Bottom, &[]), run(Position::Index(2), &[]));
+    assert_eq!(w2.z.contents(ZoneId::Library(P1))[3], w2.obj(1));
+    assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+    assert!(w2.k.position_known(&w2.z, P2, P1).is_empty());
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let (c1, c2) = (run(Position::Bottom, &[P2]), run(Position::Index(2), &[P2]));
+    assert!(c1.k.position_known(&c1.z, P2, P1).is_empty());
+    let a = c2.obj(1);
+    assert_eq!(c2.k.position_known(&c2.z, P2, P1), BTreeMap::from([(3, a)]));
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 701.24a, CR 701.24b (class instance (f)): P2 knows A at
+/// index 0 and the set {B}. A shuffle that excludes A and one that excludes X give P2 equal
+/// (empty) position knowledge. Control: `shuffle_library_disclosed` keeps A@0 for a viewer in
+/// `known_by` only; `shuffle_library` never touches KnownTo.
+#[test]
+fn twin_worlds_shuffle_excluded_undisclosed() {
+    let (mut w1, _) = index_twin(&[1, 2, 3, 4]);
+    let (mut w2, x) = index_twin(&[1, 2, 3, 4]);
+    let a = w1.obj(1);
+    let known = w1.k.known.clone();
+    let mut c = w1.clone();
+    w1.k.shuffle_library(&w1.z, P1, &[a]).unwrap();
+    w2.k.shuffle_library(&w2.z, P1, &[x]).unwrap();
+    assert!(w1.k.position_known(&w1.z, P2, P1).is_empty());
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert_eq!(w1.k, w2.k);
+    assert_eq!(w1.k.known, known);
+
+    let mut none = c.clone();
+    let mut other = c.clone();
+    c.k.shuffle_library_disclosed(&c.z, P1, &[a], &[P2])
+        .unwrap();
+    assert_eq!(c.k.position_known(&c.z, P2, P1), BTreeMap::from([(0, a)]));
+    none.k
+        .shuffle_library_disclosed(&none.z, P1, &[a], &[])
+        .unwrap();
+    assert!(none.k.positions.is_empty());
+    // A viewer not in known_by is cleared.
+    other
+        .k
+        .shuffle_library_disclosed(&other.z, P1, &[a], &[P1])
+        .unwrap();
+    assert!(other.k.position_known(&other.z, P2, P1).is_empty());
+    assert_eq!(other.k.known, known);
+}
+
+/// REQ-CORE-004 (R12): the four disclosure methods report unknown players in the documented
+/// order and leave the state unchanged; each shorthand equals its disclosure form with an
+/// empty set.
+#[test]
+fn index_disclosure_errors_and_shorthands() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 3);
+    w.k.set_position_known(&w.z, P2, P1, 2, lib[2]).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    let (q, r) = (p(97), p(98));
+    let snapshot = w.k.clone();
+    let check = |k: &Knowledge| assert_eq!(*k, snapshot);
+
+    // on_move_indexed: UnknownObject, then observers, then index_known_by.
+    let before = *w.z.object(lib[0]).unwrap();
+    let moved =
+        w.z.move_object(&mut w.ids, lib[0], req(ZoneKind::Hand))
+            .unwrap();
+    let ghost = Moved {
+        new: ObjectId::new(4242),
+        ..moved
+    };
+    assert_eq!(
+        w.k.on_move_indexed(&w.z, &before, &ghost, &[q], &[r]),
+        Err(KnowledgeError::UnknownObject(ObjectId::new(4242)))
+    );
+    assert_eq!(
+        w.k.on_move_indexed(&w.z, &before, &moved, &[P2, q], &[r]),
+        Err(KnowledgeError::UnknownPlayer(q))
+    );
+    assert_eq!(
+        w.k.on_move_indexed(&w.z, &before, &moved, &[P2], &[P1, r]),
+        Err(KnowledgeError::UnknownPlayer(r))
+    );
+    check(&w.k);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.on_move(&w.z, &before, &moved).unwrap();
+    b.on_move_indexed(&w.z, &before, &moved, &[], &[]).unwrap();
+    assert_eq!(a, b);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.on_move_observed(&w.z, &before, &moved, &[P2]).unwrap();
+    b.on_move_indexed(&w.z, &before, &moved, &[P2], &[])
+        .unwrap();
+    assert_eq!(a, b);
+
+    // on_removed_from_hidden_zone_indexed: zone owner, then observers, then index_known_by.
+    let before = *w.z.object(lib[1]).unwrap();
+    w.z.send_outside(lib[1], OutsidePool::Sideboard).unwrap();
+    let ghost = ObjectRecord {
+        zone: ZoneId::Library(NOBODY),
+        ..before
+    };
+    assert_eq!(
+        w.k.on_removed_from_hidden_zone_indexed(&w.z, &ghost, &[q], &[r]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(
+        w.k.on_removed_from_hidden_zone_indexed(&w.z, &before, &[q], &[r]),
+        Err(KnowledgeError::UnknownPlayer(q))
+    );
+    assert_eq!(
+        w.k.on_removed_from_hidden_zone_indexed(&w.z, &before, &[P2], &[r]),
+        Err(KnowledgeError::UnknownPlayer(r))
+    );
+    check(&w.k);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.on_removed_from_hidden_zone(&w.z, &before, &[P2]).unwrap();
+    b.on_removed_from_hidden_zone_indexed(&w.z, &before, &[P2], &[])
+        .unwrap();
+    assert_eq!(a, b);
+
+    // on_library_changed_indexed: owner, then index_known_by.
+    assert_eq!(
+        w.k.on_library_changed_indexed(&w.z, NOBODY, &[r]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(
+        w.k.on_library_changed_indexed(&w.z, P1, &[P2, r]),
+        Err(KnowledgeError::UnknownPlayer(r))
+    );
+    check(&w.k);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.on_library_changed(&w.z, P1).unwrap();
+    b.on_library_changed_indexed(&w.z, P1, &[]).unwrap();
+    assert_eq!(a, b);
+
+    // shuffle_library_disclosed: owner, then excluded, then known_by.
+    let bad = ObjectId::new(4242);
+    assert_eq!(
+        w.k.shuffle_library_disclosed(&w.z, NOBODY, &[bad], &[r]),
+        Err(KnowledgeError::UnknownPlayer(NOBODY))
+    );
+    assert_eq!(
+        w.k.shuffle_library_disclosed(&w.z, P1, &[bad], &[r]),
+        Err(KnowledgeError::NotInLibrary {
+            owner: P1,
+            object: bad
+        })
+    );
+    assert_eq!(
+        w.k.shuffle_library_disclosed(&w.z, P1, &[lib[2]], &[P2, r]),
+        Err(KnowledgeError::UnknownPlayer(r))
+    );
+    check(&w.k);
+    let mut a = w.k.clone();
+    let mut b = w.k.clone();
+    a.shuffle_library(&w.z, P1, &[lib[2]]).unwrap();
+    b.shuffle_library_disclosed(&w.z, P1, &[lib[2]], &[])
+        .unwrap();
+    assert_eq!(a, b);
 }

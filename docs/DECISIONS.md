@@ -2755,7 +2755,10 @@ set"). Design-level, not CR-derived: CR 701.24a speaks only of order.
 
 **Decision:** `shuffle_library(owner, excluded)` removes every viewer's position entries for
 that library except entries whose object is in `excluded` and still at the recorded index
-(CR 701.24b: found cards are not part of the shuffle). `shuffle_face_down_pile` clears the
+(CR 701.24b: found cards are not part of the shuffle). Since PR #174 round 4 those excluded
+entries are kept only for the viewers told which cards were excluded
+(`shuffle_library_disclosed(.., known_by)`); `shuffle_library` keeps them for nobody (see
+"#25 FP-024: Position knowledge survives a library change only for viewers who know the index"). `shuffle_face_down_pile` clears the
 stored `KnownTo` of the shuffled cards, which ends their CR 406.3 look permissions, and removes
 position entries naming them. Every id is validated before anything changes.
 **Rationale:** CR 701.24a/b and CR 406.3 as quoted in the brief.
@@ -2770,10 +2773,16 @@ change, CR 400.7). Position knowledge is a map per (viewer, library owner) from 
 stored entries of the libraries the move left or entered that no longer match the live library,
 besides dropping entries that name `moved.old`. A known card whose index shifts therefore becomes
 unknown until `set_position_known` is called again. This coverage holds for moves through
-`on_move` / `on_move_observed` and for insertions into and removals from a library outside
-`on_move` that the caller follows with `on_library_changed` (see "#25 FP-024:
-on_library_changed" below); a stale entry left by a change the caller did not report could
-otherwise become valid again when a later move restores the earlier shape of the library.
+`on_move` / `on_move_observed` / `on_move_indexed`, for insertions into a library outside
+`on_move` (`create_object`, `enter_from_outside`) that the caller follows with
+`on_library_changed` (or `on_library_changed_indexed`; see "#25 FP-024: on_library_changed"
+below), and for removals (`Zones::send_outside` of a library or hand object) that the caller
+follows with `on_removed_from_hidden_zone` (or its indexed form; see "#25 FP-024:
+on_removed_from_hidden_zone" below); a stale entry left by a change the caller did not report
+could otherwise become valid again when a later move restores the earlier shape of the library.
+Since PR #174 round 4 the prune applies only to viewers who know the index of the change; every
+other viewer loses all its entries for the affected library (see
+"#25 FP-024: Position knowledge survives a library change only for viewers who know the index").
 **Rationale:** Conservative: knowledge is never re-derived from an omniscient coincidence
 (R12, REQ-CORE-004).
 **Alternatives:** Lazy filtering only (stale entries can reappear when the library returns to an
@@ -2833,7 +2842,10 @@ the destination and the source zone, never on which candidate moved. A player wh
 observe it is removed from the stored `KnownTo`
 of every card now in `moved.from` and of the moved card (emptied sets are dropped), and, when
 the source is a library, loses all of its position entries for that library. An observer's
-knowledge is kept exactly as before. `on_move` is `on_move_observed` with no observers.
+knowledge is kept exactly as before. `on_move` is `on_move_observed` with no observers. Being
+an observer keeps identity knowledge only: since PR #174 round 4 position entries of the
+libraries the move left or entered survive only for the viewers in `index_known_by` of
+`on_move_indexed` (see "#25 FP-024: Position knowledge survives a library change only for viewers who know the index").
 
 Knowledge cannot tell a disclosed-position move (a draw from the top) from a secret selection
 of a library card, so a viewer who knows a position is not an observer by that fact. The caller
@@ -2881,7 +2893,9 @@ are dropped, because those objects shifted. Removals (`Zones::send_outside` of a
 hand object) use `on_removed_from_hidden_zone` instead (see that entry), which also prunes the
 library. This closes the case where a stale entry becomes valid again by coincidence (PR #174,
 F4: the viewer knows A at index 0, a card is created on top, and drawing that card would put A
-back at index 0).
+back at index 0). Since PR #174 round 4 the keep-below-`n` rule applies only to the viewers in
+`index_known_by` of `on_library_changed_indexed`; `on_library_changed` (nobody knows the index)
+drops every viewer's entries for that library (see "#25 FP-024: Position knowledge survives a library change only for viewers who know the index").
 **Rationale:** The lazy filter compares only the current library, so it cannot see that an
 entry was invalidated earlier; pruning at the change is the only point where the shift is
 visible. A library is one face-down pile whose order players can't look at or change
@@ -2900,8 +2914,11 @@ tests now assert that position knowledge is not observation and that observers a
 (only `observers`, the implicit entitlements on the new record and the source hand count); (3) observing a move only keeps existing
 knowledge, it never adds the observer to the card's `KnownTo`; (4) error precedence among
 several invalid ids in one `shuffle_face_down_pile` call is not specified (tests use one invalid
-id per pile); (5) after `send_outside` / `enter_from_outside` only position entries are
-asserted, since identity knowledge there is the caller's contract (see `on_library_changed`).
+id per pile); (5) removals (`Zones::send_outside` of a library or hand object) use
+`on_removed_from_hidden_zone` and insertions (`create_object`, `enter_from_outside`) use
+`on_library_changed`, which is position-only; the spec tests assert position entries after
+insertions and both identity and position after removals; round 4 added index disclosure (see
+"#25 FP-024: Position knowledge survives a library change only for viewers who know the index").
 **Rationale:** (1) and (2) match the implementation, which the shadow-model property test
 confirms; (3) follows "if V observed it, V's knowledge is kept"; (4) and (5) are left open
 rather than over-specified until the integration unit defines the callers.
@@ -2918,7 +2935,10 @@ the removal iff (i) V is in `observers` or (iii) `before.zone` is V's hand; (ii)
 (there is no new object). Every non-observer is removed from the stored `KnownTo` of every card
 now in `before.zone` and of `before.card` (emptied sets dropped) and, for a library source,
 loses all position entries for that library; observers keep their knowledge. A library source
-is then pruned against the live library as `on_library_changed` would. Errors, checked first
+is then pruned against the live library as `on_library_changed` would. Since PR #174 round 4
+that prune applies only to the viewers in `index_known_by` of
+`on_removed_from_hidden_zone_indexed`; every other viewer, observers included, loses all its
+entries for that library (see "#25 FP-024: Position knowledge survives a library change only for viewers who know the index"). Errors, checked first
 and leaving the state unchanged: `UnknownPlayer(o)` when `before.zone` is the library or hand of
 an unknown `o`, then `UnknownPlayer` for the first unknown observer. When `before.zone` is not a
 library or a hand the call is a no-op returning `Ok` before any validation (the brief's literal
@@ -2937,3 +2957,67 @@ pins it.
 `on_library_changed` with observers (rejected: it is also the insertion path, where nothing is
 forgotten); a Knowledge-owned wrapper around `Zones::send_outside` (rejected: Knowledge would
 mutate Zones, R1/R2).
+
+## #25 FP-024: Position knowledge survives a library change only for viewers who know the index
+
+**Decision:** Position knowledge about a library survives a change of that library's contents
+(a card moved out, moved in, removed, inserted, repositioned, or an excluded found card in a
+shuffle) only for the viewers the caller says know the index of the change. Every other viewer
+loses all its position entries for every affected library. Identity/set knowledge is not
+touched by this rule; it stays governed by step 0 and the removal hook, i.e. by `observers`.
+`observers` and `index_known_by` are separate: an announced identity is not an index, and a
+known index does not make a viewer an observer (nor undo step 0). Four methods carry the
+disclosure: `on_move_indexed(zones, before, moved, observers, index_known_by)`,
+`on_removed_from_hidden_zone_indexed(zones, before, observers, index_known_by)`,
+`on_library_changed_indexed(zones, owner, index_known_by)` and
+`shuffle_library_disclosed(zones, owner, excluded, known_by)`. The five existing methods are
+shorthands with an empty set (`on_move` = `on_move_indexed(.., &[], &[])`, `on_move_observed`
+= `on_move_indexed(.., observers, &[])`, `on_removed_from_hidden_zone` = indexed with `&[]`,
+`on_library_changed` = indexed with `&[]`, `shuffle_library` = disclosed with `&[]`): the
+default is that nobody knows the index, so nobody keeps positions for the affected library.
+Affected libraries: `moved.from` and `moved.to` when they are libraries (one library for a
+reposition), the removal source library, the library of `owner`. For a viewer in the set the
+earlier semantics apply (the entry naming the moved or removed object goes, entries whose object
+shifted go, entries still matching the live library stay; for a shuffle, entries of excluded
+objects still at their index stay). All five paths share one private helper
+(`apply_library_change`). Errors, state unchanged: `on_move_indexed` UnknownObject(moved.new),
+then the first unknown observer, then the first unknown `index_known_by` player;
+`on_removed_from_hidden_zone_indexed` UnknownPlayer(zone owner), then observers, then
+`index_known_by`; `on_library_changed_indexed` UnknownPlayer(owner), then `index_known_by`;
+`shuffle_library_disclosed` UnknownPlayer(owner), NotInLibrary for the first bad excluded id,
+then the first unknown `known_by` player. `KnowledgeError` is unchanged. Caller contract: pass a
+viewer as knowing the index only when the index is public to it (a draw of a top card the
+viewer knows is on top needs it in both `observers` and `index_known_by`; an insertion announced
+as "third from the top").
+**Rationale:** Twin-world non-interference (REQ-CORE-004): pruning against the live library
+keeps an entry when the change was below it and drops it when the change was above it, so a
+viewer who did not know the index learns on which side the change happened (PR #174 round 4,
+comments 4625492354 and 4625492361). The class sweep found six instances of this channel, all
+closed here: (a) `on_move` effect (d) for a move out of a library; (b) a move into a library at
+an undisclosed index; (c) a same-zone library reposition; (d) `on_removed_from_hidden_zone`;
+(e) `on_library_changed` after `create_object` / `enter_from_outside`; (f) `shuffle_library`
+with `excluded`, where keeping an excluded card's entry for every viewer told a viewer which
+card was found. Swept and found independent of hidden information: `set_position_known`,
+`on_player_leaves`, `on_game_end`, `shuffle_face_down_pile`, `grant_look`, `add_known`,
+`reveal_to_all`, the projection counts (CR 401.3, CR 402.3) and step-0 identity forgetting. A
+design decision, not CR-derived; the CR context is the hidden ordered library (CR 401.2).
+**Alternatives:** Keeping the prune semantics for observers (rejected: an observer knows which
+card left, not where, so it still leaks the index side); clearing identity too (rejected: set
+knowledge must survive, SRS 2.4); one disclosure struct argument instead of extra methods
+(rejected: larger churn on the frozen API).
+
+## #25 FP-024: Spec-test choices for index disclosure (PR #174 round 4)
+
+**Decision:** The Independent Tester's round-4 spec tests (1) compare every player not in
+`index_known_by` in the fixed twin tests, observers included (the announced card is the same in
+both worlds); (2) build the Removal and MoveOut twin worlds by reordering the clone's library with
+same-zone moves `Knowledge` is not told about, keeping every index that holds a live position
+entry, and skip a twin that is not indistinguishable to every player before the change; (3) count
+the generator's disclosed-index controls rather than asserting each instance (the fixed tests
+assert their controls exactly); (4) leave unasserted what a public-source removal no-op does with
+an unknown `index_known_by` player.
+**Rationale:** (1) is stronger than required and safe; (2) makes the hidden-index twin reachable
+without changing what any player could know; (3) and (4) avoid over-specifying cases the brief
+left open.
+**Alternatives:** Comparing only non-observers (weaker); generating twins from scratch (rarely
+reachable with live position entries).
