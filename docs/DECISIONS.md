@@ -4912,8 +4912,13 @@ so it would be a stub that the integration unit rewrites).
    in the request with empty `legal` and max 0 and does not remove the trigger. A mode is legal
    iff each of its own slots is fillable in this sense.
 6. *One-shot delayed triggers (CR 603.7b).* When several waiting entries match a one-shot delayed
-   trigger at once, the first in creation (input) order is used; the CR lets the controller choose
-   which event. Follow-up: a real choice can be added later if a card needs it.
+   trigger at once, the first matching element in input (creation) order is used and the
+   registration is consumed. THIS DEPARTS FROM CR 603.7b, which gives the controller of the delayed
+   trigger the choice of which simultaneous event causes it to trigger. The discarded matches
+   cannot be recovered through stack ordering. A matching element whose intervening "if" is false
+   is skipped and does not consume a one-shot entry. The departure is tracked as a follow-up owned
+   by issue #182 (a `CHOOSE` choice for the controller, to be added with the integration of
+   delayed triggers).
 7. *Delayed triggers persist* when their source leaves its zone (the CR is silent; CR 603.7c only
    says the ability no longer affects an object that left its expected zone).
 8. *Modes recorded ascending* as original indices into the mode list, whatever order the answer
@@ -4996,3 +5001,38 @@ until that unit supplies the real visibility rule.
 show the event indices (rejected: `PendingTrigger` does not carry them); change
 `description()` for every trigger (rejected: changes labels that are already unique and the
 optional-trigger request).
+
+## #31 FP-030 CR round 1 — deferred findings
+
+**Decision:** These CodeRabbit round-1 findings on PR #181 are deferred to issue #182 and are not
+implemented in this unit:
+
+(a) A one-shot delayed trigger's executable ability. `take_triggered` and `fire` remove the
+registry entry, so a `PendingTrigger` of a delayed trigger has no stored effect. The form (carry
+the ability in `PendingTrigger`, or a resolver-side snapshot keyed by the pending trigger) depends
+on the stack-object and resolver representation (#58 FP-056), which does not exist yet. Thread:
+https://github.com/donfuldauer/fineprint/pull/181#discussion_r4635776824
+
+(b) `StateTriggers::check` ignores `limit` (perTurn, perGame) because it has no access to Memory.
+The per-ability counters live in `MemoryTable` and are shared with event detection. The game-loop
+integration (#44 FP-043) owns the call site and Memory access. Thread:
+https://github.com/donfuldauer/fineprint/pull/181#discussion_r4635776870
+
+(c) The CR 603.7b controller choice of which simultaneous event causes a one-shot delayed trigger
+to trigger (see item 6 of "#31 FP-030 — Inferences and choices in the trigger lifecycle"). Until
+it is added, the implementation departs from CR 603.7b.
+
+(d) Combined target legality across slots (unverified review finding on `place.rs`).
+`PlacementEnv::legal_targets` gives independent per-slot candidate lists, so "must target X if
+able"-style requirements across slots cannot be expressed. This needs a combined-legality
+extension of `PlacementEnv`, together with the casting legality unit (#52 FP-050) and the real
+environments. Per-slot repeats stay allowed.
+
+**Rationale:** Each item needs the real game state, stack or resolver that the integration unit
+builds (see "#31 FP-030 — Real-state environments belong to the integration unit"). Deferring
+keeps this unit's public API from changing twice.
+
+**Alternatives:** Implement a stopgap interface now (rejected: it would be replaced by the
+integration design and would change the public API again). Add the controller choice of (c) now
+(rejected: it needs the same request and answer protocol as the integration unit's choices and
+no card needs it yet).
