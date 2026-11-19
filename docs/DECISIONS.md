@@ -3212,3 +3212,173 @@ detail); drop the Toy from the property run (loses the independent byte oracle).
 **Rationale:** an action-level non-linear oracle must re-derive which effects survive which rollback, i.e. re-implement the same semantics in another form, a larger change than this review round; the random runs still check every step of the specified model against the implementation, and the fixed cases cover the shared-rule risk CodeRabbit names (PR #175 round 4).
 
 **Alternatives:** action-level effect tracking for the clamped state (deferred; candidate follow-up when the casting unit first uses durable sub-transactions).
+
+## #27 FP-026 — Spec-test choices
+
+**Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_events_*.rs`)
+read the brief as follows where it is silent or allows two readings, and assert only the common
+ground: (1) `EventState`, `ObjectMarkers`, `History`, `EventLog`, `Zones`, `Permanents`,
+`MemoryTable` and `LkiStore` are compared through their canonical bytes, never through
+`PartialEq`/`Debug` (the brief lists only `Default; Clone; CanonicalEncode` for `EventState`);
+`GameState` and `IdGenerator` are compared by value. (2) Attaching to an unknown player, and a
+`TurnBegins` whose turn number would overflow, are asserted only as "some error, nothing changed"
+(the brief names no variant). (3) Error precedence between checks (for example a negative amount
+against an unknown target) is not asserted; every error test uses inputs with exactly one fault.
+(4) The ledger key of an event that follows a `TurnBegins` in the same batch is not asserted;
+only events in separate calls are. (5) "Replaced" events are not modelled in this unit, so the
+"replaced events are not counted" clause is tested through no-op, failed and rolled-back events.
+(6) LKI counters and attached objects are those of the `CharacteristicsProvider` (as
+`capture_lki_on_move` defines), so LKI tests set them on the test provider rather than through
+`AddCounters`. (7) The world starts at turn 1 with player 1 active (`set_turn_number(1)`),
+since `GameState::new` is pre-game (turn 0). (8) Self-attachment is asserted as
+`EventError::Permanent(_)` ("a cycle or other Permanents error"), and an unknown object
+(in no zone) named by Tap/Untap/Attach as `UnknownObject`.
+**Rationale:** R10/R12 black-box discipline: assert exactly what the brief states, no more; the
+comparisons above need only the traits the brief guarantees.
+**Alternatives:** Assert specific error variants or `PartialEq` on `EventState` (over-specifies
+items the brief leaves open); route LKI counters through `ObjectMarkers` (contradicts the
+existing `capture_lki_on_move` contract).
+
+## #27 FP-026 — Events that change nothing are no events
+
+**Decision:** These execute as no-ops (`Ok(None)`, nothing changed, logged or ledgered): gaining
+0 life (CR 119.9, CR 119.10); losing 0 life, treated the same by analogy (no CR rule says so);
+0 damage (CR 120.8); putting or removing 0 counters, and removing counters when none are held;
+tapping a tapped and untapping an untapped permanent (CR 701.26a, CR 701.26b); turning a
+permanent to the face it already shows; becoming a copy of what it already copies; attaching to
+the current host (CR 701.3b); unattaching an unattached object. A negative amount is
+`InvalidAmount`. The amount checks come before the target checks, in the order the brief lists
+them (0 counters on an unknown object is a no-op, not an error).
+**Rationale:** No event means nothing for triggers or replacement effects to see (CR 119.9,
+CR 120.8); a single rule for all "nothing happens" cases keeps the log clean for trigger
+matching.
+**Alternatives:** Logging zero events with a flag (would let triggers fire on non-events).
+
+## #27 FP-026 — The ledger reads executed events only
+
+**Decision:** `History` is fed only from events that actually executed (after replacement and
+prevention, which happen before execution), keyed by the game turn number at execution time
+(after a `TurnBegins` in the same batch, the new turn) and the player concerned. Damage to a
+player also records `LifeLost` (CR 119.2, CR 120.3a) besides `DamageDealtToPlayer`;
+`DamageDealtBy` is keyed by `source_controller` when it is `Some` (not validated against the
+player list). `record_spell_cast` is the one non-event input, because casting belongs to the
+casting unit (CR 601.2i). Sums saturate; a `LifeChange` of `i64::MIN` records `i64::MAX` lost.
+**Rationale:** "life lost this turn" must include damage, and a prevented or replaced thing
+never happened.
+**Alternatives:** Recording at submission (would count replaced events); a separate casting
+event (casting is out of scope).
+
+## #27 FP-026 — Standalone event state and the rollback set
+
+**Decision:** Object counters, marked damage, token card ids and copy-of links live in
+`ObjectMarkers`; with the `EventLog`, `History`, the current phase/step and the
+empty-library-draw set they form `EventState`, which is not wired into `GameState` (its Merkle
+layout and wire form are untouched, and so is `GameState`'s placeholder `HistoryLedger`). The
+`ids` field of `EventContext` is the generator `Zones` uses, because `GameState`'s own object
+generator is not reachable. `execute_batch` snapshots and, on any error, restores game, zones,
+ids, permanents, memories, LKI and the event state together.
+**Rationale:** The standalone pattern of #18-#26; the integration unit joins the components.
+**Alternatives:** Adding fields to `GameState` (outside the owned paths and a wire-format change).
+
+## #27 FP-026 — Event set and causes
+
+**Decision:** `GameEvent` (`#[non_exhaustive]`) is exactly the SRS 8.1 list plus `Unattach`
+(CR 701.3d). Sacrifice, destroy, discard, mill, exile and countering a spell are `ZoneChange`
+with a `ZoneChangeCause` label that does not change execution. Shuffle, phasing (CR 702.26d: not
+a zone change), control change (CR 613.1b), winning and losing, and destroy's own replaceable
+event (CR 701.8) are later units' events. Phase and step beginnings cite CR 500.6 and CR 603.2b
+(not 500.8); token creation cites CR 111.2 and CR 701.7a; CR 108.4 is not cited for control.
+**Rationale:** The brief's fixed API; `#[non_exhaustive]` lets later units add events.
+**Alternatives:** One variant per keyword action now (premature; their replacement handling is
+not designed yet).
+
+## #27 FP-026 — Draws: empty library and replaced draws
+
+**Decision:** A draw from an empty library is no event and adds the player to the
+empty-library-draw set (CR 121.4, CR 704.5b input; `take_empty_library_draws` clears it); the
+flag is part of the rollback set. A draw that a replacement effect replaced never reaches
+execution, so it is never counted (CR 121.6a, CR 121.5). A draw captures LKI like any zone exit.
+**Rationale:** CR 704.5b reads "attempted to draw ... since the last time state-based actions
+were checked".
+**Alternatives:** Making the empty draw an error (would roll back the whole batch).
+
+## #27 FP-026 — Tokens off the battlefield and token creation
+
+**Decision:** A `ZoneChange` of an object whose card id is marked as a token and which is not on
+the battlefield is a no-op (CR 111.8). The token mark is per `CardId` and survives the token's
+zone change (ceasing to exist is the CR 704.5d state-based action, later). Token creation does
+not model CR 111.5 (the caller decides whether the token can be created) and records no LKI
+(there was no previous object); unknown owner or controller is `UnknownPlayer`, a duplicate
+card id surfaces as `EventError::Zone(CardAlreadyPresent)`.
+**Rationale:** The brief's semantics; CR 111.8 says the token remains in its current zone.
+**Alternatives:** An error for the token move (would roll back simultaneous moves of other
+objects).
+
+## #27 FP-026 — Damage to objects and object-naming errors
+
+**Decision:** Damage to an object only marks damage (CR 120.3e); creature/planeswalker/battle
+legality (CR 120.1a) and the CR 120.3b-d and CR 120.3f-h results are later units'. For every
+event that names an object, an id no zone holds is `UnknownObject` (this is also what an event
+gets for an id an earlier event of the same batch replaced), and an object in a zone that is not
+a held permanent is `NotOnBattlefield` where the event needs a permanent (damage to an object,
+tap/untap, attach, become-copy, face up/down). `Unattach` of an object in a zone that is not
+attached (for example in a hand) is a no-op.
+**Rationale:** One consistent rule; the brief names `UnknownObject` for replaced ids in a batch
+and for tap/attach, and `NotOnBattlefield` for objects off the battlefield.
+**Alternatives:** `NotOnBattlefield` for unknown ids too (contradicts the batch rule).
+
+## #27 FP-026 — Attach timestamps and illegal attachments
+
+**Decision:** Attaching to the current host is a no-op (CR 701.3b). A cycle, a self-attach or
+an unknown object is an error that rolls back the batch (`EventError::Permanent` /
+`UnknownObject` / `NotOnBattlefield` / `UnknownPlayer`). Enchant/equip legality is the caller's.
+Every real attach issues a new timestamp from `GameState::issue_timestamp` (CR 701.3c), returned
+only in `Outcome::Attached` (Permanents holds no timestamps; the layer unit stores them).
+**Rationale:** The brief; no component stores per-permanent timestamps yet.
+**Alternatives:** Storing the timestamp in `ObjectMarkers` (not in the fixed API).
+
+## #27 FP-026 — Same-zone reposition
+
+**Decision:** A `ZoneChange` that only repositions an object in its zone (library, hand,
+graveyard, battlefield, stack) is an executed, logged event with `Outcome::ZoneChange` where
+`old == new`, but not a zone change (CR 400.7): no LKI, markers (counters, damage, copy link)
+kept, the permanent untouched, Memory untouched.
+**Rationale:** It changes library/graveyard order, which later units may observe; it is not a
+new object.
+**Alternatives:** Treating it as a no-op (loses an observable order change).
+
+## #27 FP-026 — Removing counters reports the actual number
+
+**Decision:** `RemoveCounters` removes `min(amount, held)` and reports that number in
+`Outcome::CountersRemoved { removed }`; with nothing held it is a no-op.
+**Rationale:** Later units ("for each counter removed this way") need the real number.
+**Alternatives:** An error when fewer are held (a rule-legal effect would fail).
+
+## #27 FP-026 — LKI capture order inside a batch
+
+**Decision:** `execute_batch` first runs the batch once without capturing LKI to find, in
+order, exactly which objects leave their zones (a draw's card depends on library order, which
+earlier events of the same batch can change), restores the snapshot, captures LKI for every
+such object that exists at the start of the batch (CR 704.8, CR 603.10a), and then executes the
+batch for real. An object that only exists because of an earlier event in the same batch (for
+example a token created and then moved) is captured just before its own move. `lki_captured` is
+true iff a record was stored for the departing object. LKI counters are the provider's counters
+overridden per kind by the counters `ObjectMarkers` holds, and the objects attached here are the
+provider's plus the permanents attached to it in `Permanents`, so the record shows the counters
+and attachments the events module itself put there.
+**Rationale:** The brief requires capture of every departing object before any move; a planning
+run is the only exact way to know which library card each draw takes. The provider wrapper
+keeps `capture_lki_on_move` unchanged while making the record match the state this module owns.
+**Alternatives:** Predicting the k-th card of each library (wrong when the batch also moves
+library cards); capturing just before each move (violates CR 704.8 for simultaneous
+departures); provider counters only (the record would miss counters put by events).
+
+## #27 FP-026 — CR citation index
+
+**Decision:** The new CR citations in `crates/fineprint-core/src/events/` were checked against
+the CR 2026-11-06 text (every cited rule exists), but `docs/cr-citations.json` is outside this
+unit's owned paths, so `cargo xtask cr index` is left to the Orchestrator after both roles
+finish; until then `cargo xtask cr check` reports the new citations as "not in
+docs/cr-citations.json".
+**Rationale:** R1 owned paths.
+**Alternatives:** Regenerating the index from the Implementer (edits a file outside the owned paths).
