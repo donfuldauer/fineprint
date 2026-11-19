@@ -57,6 +57,45 @@ fn toy() -> Transactions<Toy> {
     })
 }
 
+/// A toy state whose `carry_durable` appends `after.log` minus `before.log` and counts its own
+/// calls in `carries` (reset by every rollback to the checkpoint's 0), so double application
+/// of a record is observable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LogToy {
+    log: Vec<i64>,
+    carries: u32,
+}
+
+impl Transactional for LogToy {
+    fn state_hash(&self) -> Digest {
+        let mut bytes = Vec::new();
+        for v in &self.log {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend_from_slice(&self.carries.to_le_bytes());
+        leaf_digest(&bytes)
+    }
+
+    fn priority_player(&self) -> Option<PlayerId> {
+        None
+    }
+
+    fn carry_durable(mut restored: LogToy, before: &LogToy, after: &LogToy) -> LogToy {
+        restored
+            .log
+            .extend_from_slice(&after.log[before.log.len()..]);
+        restored.carries += 1;
+        restored
+    }
+}
+
+fn log_toy() -> Transactions<LogToy> {
+    Transactions::new(LogToy {
+        log: Vec::new(),
+        carries: 0,
+    })
+}
+
 fn game() -> GameState {
     let mut s = GameState::new(0x5eed_0026, 3, 20).unwrap();
     s.set_turn_number(4);
@@ -266,6 +305,56 @@ fn req_core_005_records_dropped_at_root() {
     assert_eq!(t.state().a, 1);
 }
 
+#[test]
+fn req_core_005_cr_734_1_durable_inside_durable_applied_once() {
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(7);
+    let b = t.checkpoint();
+    t.state_mut().log.push(8);
+    t.commit_durable(b).unwrap();
+    // A's window is [] -> [7, 8]; it already contains B's change, so B's record is dropped.
+    t.commit_durable(a).unwrap();
+    t.rollback(root).unwrap();
+    assert_eq!(t.state().log, vec![7, 8]);
+    assert_eq!(t.state().carries, 1);
+}
+
+#[test]
+fn req_core_005_cr_734_1_durable_inside_plain_commit_applied_once() {
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(7);
+    let b = t.checkpoint();
+    t.state_mut().log.push(8);
+    t.commit_durable(b).unwrap();
+    t.commit(a).unwrap();
+    t.rollback(root).unwrap();
+    assert_eq!(t.state().log, vec![8]);
+    assert_eq!(t.state().carries, 1);
+}
+
+#[test]
+fn req_core_005_cr_734_1_durable_inside_rolled_back_applied_once_per_rollback() {
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    t.state_mut().log.push(1);
+    let a = t.checkpoint();
+    t.state_mut().log.push(7);
+    let b = t.checkpoint();
+    t.state_mut().log.push(8);
+    t.commit_durable(b).unwrap();
+    t.state_mut().log.push(9);
+    t.rollback(a).unwrap();
+    assert_eq!(t.state().log, vec![1, 8]);
+    assert_eq!(t.state().carries, 1);
+    t.rollback(root).unwrap();
+    assert_eq!(t.state().log, vec![8]);
+    assert_eq!(t.state().carries, 1);
+}
+
 // ---------------------------------------------------------------------------------------------
 // REQ-CORE-005: errors; a failed call changes nothing
 // ---------------------------------------------------------------------------------------------
@@ -412,12 +501,161 @@ fn req_core_005_carry_skips_unchanged_and_missing_players() {
     let mut after = game();
     // A player added during the durable sub-transaction is not in `restored`: skipped.
     let new_id = after.add_player(30).unwrap();
-    // Player 3 changes, but `restored` already equals `after` for it: nothing to copy.
+    // Player 3 is set to the life it already has: unchanged before -> after, nothing carried.
     after.player_mut(PlayerId::new(3)).unwrap().set_life(20);
     let out = GameState::carry_durable(restored.clone(), &before, &after);
     assert_eq!(out.player(new_id), None);
     // Player 2 unchanged before -> after: restored's value kept.
     assert_eq!(out.player(PlayerId::new(2)).unwrap().life(), 5);
+    assert_eq!(out, restored);
+}
+
+const P1: u64 = 1;
+
+/// Runs `outer` inside a root transaction, then `sub` inside a durable sub-transaction, then
+/// rolls the root back (CR 734.1) and returns the resulting state.
+fn roll_back_around_durable(
+    setup: impl FnOnce(&mut GameState),
+    outer: impl FnOnce(&mut GameState),
+    sub: impl FnOnce(&mut GameState),
+) -> GameState {
+    let mut base = game();
+    setup(&mut base);
+    let mut t = Transactions::new(base);
+    let root = t.checkpoint();
+    outer(t.state_mut());
+    let id = t.checkpoint();
+    sub(t.state_mut());
+    t.commit_durable(id).unwrap();
+    t.rollback(root).unwrap();
+    t.into_state().unwrap()
+}
+
+#[test]
+fn req_core_005_cr_734_1_carry_life_is_a_delta() {
+    let out = roll_back_around_durable(
+        |_| {},
+        |s| s.player_mut(PlayerId::new(P1)).unwrap().set_life(8),
+        |s| s.player_mut(PlayerId::new(P1)).unwrap().set_life(5),
+    );
+    // Checkpoint 20, outer 20 -> 8 reversed, durable 8 -> 5 carried: 20 - 3.
+    assert_eq!(out.player(PlayerId::new(P1)).unwrap().life(), 17);
+}
+
+#[test]
+fn req_core_005_cr_734_1_outer_change_not_carried() {
+    let out = roll_back_around_durable(
+        |_| {},
+        |s| s.player_mut(PlayerId::new(P1)).unwrap().set_life(8),
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.counter_a", 3);
+        },
+    );
+    let pl = out.player(PlayerId::new(P1)).unwrap();
+    assert_eq!(pl.life(), 20);
+    assert_eq!(pl.counter("test.counter_a"), 3);
+}
+
+#[test]
+fn req_core_005_cr_734_1_carry_counter_is_a_delta() {
+    let out = roll_back_around_durable(
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 2);
+        },
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 5);
+        },
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 7);
+        },
+    );
+    assert_eq!(out.player(PlayerId::new(P1)).unwrap().counter("test.x"), 4);
+}
+
+#[test]
+fn req_core_005_cr_734_1_carry_counter_clamps_at_zero() {
+    let out = roll_back_around_durable(
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 1);
+        },
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 6);
+        },
+        |s| {
+            s.player_mut(PlayerId::new(P1))
+                .unwrap()
+                .set_counter("test.x", 0);
+        },
+    );
+    let pl = out.player(PlayerId::new(P1)).unwrap();
+    // 1 + (0 - 6) clamps to 0: the entry is removed.
+    assert_eq!(pl.counter("test.x"), 0);
+    assert!(!pl.counters().contains_key("test.x"));
+}
+
+#[test]
+fn req_core_005_cr_734_1_carry_counter_removal_and_designations() {
+    let out = roll_back_around_durable(
+        |s| {
+            let mut pl = s.player_mut(PlayerId::new(P1)).unwrap();
+            pl.set_counter("test.gone", 2);
+            pl.set_designation("test.changed", DesignationValue::Int(1));
+            pl.set_designation("test.removed", DesignationValue::Flag);
+            pl.set_designation("test.outer_only", DesignationValue::Int(10));
+        },
+        |s| {
+            let mut pl = s.player_mut(PlayerId::new(P1)).unwrap();
+            pl.set_counter("test.gone", 5);
+            pl.set_designation("test.outer_only", DesignationValue::Int(11));
+        },
+        |s| {
+            let mut pl = s.player_mut(PlayerId::new(P1)).unwrap();
+            pl.set_counter("test.gone", 0);
+            pl.set_designation("test.added", DesignationValue::Text("t".into()));
+            pl.set_designation("test.changed", DesignationValue::Int(2));
+            pl.clear_designation("test.removed");
+        },
+    );
+    let pl = out.player(PlayerId::new(P1)).unwrap();
+    // 2 + (0 - 5) clamps to 0.
+    assert_eq!(pl.counter("test.gone"), 0);
+    assert!(!pl.counters().contains_key("test.gone"));
+    assert_eq!(
+        pl.designation("test.added"),
+        Some(&DesignationValue::Text("t".into()))
+    );
+    assert_eq!(
+        pl.designation("test.changed"),
+        Some(&DesignationValue::Int(2))
+    );
+    assert_eq!(pl.designation("test.removed"), None);
+    // Changed only by the outer action: the checkpoint's value is restored, not carried.
+    assert_eq!(
+        pl.designation("test.outer_only"),
+        Some(&DesignationValue::Int(10))
+    );
+}
+
+#[test]
+fn req_core_005_carry_skips_player_missing_from_restored() {
+    let restored = game();
+    let mut before = game();
+    let id = before.add_player(30).unwrap();
+    let mut after = before.clone();
+    after.player_mut(id).unwrap().set_life(4);
+    let out = GameState::carry_durable(restored.clone(), &before, &after);
     assert_eq!(out, restored);
 }
 
