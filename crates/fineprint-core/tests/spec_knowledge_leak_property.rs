@@ -122,10 +122,23 @@ struct Stats {
     removal_holder_compared: usize,
     /// Removal twins where an observer's views were shown to differ (the control).
     removal_control: usize,
-    /// `enter_from_outside` / `create_object` insertions of `do_insert` (library or hand).
-    insertions: usize,
+    /// `Zones::enter_from_outside` insertions (library or hand; PR #174 review round 5 F1).
+    enter_insertions: usize,
     /// Of those, insertions into a library (followed by `on_library_changed[_indexed]`).
-    library_insertions: usize,
+    enter_library_insertions: usize,
+    /// `Zones::create_object` insertions (library or hand).
+    create_insertions: usize,
+    /// Of those, insertions into a library (followed by `on_library_changed[_indexed]`).
+    create_library_insertions: usize,
+    /// Per [`IdxClass`]: twin pairs built by [`rearranged`] that the shadow model says are
+    /// indistinguishable to every player before the change (production must agree).
+    twins_model_equivalent: [usize; 6],
+    /// Twin pairs built by [`rearranged`] that the shadow model says some player can tell
+    /// apart before the change (legitimately distinguishable; not compared).
+    twins_model_distinguishable: usize,
+    /// Library shuffles where an excluded card had a stale recorded position entry (the card
+    /// was physically moved without the knowledge being told) for a viewer in `known_by`.
+    stale_excluded: usize,
     /// Per [`IdxClass`]: "same disclosure, different hidden index" twins built.
     idx_twins: [usize; 6],
     /// Per [`IdxClass`]: (twin, player NOT in the disclosure set) pairs compared.
@@ -185,6 +198,10 @@ fn step(s: &mut World, rng: &mut Lcg, stats: &mut Stats) {
         // an insertion outside on_move (CR 401.2); for a library it is followed by
         // `on_library_changed[_indexed]`
         insert(s, owner, card, req, &ikb, shorthand, false);
+        stats.create_insertions += 1;
+        if req.to == ZoneKind::Library {
+            stats.create_library_insertions += 1;
+        }
     } else if roll < 23 {
         do_insert(s, rng, &players, stats);
     } else if roll < 46 {
@@ -604,13 +621,21 @@ fn moved_elsewhere(
 }
 
 /// A clone of `s` whose `owner` library is physically re-ordered to `target` (same-zone moves
-/// the knowledge is not told about: the twin's state before the change). `None` when the clone
-/// is not indistinguishable from `s` for every player (views and position_known).
+/// the knowledge is not told about: the twin's state before the change; the shadow model is
+/// unchanged). Pre-change equivalence is decided by the shadow model ONLY (PR #174 review
+/// round 5 F2): `None` (counted as `twins_model_distinguishable`) when the model says some
+/// player can tell the two worlds apart (projection or position_known). For a model-equivalent
+/// pair, the implementation must agree with the model in both worlds and must give every
+/// player equal views and equal `position_known` for every library: a difference is a
+/// production leak of the hidden order (CR 401.2) and fails the test; such a pair is never
+/// discarded.
 fn rearranged(
     s: &World,
     players: &[PlayerId],
     owner: PlayerId,
     target: &[ObjectId],
+    class: IdxClass,
+    stats: &mut Stats,
 ) -> Option<World> {
     let mut t = s.clone();
     for (i, id) in target.iter().enumerate() {
@@ -619,16 +644,33 @@ fn rearranged(
         assert_eq!(m.old, m.new, "a same-zone library move keeps the id");
     }
     assert_eq!(t.w.library(owner), target);
-    let same = players.iter().all(|p| {
-        s.w.view(*p) == t.w.view(*p)
+    let model_same = players.iter().all(|p| {
+        t.m.project(&t.w.zones, *p) == s.m.project(&s.w.zones, *p)
             && players
                 .iter()
-                .all(|o| s.w.positions(*p, *o) == t.w.positions(*p, *o))
+                .all(|o| t.m.positions(&t.w.zones, *p, *o) == s.m.positions(&s.w.zones, *p, *o))
     });
-    if !same {
+    if !model_same {
+        stats.twins_model_distinguishable += 1;
         return None;
     }
+    stats.twins_model_equivalent[class as usize] += 1;
+    check_model(s, "index twin S before the change");
     check_model(&t, "index twin before the change");
+    for p in players {
+        assert_eq!(
+            s.w.view(*p),
+            t.w.view(*p),
+            "production distinguishes a model-equivalent pair: view of {p:?} ({owner:?}'s library re-ordered, {class:?})"
+        );
+        for o in players {
+            assert_eq!(
+                s.w.positions(*p, *o),
+                t.w.positions(*p, *o),
+                "production distinguishes a model-equivalent pair: position_known of {p:?} on {o:?}'s library ({owner:?}'s library re-ordered, {class:?})"
+            );
+        }
+    }
     Some(t)
 }
 
@@ -702,10 +744,15 @@ fn index_twin_move(
             if rng.chance(4, 5) {
                 seed_positions_except(s, rng, players, owner, Some(id), 1);
             }
+            if !mv.ikb.is_empty() && rng.chance(1, 2) {
+                // an entry held by a viewer who knows the index (feeds the control)
+                seed_positions_except(s, rng, mv.ikb, owner, Some(id), 1);
+            }
             let Some(target) = moved_elsewhere(s, rng, players, owner, id) else {
                 return false;
             };
-            let Some(t) = rearranged(s, players, owner, &target) else {
+            let Some(t) = rearranged(s, players, owner, &target, IdxClass::MoveOut, stats) else {
+                // the model says the pair is distinguishable before the change
                 return false;
             };
             (t, mv.req)
@@ -886,8 +933,12 @@ fn do_remove(
         if rng.chance(4, 5) {
             seed_positions_except(s, rng, players, owner, Some(id), 1);
         }
+        if !ikb.is_empty() && rng.chance(1, 2) {
+            // an entry held by a viewer who knows the index (feeds the control)
+            seed_positions_except(s, rng, &ikb, owner, Some(id), 1);
+        }
         if let Some(target) = moved_elsewhere(s, rng, players, owner, id)
-            && let Some(mut t) = rearranged(s, players, owner, &target)
+            && let Some(mut t) = rearranged(s, players, owner, &target, IdxClass::Removal, stats)
         {
             let holders = pos_holders(s, players, owner);
             let (_, tobs) = apply_removal(&mut t, id, &observers, &ikb, shorthand, None);
@@ -1066,10 +1117,18 @@ fn do_insert(s: &mut World, rng: &mut Lcg, players: &[PlayerId], stats: &mut Sta
             .map(|id| (id, s.w.known_to(id)))
             .collect();
     let new = insert(s, owner, card, req, &ikb, shorthand, via_enter);
-    if to_library {
-        stats.library_insertions += 1;
+    match (via_enter, to_library) {
+        (true, true) => {
+            stats.enter_insertions += 1;
+            stats.enter_library_insertions += 1;
+        }
+        (true, false) => stats.enter_insertions += 1,
+        (false, true) => {
+            stats.create_insertions += 1;
+            stats.create_library_insertions += 1;
+        }
+        (false, false) => stats.create_insertions += 1,
     }
-    stats.insertions += 1;
     assert!(
         s.w.known_to(new).is_empty(),
         "a fresh card is known to nobody"
@@ -1151,7 +1210,13 @@ fn shuffle(
 /// `index_known_by`), then shuffles the knowledge with a random excluded subset and a random
 /// `known_by` (CR 701.24a, 701.24b). When some card is excluded and some is not, the "same
 /// disclosure, different hidden index" twin excludes another card in place of one excluded
-/// card (A vs X); a random player often holds an entry on A.
+/// card (A vs X); a random player often holds an entry on A. Half the time, after the entries
+/// are seeded and before the shuffle, the library is physically re-ordered WITHOUT telling the
+/// knowledge or the model (an excluded card first), so an excluded card can have a stale
+/// recorded index (PR #174 review round 5 F3). An entry of an excluded object survives the
+/// shuffle only while the object is still at its recorded index (the brief's rule): for every
+/// stale entry, a probe clone puts the object back at its recorded index after the shuffle
+/// and the implementation must still agree with the model (a kept stale entry would resurface).
 fn do_shuffle_library(s: &mut World, rng: &mut Lcg, players: &[PlayerId], stats: &mut Stats) {
     let owner = rng.pick(players);
     let lib = s.w.library(owner);
@@ -1177,30 +1242,93 @@ fn do_shuffle_library(s: &mut World, rng: &mut Lcg, players: &[PlayerId], stats:
         .copied()
         .filter(|o| !excluded.contains(o))
         .collect();
-    let mut twin = None;
+    let mut alt = None;
     if !excluded.is_empty() && !rest.is_empty() {
         let k = rng.idx(excluded.len());
         if rng.chance(1, 2) {
-            // a random player holds an entry on the excluded card A (CR 401.2)
+            // a random player (often one in `known_by`) holds an entry on the excluded card A
+            // (CR 401.2)
             let a = excluded[k];
             let idx = lib.iter().position(|o| *o == a).expect("in library");
-            let viewer = rng.pick(players);
+            let viewer = if !known_by.is_empty() && rng.chance(1, 2) {
+                rng.pick(&known_by)
+            } else {
+                rng.pick(players)
+            };
             s.w.k
                 .set_position_known(&s.w.zones, viewer, owner, idx, a)
                 .expect("pos");
             s.m.set_position_known(&s.w.zones, viewer, owner, idx, a);
         }
-        let mut alt = excluded.clone();
-        alt[k] = rng.pick(&rest);
+        let mut a = excluded.clone();
+        a[k] = rng.pick(&rest);
+        alt = Some(a);
+    }
+    // the recorded entries of excluded objects for viewers in `known_by` (all live here)
+    let recorded: Vec<(PlayerId, usize, ObjectId)> = known_by
+        .iter()
+        .flat_map(|v| {
+            s.m.positions(&s.w.zones, *v, owner)
+                .into_iter()
+                .filter(|(_, o)| excluded.contains(o))
+                .map(move |(i, o)| (*v, i, o))
+        })
+        .collect();
+    if !excluded.is_empty() && rng.chance(1, 2) {
+        // an unannounced physical reorder: neither the knowledge nor the model is told
+        let first = if !recorded.is_empty() && rng.chance(3, 4) {
+            rng.pick(&recorded).2
+        } else {
+            rng.pick(&excluded)
+        };
+        let mut movers = vec![first];
+        for _ in 0..rng.below(3) {
+            movers.push(rng.pick(&lib));
+        }
+        for id in movers {
+            let m =
+                s.w.raw_mv(id, KWorld::req_at(ZoneKind::Library, random_position(rng)));
+            assert_eq!(m.old, m.new, "a same-zone library move keeps the id");
+        }
+    }
+    let now = s.w.library(owner);
+    let stale: Vec<(PlayerId, usize, ObjectId)> = recorded
+        .iter()
+        .copied()
+        .filter(|(_, i, o)| now.get(*i) != Some(o))
+        .collect();
+    if !stale.is_empty() {
+        stats.stale_excluded += 1;
+    }
+    let twin = alt.map(|alt| {
         let holders = pos_holders(s, players, owner);
         let mut t = s.clone();
         shuffle(&mut t, owner, &alt, &known_by, shorthand);
-        twin = Some((t, holders));
-    }
+        (t, holders)
+    });
     let known_before: Vec<BTreeSet<PlayerId>> = lib.iter().map(|id| s.w.known_to(*id)).collect();
     shuffle(s, owner, &excluded, &known_by, shorthand);
     let known_after: Vec<BTreeSet<PlayerId>> = lib.iter().map(|id| s.w.known_to(*id)).collect();
     assert_eq!(known_before, known_after, "a shuffle never touches KnownTo");
+    for (v, i, o) in &stale {
+        // CR 701.24b and the brief's rule: the stale entry is gone; putting the object back at
+        // its recorded index (unannounced) must not bring it back
+        let mut probe = s.clone();
+        let m = probe
+            .w
+            .raw_mv(*o, KWorld::req_at(ZoneKind::Library, Position::Index(*i)));
+        assert_eq!(m.old, m.new, "a same-zone library move keeps the id");
+        assert_eq!(probe.w.library(owner).get(*i), Some(o), "probe placement");
+        check_model(
+            &probe,
+            &format!("stale excluded entry of {v:?} on {o:?} at {i} after the shuffle"),
+        );
+        assert_eq!(
+            probe.w.positions(*v, owner).get(i),
+            None,
+            "a stale excluded entry survived the shuffle: viewer {v:?}, {o:?} recorded at {i}"
+        );
+    }
     if let Some((t, holders)) = twin {
         compare_index_twins(s, &t, IdxClass::Shuffle, &known_by, &holders, stats);
     }
@@ -1618,10 +1746,29 @@ fn run_all(players: &[PlayerId]) {
         stats.removal_control > 0,
         "L3b removal control never ran: {stats:?}"
     );
-    assert!(stats.insertions > 0, "no enter_from_outside: {stats:?}");
     assert!(
-        stats.library_insertions > 0,
+        stats.enter_insertions > 0,
+        "no enter_from_outside: {stats:?}"
+    );
+    assert!(
+        stats.enter_library_insertions > 0,
         "no enter_from_outside into a library: {stats:?}"
+    );
+    assert!(stats.create_insertions > 0, "no create_object: {stats:?}");
+    assert!(
+        stats.create_library_insertions > 0,
+        "no create_object into a library: {stats:?}"
+    );
+    for class in [IdxClass::MoveOut, IdxClass::Removal] {
+        assert!(
+            stats.twins_model_equivalent[class as usize] > 0,
+            "no model-equivalent rearranged twin for {class:?} (model-distinguishable pairs: {}): {stats:?}",
+            stats.twins_model_distinguishable
+        );
+    }
+    assert!(
+        stats.stale_excluded > 0,
+        "no shuffle with a stale recorded entry of an excluded card: {stats:?}"
     );
     for class in IdxClass::ALL {
         let c = class as usize;
@@ -1726,6 +1873,80 @@ fn hidden_move_twin_fixed_instance() {
             assert_ne!(a.w.view(P2), b.w.view(P2), "the observer can tell");
         }
     }
+}
+
+/// The start of the stale-shuffle cases: P1's library from the top [X, A, Y] (cards 10, 11,
+/// 12); P2 and P3 each hold the position entry A@1 (CR 401.2). Returns the world and [X, A, Y].
+fn stale_shuffle_start() -> (World, [ObjectId; 3]) {
+    let mut s = World::new(&[P1, P2, P3]);
+    let lib = s.w.build_library(P1, &[10, 11, 12]);
+    let a = lib[1];
+    for v in [P2, P3] {
+        s.w.k
+            .set_position_known(&s.w.zones, v, P1, 1, a)
+            .expect("pos");
+        s.m.set_position_known(&s.w.zones, v, P1, 1, a);
+    }
+    check_model(&s, "stale shuffle start");
+    (s, [lib[0], lib[1], lib[2]])
+}
+
+/// REQ-CORE-004, CR 701.24b, 401.2 (PR #174 review round 5 F3): an excluded card whose
+/// recorded index is stale loses its entry in the shuffle, even for a viewer in `known_by`.
+/// [X, A, Y] with P2 holding A@1; X is moved to the bottom without telling the knowledge
+/// ([A, Y, X]: A is at 0, its recorded index 1 is stale); then one
+/// `shuffle_library_disclosed(excluded = [A], known_by = [P2])`. P2 keeps no entry, and putting
+/// A back at index 1 (again unannounced) does not bring the entry back; KnownTo is untouched.
+#[test]
+fn shuffle_drops_stale_entry_of_excluded_card() {
+    let (mut s, [x, a, y]) = stale_shuffle_start();
+    let m =
+        s.w.raw_mv(x, KWorld::req_at(ZoneKind::Library, Position::Bottom));
+    assert_eq!(m.old, m.new);
+    assert_eq!(s.w.library(P1), vec![a, y, x]);
+    let known_before: Vec<BTreeSet<PlayerId>> =
+        [x, a, y].iter().map(|o| s.w.known_to(*o)).collect();
+    shuffle(&mut s, P1, &[a], &[P2], false);
+    check_model(&s, "stale shuffle");
+    assert!(
+        s.w.positions(P2, P1).is_empty(),
+        "the stale entry A@1 is gone"
+    );
+    assert!(s.m.positions(&s.w.zones, P2, P1).is_empty());
+    assert!(s.w.positions(P3, P1).is_empty());
+    let known_after: Vec<BTreeSet<PlayerId>> = [x, a, y].iter().map(|o| s.w.known_to(*o)).collect();
+    assert_eq!(known_before, known_after, "a shuffle never touches KnownTo");
+    assert!(
+        s.w.known_to(a).contains(&P2),
+        "P2 still knows A as a set member"
+    );
+    // A back at its old recorded index: a kept stale entry would resurface here
+    let m =
+        s.w.raw_mv(x, KWorld::req_at(ZoneKind::Library, Position::Top));
+    assert_eq!(m.old, m.new);
+    assert_eq!(s.w.library(P1), vec![x, a, y]);
+    check_model(&s, "stale shuffle, A back at 1");
+    assert!(
+        s.w.positions(P2, P1).is_empty(),
+        "the stale entry must not survive the shuffle"
+    );
+}
+
+/// REQ-CORE-004, CR 701.24b, 401.2 (control of [`shuffle_drops_stale_entry_of_excluded_card`]):
+/// [X, A, Y] becomes [Y, A, X] without telling the knowledge (X and Y swap, A stays at its
+/// recorded index 1); after `shuffle_library_disclosed(excluded = [A], known_by = [P2])` P2
+/// (in `known_by`) keeps A@1 and P3 (not in `known_by`) loses it.
+#[test]
+fn shuffle_keeps_unmoved_excluded_entry_for_known_by_only() {
+    let (mut s, [x, a, y]) = stale_shuffle_start();
+    s.w.raw_mv(x, KWorld::req_at(ZoneKind::Library, Position::Bottom));
+    s.w.raw_mv(y, KWorld::req_at(ZoneKind::Library, Position::Top));
+    assert_eq!(s.w.library(P1), vec![y, a, x]);
+    shuffle(&mut s, P1, &[a], &[P2], false);
+    check_model(&s, "unmoved excluded shuffle");
+    assert_eq!(s.w.positions(P2, P1), BTreeMap::from([(1, a)]));
+    assert!(s.w.positions(P3, P1).is_empty());
+    assert!(s.w.positions(P1, P1).is_empty());
 }
 
 /// REQ-CORE-004, CR 401.2, 701.24a (L4): library views never expose order; two libraries with

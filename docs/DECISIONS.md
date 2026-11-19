@@ -3021,3 +3021,21 @@ without changing what any player could know; (3) and (4) avoid over-specifying c
 left open.
 **Alternatives:** Comparing only non-observers (weaker); generating twins from scratch (rarely
 reachable with live position entries).
+
+## #25 FP-024: Leak-property test choices (PR #174 round 5)
+
+**Decision:** In `tests/spec_knowledge_leak_property.rs`: (a) `create_object` insertions made by
+the generic step generator count toward the `create_object` counters, separately from
+`enter_from_outside`; (b) a stale excluded position entry is detected with a "resurrection probe"
+(an unannounced move puts the card back at its recorded index and the test asserts the viewer
+still has no entry), because `position_known` filters stale entries lazily and an empty result
+alone cannot show that a stale entry was kept; (c) when `index_known_by` is not empty, the
+MoveOut and Removal index twins sometimes seed an entry for a disclosed viewer on a card other
+than the announced one, so the disclosed-index control stays reachable. Pre-change equivalence of
+twin worlds is decided by the shadow model; a model-equivalent pair is never discarded and must
+give equal production views and positions.
+**Rationale:** Each counter and check then proves the path it names; (b) is the only way to
+observe a kept stale entry through the public API; (c) changes only which states are generated.
+**Alternatives:** Asserting `position_known` is empty after the shuffle (passes through lazy
+filtering even when the entry is kept); discarding twins whose production views differ (could
+hide a leak).
