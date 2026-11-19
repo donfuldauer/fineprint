@@ -510,6 +510,30 @@ fn req_core_005_carry_skips_unchanged_and_missing_players() {
     assert_eq!(out, restored);
 }
 
+/// Carries a life change (`before` -> `after`) over a state whose life is `restored`.
+fn carried_life(restored: i64, before: i64, after: i64) -> i64 {
+    let mut r = game();
+    r.player_mut(PlayerId::new(1)).unwrap().set_life(restored);
+    let mut b = game();
+    b.player_mut(PlayerId::new(1)).unwrap().set_life(before);
+    let mut a = game();
+    a.player_mut(PlayerId::new(1)).unwrap().set_life(after);
+    GameState::carry_durable(r, &b, &a)
+        .player(PlayerId::new(1))
+        .unwrap()
+        .life()
+}
+
+/// REQ-CORE-005, CR 734.1: the life delta is computed exactly (no intermediate saturation);
+/// only the final result is clamped to the i64 range.
+#[test]
+fn req_core_005_cr_734_1_life_carry_is_exact_at_i64_boundaries() {
+    assert_eq!(carried_life(-1, -1, i64::MAX), i64::MAX);
+    assert_eq!(carried_life(i64::MAX, 0, 10), i64::MAX);
+    assert_eq!(carried_life(i64::MIN, 0, -10), i64::MIN);
+    assert_eq!(carried_life(i64::MIN, i64::MIN, i64::MAX), i64::MAX);
+}
+
 const P1: u64 = 1;
 
 /// Runs `outer` inside a root transaction, then `sub` inside a durable sub-transaction, then
