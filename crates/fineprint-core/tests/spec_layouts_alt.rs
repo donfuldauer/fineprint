@@ -285,7 +285,7 @@ fn expected_prototyped() -> Characteristics {
 /// REQ-OBJ-002, CR 719.3b, 719.5, 202.3e: a prototyped spell (stack) and the permanent it
 /// becomes (battlefield) have the prototype cost, power and toughness and its colors (with
 /// Main's indicator); name, types, text, abilities and loyalty are Main's; mana value from the
-/// prototype cost, X counted on the stack.
+/// prototype cost, X counted on the stack only (CR 202.3e, 107.3m: X is 0 for the permanent).
 #[test]
 fn prototype_719_3b_prototyped_on_stack_and_battlefield() {
     let d = sample(LayoutBehavior::Prototype);
@@ -298,8 +298,9 @@ fn prototype_719_3b_prototyped_on_stack_and_battlefield() {
             // The prototype face's own name, types, text and abilities never appear.
             assert!(!got.names.contains("test.proto_inset"));
             assert_eq!(got.card_types, set(&["Artifact", "Creature"]));
-            // X + 2 + 1 + 1.
-            assert_eq!(mana_value(&d, &q, on_stack(3, 0, 0), v), Ok(7));
+            // X + 2 + 1 + 1, X counted on the stack only (CR 202.3e, 107.3m).
+            let with_x = if zone == ZoneKind::Stack { 7 } else { 4 };
+            assert_eq!(mana_value(&d, &q, on_stack(3, 0, 0), v), Ok(with_x));
             assert_eq!(mana_value(&d, &q, ManaValueContext::OffStack, v), Ok(4));
         }
     }

@@ -462,9 +462,11 @@ fn printed_layouts_every_zone_cast_status() {
                 for s in statuses() {
                     let query = q(zone).with_cast(cast).with_status(s);
                     assert_eq!(base(&d, query).unwrap(), main, "{layout} {zone:?} {cast:?}");
-                    // CR 202.3, 202.3e: {X}{1}{G} is 2 with X = 0, 5 with X = 3.
+                    // CR 202.3, 202.3e: {X}{1}{G} is 2 with X = 0; with X = 3 it is 5 on the
+                    // stack only, 2 in every other zone (CR 107.3g).
                     assert_eq!(mv(&d, query, OFF), Ok(2));
-                    assert_eq!(mv(&d, query, on(3)), Ok(5));
+                    let with_x = if zone == ZoneKind::Stack { 5 } else { 2 };
+                    assert_eq!(mv(&d, query, on(3)), Ok(with_x));
                 }
             }
         }
@@ -689,6 +691,13 @@ fn flip_def() -> CardDefinitionDSL {
     flipped.subtypes = vec![subtype_of("Creature", 1)];
     flipped.supertypes = vec!["Legendary".to_owned()];
     flipped.loyalty = Some(3);
+    flipped.defense = Some(4);
+    flipped.hand_modifier = Some(5);
+    flipped.life_modifier = Some(6);
+    main.loyalty = Some(7);
+    main.defense = Some(8);
+    main.hand_modifier = Some(-1);
+    main.life_modifier = Some(-2);
     def(LayoutBehavior::Flip, vec![flipped, main])
 }
 
@@ -713,7 +722,8 @@ fn flip_unflipped_and_off_battlefield() {
 }
 
 // REQ-OBJ-002, CR 710.1b, 710.1c, 710.2: a flipped permanent uses the flipped name, text, type
-// line and P/T; mana cost, color indicator, colors and mana value stay the normal ones.
+// line and P/T; mana cost, color indicator, colors and mana value stay the normal ones, and so
+// do loyalty, defense and the hand and life modifiers, which CR 710.1b and 710.2 do not swap.
 #[test]
 fn flip_flipped_on_battlefield() {
     let d = flip_def();
@@ -734,7 +744,10 @@ fn flip_flipped_on_battlefield() {
         assert_eq!(c.subtypes, alt.subtypes);
         assert_eq!(c.power, Some(ValueExpressionAST(5.into())));
         assert_eq!(c.toughness, Some(ValueExpressionAST(6.into())));
-        assert_eq!(c.loyalty, Some(3));
+        assert_eq!(c.loyalty, Some(7));
+        assert_eq!(c.defense, Some(8));
+        assert_eq!(c.hand_modifier, Some(-1));
+        assert_eq!(c.life_modifier, Some(-2));
         assert_eq!(c.mana_cost, main.mana_cost);
         assert_eq!(c.color_indicator, Some(ColorBitmask::GREEN));
         assert_eq!(c.colors, main.colors);
@@ -755,8 +768,9 @@ fn nonmodal_def(front_cost: Option<&str>) -> CardDefinitionDSL {
     def(LayoutBehavior::DfcNonmodal, vec![back, front])
 }
 
-// REQ-OBJ-002, CR 712.6a, 202.3b: off the stack and battlefield only the front face, cast and
-// status ignored, except that a copy of a back face has mana value 0.
+// REQ-OBJ-002, CR 712.6a, 202.3b, 712.6d: off the stack and battlefield only the front face,
+// cast and status ignored; the copy-of-a-back-face rule applies only to a spell or permanent, so
+// the front face's cost applies here even with `copying_back_face` set.
 #[test]
 fn nonmodal_other_zones_front() {
     let d = nonmodal_def(Some("{X}{1}{G}"));
@@ -766,8 +780,9 @@ fn nonmodal_other_zones_front() {
             for s in statuses() {
                 let query = q(zone).with_cast(cast).with_status(s);
                 assert_eq!(base(&d, query).unwrap(), front);
-                let expected = if s.copying_back_face { 0 } else { 2 };
-                assert_eq!(mv(&d, query, OFF), Ok(expected), "{zone:?} {s:?}");
+                assert_eq!(mv(&d, query, OFF), Ok(2), "{zone:?} {s:?}");
+                // CR 107.3g: X is 0 off the stack whatever the context.
+                assert_eq!(mv(&d, query, on(3)), Ok(2), "{zone:?} {s:?}");
             }
         }
     }
@@ -1029,7 +1044,9 @@ fn prototype_prototyped_stack_and_battlefield() {
             assert_eq!(c.abilities, main.abilities);
             assert_eq!(c.rules_text, main.rules_text);
             assert_eq!(c.color_indicator, main.color_indicator);
-            assert_eq!(mv(&d, query, on(2)), Ok(4));
+            // CR 202.3e, 107.3m: X counts on the stack, 0 for the permanent.
+            let with_x = if zone == ZoneKind::Stack { 4 } else { 2 };
+            assert_eq!(mv(&d, query, on(2)), Ok(with_x));
             assert_eq!(mv(&d, query, OFF), Ok(2));
         }
     }
@@ -1156,4 +1173,84 @@ fn exhaustive_total_and_deterministic() {
         }
     }
     assert!(checked > 0);
+}
+
+// ---------------------------------------------------------------- X off the stack (CR 202.3e)
+
+/// A stack cast choice of `layout` that selects the first face (`{X}{1}{G}` in [`valid`]).
+fn first_face_cast(layout: LayoutBehavior) -> CastChoice {
+    match layout {
+        LayoutBehavior::Split => CastChoice::SplitHalf(SplitHalf::Left),
+        LayoutBehavior::DfcModal => CastChoice::ModalFace(FaceUp::Front),
+        _ => CastChoice::None,
+    }
+}
+
+// REQ-OBJ-001, REQ-OBJ-002, CR 202.3e, 107.3g, 107.3m: for every layout, an `OnStack(X = 3)`
+// context counts X only on the stack; in every other zone X is 0 whatever context the caller
+// supplies. Checked through the trait impl directly and through `layouts::mana_value`.
+#[test]
+fn x_counts_only_on_the_stack_every_layout() {
+    for layout in SUPPORTED {
+        let d = valid(layout);
+        let object = layout_for(layout).unwrap();
+        for zone in ZoneKind::ALL {
+            let query = q(zone).with_cast(first_face_cast(layout));
+            // {X}{1}{G}: 5 with X = 3 on the stack, 2 everywhere else; a split card off the
+            // stack adds its right half's {2}{R} (CR 202.3d).
+            let off = match (layout, zone) {
+                (_, ZoneKind::Stack) => 2,
+                (LayoutBehavior::Split, _) => 5,
+                _ => 2,
+            };
+            let expected = if zone == ZoneKind::Stack { 5 } else { off };
+            assert_eq!(mv(&d, query, on(3)), Ok(expected), "{layout} {zone:?}");
+            assert_eq!(
+                object.mana_value(&d, &query, on(3), vocab()),
+                Ok(expected),
+                "{layout} {zone:?}"
+            );
+            assert_eq!(mv(&d, query, OFF), Ok(off), "{layout} {zone:?}");
+        }
+    }
+}
+
+// REQ-OBJ-001, REQ-OBJ-002, CR 107.3p, 202.3e: Y (and Z, treated alike) follow X: counted on
+// the stack, 0 in every other zone.
+#[test]
+fn y_and_z_count_only_on_the_stack() {
+    let mut d = valid(LayoutBehavior::Normal);
+    d.faces[0].mana_cost = Some(cost("{X}{Y}{Z}{1}"));
+    let ctx = ManaValueContext::OnStack(VariableValues { x: 1, y: 2, z: 4 });
+    for zone in ZoneKind::ALL {
+        let expected = if zone == ZoneKind::Stack { 8 } else { 1 };
+        assert_eq!(mv(&d, q(zone), ctx), Ok(expected), "{zone:?}");
+        assert_eq!(
+            NormalLayout.mana_value(&d, &q(zone), ctx, vocab()),
+            Ok(expected)
+        );
+    }
+}
+
+// REQ-OBJ-001, REQ-OBJ-002, CR 202.3b, 712.6d, 712.6a: `copying_back_face` gives mana value 0
+// only to a spell on the stack or a permanent on the battlefield; in every other zone the
+// flag is ignored and the front face's cost applies.
+#[test]
+fn nonmodal_copying_back_face_zone_matrix() {
+    let d = nonmodal_def(Some("{3}{G}"));
+    let copying = status(false, FaceUp::Back, true);
+    for zone in ZoneKind::ALL {
+        let query = q(zone).with_status(copying);
+        let expected = if matches!(zone, ZoneKind::Stack | ZoneKind::Battlefield) {
+            0
+        } else {
+            4
+        };
+        assert_eq!(mv(&d, query, OFF), Ok(expected), "{zone:?}");
+        assert_eq!(
+            DfcNonmodalLayout.mana_value(&d, &query, OFF, vocab()),
+            Ok(expected),
+            "{zone:?}"
+        );
+    }
 }

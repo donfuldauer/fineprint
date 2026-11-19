@@ -12,7 +12,7 @@
 use fineprint_dsl::card::{CardDefinitionDSL, CardFaceDSL, FaceKind, LayoutBehavior};
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::faces::{chars, faces};
+use super::faces::{chars, effective_ctx, faces};
 use super::types::{Gating, Layout, LayoutError, LayoutQuery};
 use crate::objects::{Characteristics, ManaValueContext};
 
@@ -59,12 +59,12 @@ macro_rules! printed_layout {
             fn mana_value(
                 &self,
                 def: &CardDefinitionDSL,
-                _query: &LayoutQuery,
+                query: &LayoutQuery,
                 ctx: ManaValueContext,
                 vocab: &RulesVocabulary,
             ) -> Result<i64, LayoutError> {
-                // CR 202.3: the object's own mana cost.
-                Ok(printed_chars($behavior, def, vocab)?.mana_value(ctx))
+                // CR 202.3: the object's own mana cost; CR 202.3e: X is 0 off the stack.
+                Ok(printed_chars($behavior, def, vocab)?.mana_value(effective_ctx(query, ctx)))
             }
 
             fn gating(&self, def: &CardDefinitionDSL) -> Result<Option<Gating>, LayoutError> {

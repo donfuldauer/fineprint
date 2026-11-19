@@ -46,7 +46,9 @@ fn expected_top() -> Characteristics {
     }
 }
 
-/// The literal flipped characteristics: the Flipped face's, with the top's cost and colors.
+/// The literal flipped characteristics: the Flipped face's name, text box, type line and P/T
+/// (CR 710.1b, 710.2), with the top's cost and colors (CR 710.1c) and the top's loyalty, defense
+/// and hand and life modifiers, which CR 710.1b and 710.2 do not replace.
 fn expected_flipped() -> Characteristics {
     Characteristics {
         names: set(&["test.flip_bottom"]),
@@ -60,10 +62,10 @@ fn expected_flipped() -> Characteristics {
         abilities: vec![ability("test.flip_bottom", 1)],
         power: Some(printed(4)),
         toughness: Some(printed(4)),
-        loyalty: None,
-        defense: Some(3),
-        hand_modifier: Some(-1),
-        life_modifier: Some(4),
+        loyalty: Some(1),
+        defense: None,
+        hand_modifier: None,
+        life_modifier: None,
     }
 }
 
@@ -115,8 +117,10 @@ fn flip_710_1b_flipped_status_ignored_off_battlefield() {
 }
 
 /// REQ-OBJ-002, CR 710.1b, 710.1c, 710.2: a flipped permanent has the Flipped face's name, text,
-/// abilities, type line, P/T, loyalty, defense and modifiers, but the normal mana cost, color
-/// indicator and colors, even though the Flipped face declares a different cost and indicator.
+/// abilities, type line and P/T, but the normal mana cost, color indicator and colors, even
+/// though the Flipped face declares a different cost and indicator. Loyalty, defense and the
+/// hand and life modifiers are not among the characteristics CR 710.1b and 710.2 replace, so
+/// they stay the normal face's although the Flipped face declares other values.
 #[test]
 fn flip_710_1c_flipped_on_battlefield_keeps_cost_and_color() {
     let d = flip_def();
@@ -124,6 +128,10 @@ fn flip_710_1c_flipped_on_battlefield_keeps_cost_and_color() {
     // The Flipped face really does declare other values.
     assert_eq!(flip_flipped().mana_cost, some_cost("{9}{W}"));
     assert_eq!(flip_flipped().color_indicator, Some(ColorBitmask::GREEN));
+    assert_eq!(flip_flipped().loyalty, None);
+    assert_eq!(flip_flipped().defense, Some(3));
+    assert_eq!(flip_flipped().hand_modifier, Some(-1));
+    assert_eq!(flip_flipped().life_modifier, Some(4));
     for cast in Cast::ALL {
         for back_up in [false, true] {
             for copying_back_face in [false, true] {
@@ -140,8 +148,9 @@ fn flip_710_1c_flipped_on_battlefield_keeps_cost_and_color() {
     }
 }
 
-/// REQ-OBJ-002, CR 710.1c, 202.3: flipping does not change the mana value: always the normal
-/// cost's, with the context passed.
+/// REQ-OBJ-002, CR 710.1c, 202.3, 202.3e, 107.3m: flipping does not change the mana value:
+/// always the normal cost's; X counts only on the stack, so it is 0 for the permanent whatever
+/// context is passed.
 #[test]
 fn flip_710_1c_mana_value_unchanged_by_flipping() {
     let v = support::vocab();
@@ -160,7 +169,13 @@ fn flip_710_1c_mana_value_unchanged_by_flipping() {
         mana_value(&d, &flipped, ManaValueContext::OffStack, v),
         Ok(1)
     );
-    assert_eq!(mana_value(&d, &flipped, on_stack(4, 0, 0), v), Ok(5));
+    assert_eq!(mana_value(&d, &flipped, on_stack(4, 0, 0), v), Ok(1));
+    let stack = query(ZoneKind::Stack, Cast::None, St::DEFAULT);
+    assert_eq!(mana_value(&d, &stack, on_stack(4, 0, 0), v), Ok(5));
+    assert_eq!(
+        FlipLayout.mana_value(&d, &stack, on_stack(4, 0, 0), v),
+        Ok(5)
+    );
     // A top face with no mana cost: 0, and the flipped permanent has no cost either.
     let mut top = flip_main();
     top.mana_cost = None;
