@@ -225,3 +225,40 @@ fn counter_overflow_fails_cleanly() {
     );
     assert_eq!(w.snap(), before);
 }
+
+// REQ-EVENT-001, CR 122.1, 122.2: counters on an object have one source, the event layer's
+// markers; a characteristics provider's counter values are never used (not by the events, not
+// by the LKI record).
+#[test]
+fn object_counters_have_one_source() {
+    let mut w = World::new();
+    let a = w.create(ZoneKind::Battlefield, P1);
+    w.provider.set_counter(a, "+1/+1", 4);
+    w.provider.set_counter(a, "x", 1);
+    assert_eq!(w.events.markers().counter(a, "+1/+1"), 0);
+
+    w.ok(add(CounterTarget::Object(a), "+1/+1", 2));
+    assert_eq!(w.events.markers().counter(a, "+1/+1"), 2);
+    assert_eq!(w.events.markers().counter(a, "x"), 0);
+
+    // The same setup on another object, for the removal checks.
+    let b = w.create(ZoneKind::Battlefield, P1);
+    w.provider.set_counter(b, "+1/+1", 4);
+    w.provider.set_counter(b, "x", 1);
+    w.ok(add(CounterTarget::Object(b), "+1/+1", 2));
+    let before = w.snap();
+    assert_eq!(w.exec(remove(CounterTarget::Object(b), "x", 1)), Ok(None));
+    assert_eq!(w.snap(), before);
+    let done = w.ok(remove(CounterTarget::Object(b), "+1/+1", 1));
+    assert_eq!(done.outcome, Outcome::CountersRemoved { removed: 1 });
+    assert_eq!(w.events.markers().counter(b, "+1/+1"), 1);
+
+    // The LKI of a departing object shows the markers, never the provider's values.
+    w.ok(GameEvent::ZoneChange {
+        object: a,
+        request: fineprint_core::zones::MoveRequest::new(ZoneKind::Graveyard),
+        cause: fineprint_core::events::ZoneChangeCause::Other,
+    });
+    let expected: BTreeMap<String, i64> = [("+1/+1".to_string(), 2)].into_iter().collect();
+    assert_eq!(w.lki.get(a).expect("LKI").counters(), &expected);
+}

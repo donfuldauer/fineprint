@@ -216,6 +216,42 @@ fn failing_last_event_rolls_back_everything() {
     assert_eq!(w.events.log().len(), log_len + 1);
 }
 
+// REQ-EVENT-001, CR 704.8, 603.10a: a batch whose second event cannot capture LKI (the provider
+// has no characteristics for b) fails with the memory error and rolls back everything, so the
+// first event's LKI record is absent too; after the provider knows b, a retry stores both.
+#[test]
+fn lki_capture_failure_in_batch_rolls_back_everything() {
+    let mut w = World::new();
+    let a = w.create(ZoneKind::Battlefield, P1);
+    let b = w.create(ZoneKind::Battlefield, P1);
+    w.provider.set_missing(b);
+    let before = w.snap();
+    let log_len = w.events.log().len();
+    assert_eq!(
+        w.batch(vec![
+            zc(a, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+            zc(b, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+        ]),
+        Err(EventError::Memory(MemoryError::NoCharacteristics(b)))
+    );
+    assert_eq!(w.snap(), before);
+    assert!(w.lki.get(a).is_none());
+    assert!(w.lki.get(b).is_none());
+    assert_eq!(w.events.log().len(), log_len);
+
+    w.provider.clear_missing(b);
+    let done = w
+        .batch(vec![
+            zc(a, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+            zc(b, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+        ])
+        .expect("retry succeeds");
+    assert_eq!(done.events.len(), 2);
+    assert!(w.lki.get(a).is_some());
+    assert!(w.lki.get(b).is_some());
+    assert_eq!(w.events.log().len(), log_len + 1);
+}
+
 // REQ-EVENT-001: the rollback also covers a failure in the middle of the batch.
 #[test]
 fn failing_middle_event_rolls_back_everything() {
@@ -249,7 +285,12 @@ fn simultaneous_destruction_captures_all_lki_first() {
             .unwrap();
         w.permanents.set_tapped(rider, true).unwrap();
         w.provider.set_attached(host, vec![rider]);
-        w.provider.set_counter(host, "+1/+1", 1);
+        // Contract change C2: object counters live only in the event layer's markers.
+        w.ok(GameEvent::AddCounters {
+            target: CounterTarget::Object(host),
+            kind: "+1/+1".into(),
+            amount: 1,
+        });
 
         let ev_host = zc(host, ZoneKind::Graveyard, ZoneChangeCause::Destroy);
         let ev_rider = zc(rider, ZoneKind::Graveyard, ZoneChangeCause::Destroy);
@@ -312,7 +353,8 @@ fn stale_id_in_same_batch_fails_and_rolls_back() {
     }
 }
 
-// REQ-EVENT-001: events naming the same object are applied in order.
+// REQ-EVENT-001, CR 701.26a, 701.26b: events naming the same object are applied in order; only
+// untapped permanents can be tapped and only tapped permanents can be untapped.
 #[test]
 fn same_object_events_apply_in_order() {
     let mut w = World::new();
@@ -326,7 +368,7 @@ fn same_object_events_apply_in_order() {
         .unwrap();
     assert_eq!(done.events.len(), 3);
     assert!(w.permanents.get(a).unwrap().status().tapped);
-    // The second Tap of [Tap, Tap] finds the permanent already tapped: no event.
+    // REQ-EVENT-001, CR 701.26a, 701.26b: the second Tap of [Tap, Tap] finds the permanent already tapped: no event.
     let b = w.create(ZoneKind::Battlefield, P1);
     let done = w
         .batch(vec![
