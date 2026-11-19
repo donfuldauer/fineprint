@@ -24,6 +24,8 @@ pub mod permanent;
 pub mod replacement;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
+/// Trigger detection: look-back classification, event matching, intervening-if, trigger limits and the waiting-trigger queue (REQ-EVENT-002).
+pub mod triggers;
 /// Checkpoints, rollback, nested durable sub-transactions and the sandbox snapshot store (REQ-CORE-005).
 pub mod txn;
 /// Zones, the zone-move primitive and the CR 400.7 exception registry (REQ-ZONE-001, REQ-CORE-002).

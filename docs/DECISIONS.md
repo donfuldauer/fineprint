@@ -4700,3 +4700,51 @@ state. The proposed SRS edit is a P8 line in docs/HUMAN_QUEUE.md.
 603.10a–g look-back categories itself matches the CR.
 **Alternatives:** Following the SRS citations literally (would cite a rule that does not cover
 tapping).
+
+## #30 FP-029 — Trigger detection design
+
+**Decision:**
+1. *Memory key scheme.* Trigger limits are counted per ability instance (source `ObjectId` +
+   ability id) in the source's `Memory` as ordinary choices (`set_choice`, `ChoiceValue::Number`):
+   `trigger.limit.turn:<abilityId>` (the turn the per-turn count belongs to),
+   `trigger.limit.turn_count:<abilityId>` (triggerings in that turn) and
+   `trigger.limit.game_count:<abilityId>` (triggerings this game). The per-turn count is read as 0
+   when the stored turn differs from the current one. Keys are written only for abilities with a
+   `limit`. A candidate triggers only if both counts are below their limits; then both increment.
+   A non-number value under a key reads as 0.
+2. *`TriggerEnv` abstraction.* Detection reads the game only through a trait (registrations per
+   view, subject/predicate/condition evaluation per view, visibility). The integration unit
+   implements it on the real state; unit and spec tests use fakes. Detection itself is pure
+   apart from the limit counters it writes to the `MemoryTable`.
+3. *No APNAP in the queue.* `WaitingTriggers` keeps creation order and offers
+   `take_for_controller`; the two-part CR 603.3b ordering belongs to the stack unit.
+4. *"From anywhere" is not look-back (CR 603.6c).* `PUT_INTO_GRAVEYARD` looks back only with
+   `from: BATTLEFIELD`; with no `from` filter (or `from: ANY`) it is matched post-event, even when
+   the object came from the battlefield.
+5. *Table choices.* `ZONE_CHANGE`: from battlefield → leaves-the-battlefield, else from graveyard →
+   leaves-graveyard, else to hand or library → hand/library (CR 603.10a), else none. `EXILED`:
+   from battlefield or graveyard → those categories, else none (exile is not a hand or library).
+   `RETURNED_TO_HAND`: from battlefield or graveyard → those categories, otherwise the
+   hand/library category, which applies (pre-event view) only when the object's pre-event id was
+   visible to all players; otherwise it is matched post-event.
+6. *Intervening-if in the matcher's view.* The CR 603.4 trigger-time check runs in the same view
+   as the matcher (pre-event for look-back triggers), with the candidate's bindings. A false
+   condition consumes no limit.
+7. *Limits vs CR 603.2h.* The SRS `limit.perTurn` / `limit.perGame` is a counter on triggerings;
+   CR 603.2h covers only the "Do this only once each turn" wording. The counter model is what the
+   SRS specifies and is implemented as such; whether a given wording maps to it is the
+   definition author's concern.
+8. *Grouping.* A `ONE_OR_MORE` candidate groups the matching events per (view, registration);
+   for the hand/library category, events of one batch split by visibility would give one
+   candidate per view.
+
+**Rationale:** SRS 8.2 (items 1-3 and 8) and the brief's table; CR 603.10, 603.10a-g, 603.6a,
+603.6c, 603.4, 603.2c, 603.3b. Ordinary choices are lost on a zone change (the memory module's rule), so a new
+object starts with fresh limits, as a new object should. Putting the turn number in the Memory
+avoids a reset pass at each turn start.
+
+**Alternatives:** A per-turn reset of counters at turn start (rejected: needs a hook into the turn
+structure that this unit does not own); keying limits by ability id alone in a global table
+(rejected: SRS 8.2 item 8 says per ability instance in Memory); ordering the queue by APNAP here
+(rejected: CR 603.3b is two-part and belongs to the stack unit); treating every
+`PUT_INTO_GRAVEYARD` from the battlefield as look-back (rejected: CR 603.6c).
