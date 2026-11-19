@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+/// The choice protocol: pending choice requests, responses, generation from choice specs, validation and deterministic suspend/resume (REQ-NET-003, REQ-DSL-011).
+pub mod choice;
 /// Game events, execution primitives, the executed-event log and the history ledger (REQ-EVENT-001, REQ-DSL-003).
 pub mod events;
 /// Who knows what, shuffle knowledge and the redacted per-player zones view (REQ-CORE-004).
