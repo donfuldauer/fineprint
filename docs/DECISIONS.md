@@ -4077,7 +4077,7 @@ after the application, CR 614.5), and right after the parent has resolved they a
 members of the SAME batch, with the parent's root (the submitted member, or the first member of its CR 704.7
 group), the root's submitted (object, destination) and depth parent + 1 (above `MAX_CHILD_DEPTH`
 is `DepthExceeded`). The loop: phase A repeatedly takes the not-started member with the least key
-(APNAP rank of its chooser, chooser, root, member index; a group at its first member, its other
+(APNAP rank of its chooser, chooser, lineage path, member index; a group at its first member, its other
 members started with it; only submitted members are grouped), resolves it and at once takes up the
 `Instead` events it queued, which then compete by the same key (see "Descendant scheduling and the
 roles of the impossible-instruction check (round 6)"); when nothing is unstarted, phases B and C
@@ -4198,7 +4198,7 @@ A full division uses the whole pool, so no division follows a division of the sa
 events that are not zone changes execute before the zone changes, which changes the order for
 `sba = false` batches ([move Y, tap Y] now succeeds). (e) Results of DIFFERENT objects or groups
 still compete for a one-use effect in APNAP order of their choosers, then submission order (an
-`Instead` descendant at the submission position of the event it replaces), so reversing the
+`Instead` descendant at the position of the event it replaces, recursively), so reversing the
 submission can change which object such an effect applies to (K1; documented). Since round 6 (D1)
 descendants are no longer deferred behind the members that were not yet started with their parent:
 each is scheduled as soon as its parent has resolved.
@@ -4218,13 +4218,23 @@ CR 616.1 orders by chooser, and the one-use effect's choice belongs to the first
 
 ## #29 FP-028 — Descendant scheduling and the roles of the impossible-instruction check (round 6)
 
-**Decision:** (Review round 6, D1 and D2.) Scheduling: every not-yet-started member of a batch,
-submitted or `Instead` descendant, is ordered by ONE key: (APNAP rank of its chooser, chooser id,
-root, member index). The rank is the chooser's position in the APNAP order; choosers outside it
-come last by ascending id. `root` is the submitted member the lineage descends from (the first
-member of a CR 704.7 group for a group's lineage), so a descendant takes the submission position
-of the event it replaces; among members with the same chooser and root the earlier-created goes
-first. Phase A takes the not-started member with the least key (a group at its first member, the
+**Decision:** (Review round 6, D1, D2 and thread r4633092145.) Scheduling: every not-yet-started
+member of a batch, submitted or `Instead` descendant, is ordered by ONE key: (APNAP rank of its
+chooser, chooser id, lineage path compared lexicographically, member index). The rank is the
+chooser's position in the APNAP order; choosers outside it come last by ascending id. The lineage
+path of a submitted member is [its index] ([the group's first index] for a CR 704.7 group member);
+a descendant's path is its parent's path followed by its position in the parent's `Instead`
+output. So a descendant takes the exact position of the event it replaces, recursively: a
+grandchild sorts at its parent's place among the parent's siblings, not after them (test
+`req_event_001_r6_lineage_path_grandchild_takes_parent_position`: T -> Instead[tap U, gain 3],
+U -> Instead[gain 1], a one-use doubler: the gain of 1 takes it, 2 + 3 = 25). The member index
+only separates a group's members, which share a path. The first round-6 version ordered by
+(root, member index), so every descendant of one submitted event shared one position and creation
+order decided (27 in that shape); rejected in review (r4633092145). Consequence: lineages are
+expanded depth-first, so an overriding `Instead` chain with a small fan-out (a draw doubled at
+every level) reaches `MAX_CHILD_DEPTH` (about 130 events) before `MAX_BUS_EVENTS` and is
+`DepthExceeded`, not `WorkLimit`; a wide fan-out (100 per level) still hits `WorkLimit`; both roll
+everything back (unit test `req_event_001_r1_f7_work_budget`, corrected under R10). Phase A takes the not-started member with the least key (a group at its first member, the
 group's other members started with it), resolves it, and at once takes up the `Instead` events it
 queued as not-started members. A descendant can start only after its parent resolved; if its
 chooser ranks before members that already resolved, it simply runs next. Requests for a
@@ -4254,8 +4264,9 @@ can't be attached to does not move the attachment. CR 608.2h: "it's the object a
 it most recently existed—that does it", so the damage source keeps dealing damage, and a copy would
 use last known information.
 **Alternatives:** Scheduling descendants after the whole cohort of members not yet started with
-their parent (round 5; rejected, D1); depth-first scheduling by lineage path (equivalent for these
-shapes; rejected as more state for no observable gain); dropping a damage event whose source moved
+their parent (round 5; rejected, D1); ordering descendants by (root, creation index) (round 6 first
+version; rejected, r4633092145: a grandchild lost its parent's place among the parent's siblings);
+dropping a damage event whose source moved
 (rejected: CR 608.2h); letting a `BecomeCopy` of a moved object fail (rejected: rolls back the
 whole call); changing `events/` to copy from last known information (outside this unit's paths; a
 later unit).
@@ -4292,8 +4303,8 @@ player; otherwise the first player of the APNAP order (the active player). APNAP
 players in ascending id order; with no active player, unrotated. Events are processed in that
 order of their choosers (as submitted), submission order within one chooser; choosers outside the
 order come last by ascending id. An `Instead` descendant is scheduled with the same order as the
-submitted events, at the submission position of the event it replaces, as soon as that event has
-resolved (round 6, D1; CR 101.4, CR 616.1). The chooser asked at a request is recomputed from the event as
+submitted events, at the position of the event it replaces (recursively, by lineage path), as soon
+as that event has resolved (round 6, D1 and r4633092145; CR 101.4, CR 616.1). The chooser asked at a request is recomputed from the event as
 modified so far (a `SetController` on a token changes who chooses next).
 **Rationale:** SRS 8.1 step [2]; CR 616.1 "the affected object's controller (or its owner if it
 has no controller)"; CR 112.2 every spell has a controller; CR 109.4 only objects on the stack or

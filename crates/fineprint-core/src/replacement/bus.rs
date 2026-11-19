@@ -60,7 +60,7 @@ pub struct BusReport {
 ///
 /// Each event is processed in APNAP order of its chooser, then submission order (CR 101.4,
 /// CR 616.1); an `Instead` descendant is processed as soon as the event it replaces has
-/// resolved, in the same order at that event's submission position: the applicable effects
+/// resolved, in the same order at that event's position, recursively: the applicable effects
 /// are collected against the current state, excluding the event's applied effects (CR 614.5)
 /// unless an effect overrides that (CR 903.9b-style); contained effects wait while a
 /// non-contained one applies (CR 616.1g); only the first non-empty tier is choosable
@@ -81,8 +81,8 @@ pub struct BusReport {
 /// executed and the second fails with `UnknownObject`, rolling back the call (a caller's
 /// duplicate). That choice among one object's moves does not depend on submission order; but
 /// the results of different objects or separate groups are resolved in APNAP order of their
-/// choosers, then submission order (an `Instead` descendant taking the submission position of
-/// the event it replaces), and may compete for a one-use effect, so reversing the submission
+/// choosers, then submission order (an `Instead` descendant taking the position of the event
+/// it replaces, recursively), and may compete for a one-use effect, so reversing the submission
 /// can change which object such an effect applies to. The `Prevent` follow-up events of the whole
 /// batch form one child batch after it (no applied effects, CR 615.5), processed the same way.
 /// A member stops just before a prevention pool is first applied to it;
@@ -212,6 +212,10 @@ struct Member {
     /// The submitted member its `Instead` lineage descends from (itself if submitted; the
     /// group's first member if that member is in a CR 704.7 group): its execution slot.
     root: usize,
+    /// Its lineage position (see [`schedule_key`]): `[root]` for a submitted member (the group's
+    /// first index for a CR 704.7 group member); for an `Instead` descendant, its parent's path
+    /// followed by its position in the parent's `Instead` output.
+    path: Vec<usize>,
     /// Its nesting: the batch's child depth plus its `Instead` generation (see
     /// [`MAX_CHILD_DEPTH`]).
     depth: usize,
@@ -238,6 +242,7 @@ impl Member {
             stopped: None,
             group: None,
             root,
+            path: vec![root],
             depth,
             submitted_move,
         }
@@ -250,9 +255,10 @@ struct Queue {
     /// The `Prevent` follow-up events (CR 615.5), in the order they were queued: one child
     /// batch after the executed batch.
     children: Vec<EventInstance>,
-    /// `(parent member, event)`: the `Instead` events not yet taken up as members of the same
-    /// batch (CR 614.6), each with its parent's applied set (CR 614.5); see [`Bus::absorb`].
-    instead: Vec<(usize, EventInstance)>,
+    /// `(parent member, position in the parent's output, event)`: the `Instead` events not yet
+    /// taken up as members of the same batch (CR 614.6), each with its parent's applied set
+    /// (CR 614.5); see [`Bus::absorb`].
+    instead: Vec<(usize, usize, EventInstance)>,
     /// `(member, copied)`: the object member `member` puts onto the battlefield enters as a
     /// copy of `copied` (CR 614.1c, CR 707.5).
     copies: Vec<(usize, ObjectId)>,
@@ -333,7 +339,7 @@ impl Bus<'_, '_, '_> {
     /// executed while the batch resolves, so every member, lineage included, is judged against
     /// the state before the batch (CR 616.1f, CR 616.2). The loop: phase A repeatedly takes the
     /// not-started member with the least [`schedule_key`] (APNAP rank of its chooser, chooser,
-    /// root, member index; CR 101.4, CR 616.1; a CR 704.7 group at its first member), resolves
+    /// lineage path, member index; CR 101.4, CR 616.1; a CR 704.7 group at its first member), resolves
     /// it and at once takes up the `Instead` events it queued as not-started members, so a
     /// descendant competes by the same key as soon as its parent has resolved (it can't start
     /// earlier; if its chooser ranks before members that already resolved, it simply runs
@@ -489,30 +495,34 @@ impl Bus<'_, '_, '_> {
     }
 
     /// CR 614.6, CR 704.3: takes up the queued `Instead` events as new members of the batch,
-    /// each inheriting its parent's root and submitted move, one generation deeper; called
+    /// each inheriting its parent's root and submitted move, one generation deeper, its path
+    /// the parent's path followed by its position in the parent's output; called
     /// right after each resolve, so the new members are scheduled by phase A at once. A member
     /// deeper than [`MAX_CHILD_DEPTH`] is [`BusError::DepthExceeded`]. An event that names a
     /// retired object in a required role is ignored (see [`Bus::impossible`]). The events were
     /// charged against the work budget when they were queued.
     fn absorb(&mut self, members: &mut Vec<Member>, queue: &mut Queue) -> Result<(), BusError> {
-        for (parent, instance) in std::mem::take(&mut queue.instead) {
-            let (root, depth, submitted_move) = {
+        for (parent, position, instance) in std::mem::take(&mut queue.instead) {
+            let (root, depth, submitted_move, mut path) = {
                 let p = &members[parent];
-                (p.root, p.depth + 1, p.submitted_move)
+                (p.root, p.depth + 1, p.submitted_move, p.path.clone())
             };
+            path.push(position);
             if depth > MAX_CHILD_DEPTH {
                 return Err(BusError::DepthExceeded);
             }
             if self.impossible(instance.event()) {
                 continue;
             }
-            members.push(Member::new(
+            let mut member = Member::new(
                 self.chooser(instance.event())?,
                 &instance,
                 root,
                 depth,
                 submitted_move,
-            ));
+            );
+            member.path = path;
+            members.push(member);
         }
         Ok(())
     }
@@ -1121,12 +1131,15 @@ impl Bus<'_, '_, '_> {
                 }
                 self.charge(events.len())?;
                 // CR 614.6, CR 704.3: they join this batch (see `absorb`).
-                queue.instead.extend(events.iter().cloned().map(|e| {
-                    (
-                        index,
-                        EventInstance::new(e).with_applied(member.applied.clone()),
-                    )
-                }));
+                queue
+                    .instead
+                    .extend(events.iter().cloned().enumerate().map(|(position, e)| {
+                        (
+                            index,
+                            position,
+                            EventInstance::new(e).with_applied(member.applied.clone()),
+                        )
+                    }));
             }
             Action::Prevent { then } => {
                 // CR 615.6: prevented damage never happens. CR 615.7: a pool prevents up to
@@ -1197,17 +1210,23 @@ impl Bus<'_, '_, '_> {
 
 /// CR 101.4, CR 616.1, SRS 8.1 step [2]: the phase A order of member `index` (`m`) among the
 /// not-started members of a batch, given the players in APNAP order: (APNAP rank of its chooser,
-/// chooser, root, member index). The rank is the chooser's position in `players`; a chooser
-/// outside it ranks last, by ascending id. An `Instead` descendant has its lineage's root, so
-/// it takes the submission position of the event it replaces; within one chooser and root the
-/// earlier-created member goes first. For submitted members (root = own index, or the group's
-/// first index) this is the order of [`Bus::apnap_order`].
-fn schedule_key(players: &[PlayerId], m: &Member, index: usize) -> (usize, PlayerId, usize, usize) {
+/// chooser, lineage path compared lexicographically, member index). The rank is the chooser's
+/// position in `players`; a chooser outside it ranks last, by ascending id. The path of an
+/// `Instead` descendant extends its parent's path by its position in the parent's output, so a
+/// descendant takes the exact position of the event it replaces, recursively (a grandchild
+/// sorts at its parent's place among its parent's siblings). The member index only breaks the
+/// tie of a CR 704.7 group's members, which share a path. For submitted members (path = [own
+/// index], or [the group's first index]) this is the order of [`Bus::apnap_order`].
+fn schedule_key<'m>(
+    players: &[PlayerId],
+    m: &'m Member,
+    index: usize,
+) -> (usize, PlayerId, &'m [usize], usize) {
     let rank = players
         .iter()
         .position(|&q| q == m.chooser)
         .unwrap_or(players.len());
-    (rank, m.chooser, m.root, index)
+    (rank, m.chooser, m.path.as_slice(), index)
 }
 
 /// CR 704.3, CR 704.7: state-based actions that would have the same result happen at the same
@@ -1235,6 +1254,7 @@ fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
         for &i in &group {
             members[i].group = Some(group[0]);
             members[i].root = group[0];
+            members[i].path = vec![group[0]];
         }
         groups.insert(group[0], group);
     }

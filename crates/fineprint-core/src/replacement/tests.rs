@@ -2535,27 +2535,32 @@ fn req_event_001_r1_f6_enters_as_copy_is_not_replaced() {
     assert_eq!(run.hash, before);
 }
 
-/// REQ-EVENT-001, F7: an overriding (CR 614.5 exception) `Instead` that doubles a draw hits
-/// the shared work budget (`WorkLimit`) and changes nothing; exactly `MAX_BUS_EVENTS` events
-/// are allowed, one more is `WorkLimit`, children included.
+/// REQ-EVENT-001, F7: an overriding (CR 614.5 exception) `Instead` that expands a draw into
+/// 100 draws hits the shared work budget (`WorkLimit`) and changes nothing; exactly
+/// `MAX_BUS_EVENTS` events are allowed, one more is `WorkLimit`, children included. Round 6
+/// (lineage paths, CR 101.4, CR 616.1): descendants are scheduled depth-first, so an overriding
+/// chain that only doubles reaches `MAX_CHILD_DEPTH` (about 130 events) before the budget and
+/// is `DepthExceeded`, equally rolled back.
 #[test]
 fn req_event_001_r1_f7_work_budget() {
     assert_eq!(MAX_BUS_EVENTS, 4096);
-    let mut w = World::new();
     let draw = GameEvent::Draw { player: p(1) };
-    w.add(
-        ReplacementEffect::new(
-            e(1),
-            EventMatcher::new(BusEventKind::Draw),
-            Action::Instead(vec![draw.clone(), draw.clone()]),
-        )
-        .with_overrides_614_5(true),
-    );
-    let before = w.state_hash();
-    let run = drive(&w, vec![draw], false, &[]);
-    assert_eq!(run.out, Err(BusError::WorkLimit));
-    assert_eq!(run.hash, before);
-    assert_eq!(run.state.registry, w.registry);
+    for (fan_out, error) in [(100, BusError::WorkLimit), (2, BusError::DepthExceeded)] {
+        let mut w = World::new();
+        w.add(
+            ReplacementEffect::new(
+                e(1),
+                EventMatcher::new(BusEventKind::Draw),
+                Action::Instead(vec![draw.clone(); fan_out]),
+            )
+            .with_overrides_614_5(true),
+        );
+        let before = w.state_hash();
+        let run = drive(&w, vec![draw.clone()], false, &[]);
+        assert_eq!(run.out, Err(error));
+        assert_eq!(run.hash, before);
+        assert_eq!(run.state.registry, w.registry);
+    }
     // The submitted batch alone.
     let w = World::new();
     let run = drive(&w, vec![life(1, 1); MAX_BUS_EVENTS], false, &[]);
@@ -5010,4 +5015,43 @@ fn req_event_001_r6_d6_tap_of_tapped_permanent_offers_no_effect() {
     assert_eq!(ok(&run).applications, vec![e(1)]);
     assert_eq!(run.state.life(1), 21);
     assert!(!run.state.permanents.get(obj).unwrap().status().tapped);
+}
+
+/// REQ-EVENT-001, REQ-ARCH-002, round 6 (r4633092145): CR 101.4, CR 616.1, CR 614.6: a
+/// grandchild takes the exact position of the event it replaces. P1's tap of T becomes
+/// [tap U, gain 3]; the tap of U becomes [gain 1]. The gain of 1 replaces the tap of U at its
+/// position before the gain of 3, so it takes the one-use doubler: 2 + 3 = 25. With P2's gain
+/// of 1 submitted too, in either order, P1's lineage still goes first (P2 ends at 21). Control:
+/// with the output [gain 3, tap U] the gain of 3 is first: 6 + 1 = 27.
+#[test]
+fn req_event_001_r6_lineage_path_grandchild_takes_parent_position() {
+    let world = |tap_u_first: bool| {
+        let mut w = World::new();
+        let t = w.create(1, ZoneKind::Battlefield);
+        let u = w.create(1, ZoneKind::Battlefield);
+        let mut output = vec![GameEvent::Tap { object: u }, life(1, 3)];
+        if !tap_u_first {
+            output.reverse();
+        }
+        w.add(tap_instead(1, t, output));
+        w.add(tap_instead(2, u, vec![life(1, 1)]));
+        w.add(doubler());
+        (w, t)
+    };
+    let (w, t) = world(true);
+    let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1), e(2), e(9)]);
+    assert_eq!(run.state.life(1), 25);
+    assert_eq!(life_deltas(ok(&run)), vec![(p(1), 3), (p(1), 2)]);
+    for events in [
+        vec![GameEvent::Tap { object: t }, life(2, 1)],
+        vec![life(2, 1), GameEvent::Tap { object: t }],
+    ] {
+        let run = drive_twice(&w, events, false, &[]);
+        assert_eq!(run.state.life(1), 25);
+        assert_eq!(run.state.life(2), 21);
+    }
+    let (w, t) = world(false);
+    let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[]);
+    assert_eq!(run.state.life(1), 27);
 }
