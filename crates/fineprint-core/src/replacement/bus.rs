@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fineprint_base::encode::CanonicalEncode;
 use fineprint_base::ids::{EffectId, IdGenerator, ObjectId, PlayerId};
 
 use super::types::{
@@ -19,12 +20,12 @@ use crate::choice::{
 };
 use crate::events::{
     AppliedEffects, EventBatch, EventContext, EventError, EventInstance, EventState, ExecutedBatch,
-    GameEvent, Outcome,
+    GameEvent,
 };
 use crate::memory::{LkiStore, MemoryTable};
 use crate::permanent::Permanents;
 use crate::state::GameState;
-use crate::zones::{ZoneId, ZoneKind, Zones};
+use crate::zones::{ZoneKind, Zones};
 
 /// The deepest nesting of child event batches (REQ-EVENT-001): a child batch at a depth above
 /// this is [`BusError::DepthExceeded`]. The submitted batch is depth 0.
@@ -64,8 +65,13 @@ pub struct BusReport {
 /// child events form one child batch processed the same way. An `Instead` child keeps the
 /// applied set of the event it replaces (CR 614.5); other children start with none. With
 /// `sba` true, zone changes of the same object to the same destination are one event
-/// (CR 704.7). Before a batch is processed, a player whose prevention pool cannot cover
-/// simultaneous damage from several sources divides it among them (CR 615.7). At most
+/// (CR 704.7); the surviving event of such a group is chosen by its content, never by its
+/// submission position. A member stops just before a prevention pool is first applied to it;
+/// once every member has stopped or finished, a player whose pool cannot cover the current
+/// simultaneous damage from several sources divides it among them, each source's share at
+/// most its damage (CR 615.7), and the stopped members continue. An object that enters as a
+/// copy is a copy as part of its entry (CR 707.5). A shield-less prevention effect queues its
+/// follow-up events once per recipient per batch (CR 122.1c, CR 615.13). At most
 /// [`MAX_BUS_EVENTS`] event instances are taken up in one call.
 ///
 /// # Errors
@@ -172,8 +178,26 @@ struct Member {
     repeats: usize,
     /// Its chooser as submitted (CR 616.1).
     chooser: PlayerId,
-    /// The `Shield::Pool` effects whose pool its chooser allocated among sources (CR 615.7).
-    pools: BTreeSet<EffectId>,
+    /// The `Shield::Pool` effects whose CR 615.7 allocation step has run for it.
+    allocated: BTreeSet<EffectId>,
+    /// The `Shield::Pool` effects it no longer takes (its source's allotment was used up).
+    declined: BTreeSet<EffectId>,
+    /// The `Shield::Pool` effect it stopped just before applying, waiting for its allocation.
+    stopped: Option<EffectId>,
+}
+
+impl Member {
+    fn new(chooser: PlayerId, instance: &EventInstance) -> Member {
+        Member {
+            chooser,
+            event: Some(instance.event().clone()),
+            applied: instance.applied_effects().clone(),
+            repeats: 0,
+            allocated: BTreeSet::new(),
+            declined: BTreeSet::new(),
+            stopped: None,
+        }
+    }
 }
 
 /// What the members of one batch queued while they were resolved.
@@ -181,9 +205,12 @@ struct Member {
 struct Queue {
     /// Child events, in the order they were queued, with their applied sets.
     children: Vec<EventInstance>,
-    /// `(member, copied)`: the object member `member` puts onto the battlefield becomes a copy
-    /// of `copied` (CR 614.1c).
+    /// `(member, copied)`: the object member `member` puts onto the battlefield enters as a
+    /// copy of `copied` (CR 614.1c, CR 707.5).
     copies: Vec<(usize, ObjectId)>,
+    /// `(effect, affected object, affected player)` of the shield-less prevention effects
+    /// whose follow-up events this batch already queued (CR 122.1c, CR 615.13).
+    prevented_once: BTreeSet<(EffectId, Option<ObjectId>, Option<PlayerId>)>,
 }
 
 struct Bus<'r, 'c, 'h> {
@@ -193,8 +220,9 @@ struct Bus<'r, 'c, 'h> {
     report: BusReport,
     /// Event instances taken up so far in this call (see [`MAX_BUS_EVENTS`]).
     work: usize,
-    /// The CR 615.7 allotments of the current batch: `(pool effect, chooser, source)` to the
-    /// damage of that source the shield may still prevent.
+    /// The CR 615.7 allotments of the current allocation of each pool and chooser:
+    /// `(pool effect, chooser, source)` to the damage of that source the shield may still
+    /// prevent.
     allotments: BTreeMap<(EffectId, PlayerId, ObjectId), i64>,
 }
 
@@ -224,92 +252,78 @@ impl Bus<'_, '_, '_> {
             return Ok(());
         }
         let mut members = Vec::with_capacity(events.len());
-        for instance in events {
-            members.push(Member {
-                chooser: self.chooser(instance.event())?,
-                event: Some(instance.event().clone()),
-                applied: instance.applied_effects().clone(),
-                repeats: 0,
-                pools: BTreeSet::new(),
-            });
+        for instance in &events {
+            members.push(Member::new(self.chooser(instance.event())?, instance));
         }
         if sba {
             coalesce(&mut members);
         }
         let choosers: Vec<PlayerId> = members.iter().map(|m| m.chooser).collect();
         let order = self.apnap_order(&choosers);
-        self.allocate(&mut members, &order)?;
         let mut queue = Queue::default();
+        // Phase A: every member runs until it finishes or stops before a prevention pool.
         for &i in &order {
             self.resolve(&mut members, i, &mut queue)?;
         }
-        let entered = self.execute(&members)?;
-        self.copy(&queue.copies, &entered)?;
+        // Phases B and C (CR 615.7, CR 616.1f, CR 616.2): the lowest pool among stopped
+        // members is allocated on the current damage, per chooser in APNAP order; its stopped
+        // members then take it and run on until they finish or stop again.
+        while let Some(pool) = members.iter().filter_map(|m| m.stopped).min() {
+            let mut group_choosers: Vec<PlayerId> = Vec::new();
+            for &i in &order {
+                let m = &members[i];
+                if m.stopped == Some(pool) && !group_choosers.contains(&m.chooser) {
+                    group_choosers.push(m.chooser);
+                }
+            }
+            for chooser in group_choosers {
+                let group: Vec<usize> = order
+                    .iter()
+                    .copied()
+                    .filter(|&i| members[i].stopped == Some(pool) && members[i].chooser == chooser)
+                    .collect();
+                self.allocate(pool, chooser, &mut members, &group)?;
+                for &i in &group {
+                    self.take_pool(&mut members, i, pool, &mut queue)?;
+                    self.resolve(&mut members, i, &mut queue)?;
+                }
+            }
+        }
+        self.execute(&members, &queue.copies)?;
         if queue.children.is_empty() {
             return Ok(());
         }
         self.run(queue.children, false, depth + 1)
     }
 
-    /// Executes the surviving events as one batch in submission order (SRS 8.1: execute E);
-    /// returns, per member index, the object it put onto the battlefield.
-    fn execute(&mut self, members: &[Member]) -> Result<BTreeMap<usize, ObjectId>, BusError> {
-        let survivors: Vec<(usize, EventInstance)> = members
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                m.event
-                    .clone()
-                    .map(|e| (i, EventInstance::new(e).with_applied(m.applied.clone())))
-            })
-            .collect();
-        let mut entered = BTreeMap::new();
-        if survivors.is_empty() {
-            return Ok(entered);
-        }
-        let batch = EventBatch::new(survivors.iter().map(|(_, s)| s.clone()).collect());
-        let executed = self.ctx.execute_batch(&batch)?;
-        // Executed events are the survivors that occurred, in submission order.
-        let mut next = executed.events.iter().peekable();
-        for (i, instance) in &survivors {
-            if let Some(ex) = next.peek()
-                && ex.instance == *instance
-            {
-                if let Some(object) = entered_object(ex.outcome) {
-                    entered.insert(*i, object);
-                }
-                next.next();
+    /// Executes the surviving events as one batch in submission order (SRS 8.1: execute E).
+    /// CR 707.5, CR 614.1c, CR 616.1c: an object that enters as a copy (`copies`, by member
+    /// index) is a copy as part of its own entering event, in this one executed batch; the
+    /// copy is not routed through replacement collection (the 614.12 look-ahead is a later
+    /// unit). The copy of a member that did not survive or did not enter is skipped.
+    fn execute(
+        &mut self,
+        members: &[Member],
+        copies: &[(usize, ObjectId)],
+    ) -> Result<(), BusError> {
+        let mut position: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut survivors: Vec<EventInstance> = Vec::new();
+        for (i, m) in members.iter().enumerate() {
+            if let Some(e) = &m.event {
+                position.insert(i, survivors.len());
+                survivors.push(EventInstance::new(e.clone()).with_applied(m.applied.clone()));
             }
         }
-        if !executed.events.is_empty() {
-            self.report.executed.push(executed);
-        }
-        Ok(entered)
-    }
-
-    /// CR 614.1c, CR 616.1c: an object that enters as a copy is a copy as part of its entry.
-    /// The copies are executed directly, as one batch right after the entry batch, without
-    /// replacement collection (the same-event entry with the ETB look-ahead is a later unit).
-    fn copy(
-        &mut self,
-        copies: &[(usize, ObjectId)],
-        entered: &BTreeMap<usize, ObjectId>,
-    ) -> Result<(), BusError> {
-        let events: Vec<EventInstance> = copies
-            .iter()
-            .filter_map(|(member, copied)| {
-                entered.get(member).map(|&object| {
-                    EventInstance::new(GameEvent::BecomeCopy {
-                        object,
-                        copied: *copied,
-                    })
-                })
-            })
-            .collect();
-        if events.is_empty() {
+        if survivors.is_empty() {
             return Ok(());
         }
-        let executed = self.ctx.execute_batch(&EventBatch::new(events))?;
+        let entry_copies: Vec<(usize, ObjectId)> = copies
+            .iter()
+            .filter_map(|(member, copied)| position.get(member).map(|&p| (p, *copied)))
+            .collect();
+        let executed = self
+            .ctx
+            .execute_batch_with_entry_copies(&EventBatch::new(survivors), &entry_copies)?;
         if !executed.events.is_empty() {
             self.report.executed.push(executed);
         }
@@ -482,7 +496,7 @@ impl Bus<'_, '_, '_> {
             .filter(|e| e.overrides_614_5 || !member.applied.contains(e.id))
             .filter(|e| match e.shield {
                 Some(Shield::Uses(n)) => n > 0,
-                Some(Shield::Pool(n)) => n > 0 && self.allotment(e.id, member, event) != Some(0),
+                Some(Shield::Pool(n)) => n > 0 && !member.declined.contains(&e.id),
                 None => true,
             })
             .filter(|e| self.matches(&e.matcher, event))
@@ -503,12 +517,9 @@ impl Bus<'_, '_, '_> {
             .collect()
     }
 
-    /// CR 615.7: what is left of the allotment the chooser gave `event`'s source from pool
-    /// `pool`, if the member's damage was allocated.
+    /// CR 615.7: what is left of the allotment `member`'s chooser gave `event`'s source from
+    /// pool `pool`, if the pool's current allocation for that chooser divided it.
     fn allotment(&self, pool: EffectId, member: &Member, event: &GameEvent) -> Option<i64> {
-        if !member.pools.contains(&pool) {
-            return None;
-        }
         let GameEvent::Damage {
             source: Some(source),
             ..
@@ -521,71 +532,95 @@ impl Bus<'_, '_, '_> {
             .copied()
     }
 
-    /// CR 615.7: before the batch is processed, each chooser whose simultaneous damage from
-    /// two or more sources exceeds a prevention pool chooses which damage the pool prevents
-    /// (`DIVIDE_VALUE`), in ascending pool id, then APNAP chooser order.
-    fn allocate(&mut self, members: &mut [Member], order: &[usize]) -> Result<(), BusInterrupt> {
-        self.allotments.clear();
-        let pools: Vec<(EffectId, i64, EventMatcher)> = self
-            .registry
-            .iter()
-            .filter_map(|e| match e.shield {
-                Some(Shield::Pool(n)) if n > 0 => Some((e.id, n, e.matcher.clone())),
-                _ => None,
-            })
-            .collect();
-        if pools.is_empty() {
+    /// CR 615.7, CR 616.1f, CR 616.2: the allocation of pool `pool` for `chooser`'s members
+    /// `group`, all stopped just before taking it, on their CURRENT damage (after every
+    /// modification so far). The eligible members are the group's damage events with a
+    /// source and an amount above 0 that the pool matches now; if they come from two or more
+    /// sources and their total exceeds what is left of the pool, the chooser divides the pool
+    /// among the sources (`DIVIDE_VALUE`), no source getting more than its damage. Otherwise
+    /// nothing is asked and the pool applies in order.
+    fn allocate(
+        &mut self,
+        pool: EffectId,
+        chooser: PlayerId,
+        members: &mut [Member],
+        group: &[usize],
+    ) -> Result<(), BusInterrupt> {
+        self.allotments
+            .retain(|&(p, c, _), _| (p, c) != (pool, chooser));
+        for &i in group {
+            members[i].allocated.insert(pool);
+        }
+        let Some(effect) = self.registry.get(pool) else {
+            return Ok(());
+        };
+        let Some(Shield::Pool(remaining)) = effect.shield else {
+            return Ok(());
+        };
+        let matcher = effect.matcher.clone();
+        let mut caps: BTreeMap<ObjectId, i64> = BTreeMap::new();
+        let mut total: i64 = 0;
+        for &i in group {
+            let Some(
+                event @ GameEvent::Damage {
+                    source: Some(source),
+                    amount,
+                    ..
+                },
+            ) = &members[i].event
+            else {
+                continue;
+            };
+            if *amount <= 0 || !self.matches(&matcher, event) {
+                continue;
+            }
+            let entry = caps.entry(*source).or_insert(0);
+            *entry = entry.saturating_add(*amount);
+            total = total.saturating_add(*amount);
+        }
+        if caps.len() < 2 || total <= remaining {
             return Ok(());
         }
-        let mut players: Vec<PlayerId> = Vec::new();
-        for &i in order {
-            if !players.contains(&members[i].chooser) {
-                players.push(members[i].chooser);
-            }
-        }
-        for (pool_id, pool, matcher) in pools {
-            for &chooser in &players {
-                let mut eligible = Vec::new();
-                let mut sources: BTreeMap<ObjectId, i64> = BTreeMap::new();
-                let mut total: i64 = 0;
-                for (i, m) in members.iter().enumerate() {
-                    if m.chooser != chooser || m.applied.contains(pool_id) {
-                        continue;
-                    }
-                    let Some(
-                        event @ GameEvent::Damage {
-                            source: Some(source),
-                            amount,
-                            ..
-                        },
-                    ) = &m.event
-                    else {
-                        continue;
-                    };
-                    if *amount <= 0 || !self.matches(&matcher, event) {
-                        continue;
-                    }
-                    eligible.push(i);
-                    let entry = sources.entry(*source).or_insert(0);
-                    *entry = entry.saturating_add(*amount);
-                    total = total.saturating_add(*amount);
-                }
-                if sources.len() < 2 || total <= pool {
-                    continue;
-                }
-                let shares = self.ask_division(chooser, pool, &sources)?;
-                for (source, share) in shares {
-                    self.allotments.insert((pool_id, chooser, source), share);
-                }
-                for i in eligible {
-                    members[i].pools.insert(pool_id);
-                }
-            }
+        let shares = self.ask_division(chooser, remaining, &caps)?;
+        for (source, share) in shares {
+            self.allotments.insert((pool, chooser, source), share);
         }
         Ok(())
     }
 
-    /// CR 615.7: asks `chooser` to divide `pool` among `sources` (ascending id).
+    /// Phase C for member `i`, stopped before pool `pool`: applies it (CR 615.7: up to the
+    /// source's allotment), or, if the source's allotment is used up or the pool is gone,
+    /// declines it so the member continues without it.
+    fn take_pool(
+        &mut self,
+        members: &mut [Member],
+        i: usize,
+        pool: EffectId,
+        queue: &mut Queue,
+    ) -> Result<(), BusInterrupt> {
+        members[i].stopped = None;
+        let Some(event) = members[i].event.clone() else {
+            return Ok(());
+        };
+        let effect = match self.registry.get(pool) {
+            Some(e) if matches!(e.shield, Some(Shield::Pool(n)) if n > 0) => e.clone(),
+            _ => {
+                members[i].declined.insert(pool);
+                return Ok(());
+            }
+        };
+        if self.allotment(pool, &members[i], &event) == Some(0) {
+            members[i].declined.insert(pool);
+            return Ok(());
+        }
+        self.apply_and_record(&mut members[i], i, &effect, queue)?;
+        Ok(())
+    }
+
+    /// CR 615.7: asks `chooser` to divide `pool` among `sources` (ascending id, each with its
+    /// cap: the source's current eligible damage). The bus rejects a share above its source's
+    /// cap (the request's payload carries only minimums); the timeout default fills the
+    /// sources in ascending id, each up to its cap, until the pool is used.
     fn ask_division(
         &mut self,
         chooser: PlayerId,
@@ -598,10 +633,14 @@ impl Bus<'_, '_, '_> {
             .map(|&s| (ChoiceTarget::Object(s), 0))
             .collect();
         let count = u64::try_from(recipients.len()).unwrap_or(u64::MAX);
-        let default: Vec<(ChoiceTarget, u64)> = recipients
+        let mut left = total;
+        let default: Vec<(ChoiceTarget, u64)> = sources
             .iter()
-            .enumerate()
-            .map(|(k, &(t, _))| (t, if k == 0 { total } else { 0 }))
+            .map(|(&s, &cap)| {
+                let share = left.min(u64::try_from(cap).unwrap_or(0));
+                left -= share;
+                (ChoiceTarget::Object(s), share)
+            })
             .collect();
         // CR 615.7
         let request = PendingChoiceRequest {
@@ -629,7 +668,17 @@ impl Bus<'_, '_, '_> {
                 .into_iter()
                 .map(|(target, amount)| match target {
                     ChoiceTarget::Object(s) if sources.contains_key(&s) => {
-                        Ok((s, i64::try_from(amount).unwrap_or(i64::MAX)))
+                        let share = i64::try_from(amount).unwrap_or(i64::MAX);
+                        let cap = sources.get(&s).copied().unwrap_or(0);
+                        if share > cap {
+                            // CR 615.7: a source's share can't exceed the damage it deals.
+                            return Err(BusInterrupt::Error(BusError::Choice(
+                                ChoiceError::Procedure(format!(
+                                    "share {share} for {target} exceeds its damage {cap}"
+                                )),
+                            )));
+                        }
+                        Ok((s, share))
                     }
                     other => Err(BusInterrupt::Error(BusError::Choice(
                         ChoiceError::Procedure(format!("{other} is not a damage source here")),
@@ -690,7 +739,9 @@ impl Bus<'_, '_, '_> {
         }
     }
 
-    /// SRS 8.1 steps [1]-[5] for one member until no effect applies (CR 616.1f).
+    /// SRS 8.1 steps [1]-[5] for one member until no effect applies (CR 616.1f), or until it
+    /// stops just before taking a prevention pool not yet allocated for it (CR 615.7; the
+    /// member keeps its state and resumes in [`Bus::take_pool`]).
     fn resolve(
         &mut self,
         members: &mut [Member],
@@ -708,11 +759,30 @@ impl Bus<'_, '_, '_> {
             }
             let chosen = self.choose(&event, &set)?;
             let effect = self.effect(chosen)?;
-            let mut pool = pool_of(&effect);
-            self.apply(&mut members[i], i, &effect, &mut pool, queue)?;
-            self.consume(&effect, pool);
-            self.report.applications.push(chosen);
+            if matches!(effect.shield, Some(Shield::Pool(_)))
+                && !members[i].allocated.contains(&chosen)
+            {
+                // CR 615.7: wait for the allocation on the batch's current damage.
+                members[i].stopped = Some(chosen);
+                return Ok(());
+            }
+            self.apply_and_record(&mut members[i], i, &effect, queue)?;
         }
+    }
+
+    /// Applies `effect` to `member`, consumes its shield and records the application.
+    fn apply_and_record(
+        &mut self,
+        member: &mut Member,
+        index: usize,
+        effect: &ReplacementEffect,
+        queue: &mut Queue,
+    ) -> Result<(), BusError> {
+        let mut pool = pool_of(effect);
+        self.apply(member, index, effect, &mut pool, queue)?;
+        self.consume(effect, pool);
+        self.report.applications.push(effect.id);
+        Ok(())
     }
 
     fn effect(&self, id: EffectId) -> Result<ReplacementEffect, BusError> {
@@ -742,8 +812,9 @@ impl Bus<'_, '_, '_> {
         let Some(event) = member.event.as_mut() else {
             return Ok(());
         };
+        let recipient = (effect.id, affected_object(event), affected_player(event));
         match &effect.action {
-            // CR 614.1c, CR 616.1c: the copy is part of the entry (see `copy`).
+            // CR 614.1c, CR 616.1c, CR 707.5: the copy is part of the entry (see `execute`).
             Action::Modify(Modification::EntersAsCopyOf(copied)) => {
                 queue.copies.push((index, *copied));
             }
@@ -771,10 +842,8 @@ impl Bus<'_, '_, '_> {
                 if let GameEvent::Damage { source, amount, .. } = event {
                     let available = (*amount).max(0);
                     let allotment = match source {
-                        Some(s) if member.pools.contains(&effect.id) => {
-                            self.allotments.get_mut(&(effect.id, member.chooser, *s))
-                        }
-                        _ => None,
+                        Some(s) => self.allotments.get_mut(&(effect.id, member.chooser, *s)),
+                        None => None,
                     };
                     let prevented = match pool {
                         Some(n) => {
@@ -794,11 +863,16 @@ impl Bus<'_, '_, '_> {
                         member.event = None;
                     }
                 }
-                // CR 615.5: the follow-up is a new event, with no applied effects.
-                self.charge(then.len())?;
-                queue
-                    .children
-                    .extend(then.iter().cloned().map(EventInstance::new));
+                // CR 122.1c, CR 615.13: a shield-less prevention effect is applied once to all
+                // simultaneous damage to one recipient, so its follow-up is queued once per
+                // batch (see DECISIONS); `Uses` and `Pool` shields count their own uses.
+                if effect.shield.is_some() || queue.prevented_once.insert(recipient) {
+                    // CR 615.5: the follow-up is a new event, with no applied effects.
+                    self.charge(then.len())?;
+                    queue
+                        .children
+                        .extend(then.iter().cloned().map(EventInstance::new));
+                }
             }
         }
         Ok(())
@@ -829,18 +903,49 @@ impl Bus<'_, '_, '_> {
     }
 }
 
-/// CR 704.3, CR 704.7: state-based actions that would have the same result happen once. Of
-/// the zone changes of one object to one destination, only the first (in submission order)
-/// is kept; the others are dropped. Different objects never merge.
+/// CR 704.3, CR 704.7: state-based actions that would have the same result happen once. The
+/// zone changes of one object to one destination are one group; the group keeps the position
+/// of its first member in submission order, and its event and applied set are those of the
+/// member whose (canonical event bytes, canonical applied-set bytes) is the least, so the
+/// result never depends on submission order (an engine determinism rule, see DECISIONS); the
+/// other members are dropped. Different objects never merge.
 fn coalesce(members: &mut [Member]) {
-    let mut seen: BTreeSet<(ObjectId, ZoneKind)> = BTreeSet::new();
-    for m in members {
+    let mut groups: BTreeMap<(ObjectId, ZoneKind), Vec<usize>> = BTreeMap::new();
+    for (i, m) in members.iter().enumerate() {
         if let Some(GameEvent::ZoneChange {
             object, request, ..
         }) = &m.event
-            && !seen.insert((*object, request.to))
         {
-            m.event = None;
+            groups.entry((*object, request.to)).or_default().push(i);
+        }
+    }
+    for group in groups.values() {
+        let [first, rest @ ..] = group.as_slice() else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        let key = |i: usize| {
+            let mut event = Vec::new();
+            let mut applied = Vec::new();
+            if let Some(e) = &members[i].event {
+                e.encode_canonical(&mut event);
+            }
+            members[i].applied.encode_canonical(&mut applied);
+            (event, applied)
+        };
+        let best = group
+            .iter()
+            .copied()
+            .min_by_key(|&i| key(i))
+            .unwrap_or(*first);
+        if best != *first {
+            members[*first].event = members[best].event.clone();
+            members[*first].applied = members[best].applied.clone();
+        }
+        for &i in rest {
+            members[i].event = None;
         }
     }
 }
@@ -889,17 +994,4 @@ fn modify(event: &mut GameEvent, m: Modification) -> bool {
         _ => {}
     }
     true
-}
-
-/// The object an executed event put onto the battlefield, if any.
-fn entered_object(outcome: Outcome) -> Option<ObjectId> {
-    match outcome {
-        Outcome::ZoneChange(moved)
-            if moved.to == ZoneId::Battlefield && moved.from != ZoneId::Battlefield =>
-        {
-            Some(moved.new)
-        }
-        Outcome::TokenCreated { object } => Some(object),
-        _ => None,
-    }
 }

@@ -125,11 +125,40 @@ impl EventContext<'_> {
     /// (game, zones, ids, permanents, memories, LKI, event state) is then restored to its
     /// value before the call.
     pub fn execute_batch(&mut self, batch: &EventBatch) -> Result<ExecutedBatch, EventError> {
+        self.execute_batch_with_entry_copies(batch, &[])
+    }
+
+    /// Executes a set of simultaneous events exactly as [`EventContext::execute_batch`] does,
+    /// except that each listed entering event puts its object onto the battlefield as a copy
+    /// (REQ-EVENT-001, CR 707.5, CR 614.1c).
+    ///
+    /// Each pair of `copies` is (index into `batch.events()` of an entering event, the copied
+    /// object). In the real run, immediately after the event at a listed index is applied, if
+    /// it put an object onto the battlefield (a zone change to the battlefield from another
+    /// zone, or a token creation), that new object's copy link is set to the copied object
+    /// before the next event of the batch runs and before the batch is logged: CR 707.5, it
+    /// enters as a copy and does not enter and then become one. The link is part of that
+    /// event's execution; the executed batch holds no extra event. A listed event that does
+    /// not put an object onto the battlefield sets nothing. The copied object is accepted if
+    /// it is in a zone at that moment or has last known information (it left earlier in this
+    /// batch, captured before the batch's moves, or in an earlier call): CR 608.2h. Only the
+    /// bus uses this entry point; a standalone `BecomeCopy` event stays strict.
+    ///
+    /// # Errors
+    /// As [`EventContext::execute_batch`], and [`EventError::UnknownObject`] for a copied
+    /// object that has neither a zone record nor last known information when its entering
+    /// event runs. Every component of the context is then restored to its value before the
+    /// call.
+    pub fn execute_batch_with_entry_copies(
+        &mut self,
+        batch: &EventBatch,
+        copies: &[(usize, ObjectId)],
+    ) -> Result<ExecutedBatch, EventError> {
         let snapshot = self.snapshot();
         // Planning run: find which objects the batch moves out of their zones, in the exact
         // order and with the exact cards the real run will move (draws depend on library
         // order, which earlier events of the batch can change).
-        let planned = match self.run(batch, &LkiMode::Off) {
+        let planned = match self.run(batch, &LkiMode::Off, &[]) {
             Ok(events) => events,
             Err(e) => {
                 self.restore(snapshot);
@@ -137,7 +166,7 @@ impl EventContext<'_> {
             }
         };
         self.restore(snapshot.clone());
-        match self.run_captured(batch, &planned) {
+        match self.run_captured(batch, &planned, copies) {
             Ok(events) => {
                 drop(snapshot);
                 let executed = ExecutedBatch {
@@ -163,6 +192,7 @@ impl EventContext<'_> {
         &mut self,
         batch: &EventBatch,
         planned: &[ExecutedEvent],
+        copies: &[(usize, ObjectId)],
     ) -> Result<Vec<ExecutedEvent>, EventError> {
         let mut captured = BTreeSet::new();
         for executed in planned {
@@ -174,7 +204,7 @@ impl EventContext<'_> {
                 captured.insert(moved.old);
             }
         }
-        self.run(batch, &LkiMode::On(&captured))
+        self.run(batch, &LkiMode::On(&captured), copies)
     }
 
     /// Captures the LKI of `id` before `req` moves it (CR 603.10, CR 608.2h).
@@ -217,15 +247,22 @@ impl EventContext<'_> {
         *self.events = s.events;
     }
 
-    /// Executes every event of `batch` in order; returns the events that occurred.
+    /// Executes every event of `batch` in order; returns the events that occurred. `copies`
+    /// (used only by the real run) lists the entering events that enter as a copy.
     fn run(
         &mut self,
         batch: &EventBatch,
         mode: &LkiMode<'_>,
+        copies: &[(usize, ObjectId)],
     ) -> Result<Vec<ExecutedEvent>, EventError> {
         let mut executed = Vec::new();
-        for instance in batch.events() {
+        for (index, instance) in batch.events().iter().enumerate() {
             if let Some((outcome, lki_captured)) = self.apply(instance.event(), mode)? {
+                if let LkiMode::On(_) = mode {
+                    for (_, copied) in copies.iter().filter(|(i, _)| *i == index) {
+                        self.enter_as_copy(outcome, *copied)?;
+                    }
+                }
                 executed.push(ExecutedEvent {
                     instance: instance.clone(),
                     outcome,
@@ -708,6 +745,28 @@ impl EventContext<'_> {
         }
         self.events.markers_mut().set_copy(object, copied);
         Ok(Some(Outcome::Applied))
+    }
+
+    /// CR 707.5, CR 614.1c: the object `outcome` put onto the battlefield enters as a copy of
+    /// `copied`. CR 608.2h: `copied` is taken from its current information while it is in a
+    /// zone, else from its last known information; with neither it is unknown. An outcome
+    /// that put nothing onto the battlefield sets nothing.
+    fn enter_as_copy(&mut self, outcome: Outcome, copied: ObjectId) -> Result<(), EventError> {
+        let entered = match outcome {
+            Outcome::ZoneChange(moved)
+                if moved.to == ZoneId::Battlefield && moved.from != ZoneId::Battlefield =>
+            {
+                moved.new
+            }
+            Outcome::TokenCreated { object } => object,
+            _ => return Ok(()),
+        };
+        if self.zones.object(copied).is_none() && self.lki.get(copied).is_none() {
+            return Err(EventError::UnknownObject(copied));
+        }
+        // CR 707.2: the copy link the layer system reads.
+        self.events.markers_mut().set_copy(entered, copied);
+        Ok(())
     }
 
     /// Sets the face status of `object`, if it is a held permanent on the battlefield, to its
