@@ -210,8 +210,9 @@ fn etb_matcher(obj: ObjectId) -> EventMatcher {
 }
 
 // REQ-EVENT-001, SRS regression "a 616.1 tier test (copy ETB versus control ETB)",
-// CR 616.1b, 616.1c: the control-ETB effect applies first, then the copy-ETB effect; the object
-// enters under the new controller and, after the child BecomeCopy, is a copy. Both id orders.
+// CR 616.1b, 616.1c, 707.5 (G1, F6): the control-ETB effect applies first, then the copy-ETB
+// effect; the object enters under the new controller as a copy, the copy being part of the entry
+// (one executed batch, no BecomeCopy event). Both id orders.
 #[test]
 fn req_event_001_regression_control_etb_before_copy_etb() {
     for (control, copy) in [(1u64, 2u64), (2, 1)] {
@@ -238,10 +239,12 @@ fn req_event_001_regression_control_etb_before_copy_etb() {
         );
         assert_eq!(r.applications(), eids(&[control, copy]));
         let batches = r.nonempty_batches();
-        assert_eq!(
-            batches.len(),
-            2,
-            "the entering batch, then the BecomeCopy batch"
+        assert_eq!(batches.len(), 1, "one entering batch, the copy included");
+        assert_eq!(r.new_log().len(), 1);
+        assert!(
+            r.executed()
+                .iter()
+                .all(|e| !matches!(e.instance.event(), GameEvent::BecomeCopy { .. }))
         );
         let entered = new_id(&batches[0].events[0].outcome);
         let w = r.world();
@@ -250,13 +253,6 @@ fn req_event_001_regression_control_etb_before_copy_etb() {
         assert_eq!(
             w.permanents.get(entered).expect("permanent").controller(),
             P2
-        );
-        assert_eq!(
-            batches[1].events[0].instance.event(),
-            &GameEvent::BecomeCopy {
-                object: entered,
-                copied: p.original
-            }
         );
         assert_eq!(w.events.markers().copy_of(entered), Some(p.original));
     }

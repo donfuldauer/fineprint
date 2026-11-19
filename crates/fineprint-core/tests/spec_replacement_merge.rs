@@ -7,7 +7,9 @@
 //! and only when they affect the SAME object with the same destination (the same result): such
 //! a group makes one choice, one application, consumes one shield use and executes as one
 //! event. Members for different objects never merge, whatever their kind, candidate set or
-//! chooser: each gets its own choice and application, in APNAP then submission order.
+//! chooser: each gets its own choice and application, in APNAP then submission order. Coalescing
+//! of same-object, same-destination moves does not depend on submission order (review round 1
+//! finding F2, round 2).
 //! Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
@@ -417,4 +419,108 @@ fn req_event_001_r1_f2_no_coalescing_without_sba() {
     );
     assert!(r.result.is_err(), "{:?}", r.result);
     assert_unchanged(&r);
+}
+
+/// Two moves of `obj` to the graveyard with different causes (Destroy, StateBasedAction), in the
+/// given submission order.
+fn mixed_cause_deaths(obj: ObjectId, destroy_first: bool) -> Vec<GameEvent> {
+    let destroy = zone_change(obj, ZoneKind::Graveyard, ZoneChangeCause::Destroy);
+    let sba = zone_change(obj, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction);
+    if destroy_first {
+        vec![destroy, sba]
+    } else {
+        vec![sba, destroy]
+    }
+}
+
+/// Runs the mixed-cause pair on `base` (with `sba`) in both submission orders and asserts the two
+/// runs are identical: the same output (report or error), the same registry bytes, the same
+/// world and the same state hash. Returns the two runs.
+fn both_orders(base: &Bus, obj: ObjectId, sba: bool) -> (Run, Run) {
+    let a = run_batch(base.clone(), mixed_cause_deaths(obj, true), sba, &[]);
+    let b = run_batch(base.clone(), mixed_cause_deaths(obj, false), sba, &[]);
+    assert_eq!(a.result, b.result, "the output depends on submission order");
+    assert_eq!(bytes(&a.after.registry), bytes(&b.after.registry));
+    assert_eq!(a.after.snap(), b.after.snap());
+    assert_eq!(a.after.canonical(), b.after.canonical());
+    assert_eq!(a.hash, b.hash);
+    (a, b)
+}
+
+/// The coalescing invariants of one sba run: success, at most one executed move of `obj`.
+fn assert_coalesced(r: &Run, obj: ObjectId) {
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    let moves = r
+        .executed()
+        .iter()
+        .filter(|e| matches!(e.instance.event(), GameEvent::ZoneChange { object, .. } if *object == obj))
+        .count();
+    assert!(moves <= 1, "{moves} executed moves of the object");
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7, 122.1c (F2): an object with a shield counter and the destroy
+// shield registered, moved to the graveyard twice in one SBA batch with different causes
+// (Destroy, StateBasedAction): the result is identical for both submission orders (which cause
+// survives is the engine's content-based choice and is not asserted); never two moves, no error.
+#[test]
+fn req_event_001_r2_f2_mixed_causes_order_independent_shield_counter() {
+    let (mut w, objs) = world(&[P1]);
+    let x = objs[0];
+    w.put_counters(x, "shield", 1);
+    let base = Bus::new(
+        w,
+        vec![ReplacementEffect::shield_counter_destroy(eid(1), x)],
+    );
+    let (a, b) = both_orders(&base, x, true);
+    assert_coalesced(&a, x);
+    assert_coalesced(&b, x);
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7 (F2): the same pair with a one-use exile redirect matching any
+// cause: identical for both orders, at most one move, no error.
+#[test]
+fn req_event_001_r2_f2_mixed_causes_order_independent_redirect() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(
+        w,
+        vec![redirect(1, ZoneKind::Exile).with_shield(Shield::Uses(1))],
+    );
+    let (a, b) = both_orders(&base, x, true);
+    assert_coalesced(&a, x);
+    assert_coalesced(&b, x);
+    assert_eq!(a.applications(), eids(&[1]));
+    assert_eq!(destinations(&a), vec![ZoneKind::Exile]);
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7 (F2): the same pair with no effect: identical for both orders;
+// the object moves to the graveyard exactly once.
+#[test]
+fn req_event_001_r2_f2_mixed_causes_order_independent_no_effect() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let (a, b) = both_orders(&Bus::new(w, Vec::new()), x, true);
+    assert_coalesced(&a, x);
+    assert_coalesced(&b, x);
+    assert_eq!(zone_changes(&a), 1);
+    assert_eq!(destinations(&a), vec![ZoneKind::Graveyard]);
+}
+
+// REQ-EVENT-001, CR 704.3 (F2): without `sba` the mixed-cause duplicate pair still fails and
+// rolls back, in both submission orders.
+#[test]
+fn req_event_001_r2_f2_mixed_causes_without_sba_fail() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(w, Vec::new());
+    for destroy_first in [true, false] {
+        let r = run_batch(
+            base.clone(),
+            mixed_cause_deaths(x, destroy_first),
+            false,
+            &[],
+        );
+        assert!(r.result.is_err(), "{destroy_first}: {:?}", r.result);
+        assert_unchanged(&r);
+    }
 }
