@@ -3865,7 +3865,7 @@ all contained.
 ## #29 FP-028 — CR 704.7 merging of state-based-action batches
 
 **Decision:** (Review round 1, F2/F5; amended in review round 2, F2, and replaced by member-wise
-semantics in review round 3, H2.) With `sba = true` only `ZoneChange` members merge. Members form a
+semantics in review round 3, H2; execution restructured in review round 4, J1-J4.) With `sba = true` only `ZoneChange` members merge. Members form a
 group when they have the same affected object and the same destination (`request.to`) as
 submitted: the same object and the same kind of result. Every member stays in the list, tagged
 with its group; the group is resolved at the position of its first member in submission order
@@ -3879,19 +3879,19 @@ no request if the restricted set has one effect). The chosen effect is applied O
 taken from the first matched member in content order) to EVERY member it is eligible for and
 matches; each such member's event is modified or dropped and the effect is added to its applied
 set. Members it does not match are unchanged and keep resolving: the loop repeats over the group
-with the union rule until no candidate remains (CR 616.1f). Execution: at most one move of the
-object per group. Of the members that still have an event, if all have the same destination,
-the one with the least (canonical `GameEvent` bytes, canonical `AppliedEffects` bytes) is
-executed and the rest are dropped (not executed, not logged); exact ties are identical and
-interchangeable. If their destinations differ (only possible because a replacement changed some
-members), the judgement recorded here (R8): members modified by an application are preferred
-over members that were not, and among the preferred members the least canonical pair wins;
-exactly one is executed, at the position of the group's first member. If every member was
-dropped (`Skip` or `Instead` on all), nothing is executed for the object; if only some were
-dropped, the remaining members still move it. The child events of an application to a group
-whose object still moves are processed (as a child batch) before the executed batch, while the
-object exists, because they are part of the same simultaneous event; every other child batch
-follows the executed batch as before. The result never depends on submission order within a
+with the union rule until no candidate remains (CR 616.1f). Execution (review round 4; detail in
+"CR 704.7 group execution: one resolved batch"): the batch is first resolved completely, then
+executed as ONE batch. The object moves exactly once per group that still moves. The child events
+of an application to a group whose object still moves are resolved through the bus (not executed
+separately) and their final events are part of the same executed batch, before the group's move;
+a final child move of the group's object is not executed on its own but competes with the group's
+remaining members. The executed move: if a candidate's final destination differs from the
+group's original destination (a redirect), only such candidates compete, otherwise all do; the
+least by (canonical `GameEvent` bytes, canonical `AppliedEffects` bytes, entry-copy plan) wins
+and is executed at the position of the group's first member; the others are dropped (not
+executed, not logged). If every member was dropped (`Skip` or `Instead` on all), no group move is
+executed for the object and the group's child events follow the executed batch as a child batch;
+if only some were dropped, the remaining members still move it. The result never depends on submission order within a
 group: both orders give the same `BusReport`, registry and state hash. Members for different
 objects never merge, whether or not they share kind, candidate set or chooser; each is processed
 on its own (own request if it has two or more candidates, own application, own shield use) in
@@ -3914,10 +3914,11 @@ covers both; CR 704.5f and CR 704.5g/h are mutually exclusive (toughness), so re
 groups are for example a CR 704.5g destruction plus a move that is not a destruction. The
 execution rule for differing destinations follows CR 704.7 (the replacement replaces the result
 of the actions it applies to, so the object ends where the replacement sent it); unmatched
-members move the object only when no member was replaced; an object cannot move twice in one
-batch. Determinism (R3, REQ-CORE-001): candidates are iterated by `EffectId`, matched members in
-content order, and the executed member chosen by content, so submission order within a group has
-no effect.
+members still move the object, except when a surviving move to a different destination than the
+group's original one (a redirect) takes precedence (CR 704.7; the object cannot move twice in
+one batch). Determinism (R3, REQ-CORE-001): candidates are iterated by `EffectId`, matched members
+in content order, and the executed move chosen by destination and content, so submission order
+within a group has no effect.
 **Alternatives:** Grouping by kind, candidate set and chooser (round 0; rejected in review:
 different permanents are not the same result); deduplicating by event kind or destination alone
 (rejected: merges different objects); merging only equal events (rejected: a cause difference
@@ -3930,7 +3931,69 @@ precedence among causes (still rejected: not settled by the supplied rules text)
 the members' applied sets (rejected: it would apply CR 614.5 to the history of an event that did
 not happen); running the child events of a group application after the move (rejected: a child
 such as the shield counter's removal would name an object that has already left, and the batch
-would fail).
+would fail); running the group's child events as a separate batch before the move (round 3;
+superseded in round 4: it retired the object id before the group's own move (J1) and captured
+LKI after the shield counter's removal (J2, CR 704.8)); preferring members that were `modified`
+(round 3; superseded: a modification that leaves the destination unchanged must not beat a
+redirect, J3); breaking ties by index (superseded: the entry-copy plan is part of the execution
+inputs, J4).
+
+## #29 FP-028 — CR 704.7 group execution: one resolved batch
+
+**Decision:** (Review round 4, J1-J4.) The bus processes a batch in two stages. RESOLVE runs the
+SRS 8.1 loop for every member (Phase A, the CR 615.7 allocation Phases B and C, CR 704.7 groups)
+and executes nothing; it returns the final events in execution order, each with its entry-copy
+plan, and the child events that follow the executed batch. EXECUTE then makes ONE
+`execute_batch_with_entry_copies` call for the final events, after which the following child
+events are processed as one child batch (`depth + 1`), as before. The child events queued by an
+application to a CR 704.7 group whose object still has a member with an event are RESOLVED
+(together, as one child batch at `depth + 1`, `sba` false, same depth limit and work budget),
+not executed. Their final events, except moves of a moving group's object, open the parent's
+executed batch in queue order, so they precede every group move (the group's move stays at the
+position of its first member). Every final child `ZoneChange` whose object is the object of a
+moving group (the first such group in index order) is removed from that list and becomes a
+candidate of the group, next to the group's members that still have an event. Survivor rule:
+let D0 be the group's original destination (the `request.to` that formed the group); if any
+candidate's final destination differs from D0, only those candidates compete; otherwise all do;
+the winner is the least by (canonical event bytes, canonical applied-set bytes, entry-copy plan:
+a candidate with a plan before one without, then the lesser plan by `ObjectId` sequence), the
+candidate's position breaking a remaining tie between interchangeable inputs. The winner's plan
+is the one executed; the losers' plans are dropped. A child move candidate's applied set is its
+own and its plan is its own (empty unless an enters-as-copy effect applied to it). Plans are kept
+as a list of copied objects (several copy applications are executed in order, as before). The
+`after` order: the child events queued while resolving the group children come first, then
+the batch's own other child events. Choosing a candidate never fails: a candidate that is not
+chosen is not executed, logged or reported. If a group has no member with an event, nothing
+changes: its child events follow the executed batch. Tests:
+`req_event_001_r4_j1_instead_child_move_competes_with_group_move` (and `_j1_i_`, `_j1_ii_`,
+`_j1_iii_`), `req_event_001_r4_j2_lki_keeps_pre_sba_counters`,
+`req_event_001_r4_j3_unchanged_destination_modification_does_not_beat_redirect`,
+`req_event_001_r4_j4_entry_copy_plan_is_part_of_the_selection`.
+**Rationale:** CR 704.3 performs all applicable state-based actions simultaneously as a single
+event, and CR 614.6 makes a replacement's modified event occur instead of the replaced one, so
+the modified event (for example the shield counter's removal) takes the replaced state-based
+action's place inside the same event (rules-researcher, review round 4). CR 704.8 derives a
+departing permanent's last known information from the game state before any of those
+state-based actions; the events layer captures LKI for every object a batch moves before any
+event of that batch, so one executed batch gives that by construction (the counter is still on
+the LKI record; the researcher notes that "performed" is not spelled out for modified events,
+and the pre-SBA reading is what CR 704.8 states). The CR is silent on one object that would move
+to two zones in one event (CR 616.1 orders effects for one event, not events). Judgement (R8):
+the redirected destination wins: the replaced member's modified event moves the object, and the
+sibling plain move finds the object gone and does nothing, by analogy with CR 614.7 (a
+replacement of an event that never happens does nothing) and CR 400.7 (an object that changes
+zones becomes a new object), not as a rule; the engine never fails or rolls back because of it.
+A modification that does not change the destination must not matter; only the destination counts
+(researcher conclusion (c)). For equal events and applied sets, the candidate with an
+entry-copy plan wins because it applied the enters-as-copy effect, and the copy is part of its
+entry (CR 707.5, CR 614.1c); so the result does not depend on which submitted instance already
+had the effect in its applied set.
+**Alternatives:** Patching J1-J4 one by one on the round-3 structure (rejected: the same
+patch-on-patch structure that produced them); executing the group children separately and
+reconciling the moves afterwards (rejected: the object id is already retired and LKI already
+captured); rolling back on a conflicting second move (rejected: researcher conclusion (b), the
+engine must never fail on it); a change in `events/` (not needed: `execute_batch_with_entry_copies`
+already captures LKI for the whole batch first).
 
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
@@ -4124,7 +4187,9 @@ caller that models lethal damage or deathtouch (CR 704.5g, CR 704.5h) submits
 regeneration (not in this unit) would replace. A mixed `Destroy` + `StateBasedAction` group is
 the only way one object's CR 704.7 group has a shield-matching member and a non-matching one;
 member-wise semantics apply the shield to the `Destroy` member only: the counter is spent (its
-removal is processed before the move), the `Destroy` member does not move, and the
+removal is part of the same executed batch, placed before the move, and the departing object's
+last known information is captured before the batch with the counter still on it (CR 704.8;
+test `req_event_001_r4_j2_lki_keeps_pre_sba_counters`)), the `Destroy` member does not move, and the
 `StateBasedAction` member still moves the object to the graveyard (test
 `req_event_001_r3_h2_d_shield_counter_on_mixed_group`).
 **Rationale:** CR 701.8b: state-based actions that check for lethal damage or deathtouch damage

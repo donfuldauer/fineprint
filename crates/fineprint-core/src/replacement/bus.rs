@@ -44,7 +44,8 @@ pub const MAX_BUS_EVENTS: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusReport {
     /// Every batch the bus executed in which something occurred, in execution order (the batch
-    /// of the final modified events, then child batches depth-first); empty if nothing occurred.
+    /// of the final events, including the final child events of CR 704.7 groups that still
+    /// move, then the following child batches depth-first); empty if nothing occurred.
     pub executed: Vec<ExecutedBatch>,
     /// Every application of an effect, in order (a CR 704.7 merged application counts once).
     pub applications: Vec<EffectId>,
@@ -65,9 +66,14 @@ pub struct BusReport {
 /// child events form one child batch processed the same way. An `Instead` child keeps the
 /// applied set of the event it replaces (CR 614.5); other children start with none. With
 /// `sba` true, zone changes of the same object to the same destination are one group
-/// (CR 704.7): its candidates are the union of its members' effects, one choice is made and
-/// the chosen effect is applied once to every member it matches; the object moves at most
-/// once, never depending on submission position. A member stops just before a prevention pool is first applied to it;
+/// (CR 704.7): its candidates are the union of its members' effects; each round selects ONE
+/// effect (the chooser's pick, or the sole candidate applied without asking) and applies it
+/// once to every member it matches; the bus repeats collection until no candidate remains
+/// (CR 616.1f). The object moves at most once, never depending on submission position. The
+/// child events of an application to a group that still moves are resolved first and are part
+/// of the one executed batch, before the move (CR 704.3, CR 704.8: last known information is
+/// captured before the batch); a child move of the object competes with the group's move. Other
+/// child events follow as a child batch. A member stops just before a prevention pool is first applied to it;
 /// once every member has stopped or finished, a player whose pool cannot cover the current
 /// simultaneous damage from several sources divides it among them, each source's share at
 /// most its damage (CR 615.7), and the stopped members continue, those with a share first. An object that enters as a
@@ -188,8 +194,6 @@ struct Member {
     /// CR 704.7: the index of the first member of its same-result group (see [`coalesce`]),
     /// if it is in one.
     group: Option<usize>,
-    /// Whether an effect was applied to it in this batch.
-    modified: bool,
 }
 
 impl Member {
@@ -203,7 +207,6 @@ impl Member {
             declined: BTreeSet::new(),
             stopped: None,
             group: None,
-            modified: false,
         }
     }
 }
@@ -220,6 +223,32 @@ struct Queue {
     /// `(effect, affected object, affected player)` of the shield-less prevention effects
     /// whose follow-up events this batch already queued (CR 122.1c, CR 615.13).
     prevented_once: BTreeSet<(EffectId, Option<ObjectId>, Option<PlayerId>)>,
+}
+
+/// A final event of a resolved batch with its entry-copy plan: the objects it enters as a
+/// copy of, in application order (CR 614.1c, CR 707.5; empty for most events).
+type Planned = (EventInstance, Vec<ObjectId>);
+
+/// A resolved batch (see [`Bus::resolve_batch`]): nothing of it has been executed yet.
+#[derive(Default)]
+struct Plan {
+    /// The final events, in execution order: the final child events of moving CR 704.7 groups
+    /// first (CR 704.3), then the members in submission order (one move per group, at the
+    /// position of its first member).
+    events: Vec<Planned>,
+    /// The child events that follow the executed batch, in order: those queued by the
+    /// resolved group children first, then those queued by the batch's own members.
+    after: Vec<EventInstance>,
+}
+
+/// CR 704.7: a same-result group of state-based zone changes (see [`coalesce`]).
+struct Group {
+    /// Its members, ascending index.
+    members: Vec<usize>,
+    /// The object every member moves.
+    object: ObjectId,
+    /// The destination every member had when submitted (the group's original result).
+    to: ZoneKind,
 }
 
 struct Bus<'r, 'c, 'h> {
@@ -246,19 +275,46 @@ impl Bus<'_, '_, '_> {
         Ok(())
     }
 
-    /// Processes one batch at child depth `depth` (SRS 8.1). The events were charged against
-    /// the work budget when they were submitted or queued.
+    /// Processes one batch at child depth `depth` (SRS 8.1): resolves it ([`Bus::resolve_batch`]),
+    /// executes its final events as ONE batch (CR 704.3), then processes the child events that
+    /// follow the executed batch as one child batch. The events were charged against the work
+    /// budget when they were submitted or queued.
     fn run(
         &mut self,
         events: Vec<EventInstance>,
         sba: bool,
         depth: usize,
     ) -> Result<(), BusInterrupt> {
+        let plan = self.resolve_batch(events, sba, depth)?;
+        self.execute(plan.events)?;
+        if plan.after.is_empty() {
+            return Ok(());
+        }
+        self.run(plan.after, false, depth + 1)
+    }
+
+    /// Resolves one batch at child depth `depth` without executing anything (SRS 8.1 steps
+    /// [1]-[5] for every member, CR 615.7 allocations, CR 704.7 groups). Returns the final events
+    /// in execution order and the child events that follow the executed batch.
+    ///
+    /// CR 704.3, CR 704.7, CR 704.8: the child events of an application to a same-result group
+    /// whose object still moves are part of the same simultaneous event: they are resolved here
+    /// (as one child batch at `depth + 1`) and their final events open the executed batch, before
+    /// the group's move, so they name the object while it exists and its last known information
+    /// is captured before any of them. A final child move of the group's object is a candidate of
+    /// the group (see [`group_survivor`]): the object moves exactly once. The child events those
+    /// children queue follow the executed batch, before this batch's other child events.
+    fn resolve_batch(
+        &mut self,
+        events: Vec<EventInstance>,
+        sba: bool,
+        depth: usize,
+    ) -> Result<Plan, BusInterrupt> {
         if depth > MAX_CHILD_DEPTH {
             return Err(BusError::DepthExceeded.into());
         }
         if events.is_empty() {
-            return Ok(());
+            return Ok(Plan::default());
         }
         let mut members = Vec::with_capacity(events.len());
         for instance in &events {
@@ -278,7 +334,7 @@ impl Bus<'_, '_, '_> {
             match members[i].group {
                 None => self.resolve(&mut members, i, &mut queue)?,
                 Some(first) if first == i => {
-                    let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
+                    let group = groups.get(&i).map_or(&[][..], |g| g.members.as_slice());
                     self.resolve_group(&mut members, group, &mut queue)?;
                 }
                 Some(_) => {}
@@ -318,76 +374,112 @@ impl Bus<'_, '_, '_> {
                 }
             }
         }
-        // CR 704.3, CR 704.7: the child events of an application to a group whose object
-        // still moves (a member the effect did not match) happen as part of the same
-        // simultaneous event, so they are processed before the move, while the object exists
-        // (see DECISIONS). Every other child event follows the executed batch.
-        let (before, after): (Vec<_>, Vec<_>) = queue.children.into_iter().partition(|(g, _)| {
-            g.is_some_and(|first| {
-                group_survivor(&members, groups.get(&first).map_or(&[][..], Vec::as_slice))
-                    .is_some()
-            })
-        });
-        if !before.is_empty() {
-            self.run(
+        // CR 704.3, CR 704.7: a group "still moves" if a member still has an event.
+        let moves = |first: usize| {
+            groups
+                .get(&first)
+                .is_some_and(|g| g.members.iter().any(|&i| members[i].event.is_some()))
+        };
+        let (before, after): (Vec<_>, Vec<_>) = queue
+            .children
+            .into_iter()
+            .partition(|(g, _)| g.is_some_and(moves));
+        let resolved = if before.is_empty() {
+            Plan::default()
+        } else {
+            self.resolve_batch(
                 before.into_iter().map(|(_, c)| c).collect(),
                 false,
                 depth + 1,
-            )?;
-        }
-        self.execute(&members, &groups, &queue.copies)?;
-        if after.is_empty() {
-            return Ok(());
-        }
-        self.run(
-            after.into_iter().map(|(_, c)| c).collect(),
-            false,
-            depth + 1,
-        )
-    }
-
-    /// Executes the surviving events as one batch in submission order (SRS 8.1: execute E).
-    /// CR 704.7: a same-result group executes at most one move, chosen by [`group_survivor`],
-    /// at the position of its first member. CR 707.5, CR 614.1c, CR 616.1c: an object that enters as a copy (`copies`, by member
-    /// index) is a copy as part of its own entering event, in this one executed batch; the
-    /// copy is not routed through replacement collection (the 614.12 look-ahead is a later
-    /// unit). The copy of a member that did not survive or did not enter is skipped.
-    fn execute(
-        &mut self,
-        members: &[Member],
-        groups: &BTreeMap<usize, Vec<usize>>,
-        copies: &[(usize, ObjectId)],
-    ) -> Result<(), BusError> {
-        let mut position: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut survivors: Vec<EventInstance> = Vec::new();
-        for (i, m) in members.iter().enumerate() {
-            let chosen = match m.group {
-                None => i,
-                Some(first) if first == i => {
-                    let group = groups.get(&i).map_or(&[][..], Vec::as_slice);
-                    match group_survivor(members, group) {
-                        Some(j) => j,
-                        None => continue,
-                    }
-                }
-                Some(_) => continue,
+            )?
+        };
+        // CR 704.7, CR 614.7, CR 400.7: a final child move of a moving group's object competes
+        // with the group's own move; every other final child event opens the executed batch.
+        let mut child_moves: BTreeMap<usize, Vec<Planned>> = BTreeMap::new();
+        let mut planned: Vec<Planned> = Vec::new();
+        for (instance, plan) in resolved.events {
+            let group = match instance.event() {
+                GameEvent::ZoneChange { object, .. } => groups
+                    .iter()
+                    .find(|&(&first, g)| g.object == *object && moves(first))
+                    .map(|(&first, _)| first),
+                _ => None,
             };
-            let m = &members[chosen];
-            if let Some(e) = &m.event {
-                position.insert(chosen, survivors.len());
-                survivors.push(EventInstance::new(e.clone()).with_applied(m.applied.clone()));
+            match group {
+                Some(first) => child_moves.entry(first).or_default().push((instance, plan)),
+                None => planned.push((instance, plan)),
             }
         }
-        if survivors.is_empty() {
+        let plan_of = |i: usize| -> Vec<ObjectId> {
+            queue
+                .copies
+                .iter()
+                .filter(|(member, _)| *member == i)
+                .map(|&(_, copied)| copied)
+                .collect()
+        };
+        for (i, m) in members.iter().enumerate() {
+            match m.group {
+                None => {
+                    if let Some(e) = &m.event {
+                        planned.push((
+                            EventInstance::new(e.clone()).with_applied(m.applied.clone()),
+                            plan_of(i),
+                        ));
+                    }
+                }
+                Some(first) if first == i => {
+                    let Some(group) = groups.get(&i) else {
+                        continue;
+                    };
+                    let mut candidates: Vec<Planned> = group
+                        .members
+                        .iter()
+                        .filter_map(|&j| {
+                            members[j].event.as_ref().map(|e| {
+                                (
+                                    EventInstance::new(e.clone())
+                                        .with_applied(members[j].applied.clone()),
+                                    plan_of(j),
+                                )
+                            })
+                        })
+                        .collect();
+                    candidates.extend(child_moves.remove(&i).unwrap_or_default());
+                    if let Some(chosen) = group_survivor(group.to, candidates) {
+                        planned.push(chosen);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        let mut after_events = resolved.after;
+        after_events.extend(after.into_iter().map(|(_, c)| c));
+        Ok(Plan {
+            events: planned,
+            after: after_events,
+        })
+    }
+
+    /// Executes the final events of a resolved batch as one batch in order (SRS 8.1: execute
+    /// E; CR 704.3, CR 704.8: the events layer captures last known information for every object
+    /// the batch moves before any event of the batch). CR 707.5, CR 614.1c, CR 616.1c: an object
+    /// that enters as a copy (its event's entry-copy plan) is a copy as part of its own entering
+    /// event, in this one executed batch; the copy is not routed through replacement collection
+    /// (the 614.12 look-ahead is a later unit).
+    fn execute(&mut self, planned: Vec<Planned>) -> Result<(), BusError> {
+        if planned.is_empty() {
             return Ok(());
         }
-        let entry_copies: Vec<(usize, ObjectId)> = copies
-            .iter()
-            .filter_map(|(member, copied)| position.get(member).map(|&p| (p, *copied)))
-            .collect();
+        let mut entry_copies: Vec<(usize, ObjectId)> = Vec::new();
+        let mut events: Vec<EventInstance> = Vec::with_capacity(planned.len());
+        for (position, (instance, plan)) in planned.into_iter().enumerate() {
+            entry_copies.extend(plan.into_iter().map(|copied| (position, copied)));
+            events.push(instance);
+        }
         let executed = self
             .ctx
-            .execute_batch_with_entry_copies(&EventBatch::new(survivors), &entry_copies)?;
+            .execute_batch_with_entry_copies(&EventBatch::new(events), &entry_copies)?;
         if !executed.events.is_empty() {
             self.report.executed.push(executed);
         }
@@ -930,7 +1022,6 @@ impl Bus<'_, '_, '_> {
             return Err(BusError::RepeatLimit);
         }
         member.repeats += 1;
-        member.modified = true;
         // CR 614.5
         member.applied.insert(effect.id);
         let Some(event) = member.event.as_mut() else {
@@ -1038,7 +1129,7 @@ impl Bus<'_, '_, '_> {
 /// the group's first member (the group's position in submission and APNAP order) and stays in
 /// the list, so collection sees every member's cause (see [`Bus::resolve_group`]). Returns
 /// each group of two or more members by its first index. Different objects never merge.
-fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
+fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Group> {
     let mut by_result: BTreeMap<(ObjectId, ZoneKind), Vec<usize>> = BTreeMap::new();
     for (i, m) in members.iter().enumerate() {
         if let Some(GameEvent::ZoneChange {
@@ -1049,49 +1140,55 @@ fn coalesce(members: &mut [Member]) -> BTreeMap<usize, Vec<usize>> {
         }
     }
     let mut groups = BTreeMap::new();
-    for group in by_result.into_values() {
+    for ((object, to), group) in by_result {
         if group.len() < 2 {
             continue;
         }
         for &i in &group {
             members[i].group = Some(group[0]);
         }
-        groups.insert(group[0], group);
+        groups.insert(
+            group[0],
+            Group {
+                members: group,
+                object,
+                to,
+            },
+        );
     }
     groups
 }
 
-/// CR 704.7: the one member of a same-result group that is executed, if any member
-/// still has an event. If every remaining member has the same destination, the one with the
-/// least (canonical event bytes, canonical applied-set bytes); otherwise the members modified
-/// by an application are preferred (the object ends where the replacement sent it), and the
-/// same content rule picks among them. Never depends on submission order (see DECISIONS).
-fn group_survivor(members: &[Member], group: &[usize]) -> Option<usize> {
-    let remaining: Vec<usize> = group
-        .iter()
-        .copied()
-        .filter(|&i| members[i].event.is_some())
-        .collect();
-    let destination = |i: usize| match &members[i].event {
-        Some(GameEvent::ZoneChange { request, .. }) => Some(request.to),
-        _ => None,
+/// CR 704.7, CR 614.7, CR 400.7: the one move of a same-result group's object that is executed,
+/// among `candidates` (the members that still have an event, then the final child moves of the
+/// object; see DECISIONS). If a candidate's destination differs from the group's original
+/// destination `original` (a redirect), only such candidates compete; otherwise all do. The
+/// winner is the least by (canonical event bytes, canonical applied-set bytes, entry-copy plan:
+/// a candidate with a plan before one without, then the lesser plan); the candidate's position
+/// breaks a remaining tie, where the candidates are interchangeable. Never depends on
+/// submission order; never fails.
+fn group_survivor(original: ZoneKind, candidates: Vec<Planned>) -> Option<Planned> {
+    let redirect = |c: &Planned| match c.0.event() {
+        GameEvent::ZoneChange { request, .. } => request.to != original,
+        _ => false,
     };
-    let first = *remaining.first()?;
-    let agree = remaining
-        .iter()
-        .all(|&i| destination(i) == destination(first));
-    let modified: Vec<usize> = remaining
-        .iter()
-        .copied()
-        .filter(|&i| members[i].modified)
-        .collect();
-    let pool = if agree || modified.is_empty() {
-        remaining
-    } else {
-        modified
-    };
-    pool.into_iter()
-        .min_by_key(|&i| (content_key(&members[i]), i))
+    let any_redirect = candidates.iter().any(redirect);
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(_, c)| !any_redirect || redirect(c))
+        .min_by_key(|(n, c)| (planned_key(c), *n))
+        .map(|(_, c)| c)
+}
+
+/// The CR 704.7 survivor order of a candidate (see [`group_survivor`]).
+fn planned_key(planned: &Planned) -> (Vec<u8>, Vec<u8>, bool, Vec<ObjectId>) {
+    let (instance, plan) = planned;
+    let mut event = Vec::new();
+    let mut applied = Vec::new();
+    instance.event().encode_canonical(&mut event);
+    instance.applied_effects().encode_canonical(&mut applied);
+    (event, applied, plan.is_empty(), plan.clone())
 }
 
 /// The (canonical event bytes, canonical applied-set bytes) of `member`, the content order of
