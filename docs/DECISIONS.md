@@ -3985,6 +3985,19 @@ descendants at depth 1) asserts `WorkLimit`. A shallow fan-out was chosen over t
 overriding 100-per-level fan-out because whether that one hits the depth or the work limit first
 depends on how the budget counts unresolved descendants, which the brief leaves open. Both cases
 assert the state hash, the canonical state and the registry bytes unchanged.
+(35) Lineage position beyond resolution (CodeRabbit review 5980983595; CR 615.7, 616.1, 101.4):
+an `Instead` descendant behaves exactly as if submitted at the position of the event it replaces,
+recursively, also (a) when stopped damage resumes after a pool prevention and (b) in the order of
+execution. Observed only by comparison with the equivalent direct batch:
+`req_event_001_r6_pool_resumes_in_lineage_order` (one source, one chooser preferring the pool e1
+over the one-use doubler e9 of damage below 3: Tap T -> Instead[Tap U, 3 damage], Tap U ->
+Instead[1 damage] ends at 17 like the direct [1, 3]; with [3 damage, Tap U] at 15 like [3, 1];
+life, damage prevented and the executed (source, amount) list equal the control) and
+`req_event_001_r6_execution_follows_lineage_order` (Tap T -> Instead[Tap U, exile Y], Tap U ->
+Instead[exile X]: executed and logged zone changes [X, Y], with the same new ids and zone bytes as
+the direct [exile X, exile Y]; control [Y, X]). The number of requests and the applied sets are not
+compared with the control (the lineage carries extra applied effects). No existing spec test
+pinned creation-order execution or resumption: none needed correcting.
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
