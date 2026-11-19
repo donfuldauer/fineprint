@@ -5064,3 +5064,44 @@ limit.
 (rejected: the file belongs to #30 and must stay byte-identical). Roll Memory back after
 `take_triggered` drops an element (rejected: it does not repair the in-batch tally, which drops
 the later passing candidate before `take_triggered` sees it).
+
+## #31 FP-030 CR round 3 — delayed trigger limits at a phase or step
+
+**Decision:** `DelayedTriggers::fire(id, turn)` checks and counts the registration's limit with the
+same counters as `take_triggered`; a dropped firing counts nothing and does not consume a
+one-shot. This supersedes the sentence "`fire` ... counts no limit" in "#31 FP-030 CR round 2 —
+delayed trigger limits".
+
+**Rationale:** Finding 1 verified: a duration registration with `per_game: Some(1)` fired on every
+call of `fire` (CR 603.2h, CR 603.7b).
+
+**Alternatives:** Leave `fire` unlimited (rejected: the DSL attaches `limit` to every triggered
+ability; SRS 8.2 item 8).
+
+## #31 FP-030 CR round 3 — delayed trigger counters are not in the MemoryTable
+
+**Decision:** The limit counters of a delayed triggered ability stay in `Delayed.counts` inside
+`DelayedTriggers`; they are not written to `MemoryTable`.
+
+**Rationale:** (i) `MemoryTable` is `BTreeMap<ObjectId, Memory>`
+(crates/fineprint-core/src/memory/record.rs): its only identity is an object id, and
+`MemoryTable::apply_zone_change` removes the old object's Memory when the object changes zone and
+gives the new object only persistent choices (CR 400.7, CR 607.2p). A delayed ability is
+registered by an effect, is not an object and has no object id of its own; its source is an
+object whose Memory is retired on a zone change, yet a delayed trigger persists when its source
+leaves its zone (docs/DECISIONS.md "#31 FP-030 — Inferences and choices") and its used limit must
+still count. Keying the counters by the source's id would reset or lose them at the zone change;
+keying them by a synthetic id would need a new identity space and a change in the memory module,
+which this unit may not touch. (ii) `detect` must not count a delayed ability's limit in Memory at
+all, because it checks the limit before it can see the captured bindings; the CR 603.4 order
+(condition, then limit) is only possible in `take_triggered`/`fire` (docs/DECISIONS.md "#31 FP-030
+CR round 2 — delayed trigger limits"). (iii) `DelayedTriggers` is itself per-game state with the
+same purpose as Memory here: one value per ability instance (`delayed#<n>`, never reused, ids
+unique per game), cloneable as a snapshot, ordered containers only (R3), alive exactly as long as
+the registration; its counters are as deterministic and as serialisable as a MemoryTable entry.
+The intent of SRS 8.2 item 8 (limits tracked per ability instance, persistent across the game,
+deterministic state) is met; only the literal word "Memory" is not.
+
+**Alternatives:** Store under the source's Memory (rejected, retired at zone change); a new Memory
+slot keyed by `delayed#<n>` (rejected, memory module is another unit's, and the key space is not
+object ids); change `detect.rs` (rejected, unit #30's file).
