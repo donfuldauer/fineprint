@@ -266,38 +266,45 @@ fn reveal_then_shuffle_in() {
 // Test 3: CR 701.24b
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-CORE-004, CR 701.24b: for viewers who know which card is excluded, an excluded found
-/// card keeps its entry while still at its index; non-excluded entries are cleared. Contrast:
-/// the shorthand `shuffle_library` (nobody told) clears every entry, set knowledge stays.
+/// REQ-CORE-004, CR 701.24a, CR 701.24b: a shuffle clears every viewer's entries of that
+/// library, including the entry of an excluded found card at its recorded index (the retained
+/// excluded entry of earlier rounds is gone); set knowledge stays.
 #[test]
-fn shuffle_excluded_card_keeps_position_while_in_place() {
+fn shuffle_clears_excluded_entries_for_every_viewer() {
     let mut w = World::new();
     let lib = w.fill_library(P1, 10, 4);
     w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
     w.k.set_position_known(&w.z, P1, P1, 2, lib[2]).unwrap();
     w.k.set_position_known(&w.z, P2, P1, 0, lib[0]).unwrap();
-    let mut shorthand = w.clone();
-    w.k.shuffle_library_disclosed(&w.z, P1, &[lib[0]], &[P1, P2])
-        .unwrap();
+    let known = w.k.known.clone();
+    w.k.shuffle_library(&w.z, P1, &[lib[0]]).unwrap();
+    assert!(w.k.position_known(&w.z, P1, P1).is_empty());
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+    assert!(w.k.positions.is_empty());
+    assert_eq!(w.k.known, known);
+    assert!(w.can(P2, lib[0]));
+    assert!(w.can(P1, lib[2]));
+}
+
+/// REQ-CORE-004, CR 701.24b, CR 401.4: the caller re-establishes a disclosed placement after the
+/// shuffle with `set_position_known`, and it is then reported by `position_known`.
+#[test]
+fn shuffle_then_caller_restores_placement() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 10, 4);
+    w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
+    w.k.shuffle_library(&w.z, P1, &[lib[0]]).unwrap();
+    assert!(w.k.position_known(&w.z, P1, P1).is_empty());
+    w.k.set_position_known(&w.z, P1, P1, 0, lib[0]).unwrap();
     assert_eq!(
         w.k.position_known(&w.z, P1, P1),
         BTreeMap::from([(0, lib[0])])
     );
-    assert_eq!(
-        w.k.position_known(&w.z, P2, P1),
-        BTreeMap::from([(0, lib[0])])
-    );
-
-    shorthand
-        .k
-        .shuffle_library(&shorthand.z, P1, &[lib[0]])
-        .unwrap();
-    assert!(shorthand.k.positions.is_empty());
-    assert!(shorthand.can(P2, lib[0]));
-    assert!(shorthand.can(P1, lib[2]));
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
 }
 
-/// REQ-CORE-004, CR 701.24b: an excluded card no longer at its recorded index loses its entry.
+/// REQ-CORE-004, CR 701.24b: an excluded card no longer at its recorded index has no entry
+/// after the shuffle either.
 #[test]
 fn shuffle_excluded_card_moved_loses_position() {
     let mut w = World::new();
@@ -337,9 +344,13 @@ fn shuffle_excluded_not_in_library_errors() {
     }
     assert_eq!(w.k, snapshot);
     assert_eq!(
-        w.k.shuffle_library(&w.z, NOBODY, &[]),
+        w.k.shuffle_library(&w.z, NOBODY, &[other[0]]),
         Err(KnowledgeError::UnknownPlayer(NOBODY))
     );
+    assert_eq!(w.k, snapshot);
+    // An excluded id that is in the library is accepted and changes nothing beyond the clear.
+    w.k.shuffle_library(&w.z, P1, &[lib[0], lib[1]]).unwrap();
+    assert!(w.k.positions.is_empty());
 }
 
 /// REQ-CORE-004, CR 701.24a: a shuffle of one library does not touch another library's entries.
@@ -1415,19 +1426,9 @@ fn property_random_sequences_never_leak() {
                         let r = at(ZoneKind::Library, Position::Index(rng.below(lib.len())));
                         prop_move(&mut z, &mut k, &mut ids, &mut told, id, r, &[], &players);
                     }
-                    let known_by: Vec<PlayerId> = players
-                        .iter()
-                        .copied()
-                        .filter(|_| rng.below(2) == 0)
-                        .collect();
-                    k.shuffle_library_disclosed(&z, owner, &excluded, &known_by)
-                        .unwrap();
-                    for v in players {
-                        for (_, id) in k.position_known(&z, v, owner) {
-                            assert!(excluded.contains(&id));
-                        }
-                    }
-                    assert_only_index_known(&k, owner, &known_by);
+                    k.shuffle_library(&z, owner, &excluded).unwrap();
+                    // CR 701.24a: nobody keeps a position entry of the shuffled library.
+                    assert_only_index_known(&k, owner, &[]);
                 }
                 _ => {
                     // CR 406.3: only face-down exiled cards form a pile; any other face-down
@@ -2388,8 +2389,7 @@ fn twin_worlds_reposition_index_undisclosed() {
 
 /// REQ-CORE-004, REQ-TEST-001, CR 701.24a, CR 701.24b (class instance (f)): P2 knows A at
 /// index 0 and the set {B}. A shuffle that excludes A and one that excludes X give P2 equal
-/// (empty) position knowledge. Control: `shuffle_library_disclosed` keeps A@0 for a viewer in
-/// `known_by` only; `shuffle_library` never touches KnownTo.
+/// (empty) position knowledge and equal projections. `shuffle_library` never touches KnownTo.
 #[test]
 fn twin_worlds_shuffle_excluded_undisclosed() {
     let (mut w1, _) = index_twin(&[1, 2, 3, 4]);
@@ -2405,24 +2405,13 @@ fn twin_worlds_shuffle_excluded_undisclosed() {
         w2.k.position_known(&w2.z, P2, P1)
     );
     assert_eq!(w1.k, w2.k);
+    assert_eq!(w1.view(P2), w2.view(P2));
     assert_eq!(w1.k.known, known);
 
-    let mut none = c.clone();
-    let mut other = c.clone();
-    c.k.shuffle_library_disclosed(&c.z, P1, &[a], &[P2])
-        .unwrap();
-    assert_eq!(c.k.position_known(&c.z, P2, P1), BTreeMap::from([(0, a)]));
-    none.k
-        .shuffle_library_disclosed(&none.z, P1, &[a], &[])
-        .unwrap();
-    assert!(none.k.positions.is_empty());
-    // A viewer not in known_by is cleared.
-    other
-        .k
-        .shuffle_library_disclosed(&other.z, P1, &[a], &[P1])
-        .unwrap();
-    assert!(other.k.position_known(&other.z, P2, P1).is_empty());
-    assert_eq!(other.k.known, known);
+    // The old control (a viewer told which card is excluded) no longer keeps A@0.
+    c.k.shuffle_library(&c.z, P1, &[a]).unwrap();
+    assert!(c.k.positions.is_empty());
+    assert_eq!(c.k.known, known);
 }
 
 /// REQ-CORE-004 (R12): the four disclosure methods report unknown players in the documented
@@ -2515,28 +2504,23 @@ fn index_disclosure_errors_and_shorthands() {
     b.on_library_changed_indexed(&w.z, P1, &[]).unwrap();
     assert_eq!(a, b);
 
-    // shuffle_library_disclosed: owner, then excluded, then known_by.
+    // shuffle_library: owner, then excluded.
     let bad = ObjectId::new(4242);
     assert_eq!(
-        w.k.shuffle_library_disclosed(&w.z, NOBODY, &[bad], &[r]),
+        w.k.shuffle_library(&w.z, NOBODY, &[bad]),
         Err(KnowledgeError::UnknownPlayer(NOBODY))
     );
     assert_eq!(
-        w.k.shuffle_library_disclosed(&w.z, P1, &[bad], &[r]),
+        w.k.shuffle_library(&w.z, P1, &[lib[2], bad]),
         Err(KnowledgeError::NotInLibrary {
             owner: P1,
             object: bad
         })
     );
-    assert_eq!(
-        w.k.shuffle_library_disclosed(&w.z, P1, &[lib[2]], &[P2, r]),
-        Err(KnowledgeError::UnknownPlayer(r))
-    );
     check(&w.k);
     let mut a = w.k.clone();
-    let mut b = w.k.clone();
     a.shuffle_library(&w.z, P1, &[lib[2]]).unwrap();
-    b.shuffle_library_disclosed(&w.z, P1, &[lib[2]], &[])
-        .unwrap();
+    let mut b = w.k.clone();
+    b.shuffle_library(&w.z, P1, &[]).unwrap();
     assert_eq!(a, b);
 }
