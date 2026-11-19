@@ -13,7 +13,7 @@ use fineprint_base::ids::{CardId, IdGenerator, ObjectId, PlayerId};
 
 use super::*;
 use crate::zones::{
-    MoveRequest, Moved, ObjectRecord, Position, ZoneId, ZoneKind, Zones, ZonesConfig,
+    MoveRequest, Moved, ObjectRecord, OutsidePool, Position, ZoneId, ZoneKind, Zones, ZonesConfig,
 };
 
 fn p(n: u64) -> PlayerId {
@@ -1801,4 +1801,227 @@ fn on_library_changed_keeps_entries_above_insertion() {
     let snapshot = w.k.clone();
     w.k.on_library_changed(&w.z, P2).unwrap();
     assert_eq!(w.k, snapshot);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test 14: on_removed_from_hidden_zone (PR #174 round 3, threads 4625229511 and 4625229503)
+// ---------------------------------------------------------------------------------------------
+
+impl World {
+    /// Removes `id` from the game with `Zones::send_outside` and applies
+    /// `on_removed_from_hidden_zone` with `observers`; returns the record before the removal.
+    fn remove(&mut self, id: ObjectId, observers: &[PlayerId]) -> ObjectRecord {
+        let before = *self.z.object(id).unwrap();
+        self.z.send_outside(id, OutsidePool::Sideboard).unwrap();
+        self.k
+            .on_removed_from_hidden_zone(&self.z, &before, observers)
+            .unwrap();
+        before
+    }
+}
+
+/// P1's library is A (card 1), B (card 2), X (card 3), card 4 (top first). P2 knows the SET
+/// {A, B} (no positions); X and card 4 are unknown to P2. Returns the world and the library.
+fn removal_twin() -> (World, Vec<ObjectId>) {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 4);
+    w.k.add_known(&w.z, lib[0], P2).unwrap();
+    w.k.add_known(&w.z, lib[1], P2).unwrap();
+    (w, lib)
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2 (thread 4625229511): an unobserved removal of A and an
+/// unobserved removal of the unknown X from P1's library give P2 equal views and equal position
+/// knowledge; P2's library knowledge is empty in both. Control: with P2 observing, P2 keeps {B}
+/// vs {A, B} (views differ). Control: `on_library_changed` alone is position-only and leaves
+/// P2's grant on B.
+#[test]
+fn twin_worlds_unobserved_removal_give_equal_views() {
+    let (mut w1, lib) = removal_twin();
+    let (mut w2, _) = removal_twin();
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+    let mut l1 = w1.clone();
+
+    w1.remove(lib[0], &[]);
+    w2.remove(lib[2], &[]);
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert!(w1.view(P2).players[&P1].library.known_cards.is_empty());
+    assert!(w2.view(P2).players[&P1].library.known_cards.is_empty());
+    // Control: the worlds really differ (P1's library holds B, X, 4 vs A, B, 4).
+    assert_ne!(w1.z.object_of_card(c(1)), w2.z.object_of_card(c(1)));
+
+    // Control: P2 watched which card was removed.
+    o1.remove(lib[0], &[P2]);
+    o2.remove(lib[2], &[P2]);
+    assert_ne!(o1.view(P2), o2.view(P2));
+    assert_eq!(o1.view(P2).players[&P1].library.known_cards, cards(&[2]));
+    assert_eq!(o2.view(P2).players[&P1].library.known_cards, cards(&[1, 2]));
+
+    // Control: on_library_changed alone only prunes positions; the grant on B stays.
+    l1.z.send_outside(lib[0], OutsidePool::Sideboard).unwrap();
+    l1.k.on_library_changed(&l1.z, P1).unwrap();
+    assert!(l1.k.known_to(&l1.z, lib[1]).unwrap().contains(&P2));
+    assert_eq!(l1.view(P2).players[&P1].library.known_cards, cards(&[2]));
+}
+
+/// P1's hand holds cards 10 and 11 (known to P2 and stored for P1) and card 12 (unknown to P2);
+/// P1's library holds card 1.
+fn hand_removal_world() -> (World, [ObjectId; 3]) {
+    let mut w = World::new();
+    w.fill_library(P1, 1, 1);
+    let h = [10, 11, 12].map(|k| w.create(k, P1, req(ZoneKind::Hand)));
+    for &id in &h[..2] {
+        w.k.add_known(&w.z, id, P2).unwrap();
+        w.k.add_known(&w.z, id, P1).unwrap();
+    }
+    (w, h)
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 402.3 (thread 4625229511): removing a card from P1's hand
+/// unobserved makes P2 forget both cards it knew, whichever card left (twin views equal); the
+/// hand owner P1 observed it (iii) and keeps its stored knowledge; with P2 as an observer, P2
+/// keeps its knowledge.
+#[test]
+fn removal_from_hand_forgets_for_non_observers() {
+    let (mut w1, h) = hand_removal_world();
+    let (mut w2, _) = hand_removal_world();
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+    w1.remove(h[0], &[]);
+    w2.remove(h[2], &[]);
+    assert_eq!(w1.view(P2), w2.view(P2));
+    let empty = HandView::Opponent {
+        count: 2,
+        known_cards: BTreeSet::new(),
+    };
+    assert_eq!(w1.view(P2).players[&P1].hand, empty);
+    assert_eq!(w1.k.known_to(&w1.z, h[1]).unwrap(), set(&[P1]));
+    assert_eq!(w2.k.known_to(&w2.z, h[0]).unwrap(), set(&[P1]));
+    assert_eq!(w2.k.known_to(&w2.z, h[1]).unwrap(), set(&[P1]));
+    // The removed card's stored KnownTo lost P2 too; P1 keeps it.
+    assert_eq!(w1.k.known_set(c(10)), set(&[P1]));
+    assert_ne!(w1.view(P1), w2.view(P1));
+
+    o1.remove(h[0], &[P2]);
+    o2.remove(h[2], &[P2]);
+    assert_ne!(o1.view(P2), o2.view(P2));
+    assert_eq!(o1.k.known_to(&o1.z, h[1]).unwrap(), set(&[P1, P2]));
+    assert_eq!(o1.k.known_set(c(10)), set(&[P1, P2]));
+    assert_eq!(
+        o2.view(P2).players[&P1].hand,
+        HandView::Opponent {
+            count: 2,
+            known_cards: cards(&[10, 11])
+        }
+    );
+}
+
+/// REQ-CORE-004, CR 401.2 (thread 4625229511): an unobserved removal drops every position
+/// entry of P2 for that library (other libraries untouched); an observed removal keeps the
+/// entries above the removal index and drops the removed card's entry and the shifted ones.
+#[test]
+fn removal_from_library_position_entries() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 5);
+    let other = w.fill_library(P2, 20, 2);
+    for (i, &id) in lib.iter().enumerate() {
+        w.k.set_position_known(&w.z, P2, P1, i, id).unwrap();
+    }
+    w.k.set_position_known(&w.z, P2, P2, 0, other[0]).unwrap();
+    let mut o = w.clone();
+
+    w.remove(lib[2], &[]);
+    assert!(w.k.position_known(&w.z, P2, P1).is_empty());
+    assert!(!w.k.positions.contains_key(&(P2, P1)));
+    assert!(w.view(P2).players[&P1].library.known_cards.is_empty());
+    assert_eq!(
+        w.k.position_known(&w.z, P2, P2),
+        BTreeMap::from([(0, other[0])])
+    );
+
+    o.remove(lib[2], &[P2]);
+    assert_eq!(
+        o.k.positions[&(P2, P1)],
+        BTreeMap::from([(0, lib[0]), (1, lib[1])])
+    );
+    assert_eq!(
+        o.view(P2).players[&P1].library.known_cards,
+        cards(&[1, 2, 4, 5])
+    );
+    // The removal of the bottom card by an observer keeps every remaining entry.
+    o.remove(lib[4], &[P2]);
+    assert_eq!(
+        o.k.positions[&(P2, P1)],
+        BTreeMap::from([(0, lib[0]), (1, lib[1])])
+    );
+}
+
+/// REQ-CORE-004 (R12): a public-zone source is a no-op; an unknown source owner and an unknown
+/// observer are UnknownPlayer with the state unchanged; the owner is checked first.
+#[test]
+fn removal_hook_noops_and_errors() {
+    let mut w = World::new();
+    let lib = w.fill_library(P1, 1, 2);
+    w.k.add_known(&w.z, lib[0], P2).unwrap();
+    w.k.set_position_known(&w.z, P2, P1, 1, lib[1]).unwrap();
+    let bf = w.create(10, P1, req(ZoneKind::Battlefield));
+    let gy = w.create(11, P1, req(ZoneKind::Graveyard));
+    for id in [bf, gy] {
+        let snapshot = w.k.clone();
+        w.remove(id, &[]);
+        assert_eq!(w.k, snapshot);
+    }
+    let snapshot = w.k.clone();
+    let before = *w.z.object(lib[0]).unwrap();
+    let other = p(98);
+    for zone in [ZoneId::Library(NOBODY), ZoneId::Hand(NOBODY)] {
+        let ghost = ObjectRecord { zone, ..before };
+        assert_eq!(
+            w.k.on_removed_from_hidden_zone(&w.z, &ghost, &[other]),
+            Err(KnowledgeError::UnknownPlayer(NOBODY))
+        );
+        assert_eq!(w.k, snapshot);
+    }
+    assert_eq!(
+        w.k.on_removed_from_hidden_zone(&w.z, &before, &[P2, other]),
+        Err(KnowledgeError::UnknownPlayer(other))
+    );
+    assert_eq!(w.k, snapshot);
+    // The hook does not depend on whether the object still exists.
+    w.k.on_removed_from_hidden_zone(&w.z, &before, &[]).unwrap();
+    assert!(!w.k.known_to(&w.z, lib[0]).unwrap().contains(&P2));
+}
+
+/// REQ-CORE-004, REQ-TEST-001, CR 401.2, CR 406.3 (thread 4625229503, fixed in round 2 by
+/// dropping step-0 condition (iv)): P2 knows A's position and B as a set member; P1 secretly
+/// exiles A (world 1) or X (world 2) face down. P2's views are equal and P2 cannot identify
+/// the exiled object in either world. Control: with P2 observing, P2 identifies A in world 1.
+#[test]
+fn twin_worlds_undisclosed_selection_to_face_down_exile() {
+    let (mut w1, a, _) = selection_twin();
+    let (mut w2, _, x) = selection_twin();
+    let (mut o1, mut o2) = (w1.clone(), w2.clone());
+    let m1 = w1.mv(a, face_down(ZoneKind::Exile));
+    let m2 = w2.mv(x, face_down(ZoneKind::Exile));
+    assert_eq!(w1.view(P2), w2.view(P2));
+    assert_eq!(
+        w1.k.position_known(&w1.z, P2, P1),
+        w2.k.position_known(&w2.z, P2, P1)
+    );
+    assert!(!w1.can(P2, m1.new));
+    assert!(!w2.can(P2, m2.new));
+    assert_ne!(
+        w1.z.object(m1.new).unwrap().card,
+        w2.z.object(m2.new).unwrap().card
+    );
+
+    let n1 = o1.mv_obs(a, face_down(ZoneKind::Exile), &[P2]);
+    let n2 = o2.mv_obs(x, face_down(ZoneKind::Exile), &[P2]);
+    assert!(o1.can(P2, n1.new));
+    assert!(!o2.can(P2, n2.new));
+    assert_ne!(o1.view(P2), o2.view(P2));
 }

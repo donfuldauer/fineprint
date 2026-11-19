@@ -2873,19 +2873,19 @@ one entry point, and a library shuffle already exists for that).
 
 **Decision:** `Knowledge::on_library_changed(zones, owner)` drops every viewer's position entry
 for the library of `owner` that no longer matches the live library (`UnknownPlayer(owner)`,
-state unchanged, otherwise). Caller contract: after any `Zones` mutation that inserts into or
-removes from a library outside `on_move` (`create_object` or `enter_from_outside` into a
-library, `send_outside` of a library card), call it for that library. After a change at index
-`n`, entries with an index below `n` are kept and entries at `n` or after it are dropped,
-because those objects shifted. This closes the case where a stale entry becomes valid again by
-coincidence (PR #174, F4: the viewer knows A at index 0, a card is created on top, and drawing
-that card would put A back at index 0).
+state unchanged, otherwise). It is position-only and is the hook for insertions. Caller
+contract: after any `Zones` mutation that inserts into a library outside `on_move`
+(`create_object` or `enter_from_outside` into a library), call it for that library. After an
+insertion at index `n`, entries with an index below `n` are kept and entries at `n` or after it
+are dropped, because those objects shifted. Removals (`Zones::send_outside` of a library or
+hand object) use `on_removed_from_hidden_zone` instead (see that entry), which also prunes the
+library. This closes the case where a stale entry becomes valid again by coincidence (PR #174,
+F4: the viewer knows A at index 0, a card is created on top, and drawing that card would put A
+back at index 0).
 **Rationale:** The lazy filter compares only the current library, so it cannot see that an
 entry was invalidated earlier; pruning at the change is the only point where the shift is
-visible. Known remaining gap: `Zones::send_outside` of a library card is an unobserved hidden
-move that `Knowledge` is not told about through `on_move`, so step 0 of
-`on_move_observed` does not run for it. The caller must call `on_library_changed` and treat the
-viewers' set knowledge of that library accordingly (the integration unit owns that call site).
+visible. A library is one face-down pile whose order players can't look at or change
+(CR 401.2); dropping stale entries is the engine's own conservative policy, not a CR rule.
 **Alternatives:** Shifting entries' indexes on every insert (claims position knowledge after a
 hidden insert); removing the claim from the identity/position decision without adding a hook
 (leaves the stale-entry revival).
@@ -2907,3 +2907,33 @@ confirms; (3) follows "if V observed it, V's knowledge is kept"; (4) and (5) are
 rather than over-specified until the integration unit defines the callers.
 **Alternatives:** Pruning only the source library (fails the shadow model and allows the F4
 revival through a hand-to-library insert).
+
+## #25 FP-024: on_removed_from_hidden_zone
+
+**Decision:** `Knowledge::on_removed_from_hidden_zone(&mut self, zones: &Zones, before:
+&ObjectRecord, observers: &[PlayerId]) -> Result<(), KnowledgeError>`, called AFTER
+`Zones::send_outside` with `before` copied before the removal. It applies the step-0 forgetting
+rule of `on_move_observed` to a removal, through the same private helper: a player V observed
+the removal iff (i) V is in `observers` or (iii) `before.zone` is V's hand; (ii) does not apply
+(there is no new object). Every non-observer is removed from the stored `KnownTo` of every card
+now in `before.zone` and of `before.card` (emptied sets dropped) and, for a library source,
+loses all position entries for that library; observers keep their knowledge. A library source
+is then pruned against the live library as `on_library_changed` would. Errors, checked first
+and leaving the state unchanged: `UnknownPlayer(o)` when `before.zone` is the library or hand of
+an unknown `o`, then `UnknownPlayer` for the first unknown observer. When `before.zone` is not a
+library or a hand the call is a no-op returning `Ok` before any validation (the brief's literal
+"does nothing and returns Ok"; a public-zone removal leaks nothing). The hook never reads
+`zones.object(before.id)`. Caller contract: every `Zones::send_outside` of a library or hand
+object is followed by this call, with the players who watched which card left as observers.
+**Rationale:** Twin-world non-interference (REQ-CORE-004): with only the position prune of
+`on_library_changed`, removing A vs B from a library whose set {A, B} P2 knows leaves {B} vs
+{A} in P2's projection, so P2 learns which card left (PR #174 round 3, comment 4625229511).
+This is a design choice, not CR-derived; the CR context is the hidden ordered library
+(CR 401.2). The same entry records that round-3 finding 4625229503 (a known position treated as
+observation of a private library-to-face-down-exile selection) was already closed in round 2 by
+dropping step-0 condition (iv); unit test `twin_worlds_undisclosed_selection_to_face_down_exile`
+pins it.
+**Alternatives:** Leaving it to the caller (rejected: a standalone projection leak); extending
+`on_library_changed` with observers (rejected: it is also the insertion path, where nothing is
+forgotten); a Knowledge-owned wrapper around `Zones::send_outside` (rejected: Knowledge would
+mutate Zones, R1/R2).

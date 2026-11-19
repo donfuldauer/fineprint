@@ -47,17 +47,24 @@ impl Knowledge {
         self.retain_indexed(|_, o, index, object| o != owner || live.get(index) == Some(&object));
     }
 
-    /// Re-checks position knowledge of the library of `owner` after a change that did not go
+    /// Re-checks position knowledge of the library of `owner` after an insertion that did not go
     /// through [`Knowledge::on_move`] (REQ-CORE-004): drops every viewer's position entry for
-    /// that library whose object is no longer at the recorded index of the live library.
+    /// that library whose object is no longer at the recorded index of the live library. It
+    /// only touches position entries, never `KnownTo`.
     ///
-    /// **Caller contract.** Call it after every [`Zones`] mutation that inserts into or removes
-    /// from a library outside `on_move`: `Zones::create_object` or `Zones::enter_from_outside`
-    /// into a library, and `Zones::send_outside` of a library card. After an insertion or a
-    /// removal at index `n` (0 is the top), entries with an index `< n` are kept and entries
-    /// with an index `>= n` are dropped, because those objects shifted. Without this call a stale
-    /// entry could become valid again by coincidence when a later move restores the earlier
-    /// shape of the library.
+    /// A library is one face-down pile whose order players can't look at or change (CR 401.2),
+    /// so a position entry is knowledge the engine tracked, not something a player can
+    /// re-check. Dropping an entry as soon as it no longer matches is the engine's own
+    /// conservative policy, not a CR rule: once stale, an entry is never allowed to become
+    /// valid again by coincidence when a later change restores the earlier shape of the
+    /// library.
+    ///
+    /// **Caller contract.** Call it after every [`Zones`] mutation that inserts into a library
+    /// outside `on_move`: `Zones::create_object` or `Zones::enter_from_outside` into a library.
+    /// After an insertion at index `n` (0 is the top), entries with an index `< n` are kept and
+    /// entries with an index `>= n` are dropped, because those objects shifted. Removals
+    /// (`Zones::send_outside` of a library or hand object) use
+    /// [`Knowledge::on_removed_from_hidden_zone`] instead, which also prunes the library.
     ///
     /// # Errors
     /// [`KnowledgeError::UnknownPlayer`]`(owner)`; the state is then unchanged.

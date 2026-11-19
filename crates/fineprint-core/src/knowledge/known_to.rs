@@ -248,7 +248,19 @@ impl Knowledge {
         if matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand)
             && moved.from != moved.to
         {
-            self.forget_unobserved(zones, before, moved, &record, observers);
+            let observed: BTreeSet<PlayerId> = zones
+                .players()
+                .into_iter()
+                .filter(|&v| {
+                    // Every condition depends only on the observers, the destination record and
+                    // the source zone, never on which candidate moved: knowing a position is not
+                    // observation (a secret selection would otherwise leak).
+                    observers.contains(&v)
+                        || implicitly_identifies(&record, v)
+                        || before.zone == ZoneId::Hand(v)
+                })
+                .collect();
+            self.forget_unobserved(zones, before.zone, card, &observed);
         }
         // (a) CR 400.2: the face of a face-up card in a public zone was seen by all players.
         if before.zone.kind().is_public() && !before.face_down {
@@ -283,42 +295,32 @@ impl Knowledge {
         Ok(())
     }
 
-    /// Step (0) of [`Knowledge::on_move_observed`]: every player who did not observe the move
-    /// out of a hidden zone forgets the cards of the source zone and the moved card, and their
-    /// position entries for a source library.
+    /// The forgetting rule of step (0) of [`Knowledge::on_move_observed`], shared with
+    /// [`Knowledge::on_removed_from_hidden_zone`]: every player of `zones` not in `observed`
+    /// forgets every card now in `source` and `card` (the moved or removed card), and, when
+    /// `source` is a library, loses every position entry for that library. Emptied `KnownTo`
+    /// sets are dropped. Design decision, not CR-derived (see `docs/DECISIONS.md`, "#25 FP-024:
+    /// Unobserved hidden moves forget the candidates").
     fn forget_unobserved(
         &mut self,
         zones: &Zones,
-        before: &ObjectRecord,
-        moved: &Moved,
-        record: &ObjectRecord,
-        observers: &[PlayerId],
+        source: ZoneId,
+        card: CardId,
+        observed: &BTreeSet<PlayerId>,
     ) {
-        let source_library = match before.zone {
-            ZoneId::Library(owner) => Some(owner),
-            _ => None,
-        };
         let blind: BTreeSet<PlayerId> = zones
             .players()
             .into_iter()
-            .filter(|&v| {
-                // Every condition depends only on the observers, the destination record and the
-                // source zone, never on which candidate moved: knowing a position is not
-                // observation (a secret selection would otherwise leak).
-                let observed = observers.contains(&v)
-                    || implicitly_identifies(record, v)
-                    || before.zone == ZoneId::Hand(v);
-                !observed
-            })
+            .filter(|v| !observed.contains(v))
             .collect();
         if blind.is_empty() {
             return;
         }
         let candidates: BTreeSet<CardId> = zones
-            .contents(moved.from)
+            .contents(source)
             .into_iter()
             .filter_map(|id| zones.object(id).map(|r| r.card))
-            .chain([record.card])
+            .chain([card])
             .collect();
         let touched = candidates.iter().any(|c| {
             self.known
@@ -336,9 +338,68 @@ impl Knowledge {
                 }
             }
         }
-        if let Some(owner) = source_library {
+        if let ZoneId::Library(owner) = source {
             self.retain_positions(|v, o, _| o != owner || !blind.contains(&v));
         }
+    }
+
+    /// Updates knowledge after an object left a library or a hand without a zone move
+    /// (REQ-CORE-004), the removal counterpart of step (0) of [`Knowledge::on_move_observed`].
+    ///
+    /// Call it AFTER [`Zones::send_outside`] (the object no longer exists in `zones`), with
+    /// `before` = the [`ObjectRecord`] copied BEFORE the removal. `observers` are the players
+    /// who watched which card was removed.
+    ///
+    /// **Caller contract.** Every [`Zones::send_outside`] of a library or hand object is
+    /// followed by this call. Pass in `observers` every player who knows which card left: for
+    /// example every player when the removal is announced, or a viewer who knows the position of
+    /// the top card when the top card is removed and that fact is public. Knowing a position
+    /// does not make a player an observer by itself.
+    ///
+    /// If `before.zone` is neither a library nor a hand, nothing happens and the result is `Ok`
+    /// (a removal from a public zone leaks nothing). Otherwise a player V observed the removal
+    /// iff V is in `observers` or `before.zone` is V's hand. Every player who did NOT observe it
+    /// forgets every card now in `before.zone` and the removed card (`before.card`), and, when
+    /// the source is a library, loses every position entry for that library: such a player
+    /// knows a set but cannot tell which member left (a design decision, see
+    /// `docs/DECISIONS.md`, "#25 FP-024: on_removed_from_hidden_zone"). Observers keep their
+    /// knowledge. When the source is a library, its position entries are then pruned against
+    /// the live library exactly as [`Knowledge::on_library_changed`] does (the entry naming
+    /// `before.id` goes, entries whose objects shifted go).
+    ///
+    /// The hook never inspects whether `before.id` still exists or where `before.card` went.
+    ///
+    /// # Errors
+    /// [`KnowledgeError::UnknownPlayer`]`(o)` when `before.zone` is the library or hand of a
+    /// player `o` not in `zones`, then [`KnowledgeError::UnknownPlayer`] for the first observer
+    /// that is not a player of `zones`. The state is then unchanged.
+    pub fn on_removed_from_hidden_zone(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        observers: &[PlayerId],
+    ) -> Result<(), KnowledgeError> {
+        let (ZoneId::Library(owner) | ZoneId::Hand(owner)) = before.zone else {
+            return Ok(());
+        };
+        require_player(zones, owner)?;
+        for &observer in observers {
+            require_player(zones, observer)?;
+        }
+        // Design decision (not CR-derived): an unobserved removal from a hidden zone makes every
+        // candidate of that zone ambiguous to the players who did not watch it.
+        let observed: BTreeSet<PlayerId> = zones
+            .players()
+            .into_iter()
+            .filter(|&v| observers.contains(&v) || before.zone == ZoneId::Hand(v))
+            .collect();
+        self.forget_unobserved(zones, before.zone, before.card, &observed);
+        // CR 401.2: a library is one face-down pile whose order players can't look at; dropping
+        // the entries of shifted objects is the engine's own conservative policy.
+        if before.zone == ZoneId::Library(owner) {
+            self.prune_library(zones, owner);
+        }
+        Ok(())
     }
 
     /// The third sentence of CR 708.9: when `player` leaves the game, every face-down permanent
