@@ -3392,11 +3392,12 @@ fn req_event_001_r2_g4_pool_three_and_pool_six() {
     assert!(run.state.registry.get(e(1)).is_none());
 }
 
-/// REQ-EVENT-001, F2: CR 704.7: the survivor of a coalesced group is chosen by content (least
-/// canonical event bytes, then applied-set bytes), so [destroy, sba move] and [sba move,
-/// destroy] of one permanent give identical reports, registries and state hashes, with a
-/// cause-sensitive shield-counter replacement and with a cause-sensitive one-use exile
-/// redirect; the outcome is the one the rule selects.
+/// REQ-EVENT-001, F2 (corrected in review round 3, H2): CR 704.3, CR 704.7: [destroy, sba
+/// move] and [sba move, destroy] of one permanent give identical reports, registries and state
+/// hashes. Member-wise semantics: the shield counter's destroy replacement (cause `Destroy`
+/// only, CR 122.1c, CR 701.8b) replaces the destroy member once (counter removed) and the sba
+/// member still moves the object to the graveyard; a one-use exile redirect of destructions
+/// replaces the destroy member, which wins the execution: the card is exiled.
 #[test]
 fn req_event_001_r2_f2_coalescing_is_order_independent() {
     let destroy_first = |x| {
@@ -3405,17 +3406,6 @@ fn req_event_001_r2_f2_coalescing_is_order_independent() {
             zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
         ]
     };
-    // Which cause the content rule keeps (both applied sets are empty).
-    let probe = ObjectId::new(1);
-    let [d, s] = [
-        encode_to_vec(&zc(probe, ZoneKind::Graveyard, ZoneChangeCause::Destroy)),
-        encode_to_vec(&zc(
-            probe,
-            ZoneKind::Graveyard,
-            ZoneChangeCause::StateBasedAction,
-        )),
-    ];
-    let destroy_survives = d < s;
     // Shield counter (destruction half).
     let mut w = World::new();
     let x = w.create(1, ZoneKind::Battlefield);
@@ -3431,21 +3421,10 @@ fn req_event_001_r2_f2_coalescing_is_order_independent() {
     assert_eq!(one.hash, two.hash);
     assert_eq!(one.state.registry, two.state.registry);
     let report = ok(&one);
-    if destroy_survives {
-        assert_eq!(report.applications, vec![e(1)]);
-        assert_eq!(one.state.counter(x, "shield"), 0);
-        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Battlefield));
-    } else {
-        assert!(report.applications.is_empty());
-        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
-    }
-    let moves = report
-        .executed
-        .iter()
-        .flat_map(|b| b.events.iter())
-        .filter(|ev| matches!(ev.instance.event(), GameEvent::ZoneChange { .. }))
-        .count();
-    assert_eq!(moves, usize::from(!destroy_survives));
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(one.state.counter(x, "shield"), 0);
+    assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(zone_changes(report), 1);
     // A one-use exile redirect of destructions only.
     let mut w = World::new();
     let x = w.create(1, ZoneKind::Battlefield);
@@ -3472,11 +3451,302 @@ fn req_event_001_r2_f2_coalescing_is_order_independent() {
     let report = ok(&one);
     assert_eq!(report.executed.len(), 1);
     assert_eq!(report.executed[0].events.len(), 1);
-    if destroy_survives {
-        assert_eq!(report.applications, vec![e(1)]);
-        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Exile));
-    } else {
-        assert!(report.applications.is_empty());
-        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Exile));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 3
+// ---------------------------------------------------------------------------------------------
+
+/// The number of zone changes executed in `report`.
+fn zone_changes(report: &BusReport) -> usize {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter(|ev| matches!(ev.instance.event(), GameEvent::ZoneChange { .. }))
+        .count()
+}
+
+/// Runs `events` (sba true) and the same events reversed with the same answers; asserts equal
+/// outputs, registries and state hashes (CR 704.7 order independence); returns the first run.
+fn both_orders(w: &World, events: &[GameEvent], answers: &[u32]) -> Run {
+    let mut backward = events.to_vec();
+    backward.reverse();
+    let one = drive(w, events.to_vec(), true, answers);
+    let two = drive(w, backward, true, answers);
+    assert_eq!(one.out, two.out);
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(one.state.registry, two.state.registry);
+    assert_eq!(one.asked, two.asked);
+    one
+}
+
+/// A one-use effect `id` on zone changes with `cause`, doing `action`.
+fn by_cause(id: u64, cause: ZoneChangeCause, action: Action) -> ReplacementEffect {
+    ReplacementEffect::new(
+        e(id),
+        EventMatcher {
+            cause: Some(cause),
+            ..EventMatcher::new(BusEventKind::ZoneChange)
+        },
+        action,
+    )
+    .with_shield(Shield::Uses(1))
+}
+
+fn to_exile() -> Action {
+    Action::Modify(Modification::SetDestination(ZoneKind::Exile))
+}
+
+/// A permanent of P1 and its [destroy, sba] moves to the graveyard.
+fn mixed_group() -> (World, ObjectId, CardId, Vec<GameEvent>) {
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let card = w.card_of(x);
+    let events = vec![
+        zc(x, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+        zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+    ];
+    (w, x, card, events)
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 3 H2 (a): CR 704.7: a one-use exile redirect of
+/// state-based moves only is applied to the sba member of a [destroy, sba] group even though
+/// the destroy member sorts first: one application, the card is exiled, in both orders.
+#[test]
+fn req_event_001_r3_h2_a_replacement_matching_a_non_first_member_applies() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::StateBasedAction, to_exile()));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert!(run.asked.is_empty());
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(run.state.registry.get(e(1)).is_none());
+}
+
+/// REQ-EVENT-001, round 3 H2 (b): control: the sba move alone is redirected to exile.
+#[test]
+fn req_event_001_r3_h2_b_sba_move_alone_is_redirected() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::StateBasedAction, to_exile()));
+    let run = drive(&w, vec![events[1].clone()], true, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+}
+
+/// REQ-EVENT-001, round 3 H2 (c): CR 704.7: a one-use `Skip` of state-based moves only drops
+/// the sba member; the destroy member, which it does not match, still moves the object to the
+/// graveyard; both orders.
+#[test]
+fn req_event_001_r3_h2_c_skip_of_one_member_leaves_the_other() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::StateBasedAction, Action::Skip));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+/// REQ-EVENT-001, round 3 H2 (d): CR 122.1c, CR 701.8b, CR 704.7: the shield counter's
+/// destroy replacement applies to the destroy member only (once: the counter is removed, the
+/// effect is applied once); the sba member still moves the object to the graveyard; one
+/// executed move; both orders. The counter removal is processed before the move.
+#[test]
+fn req_event_001_r3_h2_d_shield_counter_on_mixed_group() {
+    let (mut w, x, card, events) = mixed_group();
+    w.counters(x, "shield", 1);
+    w.add(ReplacementEffect::shield_counter_destroy(e(1), x));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.counter(x, "shield"), 0);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    // The removal batch, then the move.
+    assert_eq!(report.executed.len(), 2);
+    assert!(matches!(
+        report.executed[0].events[0].instance.event(),
+        GameEvent::RemoveCounters { .. }
+    ));
+    assert!(matches!(
+        report.executed[1].events[0].instance.event(),
+        GameEvent::ZoneChange { .. }
+    ));
+    // The shield counter does not apply to a state-based move alone (CR 122.1c, CR 704.1).
+    let run = drive(&w, vec![events[1].clone()], true, &[]);
+    assert!(ok(&run).applications.is_empty());
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+/// REQ-EVENT-001, round 3 H2 (e): CR 704.7: two identical sba members and a one-use redirect:
+/// one application covers both; one move, to exile.
+#[test]
+fn req_event_001_r3_h2_e_same_cause_duplicates_one_application() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::StateBasedAction, to_exile()));
+    let both = vec![events[1].clone(), events[1].clone()];
+    let run = drive(&w, both, true, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(run.state.registry.get(e(1)).is_none());
+}
+
+/// REQ-EVENT-001, round 3 H2 (f): CR 704.7: a one-use exile redirect of destructions only:
+/// the replaced destroy member wins over the unmatched sba member (different destinations:
+/// the modified member is executed); the card is exiled; both orders.
+#[test]
+fn req_event_001_r3_h2_f_modified_member_wins() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::Destroy, to_exile()));
+    let run = both_orders(&w, &events, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 1);
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+}
+
+/// REQ-EVENT-001, round 3 H2 (g): CR 616.1, CR 616.1f, CR 704.7: e1 redirects destructions to
+/// exile, e2 skips state-based moves; the union of candidates is offered once to the object's
+/// chooser (P1: one `CHOOSE_REPLACEMENT_EFFECT` with both); the chosen one applies to its
+/// member; the other is then the only candidate and applies without a request. Either answer
+/// ends with the destroy member exiling the card; applications in choice order; both orders.
+#[test]
+fn req_event_001_r3_h2_g_union_of_candidates_one_request() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::Destroy, to_exile()));
+    w.add(by_cause(2, ZoneChangeCause::StateBasedAction, Action::Skip));
+    for (answer, applications) in [(0, vec![e(1), e(2)]), (1, vec![e(2), e(1)])] {
+        let run = both_orders(&w, &events, &[answer]);
+        assert_eq!(run.asked.len(), 1);
+        let r = &run.asked[0];
+        assert_eq!(r.choice_type, ChoiceType::ChooseReplacementEffect);
+        assert_eq!(r.chooser, p(1));
+        assert_eq!(effects_of(r), vec![desc(1), desc(2)]);
+        let report = ok(&run);
+        assert_eq!(report.applications, applications);
+        assert_eq!(zone_changes(report), 1);
+        assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Exile));
+        assert!(run.state.registry.is_empty());
+    }
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, round 3 H2: CR 704.7: both members replaced to
+/// different destinations: exactly one move, chosen by content, the same for both orders.
+#[test]
+fn req_event_001_r3_h2_divergent_destinations_one_move() {
+    let (mut w, _, card, events) = mixed_group();
+    w.add(by_cause(1, ZoneChangeCause::Destroy, to_exile()));
+    w.add(by_cause(
+        2,
+        ZoneChangeCause::StateBasedAction,
+        Action::Modify(Modification::SetDestination(ZoneKind::Hand)),
+    ));
+    let run = both_orders(&w, &events, &[0]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1), e(2)]);
+    assert_eq!(zone_changes(report), 1);
+    let zone = run.state.zone_of_card(card);
+    assert!(zone == Some(ZoneId::Exile) || zone == Some(ZoneId::Hand(p(1))));
+}
+
+/// REQ-EVENT-001, round 3 H2 (h): CR 704.7: moves of two different objects never merge: a
+/// one-use redirect of state-based moves exiles only the first object.
+#[test]
+fn req_event_001_r3_h2_h_different_objects_do_not_merge() {
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let y = w.create(1, ZoneKind::Battlefield);
+    w.add(by_cause(1, ZoneChangeCause::StateBasedAction, to_exile()));
+    let events = vec![
+        zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        zc(y, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+    ];
+    let run = drive(&w, events, true, &[]);
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(zone_changes(report), 2);
+    assert_eq!(run.state.zone_of_card(w.card_of(x)), Some(ZoneId::Exile));
+    assert_eq!(
+        run.state.zone_of_card(w.card_of(y)),
+        Some(ZoneId::Graveyard(p(1)))
+    );
+}
+
+/// The F8 pool world with the pool effect overriding CR 614.5 (CR 903.9b-style).
+fn overriding_pool_world(pool: i64) -> (World, ObjectId, ObjectId) {
+    let (mut w, a, b) = pool_world(pool);
+    let effect = w.registry.remove(e(1)).unwrap();
+    w.add(effect.with_overrides_614_5(true));
+    (w, a, b)
+}
+
+/// REQ-EVENT-001, round 3 H4: CR 615.7, CR 614.5: an overriding pool of 3 against A:3 and
+/// B:3: every division is honoured without `RepeatLimit`: (1,2) prevents 1 of A and 2 of B,
+/// (2,1) the reverse, (3,0) and (0,3) as before; the pool is used up and removed. The
+/// non-overriding pool gives the same results.
+#[test]
+fn req_event_001_r3_h4_overriding_pool_honours_split() {
+    for overriding in [true, false] {
+        let (w, a, b) = if overriding {
+            overriding_pool_world(3)
+        } else {
+            pool_world(3)
+        };
+        let events = vec![
+            damage_from_to_player(a, 2, 3),
+            damage_from_to_player(b, 2, 3),
+        ];
+        for (sa, sb) in [(1, 2), (2, 1), (3, 0), (0, 3)] {
+            let run = drive_with(&w, events.clone(), false, &[division(&[(a, sa), (b, sb)])]);
+            let report = ok(&run);
+            assert_eq!(report.prevented, 3);
+            assert_eq!(dealt_by(report, a), 3 - i64::try_from(sa).unwrap());
+            assert_eq!(dealt_by(report, b), 3 - i64::try_from(sb).unwrap());
+            assert_eq!(run.state.life(2), 17);
+            assert!(run.state.registry.get(e(1)).is_none());
+        }
+    }
+}
+
+/// REQ-EVENT-001, round 3 H5: CR 615.7, CR 120.1: pool 4; sourceless 4, A 4 and B 4 to P2;
+/// P2 gives A all 4: A takes the pool whatever the submission order; the sourceless damage
+/// and B's are dealt in full.
+#[test]
+fn req_event_001_r3_h5_allotted_members_take_the_pool_first() {
+    let (w, a, b) = pool_world(4);
+    let s = damage_player(2, 4);
+    let da = damage_from_to_player(a, 2, 4);
+    let db = damage_from_to_player(b, 2, 4);
+    for events in [
+        vec![s.clone(), da.clone(), db.clone()],
+        vec![da.clone(), db.clone(), s.clone()],
+        vec![db.clone(), s.clone(), da.clone()],
+    ] {
+        let run = drive_with(&w, events, false, &[division(&[(a, 4), (b, 0)])]);
+        assert_eq!(run.asked.len(), 1);
+        assert_eq!(
+            run.asked[0].payload,
+            ChoicePayload::DivideValue {
+                total: 4,
+                recipients: vec![(ChoiceTarget::Object(a), 0), (ChoiceTarget::Object(b), 0)],
+            }
+        );
+        let report = ok(&run);
+        assert_eq!(report.prevented, 4);
+        assert_eq!(dealt_by(report, a), 0);
+        assert_eq!(dealt_by(report, b), 4);
+        assert_eq!(
+            dealt_sources(report).iter().filter(|s| s.is_none()).count(),
+            1
+        );
+        assert_eq!(run.state.life(2), 12);
+        assert!(run.state.registry.get(e(1)).is_none());
     }
 }
