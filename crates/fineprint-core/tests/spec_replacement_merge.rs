@@ -9,7 +9,10 @@
 //! event. Members for different objects never merge, whatever their kind, candidate set or
 //! chooser: each gets its own choice and application, in APNAP then submission order. Coalescing
 //! of same-object, same-destination moves does not depend on submission order (review round 1
-//! finding F2, round 2).
+//! finding F2, round 2). Review round 3 (H2): such a group is handled member-wise: the candidates
+//! are the effects eligible for at least one member; the chosen effect is applied once to every
+//! member it matches; unmatched members still move the object; the object moves at most once, and
+//! where the surviving destinations differ a member modified by an application wins.
 //! Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
@@ -458,10 +461,12 @@ fn assert_coalesced(r: &Run, obj: ObjectId) {
     assert!(moves <= 1, "{moves} executed moves of the object");
 }
 
-// REQ-EVENT-001, CR 704.3, 704.7, 122.1c (F2): an object with a shield counter and the destroy
-// shield registered, moved to the graveyard twice in one SBA batch with different causes
-// (Destroy, StateBasedAction): the result is identical for both submission orders (which cause
-// survives is the engine's content-based choice and is not asserted); never two moves, no error.
+// REQ-EVENT-001, CR 704.3, 704.7, 701.8b, 122.1c (F2, corrected in round 3 by H2): an object
+// with a shield counter and the destroy shield registered, moved to the graveyard twice in one SBA
+// batch with different causes (Destroy, StateBasedAction): the result is identical for both
+// submission orders, no error. The shield matches only the Destroy member (CR 122.1c: destroyed
+// as the result of an effect): it is applied once and removes the counter; the unmatched
+// StateBasedAction member still moves the object to the graveyard, exactly once.
 #[test]
 fn req_event_001_r2_f2_mixed_causes_order_independent_shield_counter() {
     let (mut w, objs) = world(&[P1]);
@@ -474,6 +479,10 @@ fn req_event_001_r2_f2_mixed_causes_order_independent_shield_counter() {
     let (a, b) = both_orders(&base, x, true);
     assert_coalesced(&a, x);
     assert_coalesced(&b, x);
+    assert_eq!(a.applications(), eids(&[1]));
+    assert_eq!(a.world().counter(x, "shield"), 0);
+    assert_eq!(moves_of(&a, x), 1);
+    assert_eq!(destinations(&a), vec![ZoneKind::Graveyard]);
 }
 
 // REQ-EVENT-001, CR 704.3, 704.7 (F2): the same pair with a one-use exile redirect matching any
@@ -490,11 +499,13 @@ fn req_event_001_r2_f2_mixed_causes_order_independent_redirect() {
     assert_coalesced(&a, x);
     assert_coalesced(&b, x);
     assert_eq!(a.applications(), eids(&[1]));
+    assert_eq!(moves_of(&a, x), 1);
     assert_eq!(destinations(&a), vec![ZoneKind::Exile]);
 }
 
-// REQ-EVENT-001, CR 704.3, 704.7 (F2): the same pair with no effect: identical for both orders;
-// the object moves to the graveyard exactly once.
+// REQ-EVENT-001, CR 704.3, 704.7 (F2, round 3 H2): the same pair with no effect: identical for
+// both orders; the members keep the same destination, so they are one move: the object moves to
+// the graveyard exactly once, nothing applied.
 #[test]
 fn req_event_001_r2_f2_mixed_causes_order_independent_no_effect() {
     let (w, objs) = world(&[P1]);
@@ -502,7 +513,9 @@ fn req_event_001_r2_f2_mixed_causes_order_independent_no_effect() {
     let (a, b) = both_orders(&Bus::new(w, Vec::new()), x, true);
     assert_coalesced(&a, x);
     assert_coalesced(&b, x);
+    assert!(a.applications().is_empty());
     assert_eq!(zone_changes(&a), 1);
+    assert_eq!(moves_of(&a, x), 1);
     assert_eq!(destinations(&a), vec![ZoneKind::Graveyard]);
 }
 
@@ -523,4 +536,379 @@ fn req_event_001_r2_f2_mixed_causes_without_sba_fail() {
         assert!(r.result.is_err(), "{destroy_first}: {:?}", r.result);
         assert_unchanged(&r);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// review round 3 (H2): member-wise SBA groups
+// ---------------------------------------------------------------------------------------------
+
+/// The number of executed ZoneChange events of `obj` in a run.
+fn moves_of(r: &Run, obj: ObjectId) -> usize {
+    r.executed()
+        .iter()
+        .filter(|e| matches!(e.instance.event(), GameEvent::ZoneChange { object, .. } if *object == obj))
+        .count()
+}
+
+/// A ZoneChange matcher for the given cause only (any object, any zones).
+fn cause_is(cause: ZoneChangeCause) -> EventMatcher {
+    EventMatcher {
+        cause: Some(cause),
+        ..EventMatcher::new(BusEventKind::ZoneChange)
+    }
+}
+
+/// A one-use effect `n` on moves with `cause`, doing `action`.
+fn one_use(n: u64, cause: ZoneChangeCause, action: Action) -> ReplacementEffect {
+    fx(n, cause_is(cause), action).with_shield(Shield::Uses(1))
+}
+
+fn to_exile() -> Action {
+    Action::Modify(Modification::SetDestination(ZoneKind::Exile))
+}
+
+/// A move of `obj` to the graveyard with `cause`.
+fn death(obj: ObjectId, cause: ZoneChangeCause) -> GameEvent {
+    zone_change(obj, ZoneKind::Graveyard, cause)
+}
+
+/// Runs `events` and their reverse as one SBA batch on `base`, answering each
+/// CHOOSE_REPLACEMENT_EFFECT request by effect id preference `prefer`, and asserts the two runs
+/// give the same output (report or error), registry bytes, world snapshot and state hash.
+fn h2_both_orders(base: &Bus, events: Vec<GameEvent>, prefer: &[u64]) -> (Run, Run) {
+    let mut reversed = events.clone();
+    reversed.reverse();
+    let a = run_preferring(base.clone(), Call::batch(events, true), prefer);
+    let b = run_preferring(base.clone(), Call::batch(reversed, true), prefer);
+    assert_eq!(a.result, b.result, "the output depends on submission order");
+    assert_eq!(bytes(&a.after.registry), bytes(&b.after.registry));
+    assert_eq!(a.after.snap(), b.after.snap());
+    assert_eq!(a.after.canonical(), b.after.canonical());
+    assert_eq!(a.hash, b.hash);
+    assert_eq!(a.requests.len(), b.requests.len());
+    (a, b)
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7 (H2 a): one permanent, [Destroy, StateBasedAction] to the
+// graveyard, a one-use exile redirect matching only the StateBasedAction cause: the effect is
+// offered for the group, applied once, and the object ends in exile, moved exactly once. Both
+// submission orders.
+#[test]
+fn req_event_001_r3_h2_effect_matching_only_sba_member_applies() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(
+        w,
+        vec![one_use(1, ZoneChangeCause::StateBasedAction, to_exile())],
+    );
+    let events = vec![
+        death(x, ZoneChangeCause::Destroy),
+        death(x, ZoneChangeCause::StateBasedAction),
+    ];
+    let (a, b) = h2_both_orders(&base, events, &[]);
+    for r in [&a, &b] {
+        assert!(r.requests.is_empty());
+        assert_eq!(r.applications(), eids(&[1]));
+        assert_eq!(moves_of(r, x), 1);
+        assert_eq!(destinations(r), vec![ZoneKind::Exile]);
+        assert_eq!(r.world().zone_of(x), None);
+        assert!(r.after.registry.is_empty());
+    }
+}
+
+// REQ-EVENT-001, CR 704.3 (H2 b, control): the StateBasedAction move alone with the same effect
+// is redirected to exile, one application.
+#[test]
+fn req_event_001_r3_h2_control_sba_move_alone() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(
+        w,
+        vec![one_use(1, ZoneChangeCause::StateBasedAction, to_exile())],
+    );
+    let r = run_batch(
+        base,
+        vec![death(x, ZoneChangeCause::StateBasedAction)],
+        true,
+        &[],
+    );
+    assert_eq!(r.applications(), eids(&[1]));
+    assert_eq!(moves_of(&r, x), 1);
+    assert_eq!(destinations(&r), vec![ZoneKind::Exile]);
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7 (H2 c): a one-use Skip matching only the StateBasedAction cause
+// drops that member; the unmatched Destroy member still moves the object to the graveyard, once.
+// Both submission orders.
+#[test]
+fn req_event_001_r3_h2_skip_of_one_member_still_moves_object() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(
+        w,
+        vec![one_use(1, ZoneChangeCause::StateBasedAction, Action::Skip)],
+    );
+    let events = vec![
+        death(x, ZoneChangeCause::Destroy),
+        death(x, ZoneChangeCause::StateBasedAction),
+    ];
+    let (a, b) = h2_both_orders(&base, events, &[]);
+    for r in [&a, &b] {
+        assert_eq!(r.applications(), eids(&[1]));
+        assert_eq!(moves_of(r, x), 1);
+        assert_eq!(destinations(r), vec![ZoneKind::Graveyard]);
+        assert_eq!(r.world().zone_of(x), None);
+    }
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7, 701.8b, 122.1c (H2 d): a shield counter and the destroy shield,
+// [Destroy, StateBasedAction]: the shield (Destroy only) is applied once and the counter removed;
+// the StateBasedAction member is not matched by it and moves the object to the graveyard, once.
+// Both submission orders.
+#[test]
+fn req_event_001_r3_h2_shield_counter_with_sba_member() {
+    let (mut w, objs) = world(&[P1]);
+    let x = objs[0];
+    w.put_counters(x, "shield", 1);
+    let base = Bus::new(
+        w,
+        vec![ReplacementEffect::shield_counter_destroy(eid(1), x)],
+    );
+    let events = vec![
+        death(x, ZoneChangeCause::Destroy),
+        death(x, ZoneChangeCause::StateBasedAction),
+    ];
+    let (a, b) = h2_both_orders(&base, events, &[]);
+    for r in [&a, &b] {
+        assert!(r.result.is_ok(), "{:?}", r.result);
+        assert_eq!(r.applications(), eids(&[1]));
+        assert_eq!(r.world().counter(x, "shield"), 0);
+        assert_eq!(moves_of(r, x), 1);
+        assert_eq!(destinations(r), vec![ZoneKind::Graveyard]);
+        assert_eq!(r.world().zone_of(x), None);
+    }
+}
+
+// REQ-EVENT-001, CR 701.8b, 122.1c (H2, shield counter): the destroy shield does not match a
+// StateBasedAction move on its own: nothing applied, the counter stays on the object until it
+// moves, the object goes to the graveyard.
+#[test]
+fn req_event_001_r3_h2_shield_counter_ignores_sba_cause() {
+    let (mut w, objs) = world(&[P1]);
+    let x = objs[0];
+    w.put_counters(x, "shield", 1);
+    let base = Bus::new(
+        w,
+        vec![ReplacementEffect::shield_counter_destroy(eid(1), x)],
+    );
+    let r = run_batch(
+        base,
+        vec![death(x, ZoneChangeCause::StateBasedAction)],
+        true,
+        &[],
+    );
+    assert!(r.applications().is_empty());
+    assert_eq!(moves_of(&r, x), 1);
+    assert_eq!(destinations(&r), vec![ZoneKind::Graveyard]);
+    assert!(r.after.registry.get(eid(1)).is_some());
+}
+
+// REQ-EVENT-001, CR 704.7 (H2 e): identical StateBasedAction duplicates and a one-use exile
+// redirect on that cause: exactly one application, one move, exile.
+#[test]
+fn req_event_001_r3_h2_same_cause_duplicates_one_application() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(
+        w,
+        vec![one_use(1, ZoneChangeCause::StateBasedAction, to_exile())],
+    );
+    let events = vec![
+        death(x, ZoneChangeCause::StateBasedAction),
+        death(x, ZoneChangeCause::StateBasedAction),
+    ];
+    let (a, b) = h2_both_orders(&base, events, &[]);
+    for r in [&a, &b] {
+        assert_eq!(r.applications(), eids(&[1]));
+        assert_eq!(moves_of(r, x), 1);
+        assert_eq!(destinations(r), vec![ZoneKind::Exile]);
+    }
+}
+
+// REQ-EVENT-001, CR 704.3, 704.7 (H2 f): a one-use exile redirect matching only the Destroy cause:
+// applied once; the modified member wins over the unmodified StateBasedAction member, so the
+// object ends in exile, moved once. Both submission orders.
+#[test]
+fn req_event_001_r3_h2_modified_member_wins() {
+    let (w, objs) = world(&[P1]);
+    let x = objs[0];
+    let base = Bus::new(w, vec![one_use(1, ZoneChangeCause::Destroy, to_exile())]);
+    let events = vec![
+        death(x, ZoneChangeCause::Destroy),
+        death(x, ZoneChangeCause::StateBasedAction),
+    ];
+    let (a, b) = h2_both_orders(&base, events, &[]);
+    for r in [&a, &b] {
+        assert_eq!(r.applications(), eids(&[1]));
+        assert_eq!(moves_of(r, x), 1);
+        assert_eq!(destinations(r), vec![ZoneKind::Exile]);
+        assert_eq!(r.world().zone_of(x), None);
+    }
+}
+
+// REQ-EVENT-001, CR 704.7, 616.1, 616.1f (H2 g): e1 (Destroy only, exile) and e2
+// (StateBasedAction only, skip), [Destroy, StateBasedAction]: the chooser is asked once with both
+// effects offered. Common ground only: one request, no error, at most one move, `applications`
+// starts with the chosen effect, and for the same answer both submission orders agree.
+#[test]
+fn req_event_001_r3_h2_two_cause_specific_effects_one_request() {
+    for pick in [1u64, 2] {
+        let (w, objs) = world(&[P1]);
+        let x = objs[0];
+        let base = Bus::new(
+            w,
+            vec![
+                one_use(1, ZoneChangeCause::Destroy, to_exile()),
+                one_use(2, ZoneChangeCause::StateBasedAction, Action::Skip),
+            ],
+        );
+        let events = vec![
+            death(x, ZoneChangeCause::Destroy),
+            death(x, ZoneChangeCause::StateBasedAction),
+        ];
+        let (a, b) = h2_both_orders(&base, events, &[pick]);
+        for r in [&a, &b] {
+            assert!(r.result.is_ok(), "pick {pick}: {:?}", r.result);
+            assert_eq!(r.requests.len(), 1, "pick {pick}");
+            assert_eq!(
+                r.requests[0].choice_type,
+                fineprint_core::choice::ChoiceType::ChooseReplacementEffect
+            );
+            let mut offered = r.offered(0);
+            offered.sort();
+            assert_eq!(offered, descs(&[1, 2]), "pick {pick}");
+            assert!(moves_of(r, x) <= 1, "pick {pick}");
+            assert_eq!(r.applications().first(), Some(&eid(pick)), "pick {pick}");
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 704.7 (H2 h): different objects in one SBA batch with the same cause-specific
+// effect never merge: each object is processed on its own (one application each, each exiled
+// once). Both submission orders.
+#[test]
+fn req_event_001_r3_h2_different_objects_do_not_merge() {
+    let (w, objs) = world(&[P1, P1]);
+    let base = Bus::new(
+        w,
+        vec![fx(
+            1,
+            cause_is(ZoneChangeCause::StateBasedAction),
+            to_exile(),
+        )],
+    );
+    for order in [[0usize, 1], [1, 0]] {
+        let events: Vec<GameEvent> = order
+            .iter()
+            .map(|&i| death(objs[i], ZoneChangeCause::StateBasedAction))
+            .collect();
+        let r = run_batch(base.clone(), events, true, &[]);
+        assert_eq!(r.applications(), eids(&[1, 1]), "{order:?}");
+        for &o in &objs {
+            assert_eq!(moves_of(&r, o), 1, "{order:?}");
+            assert_eq!(r.world().zone_of(o), None, "{order:?}");
+        }
+        assert_eq!(destinations(&r), vec![ZoneKind::Exile; 2], "{order:?}");
+    }
+}
+
+const H2_CAUSES: [ZoneChangeCause; 3] = [
+    ZoneChangeCause::Destroy,
+    ZoneChangeCause::StateBasedAction,
+    ZoneChangeCause::Other,
+];
+
+/// Every permutation of `items` (lexicographic over positions; at most 3 items here).
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let head = rest.remove(i);
+        for mut tail in permutations(&rest) {
+            tail.insert(0, head.clone());
+            out.push(tail);
+        }
+    }
+    out
+}
+
+// REQ-EVENT-001, REQ-CORE-001, CR 704.3, 704.7, 616.1f (H2 i): for generated groups of 2-3 SBA
+// members of one object (causes Destroy, StateBasedAction, Other) and 0-2 cause-specific effects
+// (exile redirect or skip, unlimited or one-use), every permutation of the submission order gives
+// the same output, registry bytes and state hash, the call succeeds, and the object moves at most
+// once. Re-running the first order gives the identical result (determinism).
+#[test]
+fn req_event_001_r3_h2_property_group_order_independent() {
+    let (mut asked, mut applied, mut moved, mut stayed) = (0usize, 0usize, 0usize, 0usize);
+    for seed in 0..120u64 {
+        let mut rng = Lcg::new(seed ^ 0x0004_0002);
+        let (w, objs) = world(&[rng.pick(&[P1, P2])]);
+        let x = objs[0];
+        let members: Vec<GameEvent> = (0..2 + rng.below(2))
+            .map(|_| death(x, rng.pick(&H2_CAUSES)))
+            .collect();
+        let effects: Vec<ReplacementEffect> = (0..rng.below(3))
+            .map(|i| {
+                let action = if rng.chance(1, 2) {
+                    to_exile()
+                } else {
+                    Action::Skip
+                };
+                let e = fx(i + 1, cause_is(rng.pick(&H2_CAUSES)), action);
+                if rng.chance(1, 2) {
+                    e.with_shield(Shield::Uses(1))
+                } else {
+                    e
+                }
+            })
+            .collect();
+        let base = Bus::new(w, effects);
+        // The same answer whatever the option order: prefer effect 1, then effect 2.
+        let runs: Vec<Run> = permutations(&members)
+            .into_iter()
+            .map(|order| run_preferring(base.clone(), Call::batch(order, true), &[1, 2]))
+            .collect();
+        let first = &runs[0];
+        assert!(first.result.is_ok(), "seed {seed}: {:?}", first.result);
+        for (k, r) in runs.iter().enumerate() {
+            let ctx = format!("seed {seed}, permutation {k}");
+            assert_eq!(r.result, first.result, "{ctx}");
+            assert_eq!(
+                bytes(&r.after.registry),
+                bytes(&first.after.registry),
+                "{ctx}"
+            );
+            assert_eq!(r.after.snap(), first.after.snap(), "{ctx}");
+            assert_eq!(r.hash, first.hash, "{ctx}");
+            assert!(moves_of(r, x) <= 1, "{ctx}");
+        }
+        let again = run_preferring(base, Call::batch(members, true), &[1, 2]);
+        assert_eq!(again.result, first.result, "seed {seed}: rerun");
+        assert_eq!(again.hash, first.hash, "seed {seed}: rerun");
+        asked += usize::from(!first.requests.is_empty());
+        applied += usize::from(!first.applications().is_empty());
+        if moves_of(first, x) == 1 {
+            moved += 1;
+        } else {
+            stayed += 1;
+        }
+    }
+    // The generator reaches requests, applications, moved and unmoved outcomes.
+    assert!(
+        asked > 0 && applied > 0 && moved > 0 && stayed > 0,
+        "asked {asked}, applied {applied}, moved {moved}, stayed {stayed}"
+    );
 }

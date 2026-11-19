@@ -10,8 +10,10 @@
 //! `DIVIDE_VALUE` request, after every request the members made before the pool applies;
 //! otherwise the pool applies automatically. An allotment is capped at its source's current
 //! damage: an answer over a cap is rejected, and the timeout default fills the recipients in
-//! ascending id order up to each source's damage. Black-box: written from the work-item brief
-//! only.
+//! ascending id order up to each source's damage. Review round 3: an overriding pool (CR 614.5
+//! exception) is allocated like any other pool and never applied again to a source that has its
+//! allotment (H4); sourceless damage is not offered in the division and draws only on what the
+//! division leaves (H5). Black-box: written from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
 mod support;
@@ -597,4 +599,143 @@ fn req_event_001_r2_g4_pool_covering_all_keeps_rest() {
     assert_eq!(next.report().prevented, 1);
     assert_eq!(dealt(&next), vec![(Some(b), 2)]);
     assert!(next.after.registry.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// review round 3 (H4, H5)
+// ---------------------------------------------------------------------------------------------
+
+/// The four valid divisions of a pool of 3 between A:3 and B:3.
+const DIVISIONS_3: [[u64; 2]; 4] = [[1, 2], [2, 1], [3, 0], [0, 3]];
+
+/// The damage each source dealt, sorted, with a 0 remainder omitted (that event is dropped).
+fn expected_dealt(parts: &[(Option<ObjectId>, i64)]) -> Dealt {
+    let mut out: Dealt = parts.iter().filter(|(_, n)| *n > 0).copied().collect();
+    out.sort();
+    out
+}
+
+fn sorted_dealt(r: &Run) -> Dealt {
+    let mut d = dealt(r);
+    d.sort();
+    d
+}
+
+/// Runs the 3 + 3 two-source allocation of `effect` for every valid division and checks: Ok, one
+/// DIVIDE_VALUE request (total 3, recipients A and B), 3 prevented, each source deals its damage
+/// minus its share, the pool effect removed.
+fn check_four_divisions(effect: ReplacementEffect, label: &str) {
+    let (w, a, b) = sources();
+    let base = Bus::new(w, vec![effect]);
+    let call = Call::batch(vec![dmg_from(a, P2, 3), dmg_from(b, P2, 3)], false);
+    for split in DIVISIONS_3 {
+        let r = run_answers(base.clone(), call.clone(), &[divide(&[a, b], &split)]);
+        let ctx = format!("{label} {split:?}");
+        assert!(r.result.is_ok(), "{ctx}: {:?}", r.result);
+        assert_allocation(&r.requests[0], 3, a, b);
+        assert_eq!(r.report().prevented, 3, "{ctx}");
+        let share = |n: u64| i64::try_from(n).expect("fits");
+        assert_eq!(
+            sorted_dealt(&r),
+            expected_dealt(&[
+                (Some(a), 3 - share(split[0])),
+                (Some(b), 3 - share(split[1]))
+            ]),
+            "{ctx}"
+        );
+        assert_eq!(r.world().life(P2), STARTING_LIFE - 3, "{ctx}");
+        assert!(r.after.registry.get(eid(POOL)).is_none(), "{ctx}");
+    }
+}
+
+// REQ-EVENT-001, CR 614.5, 615.7, 616.1f (H4): an OVERRIDING pool of 3 against 3 + 3 from two
+// sources: every valid division, (A:1,B:2), (A:2,B:1), (A:3,B:0), (A:0,B:3), completes without
+// `RepeatLimit`, prevents 3 in total, each source deals its damage minus its share, and the pool
+// effect is removed.
+#[test]
+fn req_event_001_r3_h4_overriding_pool_four_divisions() {
+    check_four_divisions(pool(3).with_overrides_614_5(true), "overriding");
+}
+
+// REQ-EVENT-001, CR 614.5, 615.7 (H4, unchanged behaviour): the same four divisions for a
+// non-overriding pool.
+#[test]
+fn req_event_001_r3_h4_non_overriding_pool_four_divisions() {
+    check_four_divisions(pool(3), "non-overriding");
+}
+
+// REQ-EVENT-001, CR 614.5, 615.7 (H4): an overriding pool of 3 and a single source: no request,
+// Ok, 3 prevented (one event of 5: 2 dealt; two events of 3: 3 dealt in total), the pool removed.
+#[test]
+fn req_event_001_r3_h4_overriding_pool_single_source() {
+    let (w, a, _) = sources();
+    let base = Bus::new(w, vec![pool(3).with_overrides_614_5(true)]);
+    let r = run_batch(base.clone(), vec![dmg_from(a, P2, 5)], false, &[]);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert_eq!(r.report().prevented, 3);
+    assert_eq!(dealt(&r), vec![(Some(a), 2)]);
+    assert!(r.after.registry.is_empty());
+
+    let r = run_batch(
+        base,
+        vec![dmg_from(a, P2, 3), dmg_from(a, P2, 3)],
+        false,
+        &[],
+    );
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert_eq!(r.report().prevented, 3);
+    assert_eq!(dealt_total(&r), 3);
+    assert_eq!(r.world().life(P2), STARTING_LIFE - 3);
+    assert!(r.after.registry.is_empty());
+}
+
+/// Damage to player 2 with no source.
+fn sourceless(amount: i64) -> GameEvent {
+    dmg_player(P2, amount)
+}
+
+// REQ-EVENT-001, CR 120.1, 615.7, 616.1f (H5): pool 4 against sourceless 4, A 4 and B 4: one
+// DIVIDE_VALUE request with exactly the recipients A and B (total 4, no sourceless recipient);
+// the members with an allotment take the pool before the sourceless damage, which draws only on
+// what the division leaves (nothing here). For (A:4,B:0), (A:2,B:2) and (A:0,B:4), and for the
+// submission orders [sourceless, A, B], [A, B, sourceless], [B, sourceless, A]: 4 prevented,
+// each source deals 4 minus its share, the sourceless damage is dealt in full, the pool removed.
+#[test]
+fn req_event_001_r3_h5_sourceless_damage_outside_division() {
+    let (w, a, b) = sources();
+    let base = Bus::new(w, vec![pool(4)]);
+    let orders: [Vec<GameEvent>; 3] = [
+        vec![sourceless(4), dmg_from(a, P2, 4), dmg_from(b, P2, 4)],
+        vec![dmg_from(a, P2, 4), dmg_from(b, P2, 4), sourceless(4)],
+        vec![dmg_from(b, P2, 4), sourceless(4), dmg_from(a, P2, 4)],
+    ];
+    for split in [[4u64, 0], [2, 2], [0, 4]] {
+        let mut hashes = Vec::new();
+        for (k, events) in orders.iter().enumerate() {
+            let ctx = format!("{split:?}, order {k}");
+            let r = run_answers(
+                base.clone(),
+                Call::batch(events.clone(), false),
+                &[divide(&[a, b], &split)],
+            );
+            assert!(r.result.is_ok(), "{ctx}: {:?}", r.result);
+            assert_eq!(r.requests.len(), 1, "{ctx}");
+            assert_allocation(&r.requests[0], 4, a, b);
+            assert_eq!(r.report().prevented, 4, "{ctx}");
+            let share = |n: u64| i64::try_from(n).expect("fits");
+            assert_eq!(
+                sorted_dealt(&r),
+                expected_dealt(&[
+                    (None, 4),
+                    (Some(a), 4 - share(split[0])),
+                    (Some(b), 4 - share(split[1])),
+                ]),
+                "{ctx}"
+            );
+            assert_eq!(r.world().life(P2), STARTING_LIFE - 8, "{ctx}");
+            assert!(r.after.registry.get(eid(POOL)).is_none(), "{ctx}");
+            hashes.push(bytes(&r.after.registry));
+        }
+        assert!(hashes.windows(2).all(|p| p[0] == p[1]), "{split:?}");
+    }
 }
