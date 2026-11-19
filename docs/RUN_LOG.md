@@ -277,3 +277,19 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
 | 03-events | #29 (PR #178 review round 6c) | Orchestrator (triage T0) | Opus 5.5 | 1 | done | docs only | DECISIONS records the R10 change to req_event_001_r6_lineage_path_grandchild_takes_parent_position (verifier finding at 59c4901) |
 | 03-events | #29 (PR #178 review round 6d) | Orchestrator (R8) | Opus 5.5 | 1 | recorded | docs only | review 5981232036 (phase C descendants after the pool round) recorded as known limitation (h); later unit |
+| 03-events | #30 | work-classifier | Opus 5.5 | 1 | needs-rules → routed | — | T2: new trigger-detection module; 603.10a-g look-back needs CR text |
+| 03-events | #30 | rules-researcher | Opus 5.5 | 1 | done | baseline CR-2026-11-06 match | 603.10a-g match SRS; three SRS §8.2 citation discrepancies → DECISIONS + HUMAN_QUEUE P8 |
+| 03-events | #30 | Implementer | Opus 5.5 | 1 | done | 2575 workspace tests pass; fmt, clippy, guard clean; triggers/ 100% lines | triggers::{look_back_kind, events_from_batch, detect, WaitingTriggers} |
+| 03-events | #30 | Independent Tester | Opus 5.5 | 1 | done | 81 spec_triggers_* pass | black-box, no disagreement with the implementation |
+| 03-events | #30 | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #30 (PR #179 review round 1) | work-classifier | Opus 5.5 | 1 | needs-rules → routed | — | 18 findings: 15 fixed, 1 contract (instance identity), 1 deferred to #61 (gain of control), docs |
+| 03-events | #30 (PR #179 review round 1) | rules-researcher | Opus 5.5 | 1 | done | baseline CR-2026-11-06 | destroy, control, draw, damage/life, tokens, re-exile, sacrifice, reposition |
+| 03-events | #30 (PR #179 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | triggers lib 44 passed; workspace green | detect_with_pre_event_memory, events_from_batch_with_lki, cross-view grouping |
+| 03-events | #30 (PR #179 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | detect 45, events 28, lookback 30 passed | black-box spec updates |
+| 03-events | #30 (PR #179 review round 1) | Orchestrator (T0 docs, CR index) | Opus 5.5 | 1 | done | cr check ok | DECISIONS round-1 entries |
+| 03-events | #30 (PR #179 review round 1) | work-verifier | Opus 5.5 | 1 | pass | 2605 passed; fmt, clippy, guard, coverage (core 99.30 %), cr check ok; spec suites ×10 stable | verified head eed9b3f; no test weakened vs f0a9448 |
+| 03-events | #30 (PR #179 review round 2) | work-classifier | Opus 5.5 | 1 | routed | — | 4 findings: 3 fixed (source_survives, discard/mill player, token `to`), 1 deferred to new issue #180 FP-143 (UNATTACHED needs executor outcome change) |
+| 03-events | #30 (PR #179 review round 2) | Orchestrator (new issue) | Opus 5.5 | 1 | done | — | opened #180 FP-143, blocked by #27 and #30 |
+| 03-events | #30 (PR #179 review round 2) | Fixer (src) | Opus 5.5 | 1 | done | triggers lib 49 passed; workspace 2615; core 99.19 % | TriggerEnv::source_survives (defaulted), discard/mill player, token `to` |
+| 03-events | #30 (PR #179 review round 2) | Fixer (tester) | Sonnet 5.5 | 1 | done | detect 49, events 29, lookback 30 passed | black-box spec updates; LiveEnv fake |
+| 03-events | #30 (PR #179 review round 2) | Orchestrator (T0 docs, CR index) | Opus 5.5 | 1 | done | cr check ok | DECISIONS round-2 entry |
