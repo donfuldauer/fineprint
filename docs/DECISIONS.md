@@ -3732,12 +3732,27 @@ candidate set or chooser; non-ZoneChange members never merge. Tests with several
 multiset of requests where the order is not fixed by APNAP/submission order. Cross-kind and
 non-ZoneChange same-result merges (for example two different SBAs that both cause a player to lose
 the game) are out of scope and untested. With `sba = false` a duplicate move of one object is only
-asserted to fail and roll back (the error variant is not asserted). Review round 2 (F2): for two
-same-object, same-destination moves with different causes (`Destroy`, `StateBasedAction`) and
-`sba = true`, the tests assert only order independence: both submission orders give the same
-output, registry bytes, world snapshot and state hash, success, and at most one executed move of
-the object (with a shield-counter destroy shield, a one-use exile redirect, and no effect). Which
-cause survives the coalescing is the engine's content-based choice and is not asserted.
+asserted to fail and roll back (the error variant is not asserted). Review rounds 2 (F2) and 3
+(H2), member-wise groups: with `sba = true` the group key is (object, destination) over ZoneChange
+members; the candidates of a group are the effects eligible for at least one member (an effect
+matching only one member's cause is offered); one `CHOOSE_REPLACEMENT_EFFECT` request when more
+than one candidate is left after the tier filter, none otherwise; the chosen effect is applied once
+(one `applications` entry, one shield use) to every member it matches, and members it does not
+match are unchanged and still move the object; further effects are then considered again
+(616.1f). The object moves at most once: members left with one destination are one move; when the
+surviving destinations differ, a member modified by an application wins over an unmodified one
+(so a redirect matching only one member's cause still exiles the object). That "modified member
+wins" rule is the brief's reading, not a CR statement. If every member is dropped the object does
+not move (not tested directly; covered only by the property's at-most-once check). Every group test
+runs both submission orders and compares output, registry bytes, world snapshot and state hash.
+`shield_counter_destroy` matches `ZoneChangeCause::Destroy` only (CR 122.1c, 701.8b): with
+[Destroy, StateBasedAction] it is applied once, the counter is removed, and the StateBasedAction
+member moves the object to the graveyard once. In the two-cause-specific-effects case (Destroy-only
+exile, StateBasedAction-only skip) only the common ground is asserted: one request offering both,
+no error, at most one move, `applications` starting with the chosen effect, and order independence
+for the same answer. The H2 property answers by effect-id preference (effect 1, then 2) so the
+answer does not depend on the option order, and checks that its cases reach requests,
+applications, moved and unmoved outcomes.
 (8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
 with `amount_below`) and uses only events and children no generated effect can loop on, so every
 case must end with `Ok`; invariant (1) is checked as "a non-override effect appears in
@@ -3811,7 +3826,23 @@ a later damage event is dealt in full. The property runner answers every allocat
 request's own `default_on_timeout` (it cannot see current damage after generated modifications, so
 any other division could exceed a cap); it checks that the default divides the total among exactly
 the request's recipients, each at least its minimum, and the "every case ends Ok" invariant is
-kept.
+kept. Sourceless damage (review round 3, H5) is outside the division: it is never a
+`DIVIDE_VALUE` recipient (CR 120.1), and it takes only what the division leaves, after the members
+that hold an allotment have taken theirs.
+(18) H4 (overriding pool, CR 614.5, 615.7): a pool of 3 with `with_overrides_614_5(true)` against
+3 + 3 from two sources is tested for all four valid divisions (A:1,B:2), (A:2,B:1), (A:3,B:0),
+(A:0,B:3): `Ok` (no `RepeatLimit`), `prevented == 3`, each source deals its damage minus its share
+(a 0 remainder means no executed event), the pool effect removed; the same four for a
+non-overriding pool; and an overriding pool with a single source (one event of 5: 3 prevented, 2
+dealt; two events of 3: 3 prevented, 3 dealt) with no request. `applications` is not asserted
+for these cases.
+(19) H5 (sourceless damage in a divided pool, CR 120.1, 615.7): pool 4 against sourceless 4, A 4
+and B 4, in the submission orders [sourceless, A, B], [A, B, sourceless] and [B, sourceless, A],
+answered (A:4,B:0), (A:2,B:2) and (A:0,B:4): exactly one request whose recipients are A and B
+(total 4), `prevented == 4`, A and B deal 4 minus their share, the sourceless 4 is dealt in full,
+the pool removed, and the registry bytes agree across the three orders. Sourceless damage with
+only ONE source (no division) has no round-2 test to carry over and none is added (the brief adds
+no new expectation for it).
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
