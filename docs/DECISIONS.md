@@ -2616,15 +2616,20 @@ pins an unsettled rule).
 `MemoryTable::apply_zone_change` with the returned `Moved`. For simultaneous state-based
 departures (CR 704.8) the caller captures every departing object first and only then moves them.
 Failure recovery: the batch is one transaction over every component it mutates: `Zones`, the
-`IdGenerator<ObjectId>`, the `LkiStore` and the `MemoryTable` (all derive `Clone`; the `LkiStore`
-clone is a cheap `Arc` snapshot, and mutating a clone never changes the original). Before the first
-capture, the caller snapshots all four. On any failed capture or failed `Zones::move_object`, the
-caller restores all of those snapshots together, for a single move and for the whole
+`IdGenerator<ObjectId>`, the `LkiStore`, the `MemoryTable` and `Permanents` (all derive `Clone`; the
+`LkiStore` clone is a cheap `Arc` snapshot, and mutating a clone never changes the original).
+`Permanents` is included because a permanent's departure also mutates it: `Permanents::leave`
+removes the permanent and unattaches everything attached to it, so restoring only the other four
+would return the object to `Zones` without restoring its permanent state or attachments. Before the
+first capture, the caller snapshots all five. On any failed capture or failed `Zones::move_object`,
+the caller restores all of those snapshots together, for a single move and for the whole
 simultaneous-departure batch alike. So a partly applied batch (earlier moves succeeded, a later one
-failed) is fully undone: no object has moved, no ids are consumed, and no LKI record or
-`MemoryTable` change remains. A retry starts from the original state and can capture again instead
-of getting `AlreadyCaptured`. Equivalently, the batch may run on clones of the four components that
-are swapped in only when every step succeeds. Restoring only the `LkiStore` is not enough, since it
+failed) is fully undone: no object has moved, no ids are consumed, and no LKI record,
+`MemoryTable` change, permanent removal or unattachment remains. A retry starts from the original
+state and can capture again instead of getting `AlreadyCaptured`. General rule: the transaction
+covers every state component the caller's departure handling mutates during the batch (these five
+today; any component added later joins the set). Equivalently, the batch may run on clones of all
+of those components that are swapped in only when every step succeeds. Restoring only the `LkiStore` is not enough, since it
 would drop an earlier object's LKI but leave its move in place. This matches the transactional
 rollback that checkpoints (#26 FP-025) will provide once state is wired.
 A capture is made iff the request makes the object leave its zone (destination differs, or exile
