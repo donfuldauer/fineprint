@@ -132,11 +132,14 @@ fn carry_player(restored: &mut GameState, before: &PlayerState, after: &PlayerSt
         return;
     };
     if before.life() != after.life() {
-        let life = target
-            .life()
-            .saturating_add(after.life().saturating_sub(before.life()));
-        target.set_life(life);
+        // Exact in i128 (integer, deterministic); only the final result is clamped to i64.
+        let exact =
+            i128::from(target.life()) + i128::from(after.life()) - i128::from(before.life());
+        let clamped = exact.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+        target.set_life(i64::try_from(clamped).unwrap_or(0));
     }
+    // Counts are >= 0, so `to - from` cannot overflow and saturating_add then max(0) already
+    // equals the exact clamped result.
     // Union of the counter kinds of `before` and `after` (ordered: BTreeMap keys).
     let kinds: BTreeSet<&String> = before
         .counters()
