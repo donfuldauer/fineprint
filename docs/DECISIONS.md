@@ -3075,21 +3075,25 @@ edits in `state/`, outside the owned paths).
 
 ## #26 FP-025: Durable-record propagation rule
 
-**Decision:** `commit_durable(id)` pops the innermost frame and appends `(before = its checkpoint,
-after = live state now)` to the parent's records, after the frame's own inherited records; at
-depth 1 it is a plain `commit`. Whenever a frame is popped (commit, durable commit or rollback)
-its records move to the parent in order; a rollback first applies them, in commit order, to the
+**Decision:** `commit_durable(id)` pops the innermost frame and, when there is a parent, gives
+the parent exactly one record `(before = its checkpoint, after = live state now)`; the frame's
+inherited records are dropped, because that record's window contains each of theirs. At depth 1
+it is a plain `commit`. Whenever a frame is popped by `commit` or `rollback` its records move to
+the parent in order; a rollback first applies them, in commit order, to the
 restored checkpoint with `carry_durable`. Records are dropped when the root frame is popped.
 Only the innermost transaction may be committed or rolled back; a failed call changes nothing.
 **Rationale:** Net rule: after rolling back ancestor A the state is A's checkpoint with every
 durable effect committed anywhere beneath A applied in commit order, which is what CR 734.1
 requires of the library-touching mana abilities that are committed as their own
 sub-transactions (SRS §2.5). Keeping records after a rollback lets an outer rollback carry them
-again over its own (earlier) checkpoint. A record can be applied twice when a durable frame also
-inherits records; the `GameState` carry rule is idempotent for that case (absolute values and
-"advance, never rewind").
-**Alternatives:** Applying effects as deltas recorded at commit (the state has no general diff
-type yet); allowing out-of-order commit (no rules procedure needs it; it makes nesting ambiguous).
+again over its own (earlier) checkpoint. Dedupe rule: a durable commit with a parent replaces
+its inherited records by its own covering record, so each durable effect is applied exactly
+once on any rollback (CodeRabbit PR #175 round 1; with the delta carry rule a forwarded
+descendant record would be applied twice).
+**Alternatives:** Forwarding the inherited records and the covering record (applies descendant
+effects twice under the delta carry rule); a general state diff type recorded at commit (the
+state has none yet); allowing out-of-order commit (no rules procedure needs it; it makes
+nesting ambiguous).
 
 ## #26 FP-025: SnapshotStore semantics
 
@@ -3111,8 +3115,15 @@ building rewind on `Transactions` (mixes sandbox undo with rules rollback, which
 `before` and `after`: the PRNG (set to `after`'s), each of the card, object, ability-instance,
 effect, timestamp and link generators (issued on `restored` until it reaches `after`'s
 `last_issued`; never rewound; stops without panicking if issuing fails), and for each player in
-both `restored` and `after` whose state changed, life, every counter and every designation
-(including removals) copied from `after`. It never carries turn number, active player,
+`before`, `after` and `restored` whose state changed `before` -> `after`, only that change
+applied over the restored player: life gets `after - before` added (saturating); each counter
+kind whose count changed gets its per-key delta added, clamped at 0 (the entry is removed),
+because a count is never negative in this state model; each designation whose value changed
+(added, changed or removed) takes `after`'s value or is cleared, because designations are not
+additive. Keys unchanged `before` -> `after` are not touched. This supersedes clause 4(iii) of
+the Implementer brief (copy from `after`): SRS §2.5 requires that rolling back the outer action
+leaves only the durable sub-transaction's effects in place, so outer changes made before the
+sub began must be reverted (CodeRabbit PR #175 round 1). It never carries turn number, active player,
 priority, turn order, the player generator or players added meanwhile, the effect registry or
 the history ledger. Components added to `GameState` by later units (zones, permanents, memory,
 knowledge) must be added to this impl by those units. The library-touching zone data a CR 734.1
@@ -3121,23 +3132,38 @@ category (b) mana ability changes cannot be carried yet: zones are not part of `
 (through R2 if a contract changes).
 **Rationale:** These are the only `GameState` components today a durable sub-transaction can
 change; not carrying priority keeps CR 734.2 priority retention true. PRNG and generator values
-are absolute, so ids issued by the durable sub-transaction are never issued again.
-**Alternatives:** Carrying the whole `after` state (would also carry the reversed action's
-changes and priority); deltas for life (a later rules unit may refine this with a diff type).
+are absolute, so ids issued by the durable sub-transaction are never issued again. Limit: the
+PRNG and the id generators are carried as absolute values at the durable commit, so when the
+durable frame's window starts at an outer checkpoint they can include draws and ids made by the
+parent action before the sub began; a PRNG delta cannot be expressed.
+**Alternatives:** Copying the whole player from `after` (rejected: carries the reversed outer
+action's earlier changes to the same player); carrying the whole `after` state (would also
+carry the reversed action's changes and priority).
 
 ## #26 FP-025: Spec-test choices
 
 **Decision:** In `crates/fineprint-core/tests/spec_txn_*.rs`: (1) the brief's "P0"/"P1" are the
 first and second seats, `PlayerId(1)` and `PlayerId(2)`, because `GameState::new` issues players
 `1..=n`; (2) when a frame holding durable records is itself committed durably, the reference
-model puts the propagated descendant records on the parent first and the frame's own record
-last (commit order, semantics e read literally), so the toy state may carry a nested suffix
-twice; (3) the "never issued" id is taken from a second `Transactions` advanced further than the
+model drops the inherited descendant records and puts only the frame's own covering record on
+the parent, so each durable effect is carried exactly once (see "Durable-record propagation
+rule"); (3) the "never issued" id is taken from a second `Transactions` advanced further than the
 instance under test, as the brief allows; (4) the id-generator carry is only asserted where the
 outer action issued no ids before the durable sub began, because i(ii) does not say whether
 "differs" compares `after` with `before` or with `restored`.
-**Rationale:** (1) and (3) follow the public API; (2) is the literal reading of "in commit
-order" with records propagating on every commit; (4) avoids asserting a case the brief leaves
+**Rationale:** (1) and (3) follow the public API; (2) follows the dedupe rule; (4) avoids asserting a case the brief leaves
 open.
 **Alternatives:** Excluding nested durable-in-durable sequences from the property model (weaker);
 asserting one reading of i(ii) (could report a false defect).
+
+## #26 FP-025: TxnId is instance-local
+
+**Decision:** A `TxnId` is valid only on the `Transactions` that issued it, and callers must
+keep each handle with its instance. Using a handle issued by another instance is a caller error
+with an unspecified result: `UnknownTxn`, `NotInnermost`, or, if its number equals an open
+frame's, treatment as that frame. This is documented on `TxnId` and `Transactions`; no code
+change (CodeRabbit PR #175 round 1).
+**Rationale:** Rejecting foreign handles needs an instance identity in each `TxnId`, which needs
+a global counter or other global mutable state; R3 forbids that, and the deterministic engine
+has no per-instance source of identity.
+**Alternatives:** An instance id inside `TxnId` (needs global mutable state, R3).
