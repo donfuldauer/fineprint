@@ -187,6 +187,12 @@ fn req_net_003_prop_validate_matches_oracle() {
             oracle_valid(ChoiceKind::Objects, &r, &m),
             "{m:?}"
         );
+        if let Err(e) = req.validate(&m) {
+            assert!(
+                !e.trim().is_empty(),
+                "seed {seed}: empty explanation for {m:?}"
+            );
+        }
     }
     assert!(
         rejected > 0 && accepted > 0,

@@ -347,3 +347,89 @@ fn req_net_003_hostile_inputs_never_panic() {
         &div(&[(to(1), u64::MAX - 2), (to(2), 1), (to(3), 1)]),
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// PAY_MANA_AND_COSTS: payment-method eligibility (REQ-NET-003, R12).
+// ---------------------------------------------------------------------------------------------
+
+/// A PAY_MANA_AND_COSTS request with methods `("test.convoke", [o1, o2])` and
+/// `("test.delve", [o3])`, optional and cancellable, auto-pay offered.
+fn pay_request() -> PendingChoiceRequest {
+    PendingChoiceRequest {
+        request_id: RequestId::new(0),
+        chooser: pid(1),
+        choice_type: ChoiceType::PayManaAndCosts,
+        reason: reason(),
+        min: 1,
+        max: 1,
+        hidden: false,
+        reveal_to: Vec::new(),
+        default_on_timeout: ChoiceResponse::CancelAndRollback,
+        options: ChoiceOptions::Enumerated(Vec::new()),
+        payload: ChoicePayload::PayManaAndCosts {
+            locked_total: "test.total_a".to_owned(),
+            methods: vec![
+                ("test.convoke".to_owned(), oids(&[11, 12])),
+                ("test.delve".to_owned(), oids(&[13])),
+            ],
+            mana_abilities: Vec::new(),
+            auto_pay: true,
+            optional: true,
+            cancellable: true,
+        },
+    }
+}
+
+/// `PayCosts` without auto-pay and without mana abilities.
+fn pay(methods: Vec<(u32, Vec<u64>)>) -> ChoiceResponse {
+    ChoiceResponse::PayCosts {
+        auto_pay: false,
+        methods: methods.into_iter().map(|(i, v)| (i, oids(&v))).collect(),
+        mana_abilities: Vec::new(),
+    }
+}
+
+/// REQ-NET-003, R12: a method may be paid with any subset of its own eligible objects.
+#[test]
+fn req_net_003_pay_costs_accepts_eligible_objects() {
+    let req = pay_request();
+    accept(&req, &pay(vec![(0, vec![11])]));
+    accept(&req, &pay(vec![(0, vec![11, 12])]));
+    accept(&req, &pay(vec![(1, vec![13])]));
+    accept(&req, &pay(vec![(0, vec![])]));
+    accept(&req, &pay(vec![(0, vec![12]), (1, vec![13])]));
+}
+
+/// REQ-NET-003, R12: objects eligible only for another method, duplicates, unlisted objects and
+/// out-of-range method indices are rejected with non-empty explanations that do not leak the
+/// other methods' eligible lists.
+#[test]
+fn req_net_003_pay_costs_rejects_ineligible_objects() {
+    let req = pay_request();
+    let e = reject(&req, &pay(vec![(0, vec![13])]));
+    // The answer's own item may be named; another method's eligible list may not.
+    assert!(!e.contains("11") && !e.contains("12"), "leaks: {e}");
+    let e = reject(&req, &pay(vec![(0, vec![11, 11])]));
+    assert!(!e.contains("12") && !e.contains("13"), "leaks: {e}");
+    let e = reject(&req, &pay(vec![(0, vec![999])]));
+    assert!(!e.contains("11") && !e.contains("12") && !e.contains("13"));
+    let e = reject(&req, &pay(vec![(2, vec![])]));
+    assert!(!e.contains("11") && !e.contains("12") && !e.contains("13"));
+    reject(&req, &pay(vec![(1, vec![11])]));
+}
+
+/// REQ-NET-003: auto-pay, declining and cancelling still validate against the payment request.
+#[test]
+fn req_net_003_pay_costs_auto_decline_cancel() {
+    let req = pay_request();
+    accept(
+        &req,
+        &ChoiceResponse::PayCosts {
+            auto_pay: true,
+            methods: Vec::new(),
+            mana_abilities: Vec::new(),
+        },
+    );
+    accept(&req, &ChoiceResponse::DeclineOptionalPayment);
+    accept(&req, &ChoiceResponse::CancelAndRollback);
+}
