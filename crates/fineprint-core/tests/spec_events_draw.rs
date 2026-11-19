@@ -8,10 +8,11 @@
 #[path = "spec_events_support.rs"]
 mod support;
 
+use fineprint_core::events::ZoneChangeCause;
 use fineprint_core::events::{
     EventError, GameEvent, HistoryQuery, HistoryScope, HistoryStat, Outcome,
 };
-use fineprint_core::zones::{ZoneId, ZoneKind};
+use fineprint_core::zones::{MoveRequest, Position, ZoneId, ZoneKind};
 use support::*;
 
 fn drawn(w: &World, p: fineprint_base::ids::PlayerId) -> i64 {
@@ -161,4 +162,127 @@ fn cards_drawn_counts_only_executed_draws() {
     assert_eq!(w.exec(GameEvent::Draw { player: P1 }), Ok(None));
     assert_eq!(drawn(&w, P1), 2);
     assert_eq!(drawn(&w, P2), 0);
+}
+
+// REQ-EVENT-001, CR 400.7: a same-zone reposition captures no LKI (the object does not leave its
+// zone); the Draw after it in the same batch takes the card now on top and does capture LKI.
+#[test]
+fn same_zone_reposition_then_draw_in_one_batch() {
+    let mut w = World::new();
+    for _ in 0..3 {
+        w.create(ZoneKind::Library, P1);
+    }
+    let lib = w.zones.contents(ZoneId::Library(P1));
+    let (t0, t1) = (lib[0], lib[1]);
+    let log_len = w.events.log().len();
+    let done = w
+        .batch(vec![
+            GameEvent::ZoneChange {
+                object: t0,
+                request: MoveRequest {
+                    to: ZoneKind::Library,
+                    position: Position::Bottom,
+                    face_down: false,
+                    controller: None,
+                },
+                cause: ZoneChangeCause::Other,
+            },
+            GameEvent::Draw { player: P1 },
+        ])
+        .expect("batch succeeds");
+    assert_eq!(done.events.len(), 2);
+    assert!(!done.events[0].lki_captured);
+    match &done.events[0].outcome {
+        Outcome::ZoneChange(m) => {
+            assert_eq!(m.old, m.new);
+            assert_eq!(m.from, m.to);
+        }
+        other => panic!("expected ZoneChange outcome, got {other:?}"),
+    }
+    assert!(done.events[1].lki_captured);
+    let moved = match &done.events[1].outcome {
+        Outcome::ZoneChange(m) => *m,
+        other => panic!("expected ZoneChange outcome, got {other:?}"),
+    };
+    assert_eq!(moved.old, t1, "the card now on top was drawn");
+    assert_eq!(moved.to, ZoneId::Hand(P1));
+    assert!(w.lki.get(moved.old).is_some());
+    assert!(
+        w.lki.get(t0).is_none(),
+        "the repositioned card left nothing behind"
+    );
+    assert_eq!(w.events.log().len(), log_len + 1);
+}
+
+// REQ-EVENT-001, CR 111.8, 121.1: a token that left the battlefield to the library cannot be
+// drawn: Draw is a no-op (no move, nothing counted, no empty-library flag change, nothing
+// logged), also when another card lies beneath it.
+#[test]
+fn draw_of_a_token_in_the_library_is_a_no_op() {
+    for cards_beneath in [0usize, 1] {
+        let mut w = World::new();
+        for _ in 0..cards_beneath {
+            w.create(ZoneKind::Library, P1);
+        }
+        let card = w.fresh_card();
+        let created = w.ok(GameEvent::CreateToken {
+            owner: P1,
+            card,
+            controller: None,
+        });
+        let token = match created.outcome {
+            Outcome::TokenCreated { object } => object,
+            other => panic!("expected TokenCreated, got {other:?}"),
+        };
+        let moved = match w
+            .ok(GameEvent::ZoneChange {
+                object: token,
+                request: MoveRequest::new(ZoneKind::Library),
+                cause: ZoneChangeCause::Other,
+            })
+            .outcome
+        {
+            Outcome::ZoneChange(m) => m,
+            other => panic!("expected ZoneChange outcome, got {other:?}"),
+        };
+        let new = moved.new;
+        assert_eq!(w.zones.contents(ZoneId::Library(P1))[0], new);
+        let flags = w.events.empty_library_draws();
+        let log_len = w.events.log().len();
+        let before = w.snap();
+
+        assert_eq!(w.exec(GameEvent::Draw { player: P1 }), Ok(None));
+        assert_eq!(w.zones.object(new).unwrap().zone, ZoneId::Library(P1));
+        assert_eq!(drawn(&w, P1), 0);
+        assert_eq!(w.events.empty_library_draws(), flags);
+        assert_eq!(w.events.log().len(), log_len);
+        assert_eq!(w.snap(), before);
+    }
+}
+
+// REQ-EVENT-001, CR 400.7: with a one-card library the Draw takes the very card that was just
+// repositioned in place: the reposition still reports no LKI, the Draw does.
+#[test]
+fn same_zone_reposition_then_draw_of_the_same_card() {
+    let mut w = World::new();
+    let only = w.create(ZoneKind::Library, P1);
+    let done = w
+        .batch(vec![
+            GameEvent::ZoneChange {
+                object: only,
+                request: MoveRequest {
+                    to: ZoneKind::Library,
+                    position: Position::Bottom,
+                    face_down: false,
+                    controller: None,
+                },
+                cause: ZoneChangeCause::Other,
+            },
+            GameEvent::Draw { player: P1 },
+        ])
+        .expect("batch succeeds");
+    assert_eq!(done.events.len(), 2);
+    assert!(!done.events[0].lki_captured);
+    assert!(done.events[1].lki_captured);
+    assert!(w.lki.get(only).is_some());
 }

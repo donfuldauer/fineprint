@@ -263,6 +263,7 @@ pub struct TestProvider {
     chars: RefCell<BTreeMap<ObjectId, Characteristics>>,
     counters: RefCell<BTreeMap<ObjectId, BTreeMap<String, i64>>>,
     attached: RefCell<BTreeMap<ObjectId, Vec<ObjectId>>>,
+    missing: RefCell<BTreeSet<ObjectId>>,
 }
 
 impl TestProvider {
@@ -274,6 +275,16 @@ impl TestProvider {
 
     pub fn set_chars(&self, id: ObjectId, c: Characteristics) {
         self.chars.borrow_mut().insert(id, c);
+    }
+
+    /// Makes `characteristics(id)` return `None` (an object the provider cannot describe).
+    pub fn set_missing(&self, id: ObjectId) {
+        self.missing.borrow_mut().insert(id);
+    }
+
+    /// Undoes [`TestProvider::set_missing`].
+    pub fn clear_missing(&self, id: ObjectId) {
+        self.missing.borrow_mut().remove(&id);
     }
 
     pub fn set_counter(&self, id: ObjectId, kind: &str, n: i64) {
@@ -291,6 +302,9 @@ impl TestProvider {
 
 impl CharacteristicsProvider for TestProvider {
     fn characteristics(&self, id: ObjectId) -> Option<Characteristics> {
+        if self.missing.borrow().contains(&id) {
+            return None;
+        }
         if let Some(c) = self.chars.borrow().get(&id) {
             return Some(c.clone());
         }

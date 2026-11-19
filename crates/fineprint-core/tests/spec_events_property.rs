@@ -119,6 +119,10 @@ fn random_event(rng: &mut Lcg, w: &mut World) -> GameEvent {
             if request.to == ZoneKind::Battlefield && rng.below(3) == 0 {
                 request.controller = Some(rng.pick(&[P1, P2]));
             }
+            // Face-down entries onto the battlefield (REQ-EVENT-001, CR 701.27b, 708.8).
+            if request.to == ZoneKind::Battlefield && rng.below(4) == 0 {
+                request.face_down = true;
+            }
             GameEvent::ZoneChange {
                 object: pick_object(rng, w),
                 request,
@@ -301,7 +305,8 @@ fn random_scripts_are_deterministic_and_errors_change_nothing() {
             let idx: Vec<u64> = w1.events.log().batches().iter().map(|b| b.index).collect();
             assert_eq!(idx, (0..logged as u64).collect::<Vec<_>>());
 
-            // Ledger: life = start + gained - lost; cards drawn = executed draws.
+            // Ledger (CR 119.2, 119.3, 120.3a): life = start + gained - lost; cards drawn =
+            // executed draws.
             for (i, p) in [P1, P2].into_iter().enumerate() {
                 let gained = game_query(&w1, HistoryStat::LifeGained, p);
                 let lost = game_query(&w1, HistoryStat::LifeLost, p);
@@ -312,7 +317,8 @@ fn random_scripts_are_deterministic_and_errors_change_nothing() {
                 );
                 assert_eq!(game_query(&w1, HistoryStat::CardsDrawn, p), draws[i]);
             }
-            // Every permanent is on the battlefield; every battlefield object is a permanent.
+            // CR 110.1, CR 400.7: every permanent is on the battlefield; every battlefield
+            // object is a permanent.
             let bf = w1
                 .zones
                 .contents(fineprint_core::zones::ZoneId::Battlefield);
@@ -321,7 +327,16 @@ fn random_scripts_are_deterministic_and_errors_change_nothing() {
                 v.sort();
                 v
             });
-            // Markers never hold counters below 1.
+            // REQ-EVENT-001, REQ-CORE-004, CR 701.27b: the zone record's face-down flag and the
+            // permanent's status agree for every battlefield object.
+            for &id in &bf {
+                assert_eq!(
+                    w1.zones.object(id).unwrap().face_down,
+                    w1.permanents.get(id).unwrap().status().face_down,
+                    "seed {seed} step {step}: face-down disagreement for {id:?}"
+                );
+            }
+            // CR 122.1, 122.2: markers never hold counters below 1.
             for id in w1.zones.all_object_ids() {
                 assert!(w1.events.markers().counters(id).values().all(|&n| n >= 1));
                 assert!(w1.events.markers().damage(id) >= 0);
