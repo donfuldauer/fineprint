@@ -3724,14 +3724,46 @@ asserted to reflect the remainder.
 override effect "to hand -> command zone" applies again after a non-override effect "command zone ->
 hand"; applications `[override, other, override]`), and an override that keeps matching forever
 (`RepeatLimit`, nothing changed).
-(7) 704.7 merging (amended brief): merged events must share kind, first-round candidate set and
-chooser; tests with several merge groups assert the multiset of requests, not their order between
-groups of the same chooser. Cross-kind same-result merges (for example two different SBAs that both
-cause a player to lose the game) are out of scope and untested.
+(7) 704.7 merging (review round 1, brief clause j): with `sba = true` only `ZoneChange` members
+merge, and only when they affect the same object with the same destination (same object, same kind
+of result); such a group makes one request (none with one candidate), one application, one shield
+use and one executed event. Members for different objects never merge, whatever their kind,
+candidate set or chooser; non-ZoneChange members never merge. Tests with several groups assert the
+multiset of requests where the order is not fixed by APNAP/submission order. Cross-kind and
+non-ZoneChange same-result merges (for example two different SBAs that both cause a player to lose
+the game) are out of scope and untested. With `sba = false` a duplicate move of one object is only
+asserted to fail and roll back (the error variant is not asserted).
 (8) The property generator never produces an unbounded override (overrides are only `Add(n >= 1)`
 with `amount_below`) and uses only events and children no generated effect can loop on, so every
 case must end with `Ok`; invariant (1) is checked as "a non-override effect appears in
-`applications` at most once per submitted event".
+`applications` at most once per submitted event". Generated damage comes from one of two fixed
+battlefield source objects or from no source, so pool shields meet multi-source damage; the runner
+answers a CR 615.7 `DIVIDE_VALUE` request with the recipients' minimums plus the rest all to the
+first (strategy First), all to the last (Last) or split by the seeded LCG (Seeded), and one test
+asserts that at least one generated case raises such a request.
+(9) F3 (stack chooser): the public zones API creates a stack object with an explicit controller
+(`Zones::create_object` with `MoveRequest { to: Stack, controller: Some(p) }`), so the spell case is
+tested directly on the stack (owned by player 1, controlled by player 2, and the reverse).
+(10) F7 (work budget): the test world holds `MAX_BUS_EVENTS` plain `LifeChange` events in one batch,
+so the boundary is tested directly (4096 succeed, 4097 is `WorkLimit`, nothing changed), plus a
+children case (4095 members + one replaced Draw with one child is 4097: `WorkLimit`; one member
+fewer succeeds). "Returns quickly" is not asserted on wall-clock time (R7); the doubling-override
+case simply has to finish.
+(11) F8 (pool allocation): when a source's allotment is 0, whether the pool effect still counts as
+applied to that source's event is not asserted (only that it appears in `applications` and the
+damage outcome); exact application lists are asserted only where unambiguous ((A:3,B:0): once;
+(A:1,B:2): twice). Only one pool is used per test, so the order of simultaneous allocation requests
+of several pools or choosers is not tested beyond "the allocation request precedes every
+CHOOSE_REPLACEMENT_EFFECT request of the batch, even the active player's". The request's options
+are asserted as `Enumerated([Object(A), Object(B)])`, `min = max = 2`, default all-to-first. The
+"no request when the effect becomes applicable only after another effect modified the event" limit
+is not tested.
+(12) F6 (enters as copy): the rollback when the copy step fails is provoked with a copied object id
+that does not exist; only `BusError::Event(_)` and an unchanged state are asserted, not the inner
+`EventError`.
+(13) F11/F4: an Untap of an untapped permanent and zero damage are asserted to leave the state
+completely unchanged and log nothing; Tap of a tapped permanent is not tested (brief: unchanged, no
+CR text).
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
