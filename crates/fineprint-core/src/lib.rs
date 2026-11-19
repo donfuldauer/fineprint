@@ -18,5 +18,7 @@ pub mod objects;
 pub mod permanent;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
+/// Checkpoints, rollback, nested durable sub-transactions and the sandbox snapshot store (REQ-CORE-005).
+pub mod txn;
 /// Zones, the zone-move primitive and the CR 400.7 exception registry (REQ-ZONE-001, REQ-CORE-002).
 pub mod zones;

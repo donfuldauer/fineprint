@@ -3058,3 +3058,157 @@ chance-dependent control counters (Removal, MoveOut) fell to 0 with 8 seeds; mor
 coverage without weakening any assertion.
 **Alternatives:** Re-tuning the generator's distribution (more fragile); dropping the controls
 (weakens the suite).
+
+## #26 FP-025: Generic `Transactional` trait over the state
+
+**Decision:** Rollback lives in a new module `fineprint_core::txn` as `Transactions<S:
+Transactional>`, a live state plus a stack of frames (checkpoint clone, durable records). The
+trait asks the state for `state_hash`, `priority_player` and `carry_durable(restored, before,
+after)`; `GameState` implements it using only its public API.
+**Rationale:** `GameState`'s fields are private to `state/`, which this unit may not edit (R1).
+A checkpoint is one `clone()`, which is a cheap Arc-sharing snapshot (#18 FP-017), and restoring
+is replacing the live value, so the restored hash is identical by construction (CR 734.1). The
+trait also lets the bookkeeping be tested on a toy state with no `GameState` at all.
+**Alternatives:** An undo log of inverse operations (every later mutator would have to record
+its inverse; easy to get wrong, and more than one clone of work); methods on `GameState` (needs
+edits in `state/`, outside the owned paths).
+
+## #26 FP-025: Durable-record propagation rule
+
+**Decision:** Each open frame keeps an ordered, non-overlapping list of steps
+`Entry { before, after, durable }` and a cursor: the live state up to which the steps account for
+its history (from the cursor to the live state the history is continuous). Own steps
+(`durable: false`) are the frame's own changes, which its rollback reverses; durable steps survive
+it. When a finished child F is handed to its parent P (with no parent everything is dropped, so
+records are dropped when the root frame is popped): `commit(F)` with no steps does nothing;
+`commit(F)` with steps gives P an own step `(P.cursor, F.checkpoint)`, F's steps with their tags,
+and an own step `(F.cursor, live)`, and moves P's cursor to `live`; `commit_durable(F)` with a
+parent gives P an own step `(P.cursor, F.checkpoint)`, every step of F re-tagged durable, and a
+durable step `(F.cursor, live)` (with F holding no steps this is the earlier single record
+`(F.checkpoint, live)`), and moves P's cursor to `live`; at depth 1 it is a plain `commit`.
+`rollback(F)` restores F's checkpoint and applies only F's durable steps, in order, each with its
+own `carry_durable(restored, before, after)` call; if F held durable steps and has a parent, P
+gets an own step `(P.cursor, F.checkpoint)` and F's durable steps, and P's cursor becomes the
+post-rollback live state; otherwise P is untouched. Steps are never merged or dropped for being
+empty. Only the innermost transaction may be committed or rolled back; a failed call changes
+nothing.
+**Rationale:** Net rule (CR 734.1, SRS §2.5): after rolling back an ancestor the state is its
+checkpoint with every durable effect beneath it applied exactly once, in time order, each as its
+own step. A carry need not be linear (the counter carry clamps at 0), so one net pair per durable
+frame loses effects: root checkpoint 1, root sets 5, inside durable A durable C1 sets 0 and durable
+C2 sets 5; A's net pair (5, 5) leaves 1 after the root's rollback, the steps give clamp(1 - 5) = 0
+then + 5 = 5 (CodeRabbit PR #175 round 3). Each change lies in exactly one step, so in the
+append-only case nothing is applied twice (the round 1 finding stays fixed). The steps are kept
+as the frames' history rather than reconstructed from the durable records alone, because a
+rolled-back child with a durable grandchild makes the live state jump: A checkpoint 0, child X
++2, durable grandchild G 2 -> 7, +1, X rolls back (live 5), A commits durably; filling the gaps
+between records ((0, 2), (2, 7)) gives 7 after the root's rollback, the correct answer is 5.
+Memory cost: no clone for a checkpoint beyond its snapshot, a plain commit of a frame with no
+steps, or a rollback with no durable step; otherwise at most three state clones per durable
+commit, per plain commit of a frame holding steps, and per rollback that forwards durable steps
+to a parent (the parent's cursor when it is not already an owned state, the child's cursor or
+checkpoint, and the live state).
+**Alternatives:** A single covering record per durable frame, dropping inherited records (loses
+non-linear effects: the round 3 finding); forwarding inherited records plus gap steps between
+them (unsound with rolled-back children, as above); forwarding the inherited records and the
+covering record (applies descendant effects twice: the round 1 finding); a general state diff
+type recorded at commit (the state has none yet); allowing out-of-order commit (no rules
+procedure needs it; it makes nesting ambiguous).
+
+## #26 FP-025: SnapshotStore semantics
+
+**Decision:** `SnapshotStore<S: Clone>` is a bounded `VecDeque` of snapshots, oldest first.
+`new(0)` is `ZeroCapacity`; `record` appends a clone and drops the oldest when full; `rewind(n)`
+returns the snapshot `n` records before the latest (n = 0 is the latest), discards the `n`
+newest, and for `n >= len()` returns `NotEnoughSnapshots` leaving the store unchanged. It has no
+dependency on `Transactions` and no FormatConfig gate.
+**Rationale:** SRS §13.3 item 7 `RewindToSnapshot` undoes N decision ticks; SRS §2.5 makes
+engine-level undo a separate feature not governed by CR 734. FormatConfig does not exist yet, so
+the gate "never exposed in rules-enforced matches unless FormatConfig allows it" belongs to the
+later API unit that exposes `RewindToSnapshot`.
+**Alternatives:** Unbounded history (memory grows without limit in long sandbox sessions);
+building rewind on `Transactions` (mixes sandbox undo with rules rollback, which §2.5 forbids).
+
+## #26 FP-025: GameState carry rule and its limits
+
+**Decision:** `carry_durable` for `GameState` carries, when the component differs between
+`before` and `after`: the PRNG (set to `after`'s), each of the card, object, ability-instance,
+effect, timestamp and link generators (issued on `restored` until it reaches `after`'s
+`last_issued`; never rewound; stops without panicking if issuing fails), and for each player in
+`before`, `after` and `restored` whose state changed `before` -> `after`, only that change
+applied over the restored player: life gets `after - before` added (saturating); each counter
+kind whose count changed gets its per-key delta added, clamped at 0 (the entry is removed),
+because a count is never negative in this state model; each designation whose value changed
+(added, changed or removed) takes `after`'s value or is cleared, because designations are not
+additive. Keys unchanged `before` -> `after` are not touched. This supersedes clause 4(iii) of
+the Implementer brief (copy from `after`): SRS §2.5 requires that rolling back the outer action
+leaves only the durable sub-transaction's effects in place, so outer changes made before the
+sub began must be reverted (CodeRabbit PR #175 round 1). It never carries turn number, active player,
+priority, turn order, the player generator or players added meanwhile, the effect registry or
+the history ledger. Components added to `GameState` by later units (zones, permanents, memory,
+knowledge) must be added to this impl by those units. The library-touching zone data a CR 734.1
+category (b) mana ability changes cannot be carried yet: zones are not part of `GameState`, and
+`state/` and `zones/` are owned by other units (R1), so wiring them is a later unit's change
+(through R2 if a contract changes).
+**Rationale:** These are the only `GameState` components today a durable sub-transaction can
+change; not carrying priority keeps CR 734.2 priority retention true. PRNG and generator values
+are absolute, so ids issued by the durable sub-transaction are never issued again. Limit: the
+PRNG and the id generators are carried as absolute values at the durable commit, so when the
+durable frame's window starts at an outer checkpoint they can include draws and ids made by the
+parent action before the sub began; a PRNG delta cannot be expressed.
+**Alternatives:** Copying the whole player from `after` (rejected: carries the reversed outer
+action's earlier changes to the same player); carrying the whole `after` state (would also
+carry the reversed action's changes and priority).
+
+## #26 FP-025: Spec-test choices
+
+**Decision:** In `crates/fineprint-core/tests/spec_txn_*.rs`: (1) the brief's "P0"/"P1" are the
+first and second seats, `PlayerId(1)` and `PlayerId(2)`, because `GameState::new` issues players
+`1..=n`; (2) the reference model keeps each frame's history as ordered `(before, after)` steps
+tagged own or durable: a durable commit hands the parent an own step up to the frame's
+checkpoint, the frame's steps made durable and a durable step from its cursor to the live state;
+a rollback carries only durable steps, one `carry_durable` call each, in time order, and hands
+them up; so each durable effect is carried exactly once, step by step, never as one net pair
+(see "Durable-record propagation rule"); (3) the "never issued" id is taken from a second `Transactions` advanced further than the
+instance under test, as the brief allows; (4) the id-generator carry is only asserted where the
+outer action issued no ids before the durable sub began, because i(ii) does not say whether
+"differs" compares `after` with `before` or with `restored`.
+**Rationale:** (1) and (3) follow the public API; (2) follows the propagation rule; (4) avoids asserting a case the brief leaves
+open.
+**Alternatives:** Excluding nested durable-in-durable sequences from the property model (weaker);
+asserting one reading of i(ii) (could report a false defect).
+
+## #26 FP-025: TxnId is instance-local
+
+**Decision:** A `TxnId` is valid only on the `Transactions` that issued it, and callers must
+keep each handle with its instance. Using a handle issued by another instance is a caller error
+with an unspecified result: `UnknownTxn`, `NotInnermost`, or, if its number equals an open
+frame's, treatment as that frame. This is documented on `TxnId` and `Transactions`; no code
+change (CodeRabbit PR #175 round 1).
+**Rationale:** Rejecting foreign handles needs an instance identity in each `TxnId`, which needs
+a global counter or other global mutable state; R3 forbids that, and the deterministic engine
+has no per-instance source of identity.
+**Alternatives:** An instance id inside `TxnId` (needs global mutable state, R3).
+
+## #26 FP-025: Property oracle compares observable state, not carry call lists
+
+**Decision:** In `tests/spec_txn_property.rs` the per-step comparison between the reference model
+and `Transactions` uses each harness's observable state. For the append-only Toy this is the
+state with its recorded `carry_durable` call list cleared; for `GameState` and the clamped state
+it is the full state. The Toy's appended log is still checked exactly against the independently
+tracked bytes, and flat cases keep exact call-count and call-argument assertions in
+`spec_txn_durable.rs` (CodeRabbit PR #175 round 3).
+**Rationale:** Under the entry/cursor propagation rule the number of `carry_durable` calls for a
+durable frame that itself holds durable work is not specified (zero-width own segments may be
+re-tagged durable and passed as no-op steps), so a correct implementation may produce a
+different call list. The effect of the calls is fully specified and is what the oracle checks.
+**Alternatives:** Compare the full Toy including its call list (over-specifies an unspecified
+detail); drop the Toy from the property run (loses the independent byte oracle).
+
+## #26 FP-025: Clamped property oracle shares the cursor rule (deferred)
+
+**Decision:** keep the clamped reference model on the specified entry/cursor rule for this PR; the cursor-rule error class (cursor not moved to the post-rollback state) is pinned by the fixed tests `counter_example_gamestate_counter_and_life`, `ntoy_counter_example_all_variants` and lib `req_core_005_cr_734_1_durable_after_rolled_back_child_not_replayed`, which fail if the cursor is not moved to the post-rollback state.
+
+**Rationale:** an action-level non-linear oracle must re-derive which effects survive which rollback, i.e. re-implement the same semantics in another form, a larger change than this review round; the random runs still check every step of the specified model against the implementation, and the fixed cases cover the shared-rule risk CodeRabbit names (PR #175 round 4).
+
+**Alternatives:** action-level effect tracking for the clamped state (deferred; candidate follow-up when the casting unit first uses durable sub-transactions).
