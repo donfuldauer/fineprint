@@ -219,3 +219,6 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #28 | Investigator | Sonnet 5.5 | 1 | root-caused | repro seed 5 ORDER n=9 | test defect, product not a defect |
 | 03-events | #28 | Fixer (spec test) | Opus 5.5 | 1 | done | 73/73 spec_choice pass; fmt, clippy clean | ORDER n>=8 asserts Validator |
 | 03-events | #28 | Orchestrator | Opus 5.5 | 1 | done | cr check ok (709 cited rules) | regenerated docs/cr-citations.json |
+| 03-events | #28 (PR #177 review round 1) | Classifier | Sonnet 5.5 | 1 | routed | — | 12 findings: 7 fix, 3 deferred (#49, #67, #68), 2 not a defect (DECISIONS); src T2 Opus, spec T1 Sonnet |
+| 03-events | #28 (PR #177 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | cargo test --workspace 2165 passed; coverage core 99.40%; fmt, clippy, guard clean | ask-time well-formedness, PayManaAndCosts eligibility, DECISIONS round-1 entry |
+| 03-events | #28 (PR #177 review round 1) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_choice_* pass | findings 8, 9 + ask-time and payment-eligibility spec tests |
