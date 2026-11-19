@@ -246,7 +246,10 @@ fn payload_for(t: ChoiceType) -> ChoicePayload {
         },
         ChoiceType::PayManaAndCosts => ChoicePayload::PayManaAndCosts {
             locked_total: "2".into(),
-            methods: strs(&["convoke"]),
+            methods: vec![
+                ("convoke".into(), vec![o(1), o(2)]),
+                ("delve".into(), vec![o(3)]),
+            ],
             mana_abilities: vec![(o(7), "tap".into())],
             auto_pay: true,
             optional: true,
@@ -1467,7 +1470,7 @@ fn req_net_003_validate_other_types() {
     assert_eq!(r.validate(&ChoiceResponse::DeclineOptionalPayment), Ok(()));
     assert_eq!(r.validate(&ChoiceResponse::CancelAndRollback), Ok(()));
     reject(&r, &pay(true, vec![(0, vec![])], vec![]));
-    reject(&r, &pay(false, vec![(1, vec![])], vec![]));
+    reject(&r, &pay(false, vec![(2, vec![])], vec![]));
     reject(&r, &pay(false, vec![(0, vec![o(1), o(1)])], vec![]));
     reject(&r, &pay(false, vec![], vec![(o(7), "other".into())]));
     let mut strict = r.clone();
@@ -2642,4 +2645,215 @@ fn req_net_003_threshold_matches_exact_counts() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 1 (PR #177): request well-formedness at ask, payment-method eligibility,
+// card-name errors from the raising procedure
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-NET-003: `ask` rejects a request whose default does not validate (a `CHOOSE_PLAYER`
+/// request defaulting to `YES`); the session never publishes it.
+#[test]
+fn req_net_003_ask_rejects_invalid_default() {
+    let proc = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        let Generated::Ask(mut r) = generate_request(
+            ctx.next_request_id(),
+            &spec(ChoiceKind::Player),
+            resolved(ResolvedCandidates::Players(vec![p(1), p(2)]), 1, 1),
+        )?
+        else {
+            return Err(ChoiceError::Procedure("random".into()).into());
+        };
+        r.default_on_timeout = ChoiceResponse::Yes;
+        ctx.ask(r)?;
+        Ok(0)
+    };
+    match ChoiceSession::start(toy_base(), proc).map(|_| ()) {
+        Err(ChoiceError::InvalidDefault(e)) => assert!(!e.trim().is_empty()),
+        other => panic!("expected InvalidDefault, got {other:?}"),
+    }
+}
+
+/// REQ-NET-003: `ask` rejects a validator request whose contract bounds differ from the request
+/// bounds (tightened without updating the contract); a consistent tightened request is accepted.
+#[test]
+fn req_net_003_ask_rejects_stale_validator_bounds() {
+    fn tightened(
+        ctx: &ChoiceContext<'_>,
+        min: u64,
+        max: u64,
+        sync: bool,
+    ) -> Result<PendingChoiceRequest, Interrupt> {
+        let mut r = number_request(ctx, 0, 19_999)?;
+        assert!(!is_enumerated(&r));
+        r.min = min;
+        r.max = max;
+        r.default_on_timeout = num(i64::try_from(min).unwrap_or(i64::MAX));
+        if sync && let ChoiceOptions::Validator(c) = &mut r.options {
+            c.min = min;
+            c.max = max;
+        }
+        Ok(r)
+    }
+    let max_stale = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        answer_number(ctx.ask(tightened(ctx, 0, 9_999, false)?)?)
+    };
+    match ChoiceSession::start(toy_base(), max_stale).map(|_| ()) {
+        Err(ChoiceError::Procedure(e)) => {
+            assert!(e.contains("0..19999") && e.contains("0..9999"), "{e}");
+        }
+        other => panic!("expected Procedure, got {other:?}"),
+    }
+    let min_stale = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        answer_number(ctx.ask(tightened(ctx, 5, 19_999, false)?)?)
+    };
+    assert!(matches!(
+        ChoiceSession::start(toy_base(), min_stale).map(|_| ()),
+        Err(ChoiceError::Procedure(_))
+    ));
+    let synced = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        answer_number(ctx.ask(tightened(ctx, 5, 9_999, true)?)?)
+    };
+    let mut s = ChoiceSession::start(toy_base(), synced).expect("consistent request accepted");
+    let r = s.pending().expect("pending").clone();
+    assert_eq!((r.min, r.max), (5, 9_999));
+    reject(&r, &num(10_000));
+    s.submit(RequestId::new(0), num(9_999)).expect("in range");
+    assert!(s.pending().is_none());
+}
+
+/// REQ-NET-003, REQ-CORE-001: a procedure whose second ask is ill-formed fails `submit` and
+/// leaves the session entirely unchanged.
+#[test]
+fn req_net_003_submit_ill_formed_second_ask_leaves_session_unchanged() {
+    let proc = |s: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        s.value += 1;
+        let a = answer_number(ctx.ask(number_request(ctx, 0, 9)?)?)?;
+        s.value += a;
+        let mut r = number_request(ctx, 0, 9)?;
+        r.default_on_timeout = ChoiceResponse::No;
+        answer_number(ctx.ask(r)?)
+    };
+    let mut s = ChoiceSession::start(toy_base(), proc).expect("start");
+    let status = s.status().clone();
+    let hash = s.state_hash();
+    assert!(matches!(
+        s.submit(RequestId::new(0), num(3)),
+        Err(ChoiceError::InvalidDefault(_))
+    ));
+    assert_eq!(s.status(), &status);
+    assert!(s.answers().is_empty());
+    assert_eq!(s.state_hash(), hash);
+    assert!(matches!(
+        s.submit_default(RequestId::new(0)),
+        Err(ChoiceError::InvalidDefault(_))
+    ));
+    assert_eq!(s.status(), &status);
+    assert!(s.answers().is_empty());
+    assert_eq!(s.state_hash(), hash);
+}
+
+/// REQ-NET-003, R12: a payment method may use only the objects eligible for that method, each
+/// at most once, at an index in range.
+#[test]
+fn req_net_003_pay_costs_method_eligibility() {
+    let r = manual(
+        ChoiceType::PayManaAndCosts,
+        ChoicePayload::PayManaAndCosts {
+            locked_total: "3".into(),
+            methods: vec![("m0".into(), vec![o(1), o(2)]), ("m1".into(), vec![o(3)])],
+            mana_abilities: vec![],
+            auto_pay: false,
+            optional: false,
+            cancellable: false,
+        },
+        ChoiceResponse::PayCosts {
+            auto_pay: false,
+            methods: vec![],
+            mana_abilities: vec![],
+        },
+    );
+    let pay = |methods: Vec<(u32, Vec<ObjectId>)>| ChoiceResponse::PayCosts {
+        auto_pay: false,
+        methods,
+        mana_abilities: vec![],
+    };
+    assert_eq!(r.validate(&pay(vec![(0, vec![o(2), o(1)])])), Ok(()));
+    assert_eq!(
+        r.validate(&pay(vec![(0, vec![o(1)]), (1, vec![o(3)])])),
+        Ok(())
+    );
+    // Outside every list.
+    let e = reject(&r, &pay(vec![(0, vec![o(9)])]));
+    assert!(e.contains("object 9"), "{e}");
+    // Duplicate.
+    reject(&r, &pay(vec![(0, vec![o(1), o(1)])]));
+    // Eligible only for the other method.
+    reject(&r, &pay(vec![(0, vec![o(3)])]));
+    reject(&r, &pay(vec![(1, vec![o(1)])]));
+    // Out-of-range method index.
+    reject(&r, &pay(vec![(2, vec![])]));
+    reject(&r, &pay(vec![(u32::MAX, vec![o(1)])]));
+    // The payload change is part of the canonical encoding.
+    let mut other = r.clone();
+    if let ChoicePayload::PayManaAndCosts { methods, .. } = &mut other.payload {
+        methods[1].1 = vec![o(4)];
+    }
+    assert_ne!(other.digest(), r.digest());
+}
+
+/// REQ-NET-003: an unknown card name is the raising procedure's explained error; the original
+/// request stays pending for a valid retry, and a known name proceeds.
+#[test]
+fn req_net_003_card_name_unknown_is_procedure_error() {
+    let proc = |_: &mut Toy, ctx: &mut ChoiceContext<'_>| -> Result<i64, Interrupt> {
+        let id = ctx.next_request_id();
+        let mut resolved_name = resolved(ResolvedCandidates::None, 1, 1);
+        resolved_name.default = Some(ChoiceResponse::SubmitCardName {
+            name: "test.vanilla_1_1".into(),
+        });
+        let Generated::Ask(r) = generate_request(id, &spec(ChoiceKind::CardName), resolved_name)?
+        else {
+            return Err(ChoiceError::Procedure("random".into()).into());
+        };
+        match ctx.ask(r)? {
+            ChoiceResponse::SubmitCardName { name } if name.starts_with("test.") => {
+                Ok(i64::try_from(name.len()).unwrap_or(0))
+            }
+            ChoiceResponse::SubmitCardName { .. } => Err(ChoiceError::Invalid {
+                request_id: id,
+                explanation: "the card name is not in the card database".into(),
+            }
+            .into()),
+            other => Err(ChoiceError::Procedure(format!("unexpected {other:?}")).into()),
+        }
+    };
+    let mut s = ChoiceSession::start(toy_base(), proc).expect("start");
+    let pending = s.pending().cloned().expect("pending");
+    // Structurally valid, unknown to the (synthetic) database.
+    let unknown = ChoiceResponse::SubmitCardName {
+        name: "not.a_card".into(),
+    };
+    assert_eq!(pending.validate(&unknown), Ok(()));
+    match s.submit(RequestId::new(0), unknown) {
+        Err(ChoiceError::Invalid {
+            request_id,
+            explanation,
+        }) => {
+            assert_eq!(request_id, RequestId::new(0));
+            assert!(!explanation.trim().is_empty());
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    assert_eq!(s.pending(), Some(&pending));
+    assert!(s.answers().is_empty());
+    s.submit(
+        RequestId::new(0),
+        ChoiceResponse::SubmitCardName {
+            name: "test.flier_2_2".into(),
+        },
+    )
+    .expect("known name");
+    assert!(matches!(s.status(), Status::Done { output: 14, .. }));
 }

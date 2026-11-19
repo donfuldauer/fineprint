@@ -293,9 +293,30 @@ struct Shape {
     count: u64,
     /// Builds the enumerated options (only called when `count < ENUMERATION_LIMIT`).
     items: Box<dyn FnOnce() -> Vec<ChoiceOption>>,
+    /// The validator rule (only used when `count >= ENUMERATION_LIMIT`, or for `CARD_NAME`).
     rule: ValidatorRule,
     payload: ChoicePayload,
     default: Option<ChoiceResponse>,
+}
+
+/// The enumerated-option builder and the validator rule of a domain, of which
+/// [`generate_request`] uses exactly one: only that one gets the domain (one clone), the other
+/// is empty.
+fn items_or_rule<T: Clone + 'static>(
+    count: u64,
+    domain: &[T],
+    to_option: fn(T) -> ChoiceOption,
+    rule: impl FnOnce(Vec<T>) -> ValidatorRule,
+) -> (Box<dyn FnOnce() -> Vec<ChoiceOption>>, ValidatorRule) {
+    let owned = domain.to_vec();
+    if count < ENUMERATION_LIMIT {
+        (
+            Box::new(move || owned.into_iter().map(to_option).collect()),
+            ValidatorRule::Payload,
+        )
+    } else {
+        (Box::new(Vec::new), rule(owned))
+    }
 }
 
 fn mode_index(i: u64) -> Result<u32, ChoiceError> {
@@ -318,16 +339,17 @@ fn shape(kind: ChoiceKind, r: &ResolvedChoice) -> Result<Shape, ChoiceError> {
                 .take(usize::try_from(min).unwrap_or(usize::MAX))
                 .copied()
                 .collect();
-            let items_src = cands.clone();
+            let count = subsets_capped(n, min, max);
+            let (items, rule) = items_or_rule(count, &cands, ChoiceOption::Object, |candidates| {
+                ValidatorRule::Subset { candidates }
+            });
             Shape {
                 choice_type: ChoiceType::SelectObjectsFromZone,
                 min,
                 max,
-                count: subsets_capped(n, min, max),
-                items: Box::new(move || items_src.into_iter().map(ChoiceOption::Object).collect()),
-                rule: ValidatorRule::Subset {
-                    candidates: cands.clone(),
-                },
+                count,
+                items,
+                rule,
                 payload: ChoicePayload::SelectObjectsFromZone { candidates: cands },
                 default: Some(ChoiceResponse::SubmitObjectSelection { objects: default }),
             }
@@ -398,16 +420,17 @@ fn shape(kind: ChoiceKind, r: &ResolvedChoice) -> Result<Shape, ChoiceError> {
             let values = want_strings(&r.candidates)?.to_vec();
             exactly_one_of(values.len())?;
             let first = values[0].clone();
-            let items_src = values.clone();
+            let count = len_u64(values.len()).min(ENUMERATION_LIMIT);
+            let (items, rule) = items_or_rule(count, &values, ChoiceOption::Text, |values| {
+                ValidatorRule::OneOf { values }
+            });
             Shape {
                 choice_type: ChoiceType::ChooseOptionOrValue,
                 min: 1,
                 max: 1,
-                count: len_u64(values.len()).min(ENUMERATION_LIMIT),
-                items: Box::new(move || items_src.into_iter().map(ChoiceOption::Text).collect()),
-                rule: ValidatorRule::OneOf {
-                    values: values.clone(),
-                },
+                count,
+                items,
+                rule,
                 payload: ChoicePayload::ChooseOptionOrValue {
                     option_type: kind.as_str().to_owned(),
                     allowed: AllowedValues::Texts(values),
@@ -437,16 +460,17 @@ fn shape(kind: ChoiceKind, r: &ResolvedChoice) -> Result<Shape, ChoiceError> {
             let players = want_players(&r.candidates)?;
             exactly_one_of(players.len())?;
             let lowest = players[0];
-            let items_src = players.clone();
+            let count = len_u64(players.len()).min(ENUMERATION_LIMIT);
+            let (items, rule) = items_or_rule(count, &players, ChoiceOption::Player, |players| {
+                ValidatorRule::OneOfPlayers { players }
+            });
             Shape {
                 choice_type: ChoiceType::ChoosePlayer,
                 min: 1,
                 max: 1,
-                count: len_u64(players.len()).min(ENUMERATION_LIMIT),
-                items: Box::new(move || items_src.into_iter().map(ChoiceOption::Player).collect()),
-                rule: ValidatorRule::OneOfPlayers {
-                    players: players.clone(),
-                },
+                count,
+                items,
+                rule,
                 payload: ChoicePayload::ChoosePlayer { players },
                 default: Some(ChoiceResponse::SubmitPlayer { player: lowest }),
             }
@@ -470,16 +494,17 @@ fn shape(kind: ChoiceKind, r: &ResolvedChoice) -> Result<Shape, ChoiceError> {
         ChoiceKind::Order => {
             let cards = want_objects(&r.candidates)?;
             let n = len_u64(cards.len());
-            let items_src = cards.clone();
+            let count = factorial_capped(n);
+            let (items, rule) = items_or_rule(count, &cards, ChoiceOption::Object, |items| {
+                ValidatorRule::Permutation { items }
+            });
             Shape {
                 choice_type: ChoiceType::OrderCards,
                 min: n,
                 max: n,
-                count: factorial_capped(n),
-                items: Box::new(move || items_src.into_iter().map(ChoiceOption::Object).collect()),
-                rule: ValidatorRule::Permutation {
-                    items: cards.clone(),
-                },
+                count,
+                items,
+                rule,
                 payload: ChoicePayload::OrderCards {
                     cards: cards.clone(),
                     destinations: vec![OrderDestination::Top],
@@ -523,28 +548,26 @@ fn shape(kind: ChoiceKind, r: &ResolvedChoice) -> Result<Shape, ChoiceError> {
             let total = division.total;
             let mut default: Vec<(ChoiceTarget, u64)> = recipients.clone();
             default[0].1 += rem; // floor_0 + rem <= total, no overflow
-            let items_src = recipients.clone();
+            let count = binomial_capped(
+                u128::from(rem) + u128::from(count_r) - 1,
+                u128::from(count_r) - 1,
+            );
+            let (items, rule) = items_or_rule(
+                count,
+                &recipients,
+                |(t, _)| match t {
+                    ChoiceTarget::Player(p) => ChoiceOption::Player(p),
+                    ChoiceTarget::Object(o) => ChoiceOption::Object(o),
+                },
+                |recipients| ValidatorRule::Division { total, recipients },
+            );
             Shape {
                 choice_type: ChoiceType::DivideValue,
                 min: count_r,
                 max: count_r,
-                count: binomial_capped(
-                    u128::from(rem) + u128::from(count_r) - 1,
-                    u128::from(count_r) - 1,
-                ),
-                items: Box::new(move || {
-                    items_src
-                        .into_iter()
-                        .map(|(t, _)| match t {
-                            ChoiceTarget::Player(p) => ChoiceOption::Player(p),
-                            ChoiceTarget::Object(o) => ChoiceOption::Object(o),
-                        })
-                        .collect()
-                }),
-                rule: ValidatorRule::Division {
-                    total,
-                    recipients: recipients.clone(),
-                },
+                count,
+                items,
+                rule,
                 payload: ChoicePayload::DivideValue { total, recipients },
                 default: Some(ChoiceResponse::SubmitDivision {
                     assignments: default,
