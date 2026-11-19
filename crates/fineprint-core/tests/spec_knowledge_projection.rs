@@ -148,7 +148,7 @@ fn exact_view_two_players_p1() {
         command: vec![ov(w, t.cm, true)],
     };
     assert_eq!(w.view(P1), expected);
-    assert_eq!(oracle_project(&w.zones, &w.k, P1), expected);
+    assert_eq!(consistency_project(&w.zones, &w.k, P1), expected);
 }
 
 /// REQ-CORE-004, CR 400.2, 401.2, 402.3, 406.3, 708.5: exact view for P2 in the two-player
@@ -191,7 +191,7 @@ fn exact_view_two_players_p2() {
         command: vec![ov(w, t.cm, true)],
     };
     assert_eq!(w.view(P2), expected);
-    assert_eq!(oracle_project(&w.zones, &w.k, P2), expected);
+    assert_eq!(consistency_project(&w.zones, &w.k, P2), expected);
 }
 
 /// REQ-CORE-004, CR 406.3, 406.3b: three players; a face-down exiled card with a grant for one
@@ -213,7 +213,7 @@ fn three_players_grant_for_one_viewer_only() {
         if sees {
             assert_eq!(v.exile[0].card, Some(card));
         }
-        assert_eq!(v, oracle_project(&w.zones, &w.k, p), "{p:?}");
+        assert_eq!(v, consistency_project(&w.zones, &w.k, p), "{p:?}");
         assert_eq!(v.players.len(), 3, "an entry for every player");
         assert_eq!(v.viewer, p);
     }

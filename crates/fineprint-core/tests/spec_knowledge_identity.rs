@@ -200,9 +200,18 @@ fn error_paths_unknown_object_and_player() {
             w.k.can_identify(&w.zones, P1, bad),
             Err(KnowledgeError::UnknownObject(bad))
         );
-        assert!(w.k.grant_look(&w.zones, bad, P1).is_err());
-        assert!(w.k.shuffle_face_down_pile(&w.zones, &[bad]).is_err());
-        assert!(w.k.shuffle_face_down_pile(&w.zones, &[fd, bad]).is_err());
+        assert_eq!(
+            w.k.grant_look(&w.zones, bad, P1),
+            Err(KnowledgeError::UnknownObject(bad))
+        );
+        assert_eq!(
+            w.k.shuffle_face_down_pile(&w.zones, &[bad]),
+            Err(KnowledgeError::UnknownObject(bad))
+        );
+        assert_eq!(
+            w.k.shuffle_face_down_pile(&w.zones, &[fd, bad]),
+            Err(KnowledgeError::UnknownObject(bad))
+        );
     }
     for bad in [NOBODY, pid(0), pid(u64::MAX)] {
         assert_eq!(
@@ -213,16 +222,19 @@ fn error_paths_unknown_object_and_player() {
             w.k.grant_look(&w.zones, fd, bad),
             Err(KnowledgeError::UnknownPlayer(bad))
         );
-        // can_identify for a non-player: never an identification of hidden information
-        let r = w.k.can_identify(&w.zones, bad, id);
-        assert!(
-            r != Ok(true),
-            "a non-player must not identify a library card"
+        // can_identify for a non-player is an error, never Ok(false)
+        assert_eq!(
+            w.k.can_identify(&w.zones, bad, id),
+            Err(KnowledgeError::UnknownPlayer(bad))
         );
-        let r = w.k.can_identify(&w.zones, bad, fd);
-        assert!(
-            r != Ok(true),
-            "a non-player must not identify a face-down card"
+        assert_eq!(
+            w.k.can_identify(&w.zones, bad, fd),
+            Err(KnowledgeError::UnknownPlayer(bad))
+        );
+        // UnknownObject is checked first
+        assert_eq!(
+            w.k.can_identify(&w.zones, bad, oid(54_321)),
+            Err(KnowledgeError::UnknownObject(oid(54_321)))
         );
     }
     assert_eq!(w.k, snapshot, "failed calls change nothing");
@@ -332,14 +344,78 @@ fn shuffle_face_down_pile_rejects_face_up() {
     assert!(w.can(P2, a));
 }
 
+/// REQ-CORE-004, CR 406.3, 701.24a: the pile must be face down AND in exile; a face-down
+/// object in a library, on the battlefield, on the stack, in a graveyard or in the command zone
+/// gives `NotFaceDown` and changes nothing (the library card stays in `known_cards`).
+#[test]
+fn shuffle_face_down_pile_rejects_face_down_outside_exile() {
+    let mut w = KWorld::two();
+    let lib = w.create_fd(ZoneKind::Library, P1);
+    let bf = w.create_fd(ZoneKind::Battlefield, P1);
+    let st = w.create_fd(ZoneKind::Stack, P1);
+    let gy = w.create_fd(ZoneKind::Graveyard, P1);
+    let cm = w.create_fd(ZoneKind::Command, P1);
+    let hand = w.create(ZoneKind::Hand, P1);
+    for id in [lib, bf, st, gy, cm, hand] {
+        w.k.add_known(&w.zones, id, P2).expect("add");
+    }
+    let snapshot = w.k.clone();
+    for id in [lib, bf, st, gy, cm, hand] {
+        assert_eq!(
+            w.k.shuffle_face_down_pile(&w.zones, &[id]),
+            Err(KnowledgeError::NotFaceDown(id)),
+            "{:?}",
+            w.rec(id)
+        );
+    }
+    assert_eq!(w.k, snapshot, "rejected calls change nothing");
+    assert_eq!(w.known_to(lib), set(&[P2]));
+    assert_eq!(lib_known(&w.view(P2), P1), set(&[w.card(lib)]));
+    assert!(w.can(P2, bf));
+}
+
+/// REQ-CORE-004, CR 406.3, 701.24a: a pile mixing valid exiled cards with an invalid id is
+/// rejected as a whole; all ids are validated before any change, so nothing is cleared.
+#[test]
+fn shuffle_face_down_pile_mixed_valid_and_invalid_clears_nothing() {
+    let mut w = KWorld::three();
+    let a = w.create_fd(ZoneKind::Exile, P1);
+    let b = w.create_fd(ZoneKind::Exile, P2);
+    let bf = w.create_fd(ZoneKind::Battlefield, P1);
+    let lib = w.create_fd(ZoneKind::Library, P1);
+    w.k.grant_look(&w.zones, a, P2).expect("grant");
+    w.k.grant_look(&w.zones, b, P3).expect("grant");
+    let snapshot = w.k.clone();
+    assert_eq!(
+        w.k.shuffle_face_down_pile(&w.zones, &[a, b, bf]),
+        Err(KnowledgeError::NotFaceDown(bf))
+    );
+    assert_eq!(
+        w.k.shuffle_face_down_pile(&w.zones, &[a, lib, b]),
+        Err(KnowledgeError::NotFaceDown(lib))
+    );
+    assert_eq!(
+        w.k.shuffle_face_down_pile(&w.zones, &[a, oid(77_777)]),
+        Err(KnowledgeError::UnknownObject(oid(77_777)))
+    );
+    assert_eq!(w.k, snapshot, "nothing cleared");
+    assert!(w.can(P2, a));
+    assert!(w.can(P3, b));
+    // the valid exile pile alone still clears
+    w.k.shuffle_face_down_pile(&w.zones, &[a, b]).expect("pile");
+    assert!(w.known_to(a).is_empty());
+    assert!(w.known_to(b).is_empty());
+}
+
 /// REQ-CORE-004: KnownTo is player memory stored per card; it follows the card to its new
-/// object id after a zone change (design decision in the brief, CR 400.7 notwithstanding).
+/// object id after a zone change (design decision in the brief, CR 400.7 notwithstanding) when
+/// the viewer watched the move (`on_move_observed`).
 #[test]
 fn known_to_follows_the_card_to_the_new_id() {
     let mut w = KWorld::two();
     let l = w.create(ZoneKind::Library, P1);
     w.k.add_known(&w.zones, l, P2).expect("add");
-    let moved = w.mv_to(l, ZoneKind::Hand);
+    let moved = w.mv_obs(l, MoveRequest::new(ZoneKind::Hand), &[P2]);
     assert_ne!(moved.old, moved.new, "CR 400.7 new object");
     assert!(w.known_to(moved.new).contains(&P2));
     assert!(w.can(P2, moved.new));
@@ -348,6 +424,21 @@ fn known_to_follows_the_card_to_the_new_id() {
         Err(KnowledgeError::UnknownObject(moved.old)),
         "the old id is gone"
     );
+}
+
+/// REQ-CORE-004 (hidden-source identity rule, a design decision of the brief): the same move
+/// unobserved by the viewer (`on_move`, the card goes to the owner's hand) makes the viewer
+/// forget the card; the owner sees it in their own hand (CR 402.3).
+#[test]
+fn known_to_forgotten_when_the_viewer_did_not_watch_the_move() {
+    let mut w = KWorld::two();
+    let l = w.create(ZoneKind::Library, P1);
+    w.k.add_known(&w.zones, l, P2).expect("add");
+    let moved = w.mv_to(l, ZoneKind::Hand);
+    assert!(!w.known_to(moved.new).contains(&P2));
+    assert!(!w.can(P2, moved.new));
+    assert!(opp_hand_known(&w.view(P2), P1).is_empty());
+    assert!(w.can(P1, moved.new));
 }
 
 /// REQ-CORE-004: `Display` and `Error` are implemented for every error variant.

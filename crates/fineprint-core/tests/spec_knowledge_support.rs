@@ -130,6 +130,13 @@ impl KWorld {
             .expect("create succeeds")
     }
 
+    /// Creates an object for the given synthetic `card` (for twin worlds with equal cards).
+    pub fn create_card(&mut self, card: CardId, owner: PlayerId, req: MoveRequest) -> ObjectId {
+        self.zones
+            .create_object(&mut self.ids, card, owner, req)
+            .expect("create succeeds")
+    }
+
     pub fn card(&self, id: ObjectId) -> CardId {
         self.zones.object(id).expect("object present").card
     }
@@ -149,6 +156,20 @@ impl KWorld {
         self.k
             .on_move(&self.zones, &before, &moved)
             .expect("on_move succeeds");
+        moved
+    }
+
+    /// Moves with `Zones::move_object` then informs the knowledge with `on_move_observed`:
+    /// `observers` watched the move and know which card moved.
+    pub fn mv_obs(&mut self, id: ObjectId, req: MoveRequest, observers: &[PlayerId]) -> Moved {
+        let before = self.rec(id);
+        let moved = self
+            .zones
+            .move_object(&mut self.ids, id, req)
+            .expect("move succeeds");
+        self.k
+            .on_move_observed(&self.zones, &before, &moved, observers)
+            .expect("on_move_observed succeeds");
         moved
     }
 
@@ -195,13 +216,13 @@ impl KWorld {
 }
 
 // ---------------------------------------------------------------------------------------------
-// the independent oracle (entitlement rules 1-4 of the brief)
+// the projection rules and the independent shadow model of the knowledge
 // ---------------------------------------------------------------------------------------------
 
-/// Whether `viewer` may identify object `id`, computed from the Zones and the stored KnownTo
-/// only (REQ-CORE-004; CR 400.2, CR 402.3, CR 708.5).
-pub fn oracle_can(zones: &Zones, k: &Knowledge, viewer: PlayerId, id: ObjectId) -> bool {
-    let r = zones.object(id).expect("object present");
+/// Entitlement rules 1-3 of the brief, evaluated on a record only (no stored knowledge):
+/// public face-up (CR 400.2), in the viewer's own hand (CR 402.3), face down on the
+/// battlefield or stack and controlled by the viewer (CR 708.5).
+pub fn implicit_can(r: &ObjectRecord, viewer: PlayerId) -> bool {
     // (1) public info, CR 400.2
     let public = r.zone.kind().is_public() && !r.face_down;
     // (2) own hand, CR 402.3
@@ -210,60 +231,46 @@ pub fn oracle_can(zones: &Zones, k: &Knowledge, viewer: PlayerId, id: ObjectId) 
     let fd_ctl = r.face_down
         && matches!(r.zone, ZoneId::Battlefield | ZoneId::Stack)
         && r.controller == viewer;
-    // (4) stored KnownTo
-    let known = k
-        .known_to(zones, id)
-        .expect("known_to succeeds")
-        .contains(&viewer);
-    public || own_hand || fd_ctl || known
+    public || own_hand || fd_ctl
 }
 
-fn oracle_object_view(zones: &Zones, k: &Knowledge, viewer: PlayerId, id: ObjectId) -> ObjectView {
-    let r = zones.object(id).expect("object present");
-    ObjectView {
-        id,
-        owner: r.owner,
-        controller: r.controller,
-        face_down: r.face_down,
-        card: if oracle_can(zones, k, viewer, id) {
-            Some(r.card)
-        } else {
-            None
-        },
-    }
-}
-
-fn oracle_cards(zones: &Zones, k: &Knowledge, viewer: PlayerId, zone: ZoneId) -> BTreeSet<CardId> {
-    zones
-        .contents(zone)
-        .into_iter()
-        .filter(|id| oracle_can(zones, k, viewer, *id))
-        .map(|id| zones.object(id).expect("object present").card)
-        .collect()
-}
-
-/// The projection the brief specifies, built independently of `Knowledge::project`
-/// (REQ-CORE-004).
-pub fn oracle_project(zones: &Zones, k: &Knowledge, viewer: PlayerId) -> ZonesView {
+/// The projection rules of the brief (REQ-CORE-004; CR 400.2, 401.2, 401.3, 402.3), with the
+/// per-object identification decided by `can`: libraries and opponent hands show a count and
+/// the set of identifiable cards, every other zone shows its objects in container order.
+pub fn project_with(zones: &Zones, viewer: PlayerId, can: &dyn Fn(ObjectId) -> bool) -> ZonesView {
+    let object_view = |id: ObjectId| -> ObjectView {
+        let r = zones.object(id).expect("object present");
+        ObjectView {
+            id,
+            owner: r.owner,
+            controller: r.controller,
+            face_down: r.face_down,
+            card: can(id).then_some(r.card),
+        }
+    };
     let ov = |zone: ZoneId| -> Vec<ObjectView> {
+        zones.contents(zone).into_iter().map(object_view).collect()
+    };
+    let cards = |zone: ZoneId| -> BTreeSet<CardId> {
         zones
             .contents(zone)
             .into_iter()
-            .map(|id| oracle_object_view(zones, k, viewer, id))
+            .filter(|id| can(*id))
+            .map(|id| zones.object(id).expect("object present").card)
             .collect()
     };
     let mut players = BTreeMap::new();
     for p in zones.players() {
         let library = LibraryView {
             count: zones.len(ZoneId::Library(p)),
-            known_cards: oracle_cards(zones, k, viewer, ZoneId::Library(p)),
+            known_cards: cards(ZoneId::Library(p)),
         };
         let hand = if p == viewer {
             HandView::Own(ov(ZoneId::Hand(p)))
         } else {
             HandView::Opponent {
                 count: zones.len(ZoneId::Hand(p)),
-                known_cards: oracle_cards(zones, k, viewer, ZoneId::Hand(p)),
+                known_cards: cards(ZoneId::Hand(p)),
             }
         };
         players.insert(
@@ -282,6 +289,271 @@ pub fn oracle_project(zones: &Zones, k: &Knowledge, viewer: PlayerId) -> ZonesVi
         stack: ov(ZoneId::Stack),
         exile: ov(ZoneId::Exile),
         command: ov(ZoneId::Command),
+    }
+}
+
+/// A consistency projection: the projection rules applied to the implementation's own
+/// `known_to`. It checks that `project` agrees with `known_to`; it is NOT an independent
+/// oracle (the [`Shadow`] model is).
+pub fn consistency_project(zones: &Zones, k: &Knowledge, viewer: PlayerId) -> ZonesView {
+    project_with(zones, viewer, &|id| {
+        let r = zones.object(id).expect("object present");
+        implicit_can(r, viewer)
+            || k.known_to(zones, id)
+                .expect("known_to succeeds")
+                .contains(&viewer)
+    })
+}
+
+/// An independent model of the knowledge, written from the brief's text only. It never calls
+/// the implementation; the physical state comes from `Zones` (REQ-CORE-004).
+///
+/// Identity knowledge is stored per card (it follows the card across zone changes); position
+/// entries are stored per (viewer, library owner).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shadow {
+    known: BTreeMap<CardId, BTreeSet<PlayerId>>,
+    pos: BTreeMap<(PlayerId, PlayerId), BTreeMap<usize, ObjectId>>,
+}
+
+impl Shadow {
+    pub fn new() -> Shadow {
+        Shadow::default()
+    }
+
+    fn rec(zones: &Zones, id: ObjectId) -> ObjectRecord {
+        *zones.object(id).expect("shadow: object present")
+    }
+
+    fn add(&mut self, card: CardId, p: PlayerId) {
+        self.known.entry(card).or_default().insert(p);
+    }
+
+    fn remove(&mut self, card: CardId, p: PlayerId) {
+        if let Some(s) = self.known.get_mut(&card) {
+            s.remove(&p);
+        }
+    }
+
+    /// The stored KnownTo of `id` (what `known_to` must report).
+    pub fn stored(&self, zones: &Zones, id: ObjectId) -> BTreeSet<PlayerId> {
+        let card = Shadow::rec(zones, id).card;
+        self.known.get(&card).cloned().unwrap_or_default()
+    }
+
+    /// Entitlement rules 1-4 (CR 400.2, 402.3, 708.5; stored KnownTo).
+    pub fn can(&self, zones: &Zones, viewer: PlayerId, id: ObjectId) -> bool {
+        implicit_can(&Shadow::rec(zones, id), viewer) || self.stored(zones, id).contains(&viewer)
+    }
+
+    /// The expected `project(zones, viewer)`.
+    pub fn project(&self, zones: &Zones, viewer: PlayerId) -> ZonesView {
+        project_with(zones, viewer, &|id| self.can(zones, viewer, id))
+    }
+
+    /// The expected `position_known`: stored entries that match the live library (CR 401.2).
+    pub fn positions(
+        &self,
+        zones: &Zones,
+        viewer: PlayerId,
+        owner: PlayerId,
+    ) -> BTreeMap<usize, ObjectId> {
+        let lib = zones.contents(ZoneId::Library(owner));
+        self.pos
+            .get(&(viewer, owner))
+            .map(|e| {
+                e.iter()
+                    .filter(|(i, o)| lib.get(**i) == Some(*o))
+                    .map(|(i, o)| (*i, *o))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn add_known(&mut self, zones: &Zones, id: ObjectId, p: PlayerId) {
+        self.add(Shadow::rec(zones, id).card, p);
+    }
+
+    /// CR 701.20a: every player of the game.
+    pub fn reveal_to_all(&mut self, zones: &Zones, id: ObjectId) {
+        let card = Shadow::rec(zones, id).card;
+        for p in zones.players() {
+            self.add(card, p);
+        }
+    }
+
+    /// CR 406.3, 406.3b: the viewer is stored in KnownTo.
+    pub fn grant_look(&mut self, zones: &Zones, id: ObjectId, p: PlayerId) {
+        self.add_known(zones, id, p);
+    }
+
+    /// CR 401.2: replaces an entry for the same object and for the same index; adds the viewer
+    /// to KnownTo.
+    pub fn set_position_known(
+        &mut self,
+        zones: &Zones,
+        viewer: PlayerId,
+        owner: PlayerId,
+        index: usize,
+        id: ObjectId,
+    ) {
+        let e = self.pos.entry((viewer, owner)).or_default();
+        e.retain(|_, o| *o != id);
+        e.insert(index, id);
+        self.add_known(zones, id, viewer);
+    }
+
+    /// CR 701.24a, 701.24b: every entry of that library is cleared except an excluded card
+    /// still at its recorded index; KnownTo is never touched (SRS 2.4).
+    pub fn shuffle_library(&mut self, zones: &Zones, owner: PlayerId, excluded: &[ObjectId]) {
+        let lib = zones.contents(ZoneId::Library(owner));
+        for ((_, o), e) in &mut self.pos {
+            if *o == owner {
+                e.retain(|i, obj| excluded.contains(obj) && lib.get(*i) == Some(obj));
+            }
+        }
+    }
+
+    /// CR 406.3, 701.24a: the KnownTo of every card of the pile is cleared.
+    pub fn shuffle_face_down_pile(&mut self, zones: &Zones, ids: &[ObjectId]) {
+        for id in ids {
+            let card = Shadow::rec(zones, *id).card;
+            self.known.remove(&card);
+        }
+    }
+
+    /// Drops every entry for `owner`'s library that does not match the live library.
+    pub fn on_library_changed(&mut self, zones: &Zones, owner: PlayerId) {
+        let lib = zones.contents(ZoneId::Library(owner));
+        for ((_, o), e) in &mut self.pos {
+            if *o == owner {
+                e.retain(|i, obj| lib.get(*i) == Some(obj));
+            }
+        }
+    }
+
+    /// Whether step 0 of the hidden-source identity rule applies to a move.
+    pub fn step0_applies(before: &ObjectRecord, moved: &Moved) -> bool {
+        matches!(before.zone.kind(), ZoneKind::Library | ZoneKind::Hand) && moved.from != moved.to
+    }
+
+    /// The players who observed a hidden-source move, by (i)-(iv) of the brief; `None` when
+    /// step 0 does not apply. `zones` is the state after the move; the position entries are
+    /// the model's state before it.
+    pub fn observed(
+        &self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        if !Shadow::step0_applies(before, moved) {
+            return None;
+        }
+        let new = Shadow::rec(zones, moved.new);
+        let mut out = BTreeSet::new();
+        for v in zones.players() {
+            let i = observers.contains(&v);
+            let ii = implicit_can(&new, v);
+            let iii = before.zone == ZoneId::Hand(v);
+            let iv = match before.zone {
+                ZoneId::Library(owner) => self
+                    .pos
+                    .get(&(v, owner))
+                    .is_some_and(|e| e.values().any(|o| *o == moved.old)),
+                _ => false,
+            };
+            if i || ii || iii || iv {
+                out.insert(v);
+            }
+        }
+        Some(out)
+    }
+
+    /// `on_move_observed` (and `on_move` with no observers): step 0, then rules (a)-(d).
+    /// Returns the observed set when step 0 applied.
+    pub fn on_move(
+        &mut self,
+        zones: &Zones,
+        before: &ObjectRecord,
+        moved: &Moved,
+        observers: &[PlayerId],
+    ) -> Option<BTreeSet<PlayerId>> {
+        let players = zones.players();
+        let card = before.card;
+        // step 0 (design rule of the brief, not CR-derived)
+        let observed = self.observed(zones, before, moved, observers);
+        if let Some(obs) = &observed {
+            let mut source: Vec<CardId> = zones
+                .contents(moved.from)
+                .into_iter()
+                .map(|id| Shadow::rec(zones, id).card)
+                .collect();
+            source.push(card);
+            for v in players.iter().filter(|v| !obs.contains(v)) {
+                for c in &source {
+                    self.remove(*c, *v);
+                }
+                if let ZoneId::Library(owner) = moved.from {
+                    self.pos.remove(&(*v, owner));
+                }
+            }
+        }
+        // (a) CR 400.2
+        if before.zone.kind().is_public() && !before.face_down {
+            for p in &players {
+                self.add(card, *p);
+            }
+        }
+        // (b) CR 402.3
+        if before.zone == ZoneId::Hand(before.owner) {
+            self.add(card, before.owner);
+        }
+        // (c) CR 708.5, 708.9
+        if before.face_down && matches!(before.zone, ZoneId::Battlefield | ZoneId::Stack) {
+            self.add(card, before.controller);
+            let reveal = moved.from != moved.to
+                && (before.zone == ZoneId::Battlefield || moved.to != ZoneId::Battlefield);
+            if reveal {
+                for p in &players {
+                    self.add(card, *p);
+                }
+            }
+        }
+        // (d) CR 401.2
+        if let ZoneId::Library(owner) = before.zone {
+            for ((_, o), e) in &mut self.pos {
+                if *o == owner {
+                    e.retain(|_, obj| *obj != moved.old);
+                }
+            }
+        }
+        for z in [moved.from, moved.to] {
+            if let ZoneId::Library(owner) = z {
+                self.on_library_changed(zones, owner);
+            }
+        }
+        observed
+    }
+
+    /// CR 708.9: the face-down permanents and spells `p` owns are revealed to all.
+    pub fn on_player_leaves(&mut self, zones: &Zones, p: PlayerId) {
+        self.reveal_face_down(zones, Some(p));
+    }
+
+    /// CR 708.9: every face-down permanent and spell is revealed to all.
+    pub fn on_game_end(&mut self, zones: &Zones) {
+        self.reveal_face_down(zones, None);
+    }
+
+    fn reveal_face_down(&mut self, zones: &Zones, owner: Option<PlayerId>) {
+        for id in zones.all_object_ids() {
+            let r = Shadow::rec(zones, id);
+            let fd = r.face_down && matches!(r.zone, ZoneId::Battlefield | ZoneId::Stack);
+            if fd && owner.is_none_or(|o| o == r.owner) {
+                self.reveal_to_all(zones, id);
+            }
+        }
     }
 }
 
