@@ -4097,7 +4097,8 @@ members started with it; only submitted members are grouped), resolves it and at
 `Instead` events it queued, which then compete by the same key (see "Descendant scheduling and the
 roles of the impossible-instruction check (round 6)"); when nothing is unstarted, phases B and C
 allocate the lowest stopped CR 615.7 pool per chooser in APNAP order over all members and resume
-its members, then take up their `Instead` events; the loop ends when nothing is pending. All
+each chooser's stopped members in the phase A key order (lineage path; members with an allotment
+before sourceless ones, round 6 review 5980983595), then take up their `Instead` events; the loop ends when nothing is pending. All
 members share one queue: one `prevented_once` set and one entry-copy list. The `Prevent { then }`
 follow-ups of the whole batch, lineage members included, form ONE following child batch
 (`depth + 1`, `sba` false), as before. RECONCILE: the final `ZoneChange`s of every member are
@@ -4111,8 +4112,10 @@ canonical applied-set bytes, entry-copy plan: a candidate with a plan before one
 lesser plan by `ObjectId` sequence), the candidate position breaking a remaining tie between
 interchangeable inputs. The winner's plan is executed; the losers (and their plans) are not
 executed, logged or reported; this never fails. EXECUTE: ONE `execute_batch_with_entry_copies`
-call: first the final events that are not zone changes, ordered by (root, member index), then the
-kept zone changes, each at the least (root, member index) of its object's candidates. Non-moves
+call: first the final events that are not zone changes, ordered by (lineage path, member index),
+then the kept zone changes, each at the least (lineage path, member index) of its object's
+candidates (round 6 review 5980983595; before, (root, member index); identical for submitted
+members, whose path is [root]). Non-moves
 come first because `Tap`, `Attach`, `RemoveCounters` and the like need a live permanent (a shield
 counter's removal precedes its object's move). This also changes the order of `sba = false`
 batches: [move Y, tap Y] used to fail with `UnknownObject` and now succeeds. K1: the choice among
@@ -4254,7 +4257,19 @@ group's other members started with it), resolves it, and at once takes up the `I
 queued as not-started members. A descendant can start only after its parent resolved; if its
 chooser ranks before members that already resolved, it simply runs next. Requests for a
 descendant's choices come in this order. For submitted members only, the key is the previous
-(rank, chooser, index) order. Phases B and C (CR 615.7) are unchanged; members taken up after the
+(rank, chooser, index) order. The same path order is used everywhere members are ordered by
+position (CodeRabbit review 5980983595): phase C resumes a chooser's stopped pool members in this
+key order (allotted members before sourceless ones, a stable sort), not by creation index, so a
+descendant that phase A stopped first also resumes first (test
+`req_event_001_r6_pool_resumption_follows_lineage_path`: T -> Instead[tap U, 3 damage],
+U -> Instead[1 damage], pool 1, a one-use doubler of damage below 3: the 1 is prevented and 3 is
+dealt, as for the direct [1 damage, 3 damage]; before, the 3 resumed first, was cut to 2, doubled
+to 4, and 5 was dealt); the executed batch orders the events that are not zone changes, and the
+kept zone changes, by (lineage path, member index) instead of (root, member index) (test
+`req_event_001_r6_execution_order_follows_lineage_path`: a grandchild move executes, and gets its
+new id, at its parent's place, as in the direct batch). Phase B is order-independent: the pool's
+choosers are taken in APNAP order (rank, then id, independent of member indices), and the
+allocation sums each source's damage in a `BTreeMap` keyed by source. Members taken up after the
 resumption are scheduled by phase A. `DepthExceeded` is raised as soon as the too-deep generation
 is taken up (same error, same rollback). Impossible-instruction roles: an event of a later batch
 of the same call is ignored if it names a retired id (an object an executed batch of this call
