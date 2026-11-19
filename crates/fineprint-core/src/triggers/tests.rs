@@ -567,7 +567,10 @@ fn req_event_002_negatives_are_post_event() {
 fn expected(kind: EventKind, from: Option<Zone>, to: Option<Zone>) -> Option<LookBackKind> {
     use LookBackKind as L;
     match kind {
-        EventKind::LeavesBattlefield | EventKind::Dies => Some(L::LeavesBattlefield),
+        // CR 701.8a, CR 603.6c, CR 603.10a: destroyed is a battlefield-to-graveyard move.
+        EventKind::LeavesBattlefield | EventKind::Dies | EventKind::Destroyed => {
+            Some(L::LeavesBattlefield)
+        }
         EventKind::Sacrificed => Some(L::Sacrificed),
         EventKind::LeavesGraveyard => Some(L::LeavesGraveyard),
         EventKind::ZoneChange => {
@@ -632,6 +635,11 @@ fn req_event_002_cr_603_10_look_back_table_exhaustive() {
         let m = with_filter(matcher(kind), "from", FilterValue::name("x").unwrap());
         assert_eq!(look_back_kind(&m), expected(kind, None, None));
     }
+    // CR 701.8a, CR 603.10a: DESTROYED looks back as a leaves-the-battlefield ability.
+    assert_eq!(
+        look_back_kind(&matcher(EventKind::Destroyed)),
+        Some(LookBackKind::LeavesBattlefield)
+    );
     // Explicit negatives named by SRS 8.2 / the brief.
     for kind in [
         EventKind::Enters,
@@ -639,7 +647,6 @@ fn req_event_002_cr_603_10_look_back_table_exhaustive() {
         EventKind::Discarded,
         EventKind::Milled,
         EventKind::Cycled,
-        EventKind::Destroyed,
         EventKind::Cast,
         EventKind::Tapped,
         EventKind::Untapped,
@@ -1543,6 +1550,10 @@ fn req_event_002_mapping_zone_change_kinds() {
         if to == Hand && matches!(from, Battlefield | Graveyard | Exile | Stack | Command) {
             s.insert(K::ReturnedToHand);
         }
+        // CR 400.8, CR 406.7: an exiled object exiled again is only EXILED (no zone change).
+        if from == Exile && to == Exile {
+            s = BTreeSet::from([K::Exiled]);
+        }
         s
     };
     let dsl = |k: ZoneKind| match k {
@@ -1571,6 +1582,19 @@ fn req_event_002_mapping_zone_change_kinds() {
             assert_eq!(e.fields.get("from"), Some(&zone_val(dsl(from))));
             assert_eq!(e.fields.get("to"), Some(&zone_val(dsl(to))));
             assert_eq!(e.fields.len(), 2);
+            // CR 400.7: the same object repositioned in its zone (same id) is no event; exile
+            // and the command zone always give a new id (CR 400.8, CR 400.10).
+            if from == to && !matches!(from, ZoneKind::Exile | ZoneKind::Command) {
+                for cause in [
+                    ZoneChangeCause::Other,
+                    ZoneChangeCause::Sacrifice,
+                    ZoneChangeCause::Destroy,
+                    ZoneChangeCause::Mill,
+                ] {
+                    let same = one(zone_change_exec(1, 1, zid(from), zid(to), cause));
+                    assert!(same.is_empty(), "{from:?} reposition {cause:?}");
+                }
+            }
         }
     }
     // By cause.
@@ -1618,11 +1642,13 @@ fn req_event_002_mapping_draw_damage_life() {
         draw,
         TriggerEvent::new(vec![EventKind::Drawn]).with_player(p(2))
     );
-    for (target, recipient) in [
-        (DamageTarget::Player(p(2)), EventField::Player(p(2))),
-        (DamageTarget::Object(o(4)), EventField::Object(o(4))),
+    // CR 120.3a: damage to a player is two occurrences (damage, then life loss); damage to an
+    // object only one (CR 120.3e is no life loss).
+    for (target, recipient, count) in [
+        (DamageTarget::Player(p(2)), EventField::Player(p(2)), 2),
+        (DamageTarget::Object(o(4)), EventField::Object(o(4)), 1),
     ] {
-        let e = one(executed(
+        let mut all = one(executed(
             GameEvent::Damage {
                 source: Some(o(3)),
                 source_controller: Some(p(1)),
@@ -1631,8 +1657,9 @@ fn req_event_002_mapping_draw_damage_life() {
                 combat: true,
             },
             Outcome::Applied,
-        ))
-        .remove(0);
+        ));
+        assert_eq!(all.len(), count);
+        let e = all.remove(0);
         let want = TriggerEvent::new(vec![EventKind::DamageDealt])
             .with_object(Some(o(3)), Some(o(3)))
             .with_field("combat", EventField::Value(FilterValue::Bool(true)))
@@ -1655,6 +1682,19 @@ fn req_event_002_mapping_draw_damage_life() {
         (sourceless.subject_pre, sourceless.subject_post),
         (None, None)
     );
+    // CR 120.8: a zero-damage event (never logged by the executor) is no life loss.
+    let zero = one(executed(
+        GameEvent::Damage {
+            source: Some(o(3)),
+            source_controller: None,
+            target: DamageTarget::Player(p(1)),
+            amount: 0,
+            combat: false,
+        },
+        Outcome::Applied,
+    ));
+    assert_eq!(zero.len(), 1);
+    assert_eq!(zero[0].kinds, vec![EventKind::DamageDealt]);
     let life = |delta: i64| {
         one(executed(
             GameEvent::LifeChange {
@@ -1729,9 +1769,22 @@ fn req_event_002_mapping_counters() {
                 EventField::Value(FilterValue::name("poison").unwrap())
             )
     );
-    // A kind that is not a valid filter name (a zone name, "ANY", empty) is not a field; a
-    // mismatched outcome falls back to the event amount.
-    for bad in ["GRAVEYARD", "ANY", ""] {
+    // A zone-named kind is kept as the zone the DSL decodes it to.
+    for (name, zone) in [("GRAVEYARD", Zone::Graveyard), ("HAND", Zone::Hand)] {
+        let e = one(executed(
+            GameEvent::RemoveCounters {
+                target: CounterTarget::Object(o(1)),
+                kind: name.to_owned(),
+                amount: 2,
+            },
+            Outcome::Applied,
+        ))
+        .remove(0);
+        assert_eq!(e.fields.get("kind"), Some(&zone_val(zone)), "{name:?}");
+    }
+    // A kind that is neither a valid filter name nor a zone name ("ANY", empty) is not a
+    // field; a mismatched outcome falls back to the event amount.
+    for bad in ["ANY", ""] {
         let e = one(executed(
             GameEvent::RemoveCounters {
                 target: CounterTarget::Object(o(1)),
@@ -1812,12 +1865,15 @@ fn req_event_002_mapping_remaining_rows() {
             same(EventKind::Tapped, 1),
             same(EventKind::Untapped, 2),
             same(EventKind::TurnedFaceUp, 3),
-            TriggerEvent::new(vec![EventKind::TokenCreated])
+            // CR 111.2: the creator is the owner; the controller is its own field.
+            TriggerEvent::new(vec![EventKind::TokenCreated, EventKind::Enters])
                 .with_object(None, Some(o(20)))
-                .with_player(p(2)),
-            TriggerEvent::new(vec![EventKind::TokenCreated])
+                .with_player(p(1))
+                .with_field("controller", EventField::Player(p(2))),
+            TriggerEvent::new(vec![EventKind::TokenCreated, EventKind::Enters])
                 .with_object(None, Some(o(21)))
-                .with_player(p(1)),
+                .with_player(p(1))
+                .with_field("controller", EventField::Player(p(1))),
             same(EventKind::Attached, 5),
             same(EventKind::Unattached, 5),
         ]
@@ -1834,6 +1890,47 @@ fn req_event_002_mapping_remaining_rows() {
     .remove(0);
     assert_eq!(e.subject_post, None);
     assert!(events_from_batch(&batch_of(Vec::new())).is_empty());
+    // CR 603.6a, CR 701.7a: an ENTERS matcher (post-event) matches each token's new id; no
+    // ZONE_CHANGE (a token has no origin zone).
+    assert!(
+        got.iter()
+            .all(|e| !e.kinds.contains(&EventKind::ZoneChange))
+    );
+    let env = FakeEnv::new()
+        .post(reg(
+            9,
+            1,
+            "enters",
+            with_bind(matcher(EventKind::Enters), "object", "it"),
+        ))
+        .post(reg(
+            9,
+            1,
+            "made",
+            with_subject(
+                matcher(EventKind::TokenCreated),
+                EventSubject::Players(PlayerGroup::AllPlayers),
+            ),
+        ));
+    let mut env = env;
+    env.players.insert((StateView::PostEvent, p(1)));
+    let fired = run(&env, &got);
+    let enters: Vec<_> = fired.iter().filter(|t| t.ability_id == "enters").collect();
+    assert_eq!(enters.len(), 2);
+    assert_eq!(
+        enters[0].bindings.get("it"),
+        Some(&EventField::Object(o(20)))
+    );
+    assert_eq!(
+        enters[1].bindings.get("it"),
+        Some(&EventField::Object(o(21)))
+    );
+    assert!(enters.iter().all(|t| t.look_back.is_none()));
+    // The TOKEN_CREATED player subject is the owner (P1) for both tokens.
+    assert_eq!(fired.iter().filter(|t| t.ability_id == "made").count(), 2);
+    env.players.clear();
+    env.players.insert((StateView::PostEvent, p(2)));
+    assert!(run(&env, &got).iter().all(|t| t.ability_id != "made"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1900,7 +1997,7 @@ fn req_event_002_mapping_from_real_execution() {
     };
     let a = create(1, 1, ZoneKind::Battlefield);
     let b = create(2, 2, ZoneKind::Battlefield);
-    let _lib = create(3, 1, ZoneKind::Library);
+    let lib = create(3, 1, ZoneKind::Library);
     let mut ctx = EventContext {
         game: &mut game,
         zones: &mut zones,
@@ -1937,10 +2034,17 @@ fn req_event_002_mapping_from_real_execution() {
         assert_eq!(e.fields.get("from"), Some(&zone_val(Zone::Battlefield)));
         assert_eq!(e.fields.get("to"), Some(&zone_val(Zone::Graveyard)));
     }
+    // CR 121.1: the draw is also a library-to-hand zone change, with a new id.
+    let draw = &tes[2];
     assert_eq!(
-        tes[2],
-        TriggerEvent::new(vec![EventKind::Drawn]).with_player(p(1))
+        kinds_set(draw),
+        BTreeSet::from([EventKind::Drawn, EventKind::ZoneChange])
     );
+    assert_eq!(draw.subject_player, Some(p(1)));
+    assert_eq!(draw.subject_pre, Some(lib));
+    assert!(draw.subject_post.is_some() && draw.subject_post != Some(lib));
+    assert_eq!(draw.fields.get("from"), Some(&zone_val(Zone::Library)));
+    assert_eq!(draw.fields.get("to"), Some(&zone_val(Zone::Hand)));
     assert_eq!(
         tes[3],
         TriggerEvent::new(vec![EventKind::LifeGained])
@@ -1961,6 +2065,464 @@ fn req_event_002_mapping_from_real_execution() {
         .creature(StateView::PreEvent, b.get());
     let got = detect(&env, &mut memories, logged.turn, &tes);
     assert_eq!(got.len(), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 1 regressions (REQ-EVENT-002)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-EVENT-002: CR 603.2c, CR 603.10a. A ONE_OR_MORE matcher yields one trigger per ability
+// instance even when its events match in different views (a visible card put into a hand looks
+// back, a hidden one does not); view, look-back and bindings come from the first match.
+#[test]
+fn req_event_002_cr_603_2c_one_or_more_groups_across_views() {
+    let m = with_bind(
+        with_batch(
+            with_filter(
+                matcher(EventKind::ZoneChange),
+                "to",
+                FilterValue::Zone(Zone::Hand),
+            ),
+            DslEventBatch::OneOrMore,
+        ),
+        "object",
+        "it",
+    );
+    let visible = zone_event(
+        vec![EventKind::ZoneChange, EventKind::ReturnedToHand],
+        1,
+        11,
+        Zone::Exile,
+        Zone::Hand,
+    );
+    let hidden = zone_event(
+        vec![EventKind::ZoneChange],
+        2,
+        12,
+        Zone::Library,
+        Zone::Hand,
+    );
+    let mut env = FakeEnv::new().both(reg(9, 1, "a1", m));
+    env.visible.insert(o(1));
+    let got = run(&env, &[visible.clone(), hidden.clone()]);
+    assert_eq!(got.len(), 1, "CR 603.2c: one trigger per ability instance");
+    assert_eq!(got[0].event_indices, vec![0, 1]);
+    assert_eq!(got[0].look_back, Some(LookBackKind::ToHandOrLibrary));
+    assert_eq!(got[0].bindings.get("it"), Some(&EventField::Object(o(1))));
+    // Reversed: the first match is post-event, so are its look-back and bindings.
+    let got = run(&env, &[hidden, visible]);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].event_indices, vec![0, 1]);
+    assert_eq!(got[0].look_back, None);
+    assert_eq!(got[0].bindings.get("it"), Some(&EventField::Object(o(12))));
+}
+
+// REQ-EVENT-002: SRS 8.2 item 8, CR 603.2h. A departing source's used limit is read from the
+// pre-event Memory; no Memory entry is recreated for its retired id; a surviving source's
+// counters are written; accepted candidates within one call count against the limit.
+#[test]
+fn req_event_002_cr_603_2h_limit_of_departing_source() {
+    let dies = zone_event(
+        vec![
+            EventKind::ZoneChange,
+            EventKind::LeavesBattlefield,
+            EventKind::Dies,
+            EventKind::PutIntoGraveyard,
+        ],
+        1,
+        11,
+        Zone::Battlefield,
+        Zone::Graveyard,
+    );
+    let r = limited(reg(5, 1, "a1", matcher(EventKind::Dies)), Some(1), None);
+    let surviving = FakeEnv::new().both(r.clone());
+    let departed = FakeEnv::new().pre(r);
+    // An earlier batch this turn used the limit while the source survived.
+    let mut memory = MemoryTable::new();
+    assert_eq!(
+        detect(&surviving, &mut memory, 3, std::slice::from_ref(&dies)).len(),
+        1
+    );
+    let pre_memory = memory.clone();
+    // (a) The source dies in this batch: its live Memory entry is gone.
+    let mut post = MemoryTable::new();
+    assert!(
+        detect_with_pre_event_memory(
+            &departed,
+            &pre_memory,
+            &mut post,
+            3,
+            std::slice::from_ref(&dies)
+        )
+        .is_empty()
+    );
+    assert!(post.get(o(5)).is_none(), "no entry for a departed source");
+    // (b) Next turn it triggers again, still without an entry.
+    assert_eq!(
+        detect_with_pre_event_memory(
+            &departed,
+            &pre_memory,
+            &mut post,
+            4,
+            std::slice::from_ref(&dies)
+        )
+        .len(),
+        1
+    );
+    assert!(post.get(o(5)).is_none());
+    // (c) A surviving source's counters are written to `memory`.
+    let mut post = MemoryTable::new();
+    assert_eq!(
+        detect_with_pre_event_memory(
+            &surviving,
+            &pre_memory,
+            &mut post,
+            4,
+            std::slice::from_ref(&dies)
+        )
+        .len(),
+        1
+    );
+    let mem = post.get(o(5)).unwrap();
+    assert_eq!(
+        mem.choice("trigger.limit.turn:a1"),
+        Some(&ChoiceValue::Number(4))
+    );
+    assert_eq!(
+        mem.choice("trigger.limit.turn_count:a1"),
+        Some(&ChoiceValue::Number(1))
+    );
+    assert_eq!(
+        mem.choice("trigger.limit.game_count:a1"),
+        Some(&ChoiceValue::Number(2))
+    );
+    // (d) perTurn 2 within one call: pre-event count plus the in-call tally.
+    let three = [dies.clone(), dies.clone(), dies];
+    let r2 = limited(reg(6, 1, "b1", matcher(EventKind::Dies)), Some(2), None);
+    let departed = FakeEnv::new().pre(r2.clone());
+    let mut post = MemoryTable::new();
+    let got = detect_with_pre_event_memory(&departed, &MemoryTable::new(), &mut post, 3, &three);
+    assert_eq!(
+        got.iter().map(|t| t.event_indices[0]).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(post.get(o(6)).is_none());
+    let mut pre_used = MemoryTable::new();
+    let m = pre_used.get_mut_or_default(o(6));
+    m.set_choice("trigger.limit.turn:b1", ChoiceValue::Number(3));
+    m.set_choice("trigger.limit.turn_count:b1", ChoiceValue::Number(1));
+    assert_eq!(
+        detect_with_pre_event_memory(&departed, &pre_used, &mut post, 3, &three).len(),
+        1
+    );
+    let surviving = FakeEnv::new().both(r2);
+    let mut post = MemoryTable::new();
+    assert_eq!(
+        detect_with_pre_event_memory(&surviving, &pre_used, &mut post, 3, &three).len(),
+        1
+    );
+    assert_eq!(
+        post.get(o(6))
+            .unwrap()
+            .choice("trigger.limit.turn_count:b1"),
+        Some(&ChoiceValue::Number(2))
+    );
+}
+
+// REQ-EVENT-002: a counter kind spelled as a zone is kept as the zone the DSL decodes; an
+// ordinary name stays a name; ANY is no field and a wildcard filter still passes.
+#[test]
+fn req_event_002_counter_kind_zone_spelling() {
+    let put = |kind: &str| {
+        one(executed(
+            GameEvent::AddCounters {
+                target: CounterTarget::Object(o(4)),
+                kind: kind.to_owned(),
+                amount: 1,
+            },
+            Outcome::Applied,
+        ))
+        .remove(0)
+    };
+    let hand = put("HAND");
+    assert_eq!(hand.fields.get("kind"), Some(&zone_val(Zone::Hand)));
+    assert_eq!(
+        put("poison").fields.get("kind"),
+        Some(&EventField::Value(FilterValue::name("poison").unwrap()))
+    );
+    let any = put("ANY");
+    assert!(!any.fields.contains_key("kind"));
+    let exact = with_filter(
+        matcher(EventKind::CountersPut),
+        "kind",
+        FilterValue::Zone(Zone::Hand),
+    );
+    let env = FakeEnv::new().post(reg(9, 1, "a1", exact));
+    assert_eq!(run(&env, std::slice::from_ref(&hand)).len(), 1);
+    assert!(run(&env, std::slice::from_ref(&any)).is_empty());
+    let wildcard = with_filter(matcher(EventKind::CountersPut), "kind", FilterValue::Any);
+    let env = FakeEnv::new().post(reg(9, 1, "a1", wildcard));
+    assert_eq!(run(&env, &[any]).len(), 1);
+}
+
+// REQ-EVENT-002: CR 400.8, CR 406.7. An exiled object exiled again gets a new id and is
+// EXILED, without ZONE_CHANGE; the cause kind still applies; ordinary exiling is unchanged.
+#[test]
+fn req_event_002_cr_400_8_re_exile() {
+    let again = one(zone_change_exec(
+        1,
+        2,
+        ZoneId::Exile,
+        ZoneId::Exile,
+        ZoneChangeCause::Exile,
+    ))
+    .remove(0);
+    assert_eq!(again.kinds, vec![EventKind::Exiled]);
+    assert_eq!(
+        (again.subject_pre, again.subject_post),
+        (Some(o(1)), Some(o(2)))
+    );
+    assert_eq!(again.fields.get("from"), Some(&zone_val(Zone::Exile)));
+    assert_eq!(again.fields.get("to"), Some(&zone_val(Zone::Exile)));
+    let destroyed = one(zone_change_exec(
+        1,
+        2,
+        ZoneId::Exile,
+        ZoneId::Exile,
+        ZoneChangeCause::Destroy,
+    ))
+    .remove(0);
+    assert_eq!(
+        kinds_set(&destroyed),
+        BTreeSet::from([EventKind::Exiled, EventKind::Destroyed])
+    );
+    let env = FakeEnv::new().post(reg(9, 1, "a1", matcher(EventKind::Exiled)));
+    assert_eq!(run(&env, std::slice::from_ref(&again)).len(), 1);
+    let zc = FakeEnv::new().both(reg(9, 1, "a1", matcher(EventKind::ZoneChange)));
+    assert!(run(&zc, &[again]).is_empty());
+    let first = one(zone_change_exec(
+        1,
+        2,
+        ZoneId::Battlefield,
+        ZoneId::Exile,
+        ZoneChangeCause::Exile,
+    ))
+    .remove(0);
+    assert!(first.kinds.contains(&EventKind::Exiled));
+    assert!(first.kinds.contains(&EventKind::ZoneChange));
+}
+
+// REQ-EVENT-002: CR 701.21a, CR 603.10a. P2 sacrifices a permanent P1 owns: the subject player
+// is P2, read from the LKI the executed batch captured; without LKI it is absent.
+#[test]
+fn req_event_002_cr_701_21a_sacrifice_subject_is_controller() {
+    let mut game = GameState::new(7, 2, 20).unwrap();
+    game.set_turn_number(1);
+    game.set_active_player(Some(p(1))).unwrap();
+    let mut zones = Zones::new(&[p(1), p(2)], ZonesConfig::default());
+    let mut ids = IdGenerator::new();
+    let mut permanents = Permanents::new();
+    let mut memories = MemoryTable::new();
+    let mut lki = LkiStore::new();
+    let mut events = EventState::new();
+    let provider = Provider;
+    let mut req = MoveRequest::new(ZoneKind::Battlefield);
+    req.controller = Some(p(2));
+    let x = zones
+        .create_object(&mut ids, CardId::new(1), p(1), req)
+        .unwrap();
+    permanents.enter(x, p(2), 1).unwrap();
+    let mut ctx = EventContext {
+        game: &mut game,
+        zones: &mut zones,
+        ids: &mut ids,
+        permanents: &mut permanents,
+        memories: &mut memories,
+        lki: &mut lki,
+        events: &mut events,
+        provider: &provider,
+    };
+    ctx.execute_batch(&EventBatch::from_events(vec![GameEvent::ZoneChange {
+        object: x,
+        request: MoveRequest::new(ZoneKind::Graveyard),
+        cause: ZoneChangeCause::Sacrifice,
+    }]))
+    .unwrap();
+    let logged = &events.log().batches_since(0)[0];
+    let tes = events_from_batch_with_lki(logged, &lki);
+    assert_eq!(tes.len(), 1);
+    let e = &tes[0];
+    assert!(e.kinds.contains(&EventKind::Sacrificed));
+    assert_eq!(e.subject_player, Some(p(2)));
+    assert_eq!(e.subject_pre, Some(x));
+    assert!(e.subject_post.is_some() && e.subject_post != Some(x));
+    assert_eq!(events_from_batch(logged)[0].subject_player, None);
+    let m = with_subject(
+        matcher(EventKind::Sacrificed),
+        EventSubject::Players(PlayerGroup::AllPlayers),
+    );
+    let mut env = FakeEnv::new().pre(reg(9, 1, "a1", m));
+    env.players.insert((StateView::PreEvent, p(2)));
+    let got = run(&env, &tes);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].look_back, Some(LookBackKind::Sacrificed));
+    env.players.clear();
+    env.players.insert((StateView::PreEvent, p(1)));
+    assert!(run(&env, &tes).is_empty());
+}
+
+// REQ-EVENT-002: CR 121.1, CR 400.2, CR 603.10a. A draw is DRAWN and a library-to-hand
+// ZONE_CHANGE (not RETURNED_TO_HAND) with old and new ids; a to-hand zone-change matcher looks
+// back only when the env says the card was visible to all.
+#[test]
+fn req_event_002_cr_121_1_draw_is_a_zone_change() {
+    let drawn = |old: u64, new: u64| {
+        one(executed(
+            GameEvent::Draw { player: p(2) },
+            Outcome::ZoneChange(Moved {
+                old: o(old),
+                new: o(new),
+                from: ZoneId::Library(p(2)),
+                to: ZoneId::Hand(p(2)),
+            }),
+        ))
+    };
+    let got = drawn(1, 2);
+    assert_eq!(
+        got,
+        vec![
+            TriggerEvent::new(vec![EventKind::Drawn, EventKind::ZoneChange])
+                .with_object(Some(o(1)), Some(o(2)))
+                .with_field("from", zone_val(Zone::Library))
+                .with_field("to", zone_val(Zone::Hand))
+                .with_player(p(2))
+        ]
+    );
+    // A malformed same-id outcome keeps the plain draw shape.
+    assert_eq!(
+        drawn(1, 1),
+        vec![TriggerEvent::new(vec![EventKind::Drawn]).with_player(p(2))]
+    );
+    let to_hand = with_filter(
+        matcher(EventKind::ZoneChange),
+        "to",
+        FilterValue::Zone(Zone::Hand),
+    );
+    let mut env = FakeEnv::new()
+        .both(reg(9, 1, "zc", to_hand))
+        .both(reg(9, 1, "dr", matcher(EventKind::Drawn)))
+        .both(reg(9, 1, "rh", matcher(EventKind::ReturnedToHand)));
+    // Hidden (the usual case for a library): post-event view.
+    let fired = run(&env, &got);
+    assert_eq!(
+        fired
+            .iter()
+            .map(|t| (t.ability_id.as_str(), t.look_back))
+            .collect::<Vec<_>>(),
+        vec![("dr", None), ("zc", None)]
+    );
+    // Visible to all: the zone-change matcher looks back.
+    env.visible.insert(o(1));
+    let fired = run(&env, &got);
+    assert_eq!(
+        fired
+            .iter()
+            .map(|t| (t.ability_id.as_str(), t.look_back))
+            .collect::<Vec<_>>(),
+        vec![("dr", None), ("zc", Some(LookBackKind::ToHandOrLibrary))]
+    );
+}
+
+// REQ-EVENT-002: CR 120.3a, CR 120.4b/c. Damage to a player is a DAMAGE_DEALT occurrence then a
+// LIFE_LOST occurrence for that player (source and recipient kept); damage to an object is no
+// life loss (CR 120.3e).
+#[test]
+fn req_event_002_cr_120_3a_damage_to_player_is_life_loss() {
+    let damage = |target: DamageTarget| {
+        executed(
+            GameEvent::Damage {
+                source: Some(o(3)),
+                source_controller: Some(p(1)),
+                target,
+                amount: 3,
+                combat: false,
+            },
+            Outcome::Applied,
+        )
+    };
+    let tes = events_from_batch(&batch_of(vec![
+        damage(DamageTarget::Player(p(2))),
+        damage(DamageTarget::Object(o(4))),
+        executed(GameEvent::Tap { object: o(4) }, Outcome::Applied),
+    ]));
+    assert_eq!(
+        tes.iter().map(|e| e.kinds.clone()).collect::<Vec<_>>(),
+        vec![
+            vec![EventKind::DamageDealt],
+            vec![EventKind::LifeLost],
+            vec![EventKind::DamageDealt],
+            vec![EventKind::Tapped],
+        ]
+    );
+    assert_eq!(
+        tes[1],
+        TriggerEvent::new(vec![EventKind::LifeLost])
+            .with_player(p(2))
+            .with_field("amount", int_val(3))
+            .with_object(Some(o(3)), Some(o(3)))
+            .with_field("recipient", EventField::Player(p(2)))
+    );
+    let m = with_bind(
+        with_subject(
+            matcher(EventKind::LifeLost),
+            EventSubject::Players(PlayerGroup::AllPlayers),
+        ),
+        "amount",
+        "n",
+    );
+    let mut env = FakeEnv::new().post(reg(9, 1, "a1", m));
+    env.players.insert((StateView::PostEvent, p(2)));
+    let got = run(&env, &tes);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].event_indices, vec![1]);
+    assert_eq!(got[0].bindings.get("n"), Some(&int_val(3)));
+}
+
+// REQ-EVENT-002: CR 701.8a, CR 603.6c, CR 603.10a. An observer destroyed together with two
+// creatures sees them destroyed through the pre-event view; it does not trigger from the
+// post-event list. CR 701.8b: DESTROYED stays distinct from DIES.
+#[test]
+fn req_event_002_cr_701_8a_destroyed_looks_back() {
+    let events = events_from_batch(&destroy_all_batch());
+    let m = with_subject(
+        matcher(EventKind::Destroyed),
+        EventSubject::Object(creature_sel()),
+    );
+    let env = FakeEnv::new()
+        .pre(reg(3, 1, "a1", m.clone()))
+        .creature(StateView::PreEvent, 1)
+        .creature(StateView::PreEvent, 2);
+    let got = run(&env, &events);
+    assert_eq!(got.len(), 2);
+    assert!(
+        got.iter()
+            .all(|t| t.look_back == Some(LookBackKind::LeavesBattlefield))
+    );
+    let env = FakeEnv::new()
+        .post(reg(3, 1, "a1", m))
+        .creature(StateView::PreEvent, 1)
+        .creature(StateView::PreEvent, 2);
+    assert!(run(&env, &events).is_empty());
+    // A sacrifice to the graveyard dies but is not destroyed.
+    let sac = one(zone_change_exec(
+        1,
+        11,
+        ZoneId::Battlefield,
+        ZoneId::Graveyard(p(1)),
+        ZoneChangeCause::Sacrifice,
+    ));
+    let env = FakeEnv::new().pre(reg(3, 1, "a1", matcher(EventKind::Destroyed)));
+    assert!(run(&env, &sac).is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
