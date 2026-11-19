@@ -209,3 +209,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #27 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; cargo test --workspace 2020 passed; coverage fineprint-core 99.67%; guard ok | events/ module, 17 GameEvent kinds, batch rollback, LKI on zone change, history ledger; 49 lib tests; 12 DECISIONS entries |
 | 03-events | #27 | Independent Tester | Opus 5.5 | 1 | done | 96 spec_events tests pass | 12 spec files; DECISIONS "Spec-test choices"; LKI-counters reading differs from Implementer (provider vs markers), both pass |
 | 03-events | #27 | Orchestrator | Opus 5.5 | 1 | done | cr check ok (709 cited rules) | regenerated docs/cr-citations.json |
+| 03-events | #27 | Work verifier | Sonnet 5.5 | 1 | pass @ 7b678c4 | fmt, clippy clean; cargo test --workspace 2020 passed; coverage 99.67%; guard, cr ok | PR #176 opened |
+| 03-events | #27 (PR #176 review round 1) | Classifier | Sonnet 5.5 | 1 | routed | — | 12 findings: 11 fix (incl. security F6 face-down leak), F12 perf deferred (DECISIONS); src T2 Opus, spec T1 Sonnet |
+| 03-events | #27 (PR #176 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | cargo test --workspace 2039 passed; coverage 99.63%; fmt, clippy, guard, cr clean | 9 new/rewritten unit tests fail on 7b678c4, pass now; 5 DECISIONS entries |
+| 03-events | #27 (PR #176 review round 1) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | fineprint-core tests pass | new spec tests fail on 7b678c4 src; CR citations added (F8, F9) |
