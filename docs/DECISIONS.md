@@ -2292,3 +2292,45 @@ it quotes.
 **Alternatives.** Clearing `removed_from_combat` on any combat setter (would hide that the
 permanent was removed); treating a phase-out of an attacked permanent as leaving its attackers'
 targets intact (contradicts CR 506.4c).
+
+## #21 FP-020 — SRS section 4.1 errata
+
+**Decision:** Treat REQ-OBJ-001 as follows: variable symbols are {X} and {Y} only (CR 107.3p; no {Z}); the no-mana-cost MV-0 exception applies only to the back face of a nonmodal double-faced permanent or spell and to melded permanents (CR 202.3a); ColorIdentity includes alternative characteristics (CR 903.4e), the back face (903.4d) and a pre-game color choice (903.4b); monocolored hybrid includes {C/W},{C/U},{C/B},{C/R},{C/G} (CR 107.4).
+**Rationale:** CR text of baseline 2026-11-06 wins (P1).
+**Alternatives:** Keep {Z} as a reserved symbol; rejected as not CR-backed.
+
+## #21 FP-020 — Characteristics API
+
+**Decision:** `fineprint_core::objects` is a standalone module (not wired into `GameState`, its
+Merkle layout or wire form) with exactly the pinned API of the #21 brief: `VariableValues`,
+`ManaValueContext` (`OffStack` / `OnStack`), `SplitHalf`, `SplitState`, `ManaValueSubject`
+(`Plain`, `NonmodalBackFace`, `CopyOfNonmodalBackFace`, `Melded`, `CopyOfMelded`, `Split`),
+`symbol_mana_value`, `mana_value`, `color_mask`, `union_colors`, `symbol_colors`,
+`colors_of_mana_cost`, `base_colors`, `IdentityFace`, `color_identity`, `ObjectError`,
+`validate_types`, `can_gain_subtype` and `Characteristics` (`from_face`, `mana_value`,
+`pt_applies`). `Characteristics` reuses the `fineprint_dsl::card` placeholder types
+(`ColorBitmask`, `TextTokenStream`, `AbilityAST`, `ValueExpressionAST`) so a `CardFaceDSL` maps
+to it one to one. `{Z}` is treated exactly like `{X}` and `{Y}` (0 off the stack, the supplied
+value on it) because the DSL still accepts it; `VariableValues` carries `z` for that reason.
+Copies of spells are not modelled: the caller passes the same `OnStack` values (CR 707.10). Mana
+value arithmetic saturates in `i64`. `ObjectError` is not `#[non_exhaustive]` so integration
+tests can match it exhaustively. `from_face` sets `colors` from cost and indicator only; CDA
+colors are applied by later work.
+**Rationale:** The brief pins the API for the Independent Tester; reusing the DSL types avoids a
+second representation of the same data.
+**Alternatives:** Rejecting `{Z}` at mana-value time (would make the function partial over a type
+the DSL accepts); own wrapper types for P/T and abilities (duplicate data, no benefit until the
+real ASTs land).
+
+## #21 FP-020 — `{C/W}` is not representable in `ManaSymbol`
+
+**Decision:** CR 107.4e makes `{C/W}`-style monocolored hybrid symbols colored with mana value 1,
+but `fineprint_dsl::mana::ManaSymbol` cannot represent them (`GenericHybrid` requires `n >= 1`
+and `parse` rejects `{C/W}`). This unit covers every existing `ManaSymbol` variant and does not
+edit `fineprint-dsl`. The follow-up is an additive `ManaSymbol` variant proposed through
+`contracts/CHANGE_REQUESTS.md` and landed as a separate contract-only PR (R2), after which
+`symbol_mana_value` (1) and `symbol_colors` (the color) gain one arm each.
+**Rationale:** `fineprint-dsl` and `contracts/**` are outside this unit's owned paths; the
+change is additive and can land independently.
+**Alternatives:** Encoding `{C/W}` as `GenericHybrid(1, c)` (changes `{1/W}` semantics and the
+DSL validity rule); editing the DSL in this unit (violates R1/R2).
