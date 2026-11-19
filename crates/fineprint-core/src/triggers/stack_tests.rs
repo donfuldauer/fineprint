@@ -22,7 +22,8 @@ use fineprint_dsl::expr::{ObjectSelectorAST, PlayerGroup, PredicateAST, Referenc
 use super::*;
 use crate::choice::{
     ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse,
-    ChoiceSession, ChoiceTarget, ChoiceType, PendingChoiceRequest, Status,
+    ChoiceSession, ChoiceTarget, ChoiceType, PendingChoiceRequest, Status, ValidatorContract,
+    ValidatorRule,
 };
 use crate::memory::MemoryTable;
 use crate::txn::Transactional;
@@ -270,8 +271,8 @@ impl Transactional for Nil {
 
 /// Runs `place_triggers` to completion, answering each request with `answer`. Returns the
 /// placement and every request asked, in order.
-fn drive(
-    env: &Places,
+fn drive<E: PlacementEnv>(
+    env: &E,
     apnap: &[PlayerId],
     waiting: &[PendingTrigger],
     mut answer: impl FnMut(&PendingChoiceRequest) -> ChoiceResponse,
@@ -564,14 +565,17 @@ fn req_event_002_delayed_registrations_and_captured_bindings() {
             .all(|r| r.source == o(10) && r.controller == p(2))
     );
 
-    let got = d.take_triggered(&[
-        waiting(10, 2, "delayed#0", &[("it", 99), ("other", 5)]),
-        waiting(10, 2, "plain", &[]),
-        waiting(11, 2, "delayed#0", &[]),
-        waiting(10, 2, "delayed#7", &[]),
-        waiting(10, 2, "delayed#x", &[]),
-        waiting(10, 2, "delayed#00", &[]),
-    ]);
+    let got = d.take_triggered(
+        &Env::default(),
+        &[
+            waiting(10, 2, "delayed#0", &[("it", 99), ("other", 5)]),
+            waiting(10, 2, "plain", &[]),
+            waiting(11, 2, "delayed#0", &[]),
+            waiting(10, 2, "delayed#7", &[]),
+            waiting(10, 2, "delayed#x", &[]),
+            waiting(10, 2, "delayed#00", &[]),
+        ],
+    );
     assert_eq!(got.len(), 1);
     let g = &got[0];
     assert_eq!(g.origin, TriggerOrigin::Delayed);
@@ -593,12 +597,15 @@ fn req_event_002_delayed_one_shot_and_duration() {
     let a = event_ability("orig", EventKind::Attacks);
     let once = d.register(o(1), p(1), a.clone(), BTreeMap::new(), true);
     let lasting = d.register(o(2), p(1), a, BTreeMap::new(), false);
-    let got = d.take_triggered(&[
-        waiting(1, 1, "delayed#0", &[("e", 1)]),
-        waiting(2, 1, "delayed#1", &[("e", 2)]),
-        waiting(1, 1, "delayed#0", &[("e", 3)]),
-        waiting(2, 1, "delayed#1", &[("e", 4)]),
-    ]);
+    let got = d.take_triggered(
+        &Env::default(),
+        &[
+            waiting(1, 1, "delayed#0", &[("e", 1)]),
+            waiting(2, 1, "delayed#1", &[("e", 2)]),
+            waiting(1, 1, "delayed#0", &[("e", 3)]),
+            waiting(2, 1, "delayed#1", &[("e", 4)]),
+        ],
+    );
     let summary: Vec<(String, EventField)> = got
         .iter()
         .map(|g| (g.ability_id.clone(), g.bindings["e"].clone()))
@@ -615,7 +622,7 @@ fn req_event_002_delayed_one_shot_and_duration() {
     assert!(!d.cancel(once));
     // A later event no longer triggers the one-shot.
     assert!(
-        d.take_triggered(&[waiting(1, 1, "delayed#0", &[])])
+        d.take_triggered(&Env::default(), &[waiting(1, 1, "delayed#0", &[])])
             .is_empty()
     );
     assert!(d.cancel(lasting));
@@ -699,7 +706,7 @@ fn req_event_002_delayed_end_to_end_with_detect() {
     ];
     let found = detect(&env, &mut MemoryTable::new(), 1, &events);
     assert_eq!(found.len(), 2);
-    let got = d.take_triggered(&found);
+    let got = d.take_triggered(&env, &found);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].ability_id, format!("delayed#{}", id.get()));
     assert_eq!(got[0].bindings["n"], EventField::Value(FilterValue::Int(3)));
@@ -1602,4 +1609,425 @@ fn req_event_002_property_stacked_order() {
         assert_eq!(pl.stacked.len(), waiting.len());
         assert!(pl.removed.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR round 1: delayed intervening "if" with captured bindings
+// ---------------------------------------------------------------------------------------------
+
+/// A trigger env whose intervening "if" holds iff every `(name, value)` of `want` is in the
+/// bindings it is given. Registrations are `regs`; any object or player matches; filter
+/// predicates hold. Records the view and ability id of every condition check.
+#[derive(Default)]
+struct BindEnv {
+    regs: Vec<TriggerRegistration>,
+    want: BTreeMap<String, EventField>,
+    calls: RefCell<Vec<(StateView, String, bool)>>,
+}
+
+impl TriggerEnv for BindEnv {
+    fn registrations(&self, _view: StateView) -> Vec<TriggerRegistration> {
+        self.regs.clone()
+    }
+
+    fn object_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _object: ObjectId,
+        _selector: &ObjectSelectorAST,
+    ) -> bool {
+        true
+    }
+
+    fn player_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _player: PlayerId,
+        _group: &PlayerGroup,
+    ) -> bool {
+        true
+    }
+
+    fn predicate_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _field: Option<&EventField>,
+    ) -> bool {
+        true
+    }
+
+    fn condition_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        self.calls.borrow_mut().push((
+            view,
+            reg.ability.base.ability_id.clone(),
+            reg.ability.intervening_if.is_some(),
+        ));
+        self.want.iter().all(|(k, v)| bindings.get(k) == Some(v))
+    }
+
+    fn is_visible_to_all(&self, _object: ObjectId) -> bool {
+        true
+    }
+}
+
+/// A delayed ability on `Attacks` binding event field `subj` as `it` and `num` as `e`, with an
+/// intervening "if".
+fn delayed_if_ability() -> TriggeredAbilityAST {
+    let mut m = EventMatcher::new(EventKind::Attacks);
+    let mut bind = BTreeMap::new();
+    bind.insert("subj".to_owned(), "it".to_owned());
+    bind.insert("num".to_owned(), "e".to_owned());
+    m.bind = Some(bind);
+    let mut a = ability("orig", Trigger::Event(m));
+    a.intervening_if = Some(if_pred());
+    a
+}
+
+fn attack_event(subj: u64, num: u64) -> TriggerEvent {
+    TriggerEvent::new(vec![EventKind::Attacks])
+        .with_field("subj", EventField::Object(o(subj)))
+        .with_field("num", EventField::Object(o(num)))
+}
+
+fn want(pairs: &[(&str, u64)]) -> BTreeMap<String, EventField> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), EventField::Object(o(*v))))
+        .collect()
+}
+
+/// REQ-EVENT-002, CR 603.4, CR 603.7: a delayed trigger's intervening "if" sees its captured
+/// value: the event binds `it` to 99, the capture to 40, the condition holds only for 40, so it
+/// triggers (with detect end to end). The registrations listed for detect carry no condition;
+/// take_triggered checks the stored one under the `delayed#<n>` id, in the post-event view.
+#[test]
+fn req_event_002_delayed_intervening_if_uses_captured_value() {
+    let mut d = DelayedTriggers::new();
+    let id = d.register(o(6), p(2), delayed_if_ability(), want(&[("it", 40)]), true);
+    let regs = d.registrations();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].ability.intervening_if, None);
+    assert_eq!(regs[0].ability.base.ability_id, "delayed#0");
+    let env = BindEnv {
+        regs,
+        want: want(&[("it", 40)]),
+        ..BindEnv::default()
+    };
+    let found = detect(&env, &mut MemoryTable::new(), 1, &[attack_event(99, 1)]);
+    assert_eq!(found.len(), 1);
+    let got = d.take_triggered(&env, &found);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].ability_id, format!("delayed#{}", id.get()));
+    assert_eq!(got[0].bindings["it"], EventField::Object(o(40)));
+    assert_eq!(got[0].bindings["e"], EventField::Object(o(1)));
+    assert!(d.is_empty(), "the one-shot fired and is removed");
+    assert_eq!(
+        *env.calls.borrow(),
+        vec![(StateView::PostEvent, "delayed#0".to_owned(), true)]
+    );
+}
+
+/// REQ-EVENT-002, CR 603.4, CR 603.7, CR 603.7b: the mirror case: the condition holds only for
+/// the event's value of a captured name, so the delayed trigger does not trigger and the
+/// one-shot stays registered.
+#[test]
+fn req_event_002_delayed_intervening_if_ignores_event_value_of_captured_name() {
+    let mut d = DelayedTriggers::new();
+    d.register(o(6), p(2), delayed_if_ability(), want(&[("it", 40)]), true);
+    let env = BindEnv {
+        regs: d.registrations(),
+        want: want(&[("it", 99)]),
+        ..BindEnv::default()
+    };
+    let found = detect(&env, &mut MemoryTable::new(), 1, &[attack_event(99, 1)]);
+    assert_eq!(found.len(), 1);
+    assert!(d.take_triggered(&env, &found).is_empty());
+    assert_eq!(
+        d.len(),
+        1,
+        "a one-shot that did not trigger stays registered"
+    );
+}
+
+/// REQ-EVENT-002, CR 603.4, CR 603.7b: a one-shot with two matching elements, the first failing
+/// its intervening "if" and the second passing, fires once on the second and is removed.
+#[test]
+fn req_event_002_delayed_one_shot_skips_element_failing_condition() {
+    let mut d = DelayedTriggers::new();
+    d.register(o(6), p(2), delayed_if_ability(), want(&[("it", 40)]), true);
+    let env = BindEnv {
+        regs: d.registrations(),
+        want: want(&[("it", 40), ("e", 2)]),
+        ..BindEnv::default()
+    };
+    let events = [
+        attack_event(99, 1),
+        attack_event(98, 2),
+        attack_event(97, 2),
+    ];
+    let found = detect(&env, &mut MemoryTable::new(), 1, &events);
+    assert_eq!(found.len(), 3);
+    let got = d.take_triggered(&env, &found);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].bindings["e"], EventField::Object(o(2)));
+    assert_eq!(got[0].bindings["it"], EventField::Object(o(40)));
+    assert!(d.is_empty());
+}
+
+/// REQ-EVENT-002, CR 603.4, CR 603.7b: with a stated duration every passing element triggers
+/// and the registration stays; an element with a look-back category is checked in the
+/// pre-event view; an ability without an intervening "if" is not checked.
+#[test]
+fn req_event_002_delayed_condition_views_and_duration() {
+    let mut d = DelayedTriggers::new();
+    d.register(o(6), p(2), delayed_if_ability(), want(&[("it", 40)]), false);
+    d.register(
+        o(7),
+        p(2),
+        event_ability("plain", EventKind::Attacks),
+        BTreeMap::new(),
+        false,
+    );
+    let env = BindEnv {
+        want: want(&[("e", 2)]),
+        ..BindEnv::default()
+    };
+    let mut pre = waiting(6, 2, "delayed#0", &[("e", 2)]);
+    pre.look_back = Some(LookBackKind::LeavesBattlefield);
+    let got = d.take_triggered(
+        &env,
+        &[
+            waiting(6, 2, "delayed#0", &[("e", 1)]),
+            pre,
+            waiting(6, 2, "delayed#0", &[("e", 2)]),
+            waiting(7, 2, "delayed#1", &[("e", 1)]),
+        ],
+    );
+    assert_eq!(
+        got.iter().map(|g| g.ability_id.clone()).collect::<Vec<_>>(),
+        vec!["delayed#0", "delayed#0", "delayed#1"]
+    );
+    assert_eq!(d.len(), 2);
+    assert_eq!(
+        env.calls.borrow().iter().map(|c| c.0).collect::<Vec<_>>(),
+        vec![
+            StateView::PostEvent,
+            StateView::PreEvent,
+            StateView::PostEvent
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR round 1: ordering labels
+// ---------------------------------------------------------------------------------------------
+
+/// A placement env with no legal targets that calls the objects in `public` public.
+#[derive(Default)]
+struct Public {
+    public: BTreeSet<ObjectId>,
+}
+
+impl PlacementEnv for Public {
+    fn legal_targets(
+        &self,
+        _trigger: &PendingTrigger,
+        _mode: Option<usize>,
+        _slot: usize,
+        _stacked_so_far: &[StackedTrigger],
+    ) -> Vec<ChoiceTarget> {
+        Vec::new()
+    }
+
+    fn is_public_object(&self, object: ObjectId) -> bool {
+        self.public.contains(&object)
+    }
+}
+
+fn with_binds(mut t: PendingTrigger, binds: &[(&str, EventField)]) -> PendingTrigger {
+    for (k, v) in binds {
+        t.bindings.insert((*k).to_owned(), v.clone());
+    }
+    t
+}
+
+/// Two triggers of one ability bound to different objects, plus a unique trigger.
+fn label_group() -> Vec<PendingTrigger> {
+    vec![
+        with_binds(
+            pt(3, 1, "a"),
+            &[
+                ("n", EventField::Value(FilterValue::Int(5))),
+                ("target", EventField::Object(o(9))),
+                ("who", EventField::Player(p(2))),
+            ],
+        ),
+        with_binds(pt(3, 1, "a"), &[("target", EventField::Object(o(10)))]),
+        with_binds(pt(4, 1, "b"), &[("target", EventField::Object(o(9)))]),
+    ]
+}
+
+/// REQ-EVENT-002, REQ-ARCH-002, CR 603.3b, CR 101.4c: triggers sharing a base label are told
+/// apart by their public bindings in name order (players, public objects); values are never
+/// shown; a unique base label is unchanged; the chosen order still maps to the same triggers.
+#[test]
+fn req_event_002_order_labels_show_public_bindings() {
+    let env = Public {
+        public: [o(9), o(10)].into_iter().collect(),
+    };
+    let (pl, asked) = drive(&env, &[p(1)], &label_group(), |_| order(&[1, 2, 0]));
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        order_payload(&asked[0]),
+        vec![
+            "object 3 ability a with target=object 9, who=player 2".to_owned(),
+            "object 3 ability a with target=object 10".into(),
+            "object 4 ability b".into(),
+        ]
+    );
+    let stacked: Vec<(String, EventField)> = pl
+        .stacked
+        .iter()
+        .map(|s| {
+            (
+                s.trigger.ability_id.clone(),
+                s.trigger.bindings["target"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stacked,
+        vec![
+            ("a".to_owned(), EventField::Object(o(10))),
+            ("b".to_owned(), EventField::Object(o(9))),
+            ("a".to_owned(), EventField::Object(o(9))),
+        ]
+    );
+    // PendingTrigger::description itself is unchanged.
+    assert_eq!(label_group()[0].description(), "object 3 ability a");
+}
+
+/// REQ-EVENT-002, REQ-ARCH-002, CR 603.3b: with the default `is_public_object` (false) no object
+/// binding leaks: two triggers bound only to objects keep identical base labels; a non-public
+/// object is not shown while a public one is; value-only bindings are never shown.
+#[test]
+fn req_event_002_order_labels_hide_private_bindings() {
+    let objects_only = vec![
+        with_binds(pt(3, 1, "a"), &[("target", EventField::Object(o(9)))]),
+        with_binds(pt(3, 1, "a"), &[("target", EventField::Object(o(10)))]),
+    ];
+    let (_, asked) = drive(&Places::default(), &[p(1)], &objects_only, defaults);
+    assert_eq!(
+        order_payload(&asked[0]),
+        vec!["object 3 ability a".to_owned(), "object 3 ability a".into()]
+    );
+    let half = Public {
+        public: [o(9)].into_iter().collect(),
+    };
+    let (_, asked) = drive(&half, &[p(1)], &objects_only, defaults);
+    assert_eq!(
+        order_payload(&asked[0]),
+        vec![
+            "object 3 ability a with target=object 9".to_owned(),
+            "object 3 ability a".into()
+        ]
+    );
+    let values = vec![
+        with_binds(
+            pt(3, 1, "a"),
+            &[("n", EventField::Value(FilterValue::Int(1)))],
+        ),
+        with_binds(
+            pt(3, 1, "a"),
+            &[("n", EventField::Value(FilterValue::Int(2)))],
+        ),
+    ];
+    let (_, asked) = drive(&half, &[p(1)], &values, defaults);
+    assert_eq!(
+        order_payload(&asked[0]),
+        vec!["object 3 ability a".to_owned(), "object 3 ability a".into()]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR round 1: CHOOSE_MODES validator
+// ---------------------------------------------------------------------------------------------
+
+/// `n` modes without targets, except that the modes in `illegal` have a required slot with no
+/// legal target (so they are not offered).
+fn many_modes(n: usize, illegal: &[usize]) -> Vec<ModeAST> {
+    (0..n)
+        .map(|i| {
+            let targets = illegal.contains(&i).then(|| vec![tslot(0, 1, 1)]);
+            mode(&format!("m{i}"), targets)
+        })
+        .collect()
+}
+
+fn modes_request(t: PendingTrigger, answer: Vec<u32>) -> (TriggerPlacement, PendingChoiceRequest) {
+    let (pl, asked) = drive(&Places::default(), &[p(1)], &[t], move |_| {
+        ChoiceResponse::SelectModes {
+            modes: answer.clone(),
+        }
+    });
+    assert_eq!(asked.len(), 1);
+    (pl, asked[0].clone())
+}
+
+/// REQ-EVENT-002, CR 603.3c, CR 700.2b: 16 legal modes (of 18) choosing exactly 8 has
+/// C(16, 8) = 12,870 answers, at least ENUMERATION_LIMIT: the request carries a Modes validator
+/// with the request bounds, and an answer maps back to the original mode indices.
+#[test]
+fn req_event_002_modes_validator_for_many_answers() {
+    let t = modal(7, "m", 8, 8, many_modes(18, &[0, 5]));
+    let (pl, r) = modes_request(t, vec![0, 1, 2, 3, 4, 5, 6, 15]);
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!((r.min, r.max), (8, 8));
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Validator(ValidatorContract {
+            min: 8,
+            max: 8,
+            rule: ValidatorRule::Modes {
+                count: 16,
+                repeats_allowed: false,
+            },
+        })
+    );
+    assert_eq!(r.validate(&r.default_on_timeout), Ok(()));
+    assert_eq!(pl.stacked[0].modes, vec![1, 2, 3, 4, 6, 7, 8, 17]);
+    // The smallest counts at or above the limit (C(24, 4) = 10,626) also use a validator.
+    let t = modal(7, "m", 4, 4, many_modes(24, &[]));
+    let (_, r) = modes_request(t, vec![0, 1, 2, 3]);
+    assert!(matches!(r.options, ChoiceOptions::Validator(_)));
+}
+
+/// REQ-EVENT-002, CR 603.3c, CR 700.2b: fewer than ENUMERATION_LIMIT answers keep the
+/// enumerated mode list: 3 modes, and the largest count below the limit (15 modes choosing 9 to
+/// 15: 9,949 answers; no mode count and bounds give exactly ENUMERATION_LIMIT - 1).
+#[test]
+fn req_event_002_modes_enumerated_below_limit() {
+    let t = modal(7, "m", 1, 1, many_modes(3, &[]));
+    let (pl, r) = modes_request(t, vec![2]);
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Enumerated((0..3).map(ChoiceOption::Mode).collect())
+    );
+    assert_eq!(pl.stacked[0].modes, vec![2]);
+    let t = modal(7, "m", 9, 15, many_modes(15, &[]));
+    let (_, r) = modes_request(t, (0..9).collect());
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Enumerated((0..15).map(ChoiceOption::Mode).collect())
+    );
 }
