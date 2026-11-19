@@ -5042,7 +5042,8 @@ fn req_event_001_r6_lineage_path_grandchild_takes_parent_position() {
     let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[]);
     assert_eq!(ok(&run).applications, vec![e(1), e(2), e(9)]);
     assert_eq!(run.state.life(1), 25);
-    assert_eq!(life_deltas(ok(&run)), vec![(p(1), 3), (p(1), 2)]);
+    // Executed at the replaced events' positions, as the direct [gain 1, gain 3].
+    assert_eq!(life_deltas(ok(&run)), vec![(p(1), 2), (p(1), 3)]);
     for events in [
         vec![GameEvent::Tap { object: t }, life(2, 1)],
         vec![life(2, 1), GameEvent::Tap { object: t }],
@@ -5054,4 +5055,119 @@ fn req_event_001_r6_lineage_path_grandchild_takes_parent_position() {
     let (w, t) = world(false);
     let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[]);
     assert_eq!(run.state.life(1), 27);
+}
+
+/// The round 6 phase C world (CodeRabbit review 5980983595): P1 is dealt damage by A (P1's
+/// permanent); pool e1 (1) prevents damage to P1; e9 doubles damage to P1 below 3, once.
+/// T's tap becomes `output(u)`; U's tap becomes [1 damage from A to P1].
+fn pool_lineage_world(output: impl Fn(ObjectId, ObjectId) -> Vec<GameEvent>) -> (World, ObjectId) {
+    let mut w = World::new();
+    let a = w.create(1, ZoneKind::Battlefield);
+    let t = w.create(1, ZoneKind::Battlefield);
+    let u = w.create(1, ZoneKind::Battlefield);
+    pool_lineage_effects(&mut w);
+    w.add(tap_instead(2, t, output(a, u)));
+    w.add(tap_instead(3, u, vec![damage_from_to_player(a, 1, 1)]));
+    (w, t)
+}
+
+/// Pool e1 (1) on damage to P1 and the one-use doubler e9 on damage to P1 below 3.
+fn pool_lineage_effects(w: &mut World) {
+    let to_p1 = EventMatcher {
+        affected_player: Some(p(1)),
+        ..EventMatcher::new(BusEventKind::Damage)
+    };
+    w.add(
+        ReplacementEffect::new(e(1), to_p1.clone(), Action::Prevent { then: Vec::new() })
+            .with_shield(Shield::Pool(1)),
+    );
+    w.add(
+        ReplacementEffect::new(
+            e(9),
+            EventMatcher {
+                amount_below: Some(3),
+                ..to_p1
+            },
+            Action::Modify(Modification::Amount(AmountOp::Mul(2))),
+        )
+        .with_shield(Shield::Uses(1)),
+    );
+}
+
+/// REQ-EVENT-001, round 6 (CodeRabbit review 5980983595): CR 615.7, CR 616.1, CR 101.4: stopped
+/// pool members resume in lineage-path order, the order phase A stopped them in. T's tap
+/// becomes [tap U, 3 damage]; U's tap becomes [1 damage]; P1 picks pool e1 (1) for the 1 damage:
+/// it is prevented and the 3 damage is dealt (P1 17), as for the direct [1 damage, 3 damage].
+/// With the output [3 damage, tap U] the result equals the direct [3 damage, 1 damage]: the
+/// pool cuts the 3 to 2, e9 doubles it to 4, the 1 is dealt (P1 15).
+#[test]
+fn req_event_001_r6_pool_resumption_follows_lineage_path() {
+    for tap_u_first in [true, false] {
+        let (w, t) = pool_lineage_world(|a, u| {
+            let mut out = vec![GameEvent::Tap { object: u }, damage_from_to_player(a, 1, 3)];
+            if !tap_u_first {
+                out.reverse();
+            }
+            out
+        });
+        let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[0]);
+        // Control: the same damage submitted directly in the corresponding order.
+        let mut c = World::new();
+        let a = c.create(1, ZoneKind::Battlefield);
+        pool_lineage_effects(&mut c);
+        let mut direct = vec![
+            damage_from_to_player(a, 1, 1),
+            damage_from_to_player(a, 1, 3),
+        ];
+        if !tap_u_first {
+            direct.reverse();
+        }
+        let control = drive_twice(&c, direct, false, &[0]);
+        let expected = if tap_u_first { 17 } else { 15 };
+        assert_eq!(control.state.life(1), expected);
+        assert_eq!(run.state.life(1), expected);
+        assert_eq!(ok(&run).prevented, ok(&control).prevented);
+    }
+}
+
+/// The objects of the executed zone changes of `report`, in execution order.
+fn moved_objects(report: &BusReport) -> Vec<ObjectId> {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter_map(|ev| match ev.instance.event() {
+            GameEvent::ZoneChange { object, .. } => Some(*object),
+            _ => None,
+        })
+        .collect()
+}
+
+/// REQ-EVENT-001, round 6 (CodeRabbit review 5980983595, execution order): CR 614.6, CR 704.3:
+/// in the executed batch a descendant takes the position of the event it replaces, by lineage
+/// path. T's tap becomes [tap U, exile Y]; U's tap becomes [exile X]: X's move executes before
+/// Y's, as in the direct batch [exile X, exile Y] (and after it with the output reversed).
+#[test]
+fn req_event_001_r6_execution_order_follows_lineage_path() {
+    for tap_u_first in [true, false] {
+        let mut w = World::new();
+        let t = w.create(1, ZoneKind::Battlefield);
+        let u = w.create(1, ZoneKind::Battlefield);
+        let x = w.create(1, ZoneKind::Battlefield);
+        let y = w.create(1, ZoneKind::Battlefield);
+        let exile = |o| zc(o, ZoneKind::Exile, ZoneChangeCause::Other);
+        let mut output = vec![GameEvent::Tap { object: u }, exile(y)];
+        let mut direct = vec![exile(x), exile(y)];
+        if !tap_u_first {
+            output.reverse();
+            direct.reverse();
+        }
+        let control = drive_twice(&w, direct, false, &[]);
+        w.add(tap_instead(1, t, output));
+        w.add(tap_instead(2, u, vec![exile(x)]));
+        let run = drive_twice(&w, vec![GameEvent::Tap { object: t }], false, &[]);
+        let expected = if tap_u_first { vec![x, y] } else { vec![y, x] };
+        assert_eq!(moved_objects(ok(&control)), expected);
+        assert_eq!(moved_objects(ok(&run)), expected);
+    }
 }
