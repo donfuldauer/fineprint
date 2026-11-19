@@ -177,6 +177,10 @@ impl CanonicalEncode for ValidatorRule {
 /// The validator contract of a request with [`ENUMERATION_LIMIT`](super::ENUMERATION_LIMIT) or
 /// more valid answers (REQ-NET-003, SRS 15.3): the client submits an answer and the engine
 /// accepts it or rejects it with an explanation.
+///
+/// `min` and `max` equal the request's `min` and `max`: a procedure that tightens the request
+/// bounds must update the validator contract bounds in the same request;
+/// [`ChoiceContext::ask`](super::ChoiceContext::ask) rejects a mismatch.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValidatorContract {
     /// The request's `min` (a count, or the low bound of an [`ValidatorRule::IntegerRange`]).
@@ -341,8 +345,10 @@ pub enum ChoicePayload {
     PayManaAndCosts {
         /// The locked total cost, as a display string.
         locked_total: String,
-        /// Payment-method candidates (convoke, delve, improvise, ...), as display strings.
-        methods: Vec<String>,
+        /// Payment-method candidates (convoke, delve, improvise, ...): `(display label, the
+        /// objects that may be used with that method)`. A `PAY_COSTS` answer names a method by
+        /// its index here and may use only that method's objects.
+        methods: Vec<(String, Vec<ObjectId>)>,
         /// Mana abilities that may be activated: `(source, ability id)`.
         mana_abilities: Vec<(ObjectId, String)>,
         /// Whether an auto-pay suggestion exists (answered with `PayCosts { auto_pay: true, .. }`).
@@ -596,9 +602,13 @@ pub struct PendingChoiceRequest {
     pub choice_type: ChoiceType,
     /// Why it is asked.
     pub reason: ChoiceReason,
-    /// The `ChoiceSpec`-derived lower bound (after clamping).
+    /// The `ChoiceSpec`-derived lower bound (after clamping). A procedure that tightens it
+    /// must update a [`ValidatorContract`]'s `min` in the same request;
+    /// [`ChoiceContext::ask`](super::ChoiceContext::ask) rejects a mismatch.
     pub min: u64,
-    /// The `ChoiceSpec`-derived upper bound (after clamping).
+    /// The `ChoiceSpec`-derived upper bound (after clamping). A procedure that tightens it
+    /// must update a [`ValidatorContract`]'s `max` in the same request;
+    /// [`ChoiceContext::ask`](super::ChoiceContext::ask) rejects a mismatch.
     pub max: u64,
     /// Whether the choice made is hidden from other players.
     pub hidden: bool,
@@ -747,8 +757,9 @@ impl PendingChoiceRequest {
     ///   without a range), one option per symbol slot, harmonize from the candidates;
     /// - `CHOOSE_TARGETS`: one list per slot, `min..=max` distinct legal targets each (current
     ///   targets also allowed when the copy may keep them);
-    /// - `PAY_MANA_AND_COSTS`: method indices in range, mana abilities as listed, auto-pay only
-    ///   if offered and alone, decline only if optional, cancel only if cancellable;
+    /// - `PAY_MANA_AND_COSTS`: method indices in range, each method's objects distinct and
+    ///   eligible for that method, mana abilities as listed, auto-pay only if offered and alone,
+    ///   decline only if optional, cancel only if cancellable;
     /// - `DECLARE_ATTACKERS`: distinct listed attackers, each with one of its targets;
     /// - `DECLARE_BLOCKERS`: distinct listed blockers, each blocking 1..=capacity distinct
     ///   attackers it can block;
@@ -760,9 +771,13 @@ impl PendingChoiceRequest {
     ///   of distinct cards from the hand;
     /// - `PREGAME_ACTION`: distinct eligible cards.
     ///
-    /// Deferred to the raising procedure (it may re-ask): card-name membership in the database,
-    /// whether a payment covers the cost, attack/block requirements and restrictions (menace,
-    /// requirement maximisation), trample lethal floors, the legality of combined target sets.
+    /// Deferred to the raising procedure: card-name membership in the database, whether a
+    /// payment covers the cost, attack/block requirements and restrictions (menace, requirement
+    /// maximisation), trample lethal floors, the legality of combined target sets. For a name
+    /// absent from the database the raising procedure returns an explained error
+    /// (`Interrupt::Error(ChoiceError::Invalid { request_id, explanation })`); it must not
+    /// re-ask, because [`ChoiceSession::submit`](super::ChoiceSession::submit) would record the
+    /// answer as accepted and replace the request.
     ///
     /// # Errors
     /// A non-empty explanation naming the violated constraint. It mentions only the answer's own
@@ -1024,7 +1039,16 @@ impl PendingChoiceRequest {
                     }
                     for (m, objects) in methods {
                         index_below(*m, method_list.len(), "payment methods")?;
-                        check_distinct_subset(objects, objects, object, "objects")?;
+                        let eligible = usize::try_from(*m)
+                            .ok()
+                            .and_then(|i| method_list.get(i))
+                            .map_or(&[][..], |(_, eligible)| eligible.as_slice());
+                        check_distinct_subset(
+                            objects,
+                            eligible,
+                            object,
+                            &format!("objects eligible for payment method {m}"),
+                        )?;
                     }
                     for ability in mana_abilities {
                         if !ability_list.contains(ability) {

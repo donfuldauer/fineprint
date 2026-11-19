@@ -10,7 +10,7 @@ use core::fmt;
 
 use fineprint_base::hash::Digest;
 
-use super::{ChoiceError, ChoiceResponse, PendingChoiceRequest, RequestId};
+use super::{ChoiceError, ChoiceOptions, ChoiceResponse, PendingChoiceRequest, RequestId};
 use crate::txn::Transactional;
 
 /// Why a procedure stopped before producing its output (REQ-NET-003).
@@ -87,8 +87,12 @@ impl ChoiceContext<'_> {
     /// # Errors
     /// [`Interrupt::Pending`] (suspend here), or [`Interrupt::Error`] with
     /// [`ChoiceError::RequestIdMismatch`] (the id is not [`ChoiceContext::next_request_id`]),
-    /// [`ChoiceError::Divergence`] (the request differs from the recorded one) or
-    /// [`ChoiceError::Procedure`] (asking again after a suspension).
+    /// [`ChoiceError::Divergence`] (the request differs from the recorded one),
+    /// [`ChoiceError::Procedure`] (asking again after a suspension, or a malformed request whose
+    /// [`ValidatorContract`](super::ValidatorContract) `min`/`max` differ from the request's
+    /// `min`/`max`) or [`ChoiceError::InvalidDefault`] (the request's `default_on_timeout` does
+    /// not pass [`PendingChoiceRequest::validate`]). A malformed request is never published,
+    /// whether the ask is replayed or live.
     pub fn ask(&mut self, request: PendingChoiceRequest) -> Result<ChoiceResponse, Interrupt> {
         if self.suspended.is_some() {
             let e = ChoiceError::Procedure(
@@ -103,6 +107,10 @@ impl ChoiceContext<'_> {
                 expected,
                 got: request.request_id,
             };
+            self.misuse.get_or_insert_with(|| e.clone());
+            return Err(Interrupt::Error(e));
+        }
+        if let Err(e) = well_formed(&request) {
             self.misuse.get_or_insert_with(|| e.clone());
             return Err(Interrupt::Error(e));
         }
@@ -123,6 +131,24 @@ impl ChoiceContext<'_> {
             }
         }
     }
+}
+
+/// The request well-formedness checked by [`ChoiceContext::ask`] before it publishes or replays
+/// a request (REQ-NET-003): the default validates, and a validator contract carries the
+/// request's bounds.
+fn well_formed(request: &PendingChoiceRequest) -> Result<(), ChoiceError> {
+    request
+        .validate(&request.default_on_timeout)
+        .map_err(ChoiceError::InvalidDefault)?;
+    if let ChoiceOptions::Validator(c) = &request.options
+        && (c.min != request.min || c.max != request.max)
+    {
+        return Err(ChoiceError::Procedure(format!(
+            "malformed request: validator contract bounds {}..{} differ from the request bounds {}..{}",
+            c.min, c.max, request.min, request.max
+        )));
+    }
+    Ok(())
 }
 
 /// Where a [`ChoiceSession`] stands (REQ-NET-003).
