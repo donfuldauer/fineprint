@@ -5,7 +5,7 @@
 //! Matching event-triggered abilities against one batch of events (REQ-EVENT-002, CR 603.2,
 //! CR 603.10, CR 603.4), with per-ability trigger limits kept in Memory.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::ability::{
@@ -86,6 +86,19 @@ pub trait TriggerEnv {
     /// Was `object` (its pre-event id) an object all players can see (CR 603.10a, the hand or
     /// library clause)?
     fn is_visible_to_all(&self, object: ObjectId) -> bool;
+
+    /// Does `source` still exist as the same object after the batch (its id was not retired by
+    /// a zone change, CR 400.7)? Phased-out permanents still exist (CR 702.26d): they keep
+    /// their ability instances and Memory, so their trigger-limit counters are kept.
+    ///
+    /// Default: some registration listed for [`StateView::PostEvent`] has this source (the
+    /// pre-existing behaviour). An environment that can see phased-out or otherwise inactive
+    /// objects overrides it.
+    fn source_survives(&self, source: ObjectId) -> bool {
+        self.registrations(StateView::PostEvent)
+            .iter()
+            .any(|r| r.source == source)
+    }
 }
 
 /// A triggered ability that has triggered and waits to be put on the stack (REQ-EVENT-002,
@@ -333,8 +346,9 @@ pub fn detect(
 /// departing source's used limit still counts (CR 603.2h, SRS 8.2 item 8). The counts of an
 /// ability instance are its counts in `pre_memory` plus the candidates of that instance already
 /// accepted in this call. `memory` is the current (post-batch) table: the incremented counters
-/// are written to it only for a source that survives, i.e. whose (source, ability id) is listed
-/// in the post-event registrations; a departing source gets no entry in `memory`.
+/// are written to it only for a source that survives, i.e. for which
+/// [`TriggerEnv::source_survives`] is true (it still exists as the same object, even if phased
+/// out, CR 702.26d); a source retired by a zone change (CR 400.7) gets no entry in `memory`.
 #[must_use]
 pub fn detect_with_pre_event_memory(
     env: &dyn TriggerEnv,
@@ -398,11 +412,9 @@ pub fn detect_with_pre_event_memory(
             ))
     });
 
-    // Ability instances that still exist after the batch (their counters are kept).
-    let survivors: BTreeSet<(ObjectId, &str)> = post_list
-        .iter()
-        .map(|r| (r.source, r.ability.base.ability_id.as_str()))
-        .collect();
+    // Sources that still exist after the batch, even if inactive (CR 702.26d), keep their
+    // counters; a source retired by a zone change does not (CR 400.7). Asked once per source.
+    let mut survives: BTreeMap<ObjectId, bool> = BTreeMap::new();
     // Triggerings accepted in this call, per ability instance.
     let mut tally: BTreeMap<(ObjectId, &str), i64> = BTreeMap::new();
 
@@ -432,7 +444,10 @@ pub fn detect_with_pre_event_memory(
                 continue;
             }
             tally.insert(key, earlier.saturating_add(1));
-            if survivors.contains(&key) {
+            let alive = *survives
+                .entry(reg.source)
+                .or_insert_with(|| env.source_survives(reg.source));
+            if alive {
                 record(memory, reg.source, ability_id, turn, c);
             }
         }
