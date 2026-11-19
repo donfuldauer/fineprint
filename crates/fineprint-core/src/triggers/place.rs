@@ -181,6 +181,18 @@ pub trait PlacementEnv {
         slot: usize,
         stacked_so_far: &[StackedTrigger],
     ) -> Vec<ChoiceTarget>;
+
+    /// May the player ordering simultaneous triggers see `object`'s id (REQ-EVENT-002,
+    /// CR 603.3b, CR 101.4c)? Used only to tell apart, in an `ORDER_SIMULTANEOUS_TRIGGERS`
+    /// payload, triggers that would otherwise have the same label: an object binding is shown
+    /// only if this returns true.
+    ///
+    /// Default: `false` (show no object). The integration unit overrides it with the real
+    /// visibility rule (docs/DECISIONS.md, "#31 FP-030 CR round 1 — ordering labels").
+    fn is_public_object(&self, object: ObjectId) -> bool {
+        let _ = object;
+        false
+    }
 }
 
 fn procedure_error(text: String) -> Interrupt {
@@ -243,6 +255,18 @@ fn target_answers_capped(slots: &[TargetSlot]) -> u64 {
     product
 }
 
+/// `min(number of valid CHOOSE_MODES answers, ENUMERATION_LIMIT)`: the sets of `min..=max`
+/// distinct modes among `k` legal modes (CR 700.2b).
+fn mode_answers_capped(k: u64, min: u64, max: u64) -> u64 {
+    let mut sum: u64 = 0;
+    let mut j = min;
+    while j <= max && sum < ENUMERATION_LIMIT {
+        sum = sum.saturating_add(binomial_capped(k, j));
+        j += 1;
+    }
+    sum.min(ENUMERATION_LIMIT)
+}
+
 /// The legal targets `env` gives, sorted ascending without duplicates (R3).
 fn legal_for<E: PlacementEnv + ?Sized>(
     env: &E,
@@ -281,9 +305,49 @@ impl SlotChoice<'_> {
     }
 }
 
+/// The `ORDER_SIMULTANEOUS_TRIGGERS` labels of `group` (CR 603.3b, CR 101.4c): each trigger's
+/// [`PendingTrigger::description`]; a trigger whose description another trigger of the group
+/// shares gets ` with ` and its chooser-visible bindings appended, in name order:
+/// `<name>=player <n>` for a player, `<name>=object <n>` for an object `env` says is public.
+/// Values and non-public objects are never shown; with nothing to show the label stays the
+/// description.
+fn order_labels<E: PlacementEnv + ?Sized>(env: &E, group: &[PendingTrigger]) -> Vec<String> {
+    let base: Vec<String> = group.iter().map(PendingTrigger::description).collect();
+    let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+    for b in &base {
+        *uses.entry(b.as_str()).or_insert(0) += 1;
+    }
+    group
+        .iter()
+        .zip(&base)
+        .map(|(t, b)| {
+            if uses.get(b.as_str()).copied().unwrap_or(0) < 2 {
+                return b.clone();
+            }
+            let shown: Vec<String> = t
+                .bindings
+                .iter()
+                .filter_map(|(name, value)| match value {
+                    EventField::Player(pl) => Some(format!("{name}=player {}", pl.get())),
+                    EventField::Object(ob) if env.is_public_object(*ob) => {
+                        Some(format!("{name}=object {}", ob.get()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if shown.is_empty() {
+                b.clone()
+            } else {
+                format!("{b} with {}", shown.join(", "))
+            }
+        })
+        .collect()
+}
+
 /// Asks the order of one player's triggers of one part (CR 603.3b, CR 101.4c). Returns the
 /// indices into `group` in the order they go on the stack.
-fn ask_order(
+fn ask_order<E: PlacementEnv + ?Sized>(
+    env: &E,
     ctx: &mut ChoiceContext<'_>,
     player: PlayerId,
     group: &[PendingTrigger],
@@ -319,7 +383,7 @@ fn ask_order(
         default_on_timeout: ChoiceResponse::OrderTriggers { order: identity },
         options,
         payload: ChoicePayload::OrderSimultaneousTriggers {
-            triggers: group.iter().map(PendingTrigger::description).collect(),
+            triggers: order_labels(env, group),
         },
     };
     match ctx.ask(request)? {
@@ -365,6 +429,24 @@ fn ask_modes(
         .filter_map(|&i| set.modes.get(i).map(|m| m.id.clone()))
         .collect();
     let default: Vec<u32> = (0..set.min).collect();
+    // The choice contract: ENUMERATION_LIMIT or more valid answers use a validator.
+    let options = if mode_answers_capped(to_u64(k), min, max) < ENUMERATION_LIMIT {
+        ChoiceOptions::Enumerated(
+            (0..k)
+                .filter_map(|i| u32::try_from(i).ok())
+                .map(ChoiceOption::Mode)
+                .collect(),
+        )
+    } else {
+        ChoiceOptions::Validator(ValidatorContract {
+            min,
+            max,
+            rule: ValidatorRule::Modes {
+                count: to_u64(k),
+                repeats_allowed: false,
+            },
+        })
+    };
     let request = PendingChoiceRequest {
         request_id: ctx.next_request_id(),
         chooser: trigger.controller,
@@ -378,12 +460,7 @@ fn ask_modes(
         hidden: false,
         reveal_to: Vec::new(),
         default_on_timeout: ChoiceResponse::SelectModes { modes: default },
-        options: ChoiceOptions::Enumerated(
-            (0..k)
-                .filter_map(|i| u32::try_from(i).ok())
-                .map(ChoiceOption::Mode)
-                .collect(),
-        ),
+        options,
         payload: ChoicePayload::ChooseModes {
             labels,
             repeats_allowed: false,
@@ -627,7 +704,7 @@ pub fn place_triggers<E: PlacementEnv + ?Sized>(
             }
             // CR 603.3b: each player puts their triggers on the stack in any order they choose.
             let order = if group.len() >= 2 {
-                ask_order(ctx, player, &group)?
+                ask_order(env, ctx, player, &group)?
             } else {
                 vec![0]
             };

@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::ability::TriggeredAbilityAST;
 
-use super::detect::{TriggerRegistration, WaitingTrigger};
+use super::detect::{TriggerEnv, TriggerRegistration, WaitingTrigger};
 use super::event::EventField;
+use super::lookback::StateView;
 use super::place::{PendingTrigger, TriggerOrigin};
 
 /// The identifier of one delayed triggered ability within one [`DelayedTriggers`]
@@ -102,19 +103,17 @@ impl DelayedTriggers {
     /// ordered by id: each with its stored source, controller and ability, the ability id
     /// replaced by `delayed#<n>` so every delayed instance is distinct (docs/DECISIONS.md,
     /// "#30 FP-029 CR round 1" item 1).
+    ///
+    /// Each listed ability has its intervening "if" removed (`intervening_if` is `None`).
+    /// [`detect`](super::detect) checks an intervening "if" with the event's bindings only, but a
+    /// delayed trigger's condition must see the bindings it captured when it was created
+    /// (CR 603.4, CR 603.7). [`DelayedTriggers::take_triggered`] checks the stored condition
+    /// instead, with the captured bindings applied.
     #[must_use]
     pub fn registrations(&self) -> Vec<TriggerRegistration> {
         self.entries
             .iter()
-            .map(|(&id, d)| {
-                let mut ability = d.ability.clone();
-                ability.base.ability_id = DelayedTriggerId(id).ability_id();
-                TriggerRegistration {
-                    source: d.source,
-                    controller: d.controller,
-                    ability,
-                }
-            })
+            .map(|(&id, d)| registration(id, d, false))
             .collect()
     }
 
@@ -130,18 +129,31 @@ impl DelayedTriggers {
             .map(|_| n)
     }
 
-    /// The pending triggers of the delayed abilities among `waiting` (REQ-EVENT-002, CR 603.7,
-    /// CR 603.7b), in input order.
+    /// The pending triggers of the delayed abilities among `waiting` (REQ-EVENT-002, CR 603.4,
+    /// CR 603.7, CR 603.7b), in input order.
     ///
-    /// Each element whose (source, ability id) is a delayed registration yields a
-    /// [`PendingTrigger`] with origin [`TriggerOrigin::Delayed`], the `delayed#<n>` ability id,
+    /// Each element whose (source, ability id) is a delayed registration is considered with
     /// the event bindings overlaid by the captured bindings (the captured value wins on a name
-    /// clash), and option, targets and modes as [`PendingTrigger::from_waiting`]. A one-shot
-    /// registration yields at most one pending trigger, for the first matching element in input
-    /// order, and is removed (CR 603.7b; the controller's choice of event is replaced by
-    /// first-in-creation-order, a recorded decision). A registration with a stated duration
-    /// yields one per matching element and stays. Other elements are ignored.
-    pub fn take_triggered(&mut self, waiting: &[WaitingTrigger]) -> Vec<PendingTrigger> {
+    /// clash). If the stored ability has an intervening "if", it is checked here with
+    /// [`TriggerEnv::condition_holds`] and those overlaid bindings, in the view detection used
+    /// for that element ([`StateView::PreEvent`] if `look_back` is set, else
+    /// [`StateView::PostEvent`]), for a registration whose ability id is `delayed#<n>` (as in
+    /// [`DelayedTriggers::registrations`], which leaves the condition to this method). A false
+    /// condition drops the element: it does not trigger (CR 603.4).
+    ///
+    /// Each remaining element yields a [`PendingTrigger`] with origin
+    /// [`TriggerOrigin::Delayed`], the `delayed#<n>` ability id, the overlaid bindings, and
+    /// option, targets and modes as [`PendingTrigger::from_waiting`]. A one-shot registration
+    /// yields at most one pending trigger, for the first element in input order that passes
+    /// its condition, and is then removed; a dropped element does not consume it (CR 603.7b; the
+    /// controller's choice of event is replaced by first-in-creation-order, a recorded
+    /// decision). A registration with a stated duration yields one per passing element and
+    /// stays. Other elements are ignored.
+    pub fn take_triggered<E: TriggerEnv + ?Sized>(
+        &mut self,
+        env: &E,
+        waiting: &[WaitingTrigger],
+    ) -> Vec<PendingTrigger> {
         let mut fired_once: BTreeSet<u64> = BTreeSet::new();
         let mut out = Vec::new();
         for w in waiting {
@@ -151,16 +163,34 @@ impl DelayedTriggers {
             let Some(d) = self.entries.get(&n) else {
                 continue;
             };
-            if d.one_shot && !fired_once.insert(n) {
+            if d.one_shot && fired_once.contains(&n) {
                 // CR 603.7b: a delayed trigger with no stated duration triggers only once.
                 continue;
+            }
+            let mut bindings = w.bindings.clone();
+            for (name, value) in &d.captured {
+                bindings.insert(name.clone(), value.clone());
+            }
+            // CR 603.4: the intervening "if" is checked when the trigger event occurs, here
+            // with the captured bindings (CR 603.7).
+            if let Some(pred) = &d.ability.intervening_if {
+                let view = if w.look_back.is_some() {
+                    StateView::PreEvent
+                } else {
+                    StateView::PostEvent
+                };
+                let reg = registration(n, d, true);
+                if !env.condition_holds(view, &reg, pred, &bindings) {
+                    continue;
+                }
+            }
+            if d.one_shot {
+                fired_once.insert(n);
             }
             let mut pending =
                 PendingTrigger::from_waiting(w.clone(), &d.ability, TriggerOrigin::Delayed);
             pending.controller = d.controller;
-            for (name, value) in &d.captured {
-                pending.bindings.insert(name.clone(), value.clone());
-            }
+            pending.bindings = bindings;
             out.push(pending);
         }
         for n in fired_once {
@@ -203,6 +233,21 @@ impl DelayedTriggers {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// The registration of delayed trigger `id`: its stored source, controller and ability with the
+/// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`.
+fn registration(id: u64, d: &Delayed, keep_condition: bool) -> TriggerRegistration {
+    let mut ability = d.ability.clone();
+    ability.base.ability_id = DelayedTriggerId(id).ability_id();
+    if !keep_condition {
+        ability.intervening_if = None;
+    }
+    TriggerRegistration {
+        source: d.source,
+        controller: d.controller,
+        ability,
     }
 }
 
