@@ -25,6 +25,15 @@ use super::lookback::StateView;
 /// or otherwise left the stack; while outstanding it does not trigger again (CR 603.8).
 /// Counting the time it waits to be put on the stack as outstanding is an inference from
 /// CR 603.8 (docs/DECISIONS.md, "#31 FP-030 — Inferences and choices").
+///
+/// Two limits of `check`. It does not apply a state trigger's `limit` (CR 603.2h): it has
+/// neither a turn nor a Memory, and `detect` skips `Trigger::State`, so the caller must
+/// enforce a limit on a state-trigger instance itself (docs/DECISIONS.md, "#31 FP-030 CR
+/// round 4 — limits of state triggers are the caller's"). And it marks an instance outstanding
+/// as soon as it triggers, so an element `DelayedTriggers::take_triggered` later drops (its
+/// stored condition false, or its limit reached) leaves that instance outstanding until the
+/// caller calls `instance_left_stack`; delayed abilities with a state trigger are therefore
+/// not routed through `check` (a delayed ability is fired with `take_triggered` or `fire`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateTriggers {
     outstanding: BTreeSet<(ObjectId, String)>,
