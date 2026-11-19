@@ -227,3 +227,53 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #28 (PR #177 review round 2) | Classifier | Sonnet 5.5 | 1 | routed | — | 2 findings (review 5975520007): A repeated PAY_COSTS method index (fix), B sub-cutoff validator fixture (test fix); T1 Sonnet x2 |
 | 03-events | #28 (PR #177 review round 2) | Fixer (src) | Sonnet 5.5 | 1 | done | cargo test --workspace pass; coverage core 99.40%; fmt, clippy, guard clean | repeated method index rejected; synced fixture 5..=14999; DECISIONS round 2 entry |
 | 03-events | #28 (PR #177 review round 2) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_choice_validate 15 passed | repeated method index spec test |
+| 03-events | #29 | Classifier | Opus 5.5 | 1 | routed | — | T2: new replacement/prevention bus (REQ-EVENT-001); confined module so no Fable; allowance unknown. Branch ccr-5e8a5255-wlx6m1 (session's assigned branch) |
+| 03-events | #29 | Rules researcher | Opus 5.5 | 1 | answered | — | 616.1g contained filter before tiers: consistent; 704.7 merge must also require the same chooser; classifier amendments 1 and 2 sent to both executors |
+| 03-events | #29 | Implementer | Opus 5.5 | 1 | done | cargo test --workspace 2270 passed; coverage core 99.28%, replacement/ ~96.5%; fmt, clippy, guard clean | 38 unit tests; amendment 1 applied |
+| 03-events | #29 | Independent Tester | Opus 5.5 | 1 | done | 66 spec tests pass; fmt, clippy, guard clean | amendment 2 applied |
+| 03-events | #29 (PR #178 build) | Orchestrator | Opus 5.5 | 1 | pass @ 65c15b5 (work-verifier) | cargo test --workspace 2270 passed; fmt, clippy, guard clean; coverage core 99.28% | PR #178 opened; CI `cr` red (CR 614.1, 615 not indexed) |
+| 03-events | #29 (PR #178 review round 1) | Rules researcher + Issue investigator | Opus 5.5 | 1 | answered | 11 findings reproduced | all valid; 704.7 merge key = same object (R8 judgement); F6 same-event copy entry deferred to #40/#38 |
+| 03-events | #29 (PR #178 review round 1) | Classifier | Opus 5.5 | 1 | routed | — | T2 Fixer (src) + T2 Independent Tester (spec) + T0 CR index |
+| 03-events | #29 (PR #178 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | lib replacement tests 50 passed; fmt, clippy, guard clean; replacement/ 95.91% | F1-F9, F11 fixed; MAX_BUS_EVENTS + BusError::WorkLimit; DECISIONS amended |
+| 03-events | #29 (PR #178 review round 1) | Independent Tester | Opus 5.5 | 1 | done | 101 spec tests pass; fmt, clippy, guard clean | regression specs for every finding; new spec_replacement_pool.rs |
+| 03-events | #29 (PR #178 review round 1) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok (721 cited rules) | docs/cr-citations.json regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 1) | Work verifier | Sonnet 5.5 | 1 | pass @ 635a50e | fmt, clippy clean; cargo test --workspace 2317 passed; coverage core 99.27%, bus.rs 95.85% lines; guard, cr ok | round 1 threads replied and resolved |
+| 03-events | #29 (PR #178 review round 2) | Rules researcher + Issue investigator | Opus 5.5 | 1 | answered | G1-G3 reproduced 25/25 | copy source uses LKI; pool split on modified damage; one shield counter per simultaneous batch (R8); G4 cap, F2 order, F6 same-batch copy added by Orchestrator |
+| 03-events | #29 (PR #178 review round 2) | Classifier | Opus 5.5 | 1 | routed | — | T2 Fixer (src + additive events entry point) + T2 Independent Tester |
+| 03-events | #29 (PR #178 review round 2) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 63, events lib 58 passed; fmt, clippy, guard clean | G1-G4, F2, F6 fixed; execute_batch_with_entry_copies added |
+| 03-events | #29 (PR #178 review round 2) | Independent Tester | Opus 5.5 | 1 | done | 131 spec tests pass; fmt, clippy, guard clean | regression specs; new spec_replacement_entry_copy.rs |
+| 03-events | #29 (PR #178 review round 2) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | docs/cr-citations.json regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 2) | Work verifier | Sonnet 5.5 | 1 | pass @ de7da3f | fmt, clippy clean; cargo test --workspace 2353 passed; coverage floors met, bus.rs 94.38%; guard, cr ok | round 2 threads replied and resolved |
+| 03-events | #29 (PR #178 review round 3) | Rules researcher + Issue investigator | Opus 5.5 | 1 | answered | H2, H4, H5 reproduced 25/25 | H1 not a defect (all allocations reachable); H2 member-wise per CR 704.7/701.8b; SRS 704.5g/704.5h erratum verified -> P8 queue line |
+| 03-events | #29 (PR #178 review round 3) | Classifier | Opus 5.5 | 1 | routed | — | T2 Fixer + T2 Independent Tester + T0 docs |
+| 03-events | #29 (PR #178 review round 3) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 74 passed; fmt, clippy, guard clean; bus.rs 95.12% | H2 member-wise groups, H4 spent allotment not offered, H5 allotted first |
+| 03-events | #29 (PR #178 review round 3) | Independent Tester | Opus 5.5 | 1 | done | 137 spec tests pass; fmt, clippy, guard clean | H2/H4/H5 specs incl. 120-seed group property test |
+| 03-events | #29 (PR #178 review round 3) | Docs | Haiku 5.5 | 1 | done | guard ok | SRS erratum entry; HUMAN_QUEUE P8 line |
+| 03-events | #29 (PR #178 review round 3) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 3) | Work verifier | Sonnet 5.5 | 1 | pass @ 12a5fc9 | cargo test --workspace 2378 passed; fmt, clippy, guard, cr clean; coverage floors met, bus.rs 96.36% | H2, H5 replied and resolved; H1 top-level comment; H4 thread removed by reviewer |
+| 03-events | #29 (PR #178 review round 4) | Rules researcher | Opus 5.5 | 1 | answered | — | CR 704.8 pre-SBA LKI confirmed; one-object-two-zones silent -> redirect wins (R8) |
+| 03-events | #29 (PR #178 review round 4) | Classifier | Opus 5.5 | 1 | routed | — | T2: replace round-3 before-batch with resolve-then-execute-once for CR 704.7 groups (J1-J6, J8) |
+| 03-events | #29 (PR #178 review round 4) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 81 passed; fmt, clippy, guard clean; bus.rs 95.62% | resolve_batch + single execute; survivor rule redirect > canonical > plan |
+| 03-events | #29 (PR #178 review round 4) | Independent Tester | Opus 5.5 | 1 | done | 152 spec tests pass; fmt, clippy, guard clean | spec_replacement_round4.rs; 10 of 15 fail on 12a5fc9 |
+| 03-events | #29 (PR #178 review round 4) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 4) | Verifier | Opus 5.5 | 1 | pass | d831418; CI green | round-4 head verified |
+| 03-events | #29 (PR #178 review round 5) | Investigator (P7 step 2) | Opus 5.5 | 1 | done | prototype + tests | repeat-defect area: holistic one-batch design for Instead lineages |
+| 03-events | #29 (PR #178 review round 5) | Fixer (src, tier-up attempt) | Opus 5.5 | 1 | done | replacement lib 96 passed; fmt, clippy, guard clean | one-batch resolution, reconcile, retired-id ignore (CR 614.6); K1-K5, N1-N3 |
+| 03-events | #29 (PR #178 review round 5) | Independent Tester | Opus 5.5 | 1 | done | 168 spec tests pass; fmt, clippy, guard clean | spec_replacement_round5.rs; C1/C2 re-specced (R10) |
+| 03-events | #29 (PR #178 review round 5) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 6) | Orchestrator | Opus 5.5 | 1 | blocked | CodeRabbit review of 6674c4b: 2 new defects in the Instead-lineage area | P7 step 3: three fixes + investigator pass + tier-up attempt spent; status:blocked-failure |
+| 03-events | #29 (PR #178 review round 6) | Orchestrator | Opus 5.5 | 1 | resumed | — | owner asked to continue past the P7 block and fix to merge |
+| 03-events | #29 (PR #178 review round 6) | Classifier | Opus 5.5 | 1 | routed | — | T2: D1 descendant APNAP scheduling, D2 impossible-check roles, D6 tap of tapped, D3/D4 docs [Fable wanted, allowance unknown] |
+| 03-events | #29 (PR #178 review round 6) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 107 passed; fmt, clippy, guard clean; bus.rs 96.46% | schedule_key + per-member absorb; required_objects; would_happen Tap arm |
+| 03-events | #29 (PR #178 review round 6) | Independent Tester | Opus 5.5 | 1 | done | 178 spec tests pass; fmt, clippy clean | spec_replacement_round6.rs; terminating chain re-specced (R10) |
+| 03-events | #29 (PR #178 review round 6) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review rounds 5-6) | Verifier | Sonnet 5.5 | 1 | pass | 4f26359: workspace 2452 tests pass; fmt, clippy, coverage floors, guard, cr check ok | traced every finding of r5/r6 briefs to a passing test; R10 evidence present |
+| 03-events | #29 (PR #178 review round 6b) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 108 passed; fmt, clippy, guard clean | lineage-path schedule_key (r4633092145); unit work-budget test covers DepthExceeded and WorkLimit (R10) |
+| 03-events | #29 (PR #178 review round 6b) | Independent Tester | Opus 5.5 | 1 | done | all spec_replacement_* pass; round6 11/11 x3 | grandchild spec test; F7 re-specced as depth-or-work limit (R10) |
+| 03-events | #29 (PR #178 review round 6b) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 6b) | Verifier | Sonnet 5.5 | 1 | pass | 802a692: workspace 2454 tests pass; fmt, clippy, coverage floors, guard, cr check ok | lineage-path follow-up traced; R10 evidence for both f7 tests present |
+| 03-events | #29 (PR #178 review round 6c) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 110 passed; fmt, clippy, guard clean | phase C resumes and reconcile executes by lineage path (review 5980983595) |
+| 03-events | #29 (PR #178 review round 6c) | Independent Tester | Opus 5.5 | 1 | done | all spec_replacement_* pass; round6 13/13 x3 | pool-resume and execution-order lineage specs |
+| 03-events | #29 (PR #178 review round 6c) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 6c) | Orchestrator (triage T0) | Opus 5.5 | 1 | done | docs only | DECISIONS records the R10 change to req_event_001_r6_lineage_path_grandchild_takes_parent_position (verifier finding at 59c4901) |
+| 03-events | #29 (PR #178 review round 6d) | Orchestrator (R8) | Opus 5.5 | 1 | recorded | docs only | review 5981232036 (phase C descendants after the pool round) recorded as known limitation (h); later unit |
