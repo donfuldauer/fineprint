@@ -196,6 +196,48 @@ fn mv_202_3d_split() {
     assert_eq!(mana_value(&half_none, OFF), 5);
 }
 
+// REQ-OBJ-001, CR 202.3d, 202.3e, 107.3g: a split card not on the stack treats X as 0 whatever
+// context is supplied; on the stack the context applies (CodeRabbit r1 regression).
+#[test]
+fn mv_202_3d_split_not_on_stack_ignores_context() {
+    let l = cost("{X}{R}");
+    let r = cost("{1}{U}");
+    let split = |state| ManaValueSubject::Split {
+        left: Some(&l),
+        right: Some(&r),
+        state,
+    };
+    assert_eq!(mana_value(&split(SplitState::NotOnStack), OFF), 3);
+    assert_eq!(mana_value(&split(SplitState::NotOnStack), on(3, 0, 0)), 3);
+    assert_eq!(mana_value(&split(SplitState::OnStackFused), on(3, 0, 0)), 6);
+    assert_eq!(
+        mana_value(
+            &split(SplitState::OnStackHalf(SplitHalf::Left)),
+            on(3, 0, 0)
+        ),
+        4
+    );
+    assert_eq!(
+        mana_value(
+            &split(SplitState::OnStackHalf(SplitHalf::Right)),
+            on(3, 0, 0)
+        ),
+        2
+    );
+    // The review's example: left {X}{R}, right {2}{U}, x = 3.
+    let r2 = cost("{2}{U}");
+    let split2 = |state| ManaValueSubject::Split {
+        left: Some(&l),
+        right: Some(&r2),
+        state,
+    };
+    assert_eq!(mana_value(&split2(SplitState::NotOnStack), on(3, 0, 0)), 4);
+    assert_eq!(
+        mana_value(&split2(SplitState::OnStackFused), on(3, 0, 0)),
+        7
+    );
+}
+
 // REQ-OBJ-001, CR 202.3e, 107.3g, 107.3a, 107.3p, 707.10: X and Y off and on the stack.
 #[test]
 fn mv_202_3e_variables() {
@@ -317,28 +359,83 @@ fn colors_of_costs() {
 fn base_colors_union() {
     let c = cost("{1}{R}");
     assert_eq!(
-        base_colors(Some(&c), None, ColorBitmask::NONE),
+        base_colors(Some(&c), None, CdaColors::None),
         ColorBitmask::RED
     );
     assert_eq!(
-        base_colors(Some(&c), Some(ColorBitmask::BLUE), ColorBitmask::NONE).bits(),
+        base_colors(Some(&c), Some(ColorBitmask::BLUE), CdaColors::None).bits(),
         10
     );
     assert_eq!(
-        base_colors(None, None, ColorBitmask::GREEN),
+        base_colors(None, None, CdaColors::Add(ColorBitmask::GREEN)),
         ColorBitmask::GREEN
     );
     assert_eq!(
-        base_colors(Some(&c), Some(ColorBitmask::WHITE), ColorBitmask::GREEN).bits(),
+        base_colors(
+            Some(&c),
+            Some(ColorBitmask::WHITE),
+            CdaColors::Add(ColorBitmask::GREEN)
+        )
+        .bits(),
         25
     );
+    assert_eq!(base_colors(None, None, CdaColors::None), ColorBitmask::NONE);
+}
+
+// REQ-OBJ-001, CR 604.3, 702.114a, 105.2, 613.3: a CDA can add to or override the printed
+// colors; a colorless-defining CDA makes a colored-cost object colorless (CodeRabbit r1).
+#[test]
+fn base_colors_cda_add_and_set() {
+    let c = cost("{1}{R}");
+    let red = cost("{R}");
     assert_eq!(
-        base_colors(None, None, ColorBitmask::NONE),
+        base_colors(Some(&c), None, CdaColors::Set(ColorBitmask::NONE)),
         ColorBitmask::NONE
     );
+    assert_eq!(
+        base_colors(
+            Some(&c),
+            Some(ColorBitmask::BLUE),
+            CdaColors::Set(ColorBitmask::NONE)
+        ),
+        ColorBitmask::NONE
+    );
+    assert_eq!(
+        base_colors(Some(&c), None, CdaColors::Set(ColorBitmask::GREEN)),
+        ColorBitmask::GREEN
+    );
+    assert_eq!(
+        base_colors(Some(&red), None, CdaColors::Add(ColorBitmask::GREEN)).bits(),
+        24
+    );
+    assert_eq!(
+        base_colors(Some(&c), None, CdaColors::None),
+        ColorBitmask::RED
+    );
+    assert_eq!(
+        base_colors(None, None, CdaColors::Add(ColorBitmask::NONE)),
+        base_colors(None, None, CdaColors::None)
+    );
+    assert_eq!(
+        base_colors(Some(&c), None, CdaColors::Add(ColorBitmask::NONE)),
+        base_colors(Some(&c), None, CdaColors::None)
+    );
+    assert_eq!(CdaColors::default(), CdaColors::None);
 }
 
 // ---------------------------------------------------------------- color identity
+
+// REQ-OBJ-001, CR 903.4, 702.114a: a devoid-style face keeps its cost colors in its identity;
+// a colored CDA adds to them (CodeRabbit r1: the CDA change must not reach identity).
+#[test]
+fn identity_keeps_cost_colors_with_cda() {
+    let c = cost("{1}{R}");
+    let devoid_like = id_face(Some(&c), &[]);
+    assert_eq!(color_identity(&[devoid_like], None), ColorBitmask::RED);
+    let mut green_cda = id_face(Some(&c), &[]);
+    green_cda.cda_colors = ColorBitmask::GREEN;
+    assert_eq!(color_identity(&[green_cda], None).bits(), 24);
+}
 
 fn id_face<'a>(mana_cost: Option<&'a ManaCostDSL>, text: &'a [ManaSymbol]) -> IdentityFace<'a> {
     IdentityFace {
@@ -634,4 +731,34 @@ fn pt_applies_cases() {
     half.toughness = Some(ValueExpressionAST(1.into()));
     let h = Characteristics::from_face(&half, v).unwrap();
     assert!(h.pt_applies(true));
+
+    // CR 208.5 (CodeRabbit r1): a creature with no printed power or toughness still has them
+    // (each 0) on and off the battlefield.
+    let bare = Characteristics::from_face(&face("test.cda_like_creature", None, &["Creature"]), v)
+        .unwrap();
+    assert!(bare.pt_applies(false));
+    assert!(bare.pt_applies(true));
+}
+
+// REQ-OBJ-001, CR 208.3, 208.5: creatures have P/T in every zone; noncreatures only off the
+// battlefield and only when printed (CodeRabbit r1 regression).
+#[test]
+fn pt_applies_creature_status_separate_from_printed() {
+    let v = vocab();
+    let bare =
+        Characteristics::from_face(&face("test.bare_creature", None, &["Creature"]), v).unwrap();
+    assert!(bare.pt_applies(true));
+    assert!(bare.pt_applies(false));
+
+    let mut power_only = face("test.power_only_artifact", None, &["Artifact"]);
+    power_only.power = Some(ValueExpressionAST(2.into()));
+    let po = Characteristics::from_face(&power_only, v).unwrap();
+    assert!(!po.pt_applies(true));
+    assert!(po.pt_applies(false));
+
+    let plain =
+        Characteristics::from_face(&face("test.plain_enchantment", None, &["Enchantment"]), v)
+            .unwrap();
+    assert!(!plain.pt_applies(true));
+    assert!(!plain.pt_applies(false));
 }

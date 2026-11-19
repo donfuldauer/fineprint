@@ -56,16 +56,45 @@ pub fn colors_of_mana_cost(cost: Option<&ManaCostDSL>) -> ColorBitmask {
     })
 }
 
-/// An object's colors before continuous effects: the union of its cost colors (CR 202.2), its
-/// color indicator (CR 202.2e) and the colors its characteristic-defining abilities define
-/// (CR 105.2).
+/// What an object's characteristic-defining abilities do to its colors (CR 604.3, 105.2, 105.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CdaColors {
+    /// No color-defining CDA: cost and indicator colors stand.
+    #[default]
+    None,
+    /// The CDA adds these colors to the cost and indicator colors (CR 604.3 "add to").
+    Add(ColorBitmask),
+    /// The CDA sets the object's colors to exactly this set, overriding cost and indicator
+    /// (CR 604.3 "override", CR 702.114a devoid = `Set(ColorBitmask::NONE)`).
+    Set(ColorBitmask),
+}
+
+/// An object's colors before other continuous effects: its cost colors (CR 202.2, 105.2) and
+/// color indicator (CR 202.2e), then the colors its characteristic-defining abilities define
+/// (CR 604.3, 613.3: CDAs apply first).
+///
+/// - [`CdaColors::None`]: cost colors united with indicator colors.
+/// - [`CdaColors::Add`]: that union plus the CDA's colors (CR 604.3 "add to").
+/// - [`CdaColors::Set`]: exactly the CDA's colors, ignoring cost and indicator (CR 604.3
+///   "override"); a devoid-style CDA is `Set(ColorBitmask::NONE)` and makes the object
+///   colorless (CR 702.114a).
+///
+/// Other color-changing effects are applied in layer 5 (CR 613.1e) by later work.
 #[must_use]
 pub fn base_colors(
     mana_cost: Option<&ManaCostDSL>,
     color_indicator: Option<ColorBitmask>,
-    cda_colors: ColorBitmask,
+    cda: CdaColors,
 ) -> ColorBitmask {
     let from_cost = colors_of_mana_cost(mana_cost);
     let from_indicator = color_indicator.unwrap_or(ColorBitmask::NONE);
-    union_colors(union_colors(from_cost, from_indicator), cda_colors)
+    let printed = union_colors(from_cost, from_indicator);
+    match cda {
+        // CR 105.2, 202.2, 202.2e: cost and indicator colors stand.
+        CdaColors::None => printed,
+        // CR 604.3: the CDA adds to the printed colors.
+        CdaColors::Add(mask) => union_colors(printed, mask),
+        // CR 604.3, 702.114a: the CDA overrides the printed colors.
+        CdaColors::Set(mask) => mask,
+    }
 }

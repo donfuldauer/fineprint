@@ -12,8 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_core::objects::{
-    Characteristics, ManaValueContext, ManaValueSubject, ObjectError, VariableValues, base_colors,
-    mana_value,
+    CdaColors, Characteristics, ManaValueContext, ManaValueSubject, ObjectError, VariableValues,
+    base_colors, mana_value,
 };
 use fineprint_dsl::card::{
     AbilityAST, CardFaceDSL, ColorBitmask, FaceKind, TextTokenStream, ValueExpressionAST,
@@ -219,7 +219,7 @@ fn chars_202_3a_no_cost_differs_from_zero_cost() {
     }
 }
 
-/// REQ-OBJ-001, CR 202.2: colors are `base_colors(cost, indicator, NONE)` for a cost-only face.
+/// REQ-OBJ-001, CR 202.2: colors are `base_colors(cost, indicator, CdaColors::None)` for a cost-only face.
 #[test]
 fn chars_202_2_colors_cost_only_face() {
     let c = cost("{1}{B}{G/P}");
@@ -228,7 +228,7 @@ fn chars_202_2_colors_cost_only_face() {
         ..blank_face("test.cost_only")
     };
     let ch = from_face(&face);
-    assert_eq!(ch.colors, base_colors(Some(&c), None, ColorBitmask::NONE));
+    assert_eq!(ch.colors, base_colors(Some(&c), None, CdaColors::None));
     assert_eq!(ch.colors, mask(4 | 16));
 }
 
@@ -242,7 +242,7 @@ fn chars_202_2e_colors_indicator_only_face() {
     let ch = from_face(&face);
     assert_eq!(
         ch.colors,
-        base_colors(None, Some(mask(8 | 2)), ColorBitmask::NONE)
+        base_colors(None, Some(mask(8 | 2)), CdaColors::None)
     );
     assert_eq!(ch.colors, mask(10));
 }
@@ -259,7 +259,7 @@ fn chars_202_2_colors_mixed_face() {
     let ch = from_face(&face);
     assert_eq!(
         ch.colors,
-        base_colors(Some(&c), Some(mask(16)), ColorBitmask::NONE)
+        base_colors(Some(&c), Some(mask(16)), CdaColors::None)
     );
     assert_eq!(ch.colors, mask(1 | 2 | 16));
 }
@@ -384,7 +384,9 @@ fn chars_208_3_creature_with_pt() {
     assert!(ch.pt_applies(true));
 }
 
-/// REQ-OBJ-001, CR 208.3: with no printed P/T it never applies, creature or not.
+/// REQ-OBJ-001, CR 208.3, CR 208.5: a noncreature with no printed P/T never has power and
+/// toughness; a creature has them everywhere (a missing value is 0, CR 208.5). Corrected after
+/// CodeRabbit round 1 on PR #170: a creature with no printed P/T has power and toughness.
 #[test]
 fn chars_208_3_no_printed_pt() {
     let plain = from_face(&CardFaceDSL {
@@ -397,8 +399,8 @@ fn chars_208_3_no_printed_pt() {
         card_types: strings(&["Creature"]),
         ..blank_face("test.cda_creature")
     });
-    assert!(!creature.pt_applies(false));
-    assert!(!creature.pt_applies(true));
+    assert!(creature.pt_applies(false));
+    assert!(creature.pt_applies(true));
 }
 
 /// REQ-OBJ-001, CR 109.3, CR 208.3: a planeswalker exposes its printed loyalty unchanged and has
