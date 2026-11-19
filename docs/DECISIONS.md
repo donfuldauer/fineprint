@@ -4693,9 +4693,11 @@ cost-payment LKI for tapped creatures rests on CR 702.122e, 702.171c and 702.184
 per CR 608.2h and 113.7a, not CR 400.7j (which covers objects moved to a public zone); (2) item 7's
 ordering of waiting triggers is the two-part process of CR 603.3b (triggers whose condition is not
 another ability triggering go first); (3) item 8's once-per-turn limit cites CR 603.2h for the
-"Do this only once each turn" form; other once-per-turn limits are card text. A "from anywhere"
-zone-change trigger is never a leaves-the-battlefield ability (CR 603.6c) and uses the post-event
-state. The proposed SRS edit is a P8 line in docs/HUMAN_QUEUE.md.
+"Do this only once each turn" form; other once-per-turn limits are card text. "From anywhere" alone
+does not make a trigger a leaves-the-battlefield ability (CR 603.6c): a `PUT_INTO_GRAVEYARD`
+matcher with no `from: BATTLEFIELD` filter is matched post-event. A `ZONE_CHANGE` matcher with
+`to: HAND` or `to: LIBRARY` and no `from` filter still looks back when the object was visible to
+all players (CR 603.10a). The proposed SRS edit is a P8 line in docs/HUMAN_QUEUE.md.
 **Rationale:** rules-researcher answers for #30 against the 2026-11-06 baseline; the SRS list of
 603.10a–g look-back categories itself matches the CR.
 **Alternatives:** Following the SRS citations literally (would cite a rule that does not cover
@@ -4734,9 +4736,20 @@ tapping).
    CR 603.2h covers only the "Do this only once each turn" wording. The counter model is what the
    SRS specifies and is implemented as such; whether a given wording maps to it is the
    definition author's concern.
-8. *Grouping.* A `ONE_OR_MORE` candidate groups the matching events per (view, registration);
-   for the hand/library category, events of one batch split by visibility would give one
-   candidate per view.
+8. *Grouping.* A `ONE_OR_MORE` candidate groups the matching events per ability instance
+   (source id, ability id), across both views: the first matching event fixes the candidate's
+   view, bindings and look-back category, and later matching events (either view) only add their
+   indices (PR #179 round 1).
+9. *Look-back candidates and Memory.* `detect` takes the pre-batch `MemoryTable` as `pre_memory`
+   through `detect_with_pre_event_memory(env, pre_memory, memory, turn, events)`;
+   `detect(env, memory, turn, events)` uses a copy of `memory` taken before the call. Limit counts
+   of every candidate, including a look-back candidate whose source Memory `apply_zone_change`
+   retired, are read from `pre_memory` plus an in-call tally of matches already accepted, so a
+   once-per-turn limit cannot fire again in the same turn. Counters are written to `memory` only
+   for a source that survives, defined as a post-event registration with the same source id and
+   ability id; a departing source gets no entry, so no Memory is recreated for a retired id. The
+   integration unit passes the pre-batch table (before the executor retires departing Memory) as
+   `pre_memory`.
 
 **Rationale:** SRS 8.2 (items 1-3 and 8) and the brief's table; CR 603.10, 603.10a-g, 603.6a,
 603.6c, 603.4, 603.2c, 603.3b. Ordinary choices are lost on a zone change (the memory module's rule), so a new
@@ -4748,3 +4761,49 @@ structure that this unit does not own); keying limits by ability id alone in a g
 (rejected: SRS 8.2 item 8 says per ability instance in Memory); ordering the queue by APNAP here
 (rejected: CR 603.3b is two-part and belongs to the stack unit); treating every
 `PUT_INTO_GRAVEYARD` from the battlefield as look-back (rejected: CR 603.6c).
+
+## #30 FP-029 CR round 1 (PR #179) — instance identity, damage and life loss, gain of control
+
+**Decision:**
+1. *Ability instance identity.* An ability instance is (source `ObjectId`, ability id) as supplied
+   by `TriggerEnv::registrations`. A producer that grants two independent copies of one definition
+   ability to one permanent must give each registration a distinct ability id. Limit counters and
+   `ONE_OR_MORE` grouping use that identity, preserved across the pre- and post-event views when
+   the same source survives. No instance-key field was added to `TriggerRegistration`.
+2. *Damage to a player.* Damage to a player by a source without infect causes life loss
+   (CR 120.3a), so the normalizer emits a `DAMAGE_DEALT` occurrence followed by a `LIFE_LOST`
+   occurrence carrying the player, the amount, the damage source and the recipient. Damage to a
+   permanent never produces `LIFE_LOST` (CR 120.3c, 120.3d, 120.3e, 120.3h), and damage of 0 or
+   less produces no `LIFE_LOST` (CR 120.8). Infect (CR 120.3b gives poison counters instead) is not
+   modelled: `GameEvent::Damage` carries no infect flag and the executor always applies life
+   loss. The effects unit that adds infect must add the flag to the event and make the normalizer
+   skip `LIFE_LOST` for it.
+3. *Gain of control.* CR 603.10d looks back only for a player losing control and for an opponent
+   gaining control from that player; a bare "gains control" trigger uses the post-event state.
+   `CONTROL_CHANGED` has no direction in the DSL matcher and the executor has no control-change
+   event, so the classifier keeps `ControlChanged` as the look-back side (`ControlLost`) and
+   nothing can emit the event yet. Deferred to #61 FP-059 (Effects III, control), which adds the
+   control-change event and must give the matcher or event a gain/loss direction so a gain-side
+   matcher is evaluated post-event; the gain-side test lands with it.
+4. *Other round-1 choices.* `DESTROYED` is classified leaves-the-battlefield (destroy is the
+   battlefield-to-graveyard move, CR 701.8a; an inference, since CR 603.10 does not name
+   "destroyed"; it stays a kind distinct from `DIES`, CR 701.8b). A draw is a library-to-hand
+   move: occurrence kinds {`DRAWN`, `ZONE_CHANGE`}, never `RETURNED_TO_HAND` (CR 121.1); the
+   library is a hidden zone, so the hand/library look-back applies only if the environment reports
+   the object visible to all. A created token enters the battlefield (CR 111.2, 701.7a): kinds
+   {`TOKEN_CREATED`, `ENTERS`}, player subject the owner (creator), the controller as a separate
+   `controller` field, no origin zone. Re-exile is `EXILED` but not `ZONE_CHANGE` (CR 400.8,
+   406.7). A same-zone reposition (same object id) is no event (CR 400.7, an inference from "from
+   one zone to another"). The sacrificing player is the permanent's controller read from its LKI
+   record (CR 701.21a), through `events_from_batch_with_lki`; `events_from_batch` without LKI
+   leaves the player unset. A counter kind spelled as a zone name becomes a `Zone` filter value.
+5. *`detect` writes no counters for departing sources.* Because `detect` delegates to
+   `detect_with_pre_event_memory`, it no longer writes limit counters for a source listed only in
+   the pre-event registrations; matching, output and in-call limit enforcement are unchanged.
+
+**Rationale:** rules-researcher answers for #30 round 1 against the 2026-11-06 baseline; CodeRabbit
+findings on PR #179.
+
+**Alternatives:** Adding an instance key to `TriggerRegistration` (breaks every environment fake);
+inventing a direction filter on `CONTROL_CHANGED` (the DSL is outside this unit's paths); modelling
+infect in the normalizer (no flag in the event).
