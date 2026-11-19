@@ -3586,8 +3586,11 @@ mapping table lists exactly these items.
 after trimming whitespace, is at most 256 UTF-8 bytes (the raw string) and contains no
 `char::is_control` character. Each failure gets its own explanation. Whether the name exists in
 the card database (either face of a DFC, CR 712.16; a prepare spell name, CR 723.5) is checked by
-the raising procedure, which may re-ask. Without a provided default, generation returns
-`NoDefault`.
+the raising procedure: an unknown name makes it return an explained error
+(`Interrupt::Error(ChoiceError::Invalid { request_id, explanation })`), so the original request
+stays pending for a valid retry, and a known name proceeds. It must not re-ask, because
+`ChoiceSession::submit` would record the answer as accepted and replace the request. Without a
+provided default, generation returns `NoDefault`.
 **Rationale:** Pinned by the brief: the engine does not hold the card database (REQ-ARCH-001,
 R5).
 **Alternatives:** An engine-side name list (would put card data in the engine).
@@ -3632,3 +3635,45 @@ and `Status` keep the pinned unboxed layout with a reasoned `allow(clippy::large
 API meaning ("NotPending: submit after Done").
 **Alternatives:** Boxing the request in `Generated::Ask` and `Status::Pending` (changes the
 pinned API).
+
+## #28 FP-027 — CodeRabbit round 1: judgement calls and deferrals
+
+**Decision:**
+(i) CHOOSE_OPTIONAL_TRIGGER description from generation: not changed. A YES_NO generated from a
+`ChoiceSpec` has no decision text (`ResolvedChoice` carries none); procedures raising
+CHOOSE_OPTIONAL_TRIGGER build `ChoicePayload::ChooseOptionalTrigger { description }` themselves;
+interpreter-supplied text for spec-generated YES_NO arrives with the DSL interpreter, issue #57
+(FP-055).
+(ii) PRIORITY_ACTION enumerated options: deferred to issue #49 (FP-047, legal-action generation;
+consumer #44 FP-043). The payload `actions` (exact responses) and `can_pass` already carry and
+validate every legal answer; mirroring them in `ChoiceOptions::Enumerated` needs an additive
+`ChoiceOption` variant (next free canonical tag, 7) designed with the producer; it changes no
+existing encoding.
+(iii) Attack requirements and attack costs in the DECLARE_ATTACKERS payload: deferred to issue #67
+(FP-065, attack constraint solver). Block combination constraints (menace, minimum blockers,
+requirements) in DECLARE_BLOCKERS: deferred to issue #68 (FP-066). Attack/block costs are raised
+as PAY_MANA_AND_COSTS (SRS 15.3). The field shapes depend on the solvers; additive payload changes
+then. Today's `validate` checks eligibility, one target per attacker, and per-blocker capacity and
+candidates only.
+(iv) Payment-method eligibility: done now. `ChoicePayload::PayManaAndCosts.methods` is
+`Vec<(String, Vec<ObjectId>)>` (display label, the objects eligible for that method), and
+`validate` requires each `PAY_COSTS` method entry to use an index in range and distinct objects
+from that method's list. Whether a payment covers the cost is deferred to issue #54 (FP-052, mana
+pool, mana abilities and paying costs).
+(v) Request well-formedness at `ChoiceContext::ask`, checked after the suspension and request-id
+checks and before the replay/suspend branch (so replay and live runs behave identically, R3): an
+invalid default gives `ChoiceError::InvalidDefault`; a validator contract whose `min`/`max` differ
+from the request's gives `ChoiceError::Procedure`; the session never publishes either.
+(vi) `validate` keeps `Result<(), String>` (pinned by the issue brief, public API); a typed
+validation error is deferred to the wire-protocol unit, issue #80 (FP-078), if it needs one. With
+(v) a malformed request never reaches `submit`, so the session boundary has one error class
+(`ChoiceError::Invalid`).
+(vii) Unknown card names: see "#28 FP-027 — Card-name validation is structural" (the raising
+procedure returns an explained `ChoiceError::Invalid`; it never re-asks).
+**Rationale:** Smallest changes that close the review findings without changing the pinned public
+API beyond `PayManaAndCosts.methods`, without renumbering canonical tags, and without designing
+payload fields ahead of the units that produce them.
+**Alternatives:** A `ChoiceOption::Response` variant now (rejected: designed without the
+producer); extending the attack/block payloads now (speculative); syncing validator bounds by
+recomputing the contract in `validate` (rejected: hides the producer's bug); a single source for
+the bounds (rejected: `min`/`max` and `ValidatorContract` are pinned public fields).
