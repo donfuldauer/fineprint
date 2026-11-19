@@ -393,6 +393,67 @@ fn spec_triggers_events_sacrifice_subject_player() {
     }
 }
 
+// REQ-EVENT-002, CR 701.9a, 701.17a: a discard (hand -> graveyard) carries the owner of the hand
+// as subject_player, a mill (library -> graveyard) the owner of the library; object ids and
+// kinds are unchanged. A players-subject matcher matches only the group containing that player;
+// an object-subject matcher still matches via the ids. Destroy has no subject player.
+#[test]
+fn spec_triggers_events_discard_mill_subject_player() {
+    // Not a look-back event: the view is the post-event one; accept in both to stay agnostic.
+    let views = [StateView::PreEvent, StateView::PostEvent];
+    for (from, cause, kind) in [
+        (ZoneKind::Hand, ZoneChangeCause::Discard, K::Discarded),
+        (ZoneKind::Library, ZoneChangeCause::Mill, K::Milled),
+    ] {
+        let mut w = World::new();
+        let card = w.create(from, P2);
+        let (batch, out) = mapped(&mut w, vec![zc(card, ZoneKind::Graveyard, cause)]);
+        assert_eq!(out.len(), 1);
+        let moved = moved_of(&batch.events[0]);
+        check_zone_change(&out[0], moved, cause, "discard/mill");
+        assert!(out[0].kinds.contains(&kind));
+        assert_eq!(out[0].subject_player, Some(P2), "{cause:?}");
+        assert_eq!(out[0].subject_pre, Some(moved.old));
+        assert_eq!(out[0].subject_post, Some(moved.new));
+        // With an LKI store the owner is still the zone's owner.
+        let with = events_from_batch_with_lki(&batch, &w.lki);
+        assert_eq!(with[0].subject_player, Some(P2), "{cause:?} with LKI");
+
+        let players = || reg(1, P1, ability("sp", subj_players(m(kind))));
+        let mut for_p2 = FakeEnv::new().with_both(players());
+        let mut for_p1 = FakeEnv::new().with_both(players());
+        for v in views {
+            for_p2 = for_p2.accept_player(v, P2);
+            for_p1 = for_p1.accept_player(v, P1);
+        }
+        assert_eq!(
+            summary(&run(&for_p2, &out)),
+            vec![(1, "sp".to_string(), vec![0])],
+            "{cause:?}"
+        );
+        assert!(run(&for_p1, &out).is_empty(), "{cause:?}");
+
+        let mut by_object = FakeEnv::new().with_both(reg(2, P1, ability("so", subj_obj(m(kind)))));
+        for v in views {
+            by_object = by_object.accept(v, &[moved.old.get(), moved.new.get()]);
+        }
+        assert_eq!(
+            summary(&run(&by_object, &out)),
+            vec![(2, "so".to_string(), vec![0])],
+            "{cause:?}"
+        );
+    }
+
+    // A destroy (battlefield -> graveyard) has no subject player.
+    let mut w = World::new();
+    let perm = w.create(ZoneKind::Battlefield, P2);
+    let t = one(
+        &mut w,
+        zc(perm, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+    );
+    assert_eq!(t.subject_player, None);
+}
+
 /// A literal same-zone move of kind `z` (owner P1) from object `old` to object `new`.
 fn literal_same_zone(z: ZoneKind, cause: ZoneChangeCause, old: u64, new: u64) -> ExecutedEvent {
     ExecutedEvent {
@@ -1041,6 +1102,10 @@ fn spec_triggers_events_token_created() {
             out[i].fields.get("controller"),
             Some(&EventField::Player(controller))
         );
+        // CR 701.7a: a created token enters the battlefield; it has no origin zone.
+        assert_eq!(out[i].fields.get("to"), Some(&vzone(Zone::Battlefield)));
+        assert!(!out[i].fields.contains_key("from"));
+        assert!(!out[i].kinds.contains(&K::ZoneChange));
     }
 }
 
@@ -1085,6 +1150,27 @@ fn spec_triggers_events_token_enters_detection() {
             (1, "en".to_string(), vec![1])
         ]
     );
+
+    // CR 701.7a, 603.6a: an ENTERS matcher filtered on `to: BATTLEFIELD` triggers for both tokens;
+    // one filtered on `from: GRAVEYARD` does not.
+    let to_bf = FakeEnv::new().with_post(reg(
+        2,
+        P1,
+        ability("tb", filt(m(K::Enters), "to", zone(Zone::Battlefield))),
+    ));
+    assert_eq!(
+        summary(&run(&to_bf, &out)),
+        vec![
+            (2, "tb".to_string(), vec![0]),
+            (2, "tb".to_string(), vec![1])
+        ]
+    );
+    let from_gy = FakeEnv::new().with_post(reg(
+        3,
+        P1,
+        ability("fg", filt(m(K::Enters), "from", zone(Zone::Graveyard))),
+    ));
+    assert!(run(&from_gy, &out).is_empty());
 }
 
 // REQ-EVENT-002, CR 603.10c: attach / unattach map with the attachment as subject.

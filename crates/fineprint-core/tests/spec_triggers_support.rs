@@ -285,6 +285,16 @@ impl FakeEnv {
         self.with_pre(r.clone()).with_post(r)
     }
 
+    /// Wraps this fake in an environment whose `source_survives` answers true exactly for `ids`
+    /// (CR 702.26d: a source that still exists as the same object after the batch). Everything
+    /// else delegates to `self`; `FakeEnv` itself keeps the trait's default `source_survives`.
+    pub fn with_live(self, ids: &[u64]) -> LiveEnv {
+        LiveEnv {
+            inner: self,
+            live: ids.iter().map(|&n| oid(n)).collect(),
+        }
+    }
+
     pub fn clear_calls(&self) {
         self.object_calls.borrow_mut().clear();
         self.player_calls.borrow_mut().clear();
@@ -360,6 +370,67 @@ impl TriggerEnv for FakeEnv {
     fn is_visible_to_all(&self, object: ObjectId) -> bool {
         self.visible_calls.borrow_mut().push(object);
         self.visible.contains(&object)
+    }
+}
+
+/// A [`FakeEnv`] with an explicit set of live source ids for `source_survives`.
+#[derive(Debug)]
+pub struct LiveEnv {
+    pub inner: FakeEnv,
+    pub live: BTreeSet<ObjectId>,
+}
+
+impl TriggerEnv for LiveEnv {
+    fn registrations(&self, view: StateView) -> Vec<TriggerRegistration> {
+        self.inner.registrations(view)
+    }
+
+    fn object_matches(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        object: ObjectId,
+        selector: &ObjectSelectorAST,
+    ) -> bool {
+        self.inner.object_matches(view, reg, object, selector)
+    }
+
+    fn player_matches(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        player: PlayerId,
+        group: &PlayerGroup,
+    ) -> bool {
+        self.inner.player_matches(view, reg, player, group)
+    }
+
+    fn predicate_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        pred: &PredicateAST,
+        field: Option<&EventField>,
+    ) -> bool {
+        self.inner.predicate_holds(view, reg, pred, field)
+    }
+
+    fn condition_holds(
+        &self,
+        view: StateView,
+        reg: &TriggerRegistration,
+        pred: &PredicateAST,
+        bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        self.inner.condition_holds(view, reg, pred, bindings)
+    }
+
+    fn is_visible_to_all(&self, object: ObjectId) -> bool {
+        self.inner.is_visible_to_all(object)
+    }
+
+    fn source_survives(&self, source: ObjectId) -> bool {
+        self.live.contains(&source)
     }
 }
 
