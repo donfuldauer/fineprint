@@ -213,3 +213,17 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #27 (PR #176 review round 1) | Classifier | Sonnet 5.5 | 1 | routed | — | 12 findings: 11 fix (incl. security F6 face-down leak), F12 perf deferred (DECISIONS); src T2 Opus, spec T1 Sonnet |
 | 03-events | #27 (PR #176 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | cargo test --workspace 2039 passed; coverage 99.63%; fmt, clippy, guard, cr clean | 9 new/rewritten unit tests fail on 7b678c4, pass now; 5 DECISIONS entries |
 | 03-events | #27 (PR #176 review round 1) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | fineprint-core tests pass | new spec tests fail on 7b678c4 src; CR citations added (F8, F9) |
+| 03-events | #28 | Classifier | Sonnet 5.5 | 1 | routed | — | very-high (contract owner), complex; T2 Opus 5.5 x2 (Implementer, Independent Tester spec_choice_*.rs); no rules questions; Fable not granted (allowance unknown, no T2 failure); design pinned: re-execution from checkpoint with recorded answers |
+| 03-events | #28 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; 42 choice unit tests pass; coverage core 99.44% | ADR + 5 DECISIONS entries; generator sorts unsorted candidates after tester finding |
+| 03-events | #28 | Independent Tester | Opus 5.5 | 1 | done | 73 spec_choice tests; 1 test defect (ORDER n>=8 expected Enumerated) | DECISIONS "Spec-test choices" |
+| 03-events | #28 | Investigator | Sonnet 5.5 | 1 | root-caused | repro seed 5 ORDER n=9 | test defect, product not a defect |
+| 03-events | #28 | Fixer (spec test) | Opus 5.5 | 1 | done | 73/73 spec_choice pass; fmt, clippy clean | ORDER n>=8 asserts Validator |
+| 03-events | #28 | Orchestrator | Opus 5.5 | 1 | done | cr check ok (709 cited rules) | regenerated docs/cr-citations.json |
+| 03-events | #28 (PR #177 review round 1) | Classifier | Sonnet 5.5 | 1 | routed | — | 12 findings: 7 fix, 3 deferred (#49, #67, #68), 2 not a defect (DECISIONS); src T2 Opus, spec T1 Sonnet |
+| 03-events | #28 (PR #177 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | cargo test --workspace 2165 passed; coverage core 99.40%; fmt, clippy, guard clean | ask-time well-formedness, PayManaAndCosts eligibility, DECISIONS round-1 entry |
+| 03-events | #28 (PR #177 review round 1) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_choice_* pass | findings 8, 9 + ask-time and payment-eligibility spec tests |
+| 03-events | #28 | Work verifier | Sonnet 5.5 | 1 | pass @ 550d456 | fmt, clippy clean; cargo test --workspace 2152 passed; coverage core 99.44%; guard, cr ok | PR #177 opened |
+| 03-events | #28 (PR #177 review round 1) | Work verifier | Sonnet 5.5 | 1 | pass @ 7f9e9b2 | fmt, clippy clean; cargo test --workspace 2165 passed; coverage core 99.40%; guard, cr ok | round 1 fixes verified; threads replied and resolved |
+| 03-events | #28 (PR #177 review round 2) | Classifier | Sonnet 5.5 | 1 | routed | — | 2 findings (review 5975520007): A repeated PAY_COSTS method index (fix), B sub-cutoff validator fixture (test fix); T1 Sonnet x2 |
+| 03-events | #28 (PR #177 review round 2) | Fixer (src) | Sonnet 5.5 | 1 | done | cargo test --workspace pass; coverage core 99.40%; fmt, clippy, guard clean | repeated method index rejected; synced fixture 5..=14999; DECISIONS round 2 entry |
+| 03-events | #28 (PR #177 review round 2) | Fixer (spec tests) | Sonnet 5.5 | 1 | done | spec_choice_validate 15 passed | repeated method index spec test |

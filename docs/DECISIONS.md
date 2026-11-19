@@ -3462,3 +3462,241 @@ and the real run each copy the history map on their first history write after a 
 batch executor's planning/rollback. Revisit when a performance or replay unit measures it.
 **Alternatives:** Staging history updates until the batch succeeds; a persistent map that
 shares unchanged entries.
+
+## #28 FP-027 — Spec-test choices
+
+**Decision:** The Independent Tester's spec tests (`crates/fineprint-core/tests/spec_choice_*.rs`)
+read the brief as follows where it is silent, and assert only the common ground:
+(1) Unsorted Objects/Players candidates are valid input: the mapping table says they "are sorted
+ascending", requirement 5 says the OBJECTS default is ascending "even if candidates were given
+unsorted", and property (iv) says their order "does not change the generated request". So
+generation must sort them, not reject them; only duplicates are `InvalidSpec`. Tests about other
+properties use ascending candidates so that one fault does not mask unrelated checks.
+(2) Resolved `min`/`max` for kinds whose bounds the table does not use (COLOR, CREATURE_TYPE,
+PILE, PLAYER, YES_NO, CARD_NAME, DIVISION) are passed as 1/1, ORDER as n/n; request `min`/`max`
+are asserted only for OBJECTS and MODE (copied, max clamped to n), NUMBER (copied) and
+PLAYER/YES_NO (1/1; YES_NO also with resolved 0/0 and 0/5, as it has no candidates to bound).
+(3) Answer order is free where the table states no order: SubmitObjectSelection ids, SelectModes
+indices and SubmitDivision assignments are accepted in any order; the order of the DIVISION
+default's assignment list is not asserted (compared as a sorted list).
+(4) A submit whose id is not the pending one, earlier or later, is `StaleRequest { submitted,
+pending: Some(real) }`; after Done every submit is `NotPending`. `submit_default` with a wrong id
+is asserted only as some error.
+(5) Unpinned items are asserted as "some Err" or "is a Validator": wrong-typed or missing
+`resolved.division`, duplicate or empty Strings candidates, replay failures, procedure failures,
+`ctx.ask` with the wrong id; `ValidatorContract` contents are never inspected; `ChoiceError` is
+matched with `matches!`, never compared with `==`.
+(6) A "control character" in a card name is any `char::is_control` character (Unicode Cc,
+including DEL and C1 controls such as U+009B).
+(7) NUMBER ranges stay within `0..=i64::MAX` (the answer carries an `i64`); the u64::MAX overflow
+cases use DIVISION totals and OBJECTS/MODE max values instead.
+(8) Divergence is provoked by a `Cell` counter folded into the request's `reason.cr` (first ask)
+or into a NUMBER max (second ask); only `Divergence { .. }` is asserted, not its index.
+**Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
+silent, take the reading most consistent with the SRS 15.3 table and the brief's own examples.
+**Alternatives:** Requiring callers to pre-sort candidates (contradicts requirement 5 and
+property (iv)); asserting request bounds for every kind or a fixed assignment order
+(over-specifies); ASCII-only control check (narrower than "control characters").
+
+## #28 FP-027 — Suspension design: deterministic re-execution with a recorded answer list
+
+**Decision:** Rules code that needs a player's decision stays plain synchronous code. A procedure
+is `Fn(&mut S, &mut ChoiceContext<'_>) -> Result<O, Interrupt>` and asks with
+`ctx.ask(request)?`. If that ask already has a recorded answer, `ask` returns it. Otherwise it
+returns `Interrupt::Pending(request)` and the procedure propagates it. `ChoiceSession` keeps the
+base state (one cheap Arc-sharing clone, the same checkpoint mechanism as #26), the ordered list
+of accepted answers, and the digest of the request each answer was accepted for. Every accepted
+answer re-runs the procedure from a fresh clone of the base with the whole list. Whatever the
+procedure changed before it suspended is dropped with that clone, so while a request is pending
+the visible state is exactly the base, and `state_hash()` is the base's hash. A request's id is
+the 0-based position of its ask in the run (`ctx.next_request_id()`), so no global counter is
+needed. When a re-run reaches an answered ask, it compares `PendingChoiceRequest::digest()` (SHA-256
+of the canonical encoding) with the recorded digest. A mismatch, or a run that finishes before
+reaching a recorded answer, is `ChoiceError::Divergence { index }`, never ignored. A failed
+`submit` changes nothing, because the new list is committed only after its re-run succeeds.
+**Rationale:** R3 makes a procedure a pure function of (state, answers), PRNG draws included: each
+run starts from the base's PRNG, so re-execution is exact. No procedure has to be written by hand
+as a state machine. The answer list is the unit for replay logs, forks and serialisation: a
+pending decision is just the base plus its answers. No threads or async are needed (R3,
+REQ-CORE-006). Cost: a run with `k` asks does `O(k^2)` procedure work over the session (each
+answer re-runs the prefix). This is accepted because `k` is small for rules procedures.
+Consequences: a procedure must be deterministic and must have no side effects outside `S` (a
+`Cell` counter is caught as divergence). Every decision must go through `ctx.ask` with
+`next_request_id()` (a different id is `ChoiceError::RequestIdMismatch`). A suspension must be
+propagated: asking again after it, finishing after it, or returning a `Pending` that `ask` did not
+return is `ChoiceError::Procedure`. Limits: the session is not wired into `GameState` or its
+Merkle layout, and its wire schema belongs to the wire-protocol unit (#80), like the other
+standalone #27 components. Timeouts are the caller's: `submit_default(id)` is exactly
+`submit(id, pending.default_on_timeout.clone())`, and the engine never reads a clock (R3, R7).
+**Alternatives:** (b) Explicit continuations: procedures written as state machines stored in the
+state. Rejected: every procedure becomes a state machine, the continuation data must be hashed,
+redacted and serialised, and the error risk is high. (c) Coroutines, async or threads. Rejected:
+R3 and REQ-CORE-006 (scheduling must not affect results, and suspended stacks cannot be hashed or
+serialised). (d) Undo-log rollback and redo with #26 `Transactions`. Rejected for resumption:
+durable-record semantics exist for CR 734 rollback, not for replaying a procedure. `Transactions`
+stays the mechanism for illegal or cancelled actions: `CANCEL_AND_ROLLBACK` handling arrives with
+casting and will use it.
+
+## #28 FP-027 — Generation: candidate handling, errors and request bounds
+
+**Decision:** (1) Objects and Players candidates are sorted ascending by generation; only
+duplicates are `InvalidSpec`. Strings keep their order and must be non-empty and distinct. This
+matches the Independent Tester's reading ("#28 FP-027 — Spec-test choices"). My first
+implementation rejected unsorted input, and the spec tests showed that the brief's "are sorted
+ascending" means the engine sorts. (2) Missing candidates are `MissingCandidates`. So are
+candidates given for a kind that needs none (NUMBER, CARD_NAME, YES_NO, DIVISION), and a
+`division` given for a non-DIVISION kind (the brief's "missing/extra candidate kind"). Candidates
+of the wrong kind are `InvalidSpec`. (3) `resolved.min > resolved.max` is `Unsatisfiable` for every
+kind. (4) Request bounds: OBJECTS/MODE keep `min` and clamp `max` to n. NUMBER bounds the value
+and clamps `max` to `i64::MAX`, because the answer carries an `i64`; a `min` above `i64::MAX` is
+`Unsatisfiable`. ORDER and DIVISION use n/n and r/r (items and recipients). COLOR,
+CREATURE_TYPE, PILE, PLAYER, YES_NO and CARD_NAME use 1/1. (5) `random: true` returns
+`Generated::Random` right after `spec.validate()`, before candidate checks. (6) A YES_NO request's
+payload description is empty: `reason` says why it is asked.
+**Rationale:** The brief's mapping table and pinned rules. The request's `min`/`max` are the
+values validation reads, so a raising procedure can tighten them.
+**Alternatives:** Rejecting unsorted ids (contradicts the spec-test reading of requirement 5);
+`InvalidSpec` for extra candidates (the brief groups them with missing ones); rejecting NUMBER
+ranges above `i64::MAX` (the saturation tests need huge ranges to be accepted).
+
+## #28 FP-027 — Option counting, enumerated items and ORDER restricted to top
+
+**Decision:** The number of distinct valid answers is computed exactly in `u128`/`u64` and capped
+at `ENUMERATION_LIMIT`, with an early exit. The decision needs only `N < 10_000`, so the contract
+does not carry N. `C(n, k)` uses the exact multiplicative recurrence and stops as soon as it
+reaches the limit, so huge inputs cost almost nothing and never overflow. Enumerated items are
+whole answers where an answer is a single value (player, text, number, yes/no). For OBJECTS,
+MODE, ORDER and DIVISION they are building blocks (candidates, mode indices, cards, recipients),
+combined under the request's `min`/`max` and payload. ORDER from a spec offers only the `top`
+destination: the answer is `top` = a permutation of all candidates, with `bottom` and `graveyard`
+empty. Scry-like requests raised by procedures list more destinations in
+`ChoicePayload::OrderCards`. `ValidatorContract { min, max, rule }` carries the domain in `rule`
+(Subset, Modes, IntegerRange, OneOf, OneOfPlayers, Permutation, Division, CardName, or Payload
+for the procedure-raised types), so a remote client can pre-check an answer.
+**Rationale:** SRS 15.3 asks for pre-validated options below 10,000. Enumerating every subset or
+permutation would be exponential even below the limit and would duplicate the payload. The pinned
+mapping table lists exactly these items.
+**Alternatives:** Listing every whole answer (8192 subsets for n = 13); carrying N in the contract
+(it would have to saturate, so it adds nothing).
+
+## #28 FP-027 — Card-name validation is structural
+
+**Decision:** A `CHOOSE_CARD_NAME` request is always a validator contract
+(`ValidatorRule::CardName { max_bytes: 256 }`). An answer is accepted when its name is non-empty
+after trimming whitespace, is at most 256 UTF-8 bytes (the raw string) and contains no
+`char::is_control` character. Each failure gets its own explanation. Whether the name exists in
+the card database (either face of a DFC, CR 712.16; a prepare spell name, CR 723.5) is checked by
+the raising procedure: an unknown name makes it return an explained error
+(`Interrupt::Error(ChoiceError::Invalid { request_id, explanation })`), so the original request
+stays pending for a valid retry, and a known name proceeds. It must not re-ask, because
+`ChoiceSession::submit` would record the answer as accepted and replace the request. Without a
+provided default, generation returns `NoDefault`.
+**Rationale:** Pinned by the brief: the engine does not hold the card database (REQ-ARCH-001,
+R5).
+**Alternatives:** An engine-side name list (would put card data in the engine).
+
+## #28 FP-027 — Payloads and responses of the procedure-raised types
+
+**Decision:** `ChoicePayload` has one variant per choice type, and its canonical tag equals
+`ChoiceType::tag()`. The fields the brief left to this unit are designed index-first, and every
+index refers to a list in the payload. `ConfigureCosts { alternative: Option<u32>, additional:
+Vec<u32>, x: Option<u64>, symbol_options: Vec<u32> (one per hybrid/Phyrexian slot), harmonize:
+Option<ObjectId> }`; `SelectTargets { targets: Vec<Vec<ChoiceTarget>> }` (one list per slot);
+`PayCosts { auto_pay: bool, methods: Vec<(u32, Vec<ObjectId>)>, mana_abilities: Vec<(ObjectId,
+String)> }`; `SubmitAttackers { attacks: Vec<(ObjectId, ChoiceTarget)> }`; `SubmitBlockers {
+blocks: Vec<(ObjectId, Vec<ObjectId>)> }`; `OrderTriggers { order: Vec<u32> }` (a permutation);
+`SelectReplacement { index: u32 }`; `SubmitPregame { objects: Vec<ObjectId> }`. The
+`PRIORITY_ACTION` payload lists each legal action as the exact response that takes it, and has a
+`can_propose_shortcut` flag. The SRS response list has no ProposeShortcut response, so that
+response arrives with the shortcut unit. Validation of these types checks the variant (the
+explanation names both the response and the request type), membership, distinctness, index
+ranges and payload counts. Deferred to the raising procedures: whether a payment covers the
+cost, attack and block requirements and restrictions (menace, requirement maximisation),
+trample lethal floors, and the legality of combined target sets. A payload that does not match
+the request's type is rejected as malformed, never accepted.
+**Rationale:** Indices into the request keep responses small and checkable without hidden
+information (R12). Handlers arrive with the procedures that raise these types (issue text).
+**Alternatives:** Free-form strings for costs and targets (cannot be validated); adding a
+ProposeShortcut response now (not in the SRS 15.3 response column).
+
+## #28 FP-027 — Canonical encoding tags and session error choices
+
+**Decision:** Every enum encodes a one-byte `put_variant` tag in declaration order, then its
+fields in declaration order. The tags are `ChoiceType` 0..19 (table row), `ChoiceResponse` 0..28
+(the order of the SRS response list), `ChoiceTarget` Player 0 / Object 1, `ChoiceValue` Number 0
+/ Text 1, `ChoiceOption` 0..6, `ChoiceOptions` Enumerated 0 / Validator 1, `ValidatorRule` 0..8,
+`OrderDestination` 0..2, `AllowedValues` Range 0 / Texts 1, `ResolvedCandidates` 0..3, and
+`Generated` Ask 0 / Random 1. Structs use `impl_canonical_struct!` in field order.
+Session errors: `replay` with more answers than the procedure asks for is `NotPending`. A
+`submit_default` with a wrong id is `StaleRequest` (it is `submit`). `ChoiceError` gains the
+`RequestIdMismatch { expected, got }` variant (the brief allows a dedicated variant). `Generated`
+and `Status` keep the pinned unboxed layout with a reasoned `allow(clippy::large_enum_variant)`.
+**Rationale:** The #27 convention for canonical encodings. The session errors follow the pinned
+API meaning ("NotPending: submit after Done").
+**Alternatives:** Boxing the request in `Generated::Ask` and `Status::Pending` (changes the
+pinned API).
+
+## #28 FP-027 — CodeRabbit round 1: judgement calls and deferrals
+
+**Decision:**
+(i) CHOOSE_OPTIONAL_TRIGGER description from generation: not changed. A YES_NO generated from a
+`ChoiceSpec` has no decision text (`ResolvedChoice` carries none); procedures raising
+CHOOSE_OPTIONAL_TRIGGER build `ChoicePayload::ChooseOptionalTrigger { description }` themselves;
+interpreter-supplied text for spec-generated YES_NO arrives with the DSL interpreter, issue #57
+(FP-055).
+(ii) PRIORITY_ACTION enumerated options: deferred to issue #49 (FP-047, legal-action generation;
+consumer #44 FP-043). The payload `actions` (exact responses) and `can_pass` already carry and
+validate every legal answer; mirroring them in `ChoiceOptions::Enumerated` needs an additive
+`ChoiceOption` variant (next free canonical tag, 7) designed with the producer; it changes no
+existing encoding.
+(iii) Attack requirements and attack costs in the DECLARE_ATTACKERS payload: deferred to issue #67
+(FP-065, attack constraint solver). Block combination constraints (menace, minimum blockers,
+requirements) in DECLARE_BLOCKERS: deferred to issue #68 (FP-066). Attack/block costs are raised
+as PAY_MANA_AND_COSTS (SRS 15.3). The field shapes depend on the solvers; additive payload changes
+then. Today's `validate` checks eligibility, one target per attacker, and per-blocker capacity and
+candidates only.
+(iv) Payment-method eligibility: done now. `ChoicePayload::PayManaAndCosts.methods` is
+`Vec<(String, Vec<ObjectId>)>` (display label, the objects eligible for that method), and
+`validate` requires each `PAY_COSTS` method entry to use an index in range and distinct objects
+from that method's list. Whether a payment covers the cost is deferred to issue #54 (FP-052, mana
+pool, mana abilities and paying costs).
+(v) Request well-formedness at `ChoiceContext::ask`, checked after the suspension and request-id
+checks and before the replay/suspend branch (so replay and live runs behave identically, R3): an
+invalid default gives `ChoiceError::InvalidDefault`; a validator contract whose `min`/`max` differ
+from the request's gives `ChoiceError::Procedure`; the session never publishes either.
+(vi) `validate` keeps `Result<(), String>` (pinned by the issue brief, public API); a typed
+validation error is deferred to the wire-protocol unit, issue #80 (FP-078), if it needs one. With
+(v) a malformed request never reaches `submit`, so the session boundary has one error class
+(`ChoiceError::Invalid`).
+(vii) Unknown card names: see "#28 FP-027 — Card-name validation is structural" (the raising
+procedure returns an explained `ChoiceError::Invalid`; it never re-asks).
+**Rationale:** Smallest changes that close the review findings without changing the pinned public
+API beyond `PayManaAndCosts.methods`, without renumbering canonical tags, and without designing
+payload fields ahead of the units that produce them.
+**Alternatives:** A `ChoiceOption::Response` variant now (rejected: designed without the
+producer); extending the attack/block payloads now (speculative); syncing validator bounds by
+recomputing the contract in `validate` (rejected: hides the producer's bug); a single source for
+the bounds (rejected: `min`/`max` and `ValidatorContract` are pinned public fields).
+
+## #28 FP-027 — CodeRabbit round 2: judgement calls
+
+**Decision:**
+(i) PAY_COSTS: a method index may appear at most once per response; objects for one method go in
+one entry. `validate` rejects a repeated index with a non-empty explanation. Cross-method object
+overlap is not checked here (eligibility lists are per method; whether a payment covers the cost
+stays deferred to issue #54, FP-052).
+(ii) The `req_net_003_ask_rejects_stale_validator_bounds` success fixture is corrected to a range
+(5..=14_999) at or above `ENUMERATION_LIMIT`, so it is a valid validator-contract request.
+`well_formed` (session.rs) is unchanged: it checks only what makes a request unusable by the
+session (default validates, validator bounds equal request bounds). Whether a request uses
+Enumerated below `ENUMERATION_LIMIT` and Validator at or above it is a property of the producer:
+`generate_request` guarantees it by counting; a procedure-built request is the procedure's
+responsibility.
+**Rationale:** (i) A repeated index would bypass the per-method distinctness check, so the answer
+is ambiguous. (ii) The option count depends on type-specific candidate data (subsets, permutations,
+divisions, card names) that the request does not carry uniformly for payload-built types;
+re-deriving it in `well_formed` duplicates generate.rs and risks rejecting valid procedure-raised
+requests (CHOOSE_CARD_NAME is always a validator by design).
+**Alternatives:** (i) Merging repeated entries (rejected: silently reinterprets the answer);
+tracking objects across all methods (rejected: not stated by SRS 15.3, may break legitimate
+overlap). (ii) A count-based check in `well_formed` reusing generate.rs (rejected, reasons above).

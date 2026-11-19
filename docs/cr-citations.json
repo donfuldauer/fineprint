@@ -52,12 +52,16 @@
     "103.5": {
       "sha256": "5aae524062fd8643532753730d59086491360f0b0792eb24f43b9b47f9acb51f",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:192",
+        "crates/fineprint-core/src/choice/request.rs:420",
         "docs/SRS.md:1147"
       ]
     },
     "103.6": {
       "sha256": "ff4ff1409b458cb16ac69e8c560f8e19ba0e632acd861693f45e883a57e588e8",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:194",
+        "crates/fineprint-core/src/choice/request.rs:429",
         "docs/SRS.md:1148"
       ]
     },
@@ -598,6 +602,7 @@
     "116.2": {
       "sha256": "9755a27c7b298d39aa89d5b7267a819bea18bb73c45c2083046d92f098e3bcc5",
       "locations": [
+        "crates/fineprint-core/src/choice/response.rs:74",
         "docs/SRS.md:1129"
       ]
     },
@@ -1851,7 +1856,7 @@
         "crates/fineprint-core/src/events/types.rs:295",
         "crates/fineprint-core/src/events/types.rs:648",
         "crates/fineprint-core/src/knowledge/mod.rs:11",
-        "crates/fineprint-core/src/lib.rs:25",
+        "crates/fineprint-core/src/lib.rs:27",
         "crates/fineprint-core/src/memory/error.rs:19",
         "crates/fineprint-core/src/memory/linked.rs:17",
         "crates/fineprint-core/src/memory/linked.rs:19",
@@ -2777,6 +2782,8 @@
     "502.3": {
       "sha256": "819b587a6f4443ae6fa746230bbfcdd0b044b5c5ce1a7afdcb5b61b578efcc25",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:188",
+        "crates/fineprint-core/src/choice/request.rs:410",
         "crates/fineprint-core/src/events/tests.rs:1109",
         "docs/SRS.md:1145",
         "docs/SRS.md:1451",
@@ -2912,6 +2919,8 @@
     "508.1": {
       "sha256": "d2a6db8a69f925098ee7582143df95d9b64792f9972f185b6ea3a5a583081033",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:168",
+        "crates/fineprint-core/src/choice/request.rs:355",
         "docs/SRS.md:1135"
       ]
     },
@@ -2960,6 +2969,8 @@
     "509.1": {
       "sha256": "001af38849cf64501ea1a666a054e669cdc63124efa2b606e4a13cc28a181813",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:170",
+        "crates/fineprint-core/src/choice/request.rs:362",
         "docs/SRS.md:1136"
       ]
     },
@@ -3035,6 +3046,15 @@
     "510.1c": {
       "sha256": "df9ef2df67ff4a058810dd7b3dc98e25b0eba5c2422fa86db1de9ddab56e7ab6",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:494",
+        "crates/fineprint-core/src/choice/generate.rs:62",
+        "crates/fineprint-core/src/choice/mod.rs:164",
+        "crates/fineprint-core/src/choice/request.rs:333",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:238",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:356",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:550",
+        "crates/fineprint-core/tests/spec_choice_threshold.rs:157",
+        "crates/fineprint-core/tests/spec_choice_validate.rs:189",
         "docs/SRS.md:1133",
         "docs/SRS.md:273",
         "docs/SRS.md:625"
@@ -3043,6 +3063,13 @@
     "510.1d": {
       "sha256": "0d62a6bfd00323bf988a9da411505370c2d0f08d28f4af74fc99648fc3a77950",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:494",
+        "crates/fineprint-core/src/choice/generate.rs:62",
+        "crates/fineprint-core/src/choice/mod.rs:164",
+        "crates/fineprint-core/src/choice/request.rs:333",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:238",
+        "crates/fineprint-core/tests/spec_choice_threshold.rs:157",
+        "crates/fineprint-core/tests/spec_choice_validate.rs:189",
         "docs/SRS.md:273"
       ]
     },
@@ -3135,6 +3162,12 @@
     "601.2b": {
       "sha256": "b29d06932bab059464552b9ff28166320206bd0def60de3639b155e1798308b2",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:335",
+        "crates/fineprint-core/src/choice/mod.rs:158",
+        "crates/fineprint-core/src/choice/mod.rs:160",
+        "crates/fineprint-core/src/choice/request.rs:20",
+        "crates/fineprint-core/src/choice/request.rs:304",
+        "crates/fineprint-core/src/choice/request.rs:313",
         "docs/SRS.md:1130",
         "docs/SRS.md:1131",
         "docs/SRS.md:380",
@@ -3145,6 +3178,10 @@
     "601.2c": {
       "sha256": "a258cdfe57a0d317fbafc7acf8caee205cb0c71c4aa988052472580c4910558c",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:311",
+        "crates/fineprint-core/src/choice/mod.rs:162",
+        "crates/fineprint-core/src/choice/request.rs:243",
+        "crates/fineprint-core/src/choice/request.rs:326",
         "docs/SRS.md:1132",
         "docs/SRS.md:381",
         "docs/SRS.md:888"
@@ -3153,6 +3190,16 @@
     "601.2d": {
       "sha256": "6f9f37717e4f0594579bc0cf3fd938c7d56cc49deaa165c7c011400e46e38fbc",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:494",
+        "crates/fineprint-core/src/choice/generate.rs:62",
+        "crates/fineprint-core/src/choice/mod.rs:164",
+        "crates/fineprint-core/src/choice/request.rs:1136",
+        "crates/fineprint-core/src/choice/request.rs:333",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:238",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:356",
+        "crates/fineprint-core/tests/spec_choice_generate.rs:550",
+        "crates/fineprint-core/tests/spec_choice_threshold.rs:157",
+        "crates/fineprint-core/tests/spec_choice_validate.rs:189",
         "docs/SRS.md:1133",
         "docs/SRS.md:382"
       ]
@@ -3178,6 +3225,8 @@
     "601.2g": {
       "sha256": "2e1360bd5e7e13b76ca1eb35e53e1958252a84074b0d270c0d7c697834e5c24e",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:166",
+        "crates/fineprint-core/src/choice/request.rs:340",
         "docs/SRS.md:1134",
         "docs/SRS.md:385"
       ]
@@ -3185,6 +3234,8 @@
     "601.2h": {
       "sha256": "3861c49fd0e9430da791ab556875a1045abed83b6afa317d89b803f69de82f92",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:166",
+        "crates/fineprint-core/src/choice/request.rs:340",
         "docs/SRS.md:1000",
         "docs/SRS.md:1449",
         "docs/SRS.md:386",
@@ -3245,6 +3296,8 @@
     "603.3b": {
       "sha256": "81584e76d6cb11e4f87018ba5c6fc6b48a2351e003eae16d74a39745c909b22c",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:172",
+        "crates/fineprint-core/src/choice/request.rs:367",
         "docs/SRS.md:1137",
         "docs/SRS.md:214",
         "docs/SRS.md:459",
@@ -4052,6 +4105,8 @@
     "616.1": {
       "sha256": "19a6b02a0195116d862baa4c201d182df2474d09b91f3b94bd09abc8f6376720",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:176",
+        "crates/fineprint-core/src/choice/request.rs:377",
         "docs/SRS.md:1139",
         "docs/SRS.md:1206",
         "docs/SRS.md:423",
@@ -5395,6 +5450,9 @@
     "707.10c": {
       "sha256": "c3a057dc786440a23cb99d0517de92c1f5e44ae220bfd66f51f4574557b28ca1",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:162",
+        "crates/fineprint-core/src/choice/request.rs:252",
+        "crates/fineprint-core/src/choice/request.rs:326",
         "docs/SRS.md:1132",
         "docs/SRS.md:403"
       ]
@@ -6200,6 +6258,9 @@
     "712.16": {
       "sha256": "d2264b4f9d6a1a3f0bc6a6cbd9f5d4d27201372010a3c583e94755088c5625b0",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:420",
+        "crates/fineprint-core/src/choice/mod.rs:186",
+        "crates/fineprint-core/src/choice/request.rs:408",
         "docs/SRS.md:1144"
       ]
     },
@@ -6833,6 +6894,9 @@
     "723.5": {
       "sha256": "eee2582558a788c05bf6ac0e5f85eb50ea479bd2cf424adf060f7ab4aa390d31",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:420",
+        "crates/fineprint-core/src/choice/mod.rs:186",
+        "crates/fineprint-core/src/choice/request.rs:408",
         "docs/SRS.md:1144"
       ]
     },
@@ -7083,6 +7147,10 @@
     "731.3a": {
       "sha256": "2ea8c42473744bf08e3baad060c86ecff509d3dd42c3b1232e6ed7f885b7ecb8",
       "locations": [
+        "crates/fineprint-core/src/choice/generate.rs:469",
+        "crates/fineprint-core/src/choice/mod.rs:180",
+        "crates/fineprint-core/src/choice/request.rs:218",
+        "crates/fineprint-core/src/choice/request.rs:389",
         "docs/SRS.md:1141",
         "docs/SRS.md:125",
         "docs/SRS.md:186"
@@ -7129,6 +7197,8 @@
     "733.2b": {
       "sha256": "b8db5635621399e7e2b1d5bc8d5684752160aacf1bc6569c4af1ba1d59729246",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:190",
+        "crates/fineprint-core/src/choice/request.rs:415",
         "docs/SRS.md:1146",
         "docs/SRS.md:612"
       ]
@@ -7172,6 +7242,7 @@
     "734": {
       "sha256": "2b2e56c3b58a6b644f17a430aba50f679469af6983aff458b0530fdb37334ead",
       "locations": [
+        "crates/fineprint-core/src/choice/response.rs:121",
         "crates/fineprint-core/src/txn/game_state.rs:5",
         "crates/fineprint-core/src/txn/mod.rs:190",
         "crates/fineprint-core/src/txn/mod.rs:27",
@@ -7337,6 +7408,8 @@
     "800.4g": {
       "sha256": "af3b82c7f9ed5fa2f7c4cb864e5b60f1d81e4add60cc2febe571588b34c5edde",
       "locations": [
+        "crates/fineprint-core/src/choice/mod.rs:182",
+        "crates/fineprint-core/src/choice/request.rs:396",
         "docs/SRS.md:1142"
       ]
     },
