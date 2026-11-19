@@ -256,3 +256,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 4) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 81 passed; fmt, clippy, guard clean; bus.rs 95.62% | resolve_batch + single execute; survivor rule redirect > canonical > plan |
 | 03-events | #29 (PR #178 review round 4) | Independent Tester | Opus 5.5 | 1 | done | 152 spec tests pass; fmt, clippy, guard clean | spec_replacement_round4.rs; 10 of 15 fail on 12a5fc9 |
 | 03-events | #29 (PR #178 review round 4) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 4) | Verifier | Opus 5.5 | 1 | pass | d831418; CI green | round-4 head verified |
+| 03-events | #29 (PR #178 review round 5) | Investigator (P7 step 2) | Opus 5.5 | 1 | done | prototype + tests | repeat-defect area: holistic one-batch design for Instead lineages |
+| 03-events | #29 (PR #178 review round 5) | Fixer (src, tier-up attempt) | Opus 5.5 | 1 | done | replacement lib 96 passed; fmt, clippy, guard clean | one-batch resolution, reconcile, retired-id ignore (CR 614.6); K1-K5, N1-N3 |
+| 03-events | #29 (PR #178 review round 5) | Independent Tester | Opus 5.5 | 1 | done | 168 spec tests pass; fmt, clippy, guard clean | spec_replacement_round5.rs; C1/C2 re-specced (R10) |
+| 03-events | #29 (PR #178 review round 5) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |

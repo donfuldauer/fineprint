@@ -3787,8 +3787,11 @@ original. Whether an empty batch also appears in `BusReport::executed` is not as
 rollback when the copy step fails is provoked with a copied object id that does not exist; only
 `BusError::Event(_)` and an unchanged state are asserted, not the inner `EventError`.
 (13) F11/F4: an Untap of an untapped permanent and zero damage are asserted to leave the state
-completely unchanged and log nothing; Tap of a tapped permanent is not tested (brief: unchanged, no
-CR text).
+completely unchanged and log nothing; a Tap of a tapped permanent executing on its own is not
+tested (brief: unchanged, no CR text). Amended in review round 5 (C2): a Tap of a tapped permanent
+is submitted as the START of `req_event_001_override_effect_terminating_chain_applies_again` and is
+asserted to collect effects (it is replaced, so it never executes), as the decision "Events that
+would not happen offer no effects" states.
 (14) G1 (copy source, CR 608.2h, SRS 2.3): the entry copy succeeds when the original is destroyed in
 the SAME batch as the entering event, in both submission orders, for a zone-change entry and a
 token; the copy link is the original's (old) id and the original's executed move ends in a
@@ -3879,6 +3882,69 @@ held C: the card enters once, as a copy, with no `BecomeCopy` event executed or 
 application of C, C consumed, in both orders. This is the brief's reading, not a CR statement.
 Controls: both applied sets empty (one application, a copy); both holding C (no application, C
 kept, not a copy).
+(24) K2/K3/K5/E2/E3 (review round 5, CR 704.3, 614.6, 616.2; tests in
+`spec_replacement_round5.rs`): an `Instead` lineage is part of the ONE executed batch of the call
+whatever it descends from (a CR 704.7 group member, a singleton, an `sba = false` member, a
+grandchild of a nested lineage); "one batch" is asserted over the non-empty executed batches and
+the non-empty logged batches, the logged batch equal in canonical bytes to the reported one. The
+order inside the batch is asserted only where the brief states it: a non-move final event (a
+`RemoveCounters` child) precedes the surviving zone changes. A fully replaced group or singleton
+(its only result a counter removal) leaves the object on the battlefield and still shares the
+batch with the other object's move. E2: a child removing a counter from an object that moves in
+the same batch leaves that object's LKI at the pre-batch count (CR 704.8). K5 (reading Q3): the
+grandchild's `RemoveCounters` of a counter the object does not have is still replaced (nothing
+executes between generations); the variant whose grandchild moves to the group's own destination
+asserts only Ok, one move and the graveyard.
+(25) K4 (CR 615.5, 615.13, 122.1c, reading Q1: the CR is silent on simultaneous additional effects
+of prevention): K4 is not a defect. The group case (the damage to A is the `Instead` child of a
+group member) equals the plain batch [damage A, damage B]: the two follow-ups (1 damage to Q each)
+are one later batch and Q's shield removes ONE counter (2 -> 1). The inverse (a lineage damage to
+Q simultaneous with a submitted damage to Q) shares one removal too and reports the same
+`prevented` (2) as the control [damage Q, damage Q] in a fresh world. The prevention effects on A
+and B carry no shield. Follow-ups whose object was moved by the call's earlier batch (damage to X,
+a move of X) are asserted to be ignored (Ok, the earlier batch kept, the follow-up not executed,
+one non-empty batch); a follow-up naming a never-issued id fails with an unknown-object error at
+any event layer (`EventError::UnknownObject` or the zone, permanent or memory variant) and the call
+rolls back.
+(26) E1/E4 (CR 704.3, 704.7, 400.7): one object with several submitted destinations and no
+effects (two singletons; two groups; a group and a singleton) moves once, without error or
+rollback, in both the submitted and the reverse order, with equal report, registry bytes, state
+hash and zone. The test asserts only "one of {graveyard, exile}, the same for both orders".
+Observation (not asserted): with the round-5 implementation all three shapes put the card in the
+graveyard.
+(27) B3 (reading Q2: the CR is silent on one object moving twice in one simultaneous event): a
+move produced or redirected by a replacement (its final destination differs from its own submitted
+member's, or it descends from a member of another object) beats a plain submitted move. K2 (c)
+with `sba = false` (X's move replaced by a child exiling Y, Y's own move submitted) is therefore
+NOT a caller duplicate and succeeds; the `sba = false` failure for two SUBMITTED moves of one object
+(`req_event_001_r1_f2_no_coalescing_without_sba`) stays as (7) states. N1: of two entries hand to
+battlefield, one with cause Other and C already applied, the other with cause StateBasedAction and
+no applied effect, the Other move wins on canonical event content (the test checks first that
+`bytes` of the Other event sorts before the StateBasedAction one) and the losing move cannot supply
+its copy plan: no copy link on the new id, both orders equal. N2 strengthens
+`req_event_001_r4_j1_instead_child_same_destination`: the only executed move of X across all
+batches is the child `zone_change(X, Graveyard, Other)` (encoding precondition checked the same
+way). N3: a child starting at the group's destination and redirected to exile is a redirect by its
+FINAL destination and wins (exile, `applications` [e1, e2]).
+(28) C1 (clause B1; CR 614.6 "a modified event occurs instead", CR 704.3; REQ-EVENT-001
+"replacement-generated events re-enter the bus"): `req_event_001_executed_batches_parent_then_children`
+is corrected from three non-empty batches (Tap; life(P1, +1); life(P2, -1)) to ONE batch
+[life(P1, +1), life(P2, -1), Tap]: the damage's lineage (in the order the effect listed it, the
+Draw child replaced in place by life(P2, -1)) precedes the later member's Tap; the logged batch
+equals the reported one (bytes and index), the life totals and `applications` [1, 2] are kept.
+(29) C2 (clause B4, reading Q3; CR 614.6, 616.1f): `req_event_001_override_effect_applies_again_to_instead_child`
+keeps its scenario but now asserts `DepthExceeded` with the state unchanged: the lineage is judged
+against the pre-call state, so the overriding effect keeps matching its own child Tap (the charge
+counter is never removed between generations). Its old purpose (CR 614.5 override semantics) moves
+to `req_event_001_override_effect_terminating_chain_applies_again`: a tapped permanent, e1 (Tap ->
+Instead[Untap], overriding) and e2 (Untap -> Instead[Tap]): Ok, `applications` [e1, e2, e1], the
+permanent untapped, ONE batch holding exactly one Untap with applied set {e1, e2}.
+(30) B6 (CodeRabbit K1): separate results (different objects, separate groups) are scheduled in
+APNAP order then submission order and may compete for a one-use effect, and an object's new id and
+the batch order depend on the position of its move; so whole-run equality (report, registry bytes,
+world snapshot, canonical state, state hash, and a re-run) is asserted only between the two orders
+of ONE group's members, or of one object's two events, with every other event at the same position.
+Other reorderings (K2 b) assert only final zones and counts.
 **Rationale:** R10/R12 black-box discipline: assert exactly what the brief states; where it is
 silent, assert the reading every conforming implementation shares.
 **Alternatives:** Asserting empty batches in `executed`, the pool remainder through `get`, or a fixed
@@ -4103,7 +4169,10 @@ events that are not zone changes execute before the zone changes, which changes 
 are resolved in APNAP order, then submission order, and can compete for a one-use effect, so
 reversing the submission can change which object such an effect applies to (K1; documented).
 (f) "Instead, do A, then B" where B names a new object made by A cannot be expressed as
-`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit.
+`Instead(Vec)` (the lineage is judged against the pre-batch state); a later unit. (g) The
+impossible-instruction check for a later batch of one call looks only at the event's affected
+object: an event that names an object this call already moved in another role (a damage source,
+the `copied` object of a copy event) is not dropped and reaches the events layer as before.
 **Rationale:** (b) is rare (it needs an `Instead` on partly prevented damage); (e) follows from
 CR 616.1 (each object's choice is its own, choosers in APNAP order); (f) needs sequenced
 sub-events, outside this unit.
