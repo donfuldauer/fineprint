@@ -3638,13 +3638,15 @@
     "603.2h": {
       "sha256": "fb3d8b56cc584a989ce206956bf54b6244d998f5950d7ba10506c7341d13e12f",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:148",
-        "crates/fineprint-core/src/triggers/delayed.rs:186",
-        "crates/fineprint-core/src/triggers/delayed.rs:236",
-        "crates/fineprint-core/src/triggers/delayed.rs:300",
+        "crates/fineprint-core/src/triggers/delayed.rs:153",
+        "crates/fineprint-core/src/triggers/delayed.rs:191",
+        "crates/fineprint-core/src/triggers/delayed.rs:241",
+        "crates/fineprint-core/src/triggers/delayed.rs:272",
+        "crates/fineprint-core/src/triggers/delayed.rs:320",
         "crates/fineprint-core/src/triggers/delayed.rs:46",
-        "crates/fineprint-core/src/triggers/delayed.rs:51",
-        "crates/fineprint-core/src/triggers/delayed.rs:63",
+        "crates/fineprint-core/src/triggers/delayed.rs:52",
+        "crates/fineprint-core/src/triggers/delayed.rs:64",
+        "crates/fineprint-core/src/triggers/delayed.rs:91",
         "crates/fineprint-core/src/triggers/detect.rs:272",
         "crates/fineprint-core/src/triggers/detect.rs:346",
         "crates/fineprint-core/src/triggers/detect.rs:434",
@@ -3653,6 +3655,10 @@
         "crates/fineprint-core/src/triggers/stack_tests.rs:2123",
         "crates/fineprint-core/src/triggers/stack_tests.rs:2178",
         "crates/fineprint-core/src/triggers/stack_tests.rs:2209",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2254",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2273",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2290",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2343",
         "crates/fineprint-core/src/triggers/tests.rs:1232",
         "crates/fineprint-core/src/triggers/tests.rs:1235",
         "crates/fineprint-core/src/triggers/tests.rs:2123",
@@ -3674,7 +3680,15 @@
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:600",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:619",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:635",
-        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:656"
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:656",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:749",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:759",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:778",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:794",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:813",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:831",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:848",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:891"
       ]
     },
     "603.3": {
@@ -3845,11 +3859,12 @@
     "603.4": {
       "sha256": "7ac136f2293f3591b724c61d2685b75513470166d023c081682e87311b15c229",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:146",
-        "crates/fineprint-core/src/triggers/delayed.rs:171",
-        "crates/fineprint-core/src/triggers/delayed.rs:181",
-        "crates/fineprint-core/src/triggers/delayed.rs:223",
+        "crates/fineprint-core/src/triggers/delayed.rs:151",
+        "crates/fineprint-core/src/triggers/delayed.rs:176",
+        "crates/fineprint-core/src/triggers/delayed.rs:186",
+        "crates/fineprint-core/src/triggers/delayed.rs:228",
         "crates/fineprint-core/src/triggers/delayed.rs:47",
+        "crates/fineprint-core/src/triggers/delayed.rs:92",
         "crates/fineprint-core/src/triggers/detect.rs:341",
         "crates/fineprint-core/src/triggers/detect.rs:428",
         "crates/fineprint-core/src/triggers/detect.rs:6",
@@ -3992,12 +4007,12 @@
     "603.7": {
       "sha256": "a86d3aaab430d1a34d8476747e02512d20c7b252359c7617f0413f0085df3932",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:103",
-        "crates/fineprint-core/src/triggers/delayed.rs:146",
-        "crates/fineprint-core/src/triggers/delayed.rs:172",
-        "crates/fineprint-core/src/triggers/delayed.rs:224",
+        "crates/fineprint-core/src/triggers/delayed.rs:108",
+        "crates/fineprint-core/src/triggers/delayed.rs:151",
+        "crates/fineprint-core/src/triggers/delayed.rs:177",
+        "crates/fineprint-core/src/triggers/delayed.rs:229",
         "crates/fineprint-core/src/triggers/delayed.rs:5",
-        "crates/fineprint-core/src/triggers/delayed.rs:83",
+        "crates/fineprint-core/src/triggers/delayed.rs:84",
         "crates/fineprint-core/src/triggers/mod.rs:32",
         "crates/fineprint-core/src/triggers/place.rs:30",
         "crates/fineprint-core/src/triggers/stack_tests.rs:1711",
@@ -4027,9 +4042,9 @@
     "603.7a": {
       "sha256": "4ed83970e988b25f499d1d4f4ae51658f65a47e95ea7fb3cc7bfd4763926bf1f",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:103",
-        "crates/fineprint-core/src/triggers/delayed.rs:85",
-        "crates/fineprint-core/src/triggers/delayed.rs:87",
+        "crates/fineprint-core/src/triggers/delayed.rs:108",
+        "crates/fineprint-core/src/triggers/delayed.rs:86",
+        "crates/fineprint-core/src/triggers/delayed.rs:88",
         "crates/fineprint-core/src/triggers/stack_tests.rs:678",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:271"
       ]
@@ -4037,11 +4052,11 @@
     "603.7b": {
       "sha256": "3935e375677c97cf8e7977b005e7e22dd5f5e82668295abf6d66216153faecc5",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:113",
-        "crates/fineprint-core/src/triggers/delayed.rs:172",
-        "crates/fineprint-core/src/triggers/delayed.rs:196",
-        "crates/fineprint-core/src/triggers/delayed.rs:216",
-        "crates/fineprint-core/src/triggers/delayed.rs:263",
+        "crates/fineprint-core/src/triggers/delayed.rs:118",
+        "crates/fineprint-core/src/triggers/delayed.rs:177",
+        "crates/fineprint-core/src/triggers/delayed.rs:201",
+        "crates/fineprint-core/src/triggers/delayed.rs:221",
+        "crates/fineprint-core/src/triggers/delayed.rs:276",
         "crates/fineprint-core/src/triggers/stack_tests.rs:1742",
         "crates/fineprint-core/src/triggers/stack_tests.rs:1764",
         "crates/fineprint-core/src/triggers/stack_tests.rs:1789",
@@ -4049,6 +4064,9 @@
         "crates/fineprint-core/src/triggers/stack_tests.rs:2101",
         "crates/fineprint-core/src/triggers/stack_tests.rs:2123",
         "crates/fineprint-core/src/triggers/stack_tests.rs:2209",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2254",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2290",
+        "crates/fineprint-core/src/triggers/stack_tests.rs:2343",
         "crates/fineprint-core/src/triggers/stack_tests.rs:592",
         "crates/fineprint-core/src/triggers/stack_tests.rs:6",
         "crates/fineprint-core/src/triggers/stack_tests.rs:643",
@@ -4063,7 +4081,12 @@
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:563",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:600",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:619",
-        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:671"
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:671",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:749",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:759",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:848",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:866",
+        "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:876"
       ]
     },
     "603.7c": {
@@ -4076,9 +4099,9 @@
     "603.7d": {
       "sha256": "6504b972920fa015f5224c4923961275605304d9739da5eded0527f638f63647",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:105",
-        "crates/fineprint-core/src/triggers/delayed.rs:107",
-        "crates/fineprint-core/src/triggers/delayed.rs:321",
+        "crates/fineprint-core/src/triggers/delayed.rs:110",
+        "crates/fineprint-core/src/triggers/delayed.rs:112",
+        "crates/fineprint-core/src/triggers/delayed.rs:341",
         "crates/fineprint-core/src/triggers/place.rs:45",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:50"
       ]
@@ -4086,21 +4109,21 @@
     "603.7e": {
       "sha256": "9a19f669349ee261f797d2e9fb5ca2f1265df8a2aeaa554c3fa93dbe0dd7daaf",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:108",
-        "crates/fineprint-core/src/triggers/delayed.rs:321"
+        "crates/fineprint-core/src/triggers/delayed.rs:113",
+        "crates/fineprint-core/src/triggers/delayed.rs:341"
       ]
     },
     "603.7f": {
       "sha256": "19775a10cd6224c02cd361d72a49109cd5e5f0aa7bf914f0db98d34586488b83",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:110"
+        "crates/fineprint-core/src/triggers/delayed.rs:115"
       ]
     },
     "603.7g": {
       "sha256": "6ada26d1e1311463ee051d43d6d68b01e7858aeb1425446dd11494448f6ba1ba",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:105",
-        "crates/fineprint-core/src/triggers/delayed.rs:112",
+        "crates/fineprint-core/src/triggers/delayed.rs:110",
+        "crates/fineprint-core/src/triggers/delayed.rs:117",
         "crates/fineprint-core/src/triggers/place.rs:45",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:50"
       ]
@@ -4383,8 +4406,8 @@
     "603.12": {
       "sha256": "5b6dbaa669d6ca274673d71902ecc3604e230cf9ac11e4e5ce60f2ab5b889738",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:315",
-        "crates/fineprint-core/src/triggers/delayed.rs:322",
+        "crates/fineprint-core/src/triggers/delayed.rs:335",
+        "crates/fineprint-core/src/triggers/delayed.rs:342",
         "crates/fineprint-core/src/triggers/delayed.rs:6",
         "crates/fineprint-core/src/triggers/mod.rs:33",
         "crates/fineprint-core/src/triggers/place.rs:32",
@@ -4402,9 +4425,9 @@
     "603.12a": {
       "sha256": "4f3c134a8f04bac0fe5ba1e7f1820155cacccfa826735d8a3b561dc91e731ca9",
       "locations": [
-        "crates/fineprint-core/src/triggers/delayed.rs:315",
-        "crates/fineprint-core/src/triggers/delayed.rs:319",
-        "crates/fineprint-core/src/triggers/delayed.rs:320",
+        "crates/fineprint-core/src/triggers/delayed.rs:335",
+        "crates/fineprint-core/src/triggers/delayed.rs:339",
+        "crates/fineprint-core/src/triggers/delayed.rs:340",
         "crates/fineprint-core/src/triggers/stack_tests.rs:6",
         "crates/fineprint-core/src/triggers/stack_tests.rs:719",
         "crates/fineprint-core/tests/spec_triggers_stack_delayed.rs:691",
