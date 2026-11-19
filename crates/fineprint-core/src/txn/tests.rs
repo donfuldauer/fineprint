@@ -57,13 +57,15 @@ fn toy() -> Transactions<Toy> {
     })
 }
 
-/// A toy state whose `carry_durable` appends `after.log` minus `before.log` and counts its own
-/// calls in `carries` (reset by every rollback to the checkpoint's 0), so double application
-/// of a record is observable.
+/// A toy state whose `carry_durable` appends `after.log` minus `before.log`, counts its own
+/// calls in `carries` and records each call's `(before.log, after.log)` in `calls` (both reset
+/// by every rollback to the checkpoint's values), so double application of a step and the
+/// exact call arguments are observable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LogToy {
     log: Vec<i64>,
     carries: u32,
+    calls: Vec<(Vec<i64>, Vec<i64>)>,
 }
 
 impl Transactional for LogToy {
@@ -83,8 +85,9 @@ impl Transactional for LogToy {
     fn carry_durable(mut restored: LogToy, before: &LogToy, after: &LogToy) -> LogToy {
         restored
             .log
-            .extend_from_slice(&after.log[before.log.len()..]);
+            .extend_from_slice(after.log.get(before.log.len()..).unwrap_or_default());
         restored.carries += 1;
+        restored.calls.push((before.log.clone(), after.log.clone()));
         restored
     }
 }
@@ -93,7 +96,28 @@ fn log_toy() -> Transactions<LogToy> {
     Transactions::new(LogToy {
         log: Vec::new(),
         carries: 0,
+        calls: Vec::new(),
     })
+}
+
+/// Asserts that the `carry_durable` calls recorded in `s` form one contiguous, append-only
+/// history (each call starts where the previous one ended) whose appended values, in order,
+/// are exactly `effects`: every durable effect applied once, in time order.
+fn assert_applied_once_in_order(s: &LogToy, effects: &[i64]) {
+    let mut appended = Vec::new();
+    for pair in s.calls.windows(2) {
+        assert_eq!(
+            pair[0].1, pair[1].0,
+            "calls are not contiguous: {:?}",
+            s.calls
+        );
+    }
+    for (before, after) in &s.calls {
+        assert!(after.starts_with(before), "not append-only: {:?}", s.calls);
+        appended.extend_from_slice(&after[before.len()..]);
+    }
+    assert_eq!(appended, effects);
+    assert_eq!(s.log, effects);
 }
 
 fn game() -> GameState {
@@ -314,11 +338,126 @@ fn req_core_005_cr_734_1_durable_inside_durable_applied_once() {
     let b = t.checkpoint();
     t.state_mut().log.push(8);
     t.commit_durable(b).unwrap();
-    // A's window is [] -> [7, 8]; it already contains B's change, so B's record is dropped.
+    // A's window [] -> [7, 8] is kept as its steps in time order: A's own push of 7, then B's
+    // push of 8; each applied once (not [7, 8, 8]).
     t.commit_durable(a).unwrap();
     t.rollback(root).unwrap();
-    assert_eq!(t.state().log, vec![7, 8]);
-    assert_eq!(t.state().carries, 1);
+    assert_applied_once_in_order(t.state(), &[7, 8]);
+    // B's step is carried with exactly its own arguments (B's checkpoint, live at its commit).
+    assert!(t.state().calls.contains(&(vec![7], vec![7, 8])));
+}
+
+/// REQ-CORE-005, CR 734.1: an append-only nest of plain, durable and rolled-back frames; every
+/// durable effect beneath the root is applied exactly once, in time order (no duplication).
+#[test]
+fn req_core_005_cr_734_1_nested_append_only_each_effect_applied_once() {
+    // A committed plainly around a durable B that holds a durable C.
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(1);
+    let b = t.checkpoint();
+    t.state_mut().log.push(2);
+    let c = t.checkpoint();
+    t.state_mut().log.push(3);
+    t.commit_durable(c).unwrap();
+    t.state_mut().log.push(4);
+    t.commit_durable(b).unwrap();
+    t.state_mut().log.push(5);
+    t.commit(a).unwrap();
+    t.state_mut().log.push(6);
+    t.rollback(root).unwrap();
+    assert_applied_once_in_order(t.state(), &[2, 3, 4]);
+
+    // The same nest with A rolled back, then more work, then the root rolled back.
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(1);
+    let b = t.checkpoint();
+    t.state_mut().log.push(2);
+    let c = t.checkpoint();
+    t.state_mut().log.push(3);
+    t.commit_durable(c).unwrap();
+    t.state_mut().log.push(4);
+    t.commit_durable(b).unwrap();
+    t.state_mut().log.push(5);
+    t.rollback(a).unwrap();
+    assert_applied_once_in_order(t.state(), &[2, 3, 4]);
+    t.state_mut().log.push(6);
+    let d = t.checkpoint();
+    t.state_mut().log.push(7);
+    t.commit_durable(d).unwrap();
+    t.rollback(root).unwrap();
+    // After A's rollback, B's steps went up to the root; D's step follows them.
+    assert_eq!(t.state().log, vec![2, 3, 4, 7]);
+    assert_eq!(t.state().carries, 4);
+    assert_eq!(
+        t.state().calls.last(),
+        Some(&(vec![2, 3, 4, 6], vec![2, 3, 4, 6, 7]))
+    );
+}
+
+/// REQ-CORE-005, CR 734.1: several durable children directly under the rolled-back frame, with
+/// plainly committed work between them: one `carry_durable` call per durable child, with
+/// exactly (child checkpoint, live state at its durable commit), in commit order.
+#[test]
+fn req_core_005_cr_734_1_flat_durable_children_carried_with_exact_arguments() {
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    t.state_mut().log.push(1);
+    let c1 = t.checkpoint();
+    t.state_mut().log.push(2);
+    t.commit_durable(c1).unwrap();
+    let plain = t.checkpoint();
+    t.state_mut().log.push(3);
+    t.commit(plain).unwrap();
+    let c2 = t.checkpoint();
+    t.state_mut().log.push(4);
+    t.commit_durable(c2).unwrap();
+    t.state_mut().log.push(5);
+    t.rollback(root).unwrap();
+    assert_eq!(t.state().log, vec![2, 4]);
+    assert_eq!(t.state().carries, 2);
+    assert_eq!(
+        t.state().calls,
+        vec![(vec![1], vec![1, 2]), (vec![1, 2, 3], vec![1, 2, 3, 4])]
+    );
+}
+
+/// REQ-CORE-005, CR 734.1: plain commits with nothing durable beneath them leave nothing to
+/// carry: the root's rollback restores its checkpoint, and a later durable sibling is carried
+/// with exactly its own arguments.
+#[test]
+fn req_core_005_cr_734_1_plain_commits_without_durable_carry_nothing() {
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(1);
+    let b = t.checkpoint();
+    t.state_mut().log.push(2);
+    t.commit(b).unwrap();
+    t.commit(a).unwrap();
+    assert_eq!(t.state().log, vec![1, 2]);
+    t.state_mut().log.push(3);
+    let r = t.rollback(root).unwrap();
+    assert_eq!(*t.state(), log_toy().into_state().unwrap());
+    assert_eq!(r.state_hash, t.state().state_hash());
+
+    let mut t = log_toy();
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    t.state_mut().log.push(1);
+    let b = t.checkpoint();
+    t.state_mut().log.push(2);
+    t.commit(b).unwrap();
+    t.commit(a).unwrap();
+    let c = t.checkpoint();
+    t.state_mut().log.push(3);
+    t.commit_durable(c).unwrap();
+    t.rollback(root).unwrap();
+    assert_eq!(t.state().log, vec![3]);
+    assert_eq!(t.state().calls, vec![(vec![1, 2], vec![1, 2, 3])]);
 }
 
 #[test]
@@ -728,6 +867,67 @@ fn req_core_005_advance_stops_when_issue_fails() {
         |s| s.issue_card_id().is_ok(),
     );
     assert_eq!(restored.ids().card.last_issued(), 2);
+}
+
+fn counter_x(s: &GameState) -> i64 {
+    s.player(PlayerId::new(P1)).unwrap().counter("test.x")
+}
+
+fn set_counter_x(t: &mut Transactions<GameState>, n: i64) {
+    t.state_mut()
+        .player_mut(PlayerId::new(P1))
+        .unwrap()
+        .set_counter("test.x", n);
+}
+
+/// REQ-CORE-005, CR 734.1: the counter carry clamps at zero, so durable effects nested in a
+/// durable frame are carried step by step, not as one net pair. Root checkpoint 1; root sets
+/// 5; inside durable A, durable C1 removes all 5 (-> 0) and durable C2 adds 5 (-> 5). After the
+/// root's rollback: clamp(1 - 5) = 0, then + 5 = 5. One net pair (5 -> 5) would leave 1.
+#[test]
+fn req_core_005_cr_734_1_nested_durable_counter_carried_step_by_step() {
+    let mut base = game();
+    base.player_mut(PlayerId::new(P1))
+        .unwrap()
+        .set_counter("test.x", 1);
+    let mut t = Transactions::new(base);
+    let root = t.checkpoint();
+    set_counter_x(&mut t, 5);
+    let a = t.checkpoint();
+    let c1 = t.checkpoint();
+    set_counter_x(&mut t, 0);
+    t.commit_durable(c1).unwrap();
+    let c2 = t.checkpoint();
+    set_counter_x(&mut t, 5);
+    t.commit_durable(c2).unwrap();
+    t.commit_durable(a).unwrap();
+    assert_eq!(counter_x(t.state()), 5);
+    t.rollback(root).unwrap();
+    assert_eq!(counter_x(t.state()), 5);
+    assert_eq!(t.depth(), 0);
+}
+
+/// REQ-CORE-005, CR 734.1: a rolled-back child X with a durable grandchild G breaks the
+/// continuity of its parent's history. A checkpoint 0; X: +2, durable G 2 -> 7, +1; X rolls
+/// back (live = 0 + 5 = 5); A commits durably; the root's rollback gives 5, not 7 (filling the
+/// gap from G's end to A's commit would replay what X's rollback reversed).
+#[test]
+fn req_core_005_cr_734_1_durable_after_rolled_back_child_not_replayed() {
+    let mut t = Transactions::new(game());
+    let root = t.checkpoint();
+    let a = t.checkpoint();
+    let x = t.checkpoint();
+    set_counter_x(&mut t, 2);
+    let g = t.checkpoint();
+    set_counter_x(&mut t, 7);
+    t.commit_durable(g).unwrap();
+    set_counter_x(&mut t, 8);
+    t.rollback(x).unwrap();
+    assert_eq!(counter_x(t.state()), 5);
+    t.commit_durable(a).unwrap();
+    assert_eq!(counter_x(t.state()), 5);
+    t.rollback(root).unwrap();
+    assert_eq!(counter_x(t.state()), 5);
 }
 
 #[test]
