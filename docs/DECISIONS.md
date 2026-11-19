@@ -3788,11 +3788,14 @@ all contained.
 **Decision:** (Review round 1, F2/F5; replaces the round 0 rule.) With `sba = true` only
 `ZoneChange` members merge. Members form a group when they have the same affected object and the
 same destination (`request.to`) at collection time: the same object and the same kind of result.
-The group is the first member in submission order: it makes one collection and one choice (asked
-of that object's chooser; no request if the choosable set has one effect), the chosen effect is
-applied once, consumes one shield use, appears once in `BusReport::applications`, and the group
-is executed as one event (the first member's modified event). The other members are dropped: not
-executed, not logged. Members for different objects never merge, whether or not they share kind,
+(Review round 2, F2.) The group keeps the position of its first member in submission order (for
+APNAP and execution order), but its event and applied set are those of the member whose pair
+(canonical encoding of its `GameEvent`, canonical encoding of its `AppliedEffects`) is the
+lexicographic minimum; exact ties are identical and interchangeable. The group makes one
+collection and one choice (asked of that object's chooser; no request if the choosable set has
+one effect), the chosen effect is applied once, consumes one shield use, appears once in
+`BusReport::applications`, and the group is executed as one event (the content-chosen member's
+modified event). The other members are dropped: not executed, not logged. Members for different objects never merge, whether or not they share kind,
 candidate set or chooser; each is processed on its own (own request if it has two or more
 candidates, own application, own shield use) in APNAP and submission order. Non-`ZoneChange`
 events never merge. With `sba = false` nothing merges and equal duplicate moves are not coalesced
@@ -3805,11 +3808,19 @@ replacement effect will replace all of them." The CR text does not define the ke
 result"; per R8 this is a judgement call: same object and same destination is the narrowest
 reading that covers the lethal-damage-plus-deathtouch case, and CR 616.1 makes each affected
 object's choice its own, so different permanents are distinct results (the round 0 rule merged
-them and let one shield use exile several permanents).
+them and let one shield use exile several permanents). The survivor rule is determinism by
+content (R3, REQ-CORE-001): the result of a batch must not depend on submission order within a
+group, and the property tests assert insertion-order independence. The rule is an engine choice,
+not a statement about the CR: the CR was not consulted on which cause (for example `Destroy` or
+`StateBasedAction`) should prevail, and none is claimed.
 **Alternatives:** Grouping by kind, candidate set and chooser (round 0; rejected in review:
 different permanents are not the same result); deduplicating by event kind or destination alone
 (rejected: merges different objects); merging only equal events (rejected: a cause difference
-such as lethal damage versus deathtouch would keep two moves of one object).
+such as lethal damage versus deathtouch would keep two moves of one object); keeping the first
+submitted member (round 1; rejected in round 2: submission order changed which cause-sensitive
+replacement applied); a precedence among causes (rejected: not settled by the supplied rules
+text; a rules question if it is wanted); the union of the members' applied sets (rejected: it
+would apply CR 614.5 to the history of an event that did not happen).
 ## #29 FP-028 — Known limitation: CR 704.7 merging only within one event kind
 
 **Decision:** CR 704.7 merging here covers only `ZoneChange` events of the same object to the same
@@ -3876,11 +3887,10 @@ review: exponential growth); a time budget (rejected: R3/R7, not deterministic).
 `ReplacementEffect` (the registry encoding is built from them; zone kinds use their one-byte tag).
 The request's enumerated options are `ChoiceOption::Number(i)` for each index `i` of the payload's
 effect list, `min = max = 1`, `reveal_to` empty. `BusReport::executed` lists only batches in which
-an event occurred (as the event log does). `EntersAsCopyOf` emits its `BecomeCopy` only when the
-executed event's outcome is a token creation or a zone change into the battlefield from another
-zone; review round 1 (F6) executes that copy directly, as its own executed batch right after the
-entry batch, with no replacement collection (see "Enters-as-copy is applied atomically after
-entry; the true same-event entry is deferred"). `SetDestination` keeps the rest of the request,
+an event occurred (as the event log does). `EntersAsCopyOf` takes effect only when the executed
+event's outcome is a token creation or a zone change into the battlefield from another zone;
+review round 2 (G1/F6) sets the copy link as part of that entering event, with no replacement
+collection (see "Enters-as-copy is applied as part of the entry event"). `SetDestination` keeps the rest of the request,
 except that review round 1 (F9) clears the controller when the new zone is neither the
 battlefield nor the stack (only those zones take a controller, CR 109.4; `Zones` rejects the
 combination with `ControllerNotApplicable`). Review round 1 (F7) adds `pub const
@@ -3896,9 +3906,9 @@ procedures use `?`; the encodings make the registry hashable.
 **Decision:** (Review round 1, F1.) An event produced by `Action::Instead` is the modified event
 that replaces its parent: it carries the parent's applied set as it stands after that
 application, the applying effect included. Events that are independent new events start with an
-empty applied set: `Prevent { then }` follow-ups, the copy of an enters-as-copy entry, and every
-member of the submitted batch (history is per batch member, never shared). `overrides_614_5`
-effects still apply again.
+empty applied set: `Prevent { then }` follow-ups and every member of the submitted batch (history
+is per batch member, never shared). An enters-as-copy is not an event: its copy link is set as
+part of the entering event. `overrides_614_5` effects still apply again.
 **Rationale:** CR 614.5: a replacement effect "gets only one opportunity to affect an event or any
 modified events that may replace that event"; CR 614.6: a replaced event never happens and the
 modified event occurs instead. With fresh sets two effects that replace each other's output
@@ -3925,51 +3935,156 @@ rules question settles it).
 
 ## #29 FP-028 — Pool prevention is allocated by the affected player
 
-**Decision:** (Review round 1, F8.) Before any member of a batch is processed, for each
-`Shield::Pool` effect P (ascending `EffectId`) and each chooser (APNAP order) the bus collects the
-eligible members: `Damage` members of that chooser with `source = Some(_)`, amount > 0, matched
-by P as submitted, without P in their applied set. If they come from at least two distinct
-sources and their amounts sum to more than P's remaining pool, the chooser is asked once with the
-existing `DIVIDE_VALUE` choice (no change to `choice/`): total = the remaining pool, recipients =
-the sources in ascending `ObjectId` order with minimum 0, `min = max` = the number of
-recipients, options `ChoiceOption::Object` per source, reason `CR 615.7`, default the whole pool
-to the first recipient. These requests come before every other request of the batch. The answer
-is an allotment per source: when P applies to an eligible member it prevents the minimum of the
-source's unused allotment, the member's damage and the pool left; the rest is dealt. Events of
-one source use its allotment in submission order. A member whose source's allotment is used up
-(or was 0) is not offered P at all, so it records no application. An allotment above the
-source's damage stays in the shield. Sourceless damage is not in the table and draws on the pool
-in order, as before; with one source, or a pool that covers all eligible damage, nothing is
-asked. `Shield::Uses` shields are unchanged. Known limitations: the allotment table is built
-from the events as submitted, so when P only becomes applicable after another effect modified
-the event, the member has no allotment entry and the sequential drawing applies; and the grouping
-is per chooser, not per shielded object or player.
+**Decision:** (Review round 1, F8; amended in review round 2, G2 and G4.) The allocation is made on
+the damage as it stands when the shield applies. Each member's resolve loop is resumable: a member
+stops immediately before it would apply a `Shield::Pool` effect P not yet allocated for it (after
+any `CHOOSE_REPLACEMENT_EFFECT` that selected P, or when P is the single candidate of its tier),
+and nowhere else. Phase A: every member, in APNAP order, runs until it stops or finishes. Phase B:
+for the lowest `EffectId` pool among stopped members, the stopped members of that pool are
+grouped by chooser (APNAP order of choosers); for each group in turn the bus builds the table
+from the members' CURRENT events: eligible members are the group's `Damage` events with
+`source = Some(_)`, current amount > 0, matched by P now. If they come from at least two
+distinct sources and their total exceeds what is left of P's pool, the chooser is asked once
+with the existing `DIVIDE_VALUE` choice (no change to `choice/`): total = the remaining pool,
+recipients = the sources in ascending `ObjectId` order with minimum 0, `min = max` = the number
+of recipients, options `ChoiceOption::Object` per source, reason `CR 615.7`. Otherwise nothing is
+asked and P applies in order. Phase C: P is applied to that group's members in APNAP order, each
+running on until its next stop or finish; then the next group, and Phase B repeats while any
+member is stopped (a member reaching another pool joins that pool's group; a new table for the
+same pool and chooser replaces the old one). Caps (G4): `cap(s)` is the sum of the current
+amounts of source s's eligible members; the allotment total is min(remaining pool, total
+eligible damage), and a request is made only when the total exceeds the pool, so the shares sum
+to the pool. The bus rejects an answer whose share for a source exceeds its cap with
+`BusError::Choice(ChoiceError::Procedure(..))` naming the source and its cap (the call fails and
+everything rolls back), after the choice layer's own validation; the timeout default fills the
+sources in ascending `ObjectId` order, each up to its cap, until the pool is used (pool 4 with
+A:3, B:2 gives (A:3, B:1)). When P applies to a member in the table it prevents the minimum of
+the source's unused allotment, the member's current damage and the pool left; events of one
+source use its allotment in APNAP and submission order. A member whose source's allotment is used
+up or 0 is not given P (no application) and continues; this includes a member that chose P over
+another effect and then finds its allotment 0. Sourceless damage is not in the table and draws on
+the pool in order. With valid answers every point of the pool is used by the batch whenever the
+eligible damage allows it, so a batch that asked for an allocation leaves the pool drained and P
+removed from the registry. Request order: the `DIVIDE_VALUE` request comes after every request
+members make before reaching the pool (for example the active player's unrelated
+`CHOOSE_REPLACEMENT_EFFECT` in the same batch) and before any request made after the pool is
+applied. `Shield::Uses` shields are unchanged. Known limitations: a pool can keep points when the
+total eligible damage was below it, or when a modification applied after the allocation (in
+Phase C) changed the damage; the grouping is per chooser, not per shielded object or player; a
+member that chose P and finds its allotment 0 continues without it.
 **Rationale:** CR 615.7: "If damage would be dealt to the shielded permanent or player by two or
 more applicable sources at the same time, the player or the controller of the permanent chooses
-which damage the shield prevents. ... Such effects count only the amount of damage; the number of
-events or sources dealing it doesn't matter." In round 0 the submission order made that choice.
-Not offering P to a member with no allotment left makes the answers (A:3, B:0) and (A:0, B:3)
-exact mirrors.
+which damage the shield prevents. Once the shield has been reduced to 0, any remaining damage is
+dealt normally. Such effects count only the amount of damage; the number of events or sources
+dealing it doesn't matter." CR 616.1f: "Once the chosen effect has been applied, this process is
+repeated (taking into account only replacement or prevention effects that would now be
+applicable) until there are no more left to apply." CR 616.2: "A replacement or prevention
+effect can become applicable to an event as the result of another replacement or prevention
+effect that modifies the event." So the division is decided on the damage after earlier
+modifications, and whether a same-tier modification or the shield goes first is the chooser's
+CR 616.1e choice. Damage is dealt normally only once the shield is 0, so a share above its
+source's damage must not leave the shield with points while damage is dealt: capping is the
+correction chosen. The DIVIDE_VALUE payload carries only per-recipient minimums, so the maximum
+is enforced by the bus. In round 0 the submission order made the choice; in round 1 the table
+was fixed before any modification.
 **Alternatives:** Asking per event (rejected: the shield counts amounts, not events); a new choice
-type (rejected: `DIVIDE_VALUE` already validates a division).
+type (rejected: `DIVIDE_VALUE` already validates a division); one allocation before any member is
+resolved (round 1; rejected in round 2: modifications changed the damage after the table was
+fixed); a lazy check at the pool's first application (rejected: an earlier member draws on the
+pool before a later member's modifications exist); redistributing an unused allotment to the
+remaining damage (rejected for the cap, which keeps the answer exactly what the player chose);
+adding a per-recipient maximum to `choice/` (outside this unit).
 
-## #29 FP-028 — Enters-as-copy is applied atomically after entry; the true same-event entry is deferred
+## #29 FP-028 — Enters-as-copy is applied as part of the entry event
 
-**Decision:** (Review round 1, F6.) `Modification::EntersAsCopyOf` no longer queues a
-`BecomeCopy` child for replacement processing. The copy is executed directly right after the
-entry batch, as its own executed batch (`BusReport::executed` shows the entry batch, then the
-`BecomeCopy` batch with the new object id and an empty applied set), with no replacement
-collection, so a separate effect on `BecomeCopy` cannot undo it. If the copy step fails, the
-whole call rolls back. A `BecomeCopy` submitted on its own (a genuine post-entry copy) still goes
-through replacement. The true same-event entry, where the object is a copy as it enters and the
-ETB look-ahead sees the copied values, needs changes in `events/` and `zones/` outside this unit
-and is deferred to #40 FP-039 / #38 FP-037.
-**Rationale:** CR 614.1c makes "enters as" effects replacement effects; CR 603.6d: such an effect
-"occurs as part of the event that puts the permanent onto the battlefield"; CR 616.1c ranks
-enter-as-copy effects; CR 614.12a: a choice for an enter-modifying effect is made before the
-permanent enters. Running the copy through the bus let a second effect skip it.
-**Alternatives:** Keeping the copy as a bus child (round 0; rejected in review); changing the
-executor so the entry and the copy are one event (outside the owned paths; deferred).
+**Decision:** (Review round 1, F6; replaced in review round 2, G1/F6.) `Modification::EntersAsCopyOf`
+does not queue a `BecomeCopy` child and is not routed through replacement collection, so nothing
+can skip it. The bus executes the surviving events with
+`EventContext::execute_batch_with_entry_copies`, which sets the new object's copy link
+(`copy_of(new) == Some(copied)`) inside the entering event's own execution, in the one executed
+batch of the entry, before the next event of the batch and before the batch is logged:
+`BusReport::executed` and the event log show one batch for the entry, holding the entering event
+and no `BecomeCopy` event. The round 1 separate `BecomeCopy` batch is withdrawn. The source is
+taken from its current information while it is in a zone, or from its last known information
+when it left earlier in the same batch (LKI captured before the batch's moves) or in an earlier
+call; the copy, and the whole call, fails with `UnknownObject` only when the source never existed
+(no zone record and no LKI). A source that leaves later in the same batch is still in its zone
+when the copy is set. `copy_of` may therefore name a retired id; resolving the copiable values
+through `memory::information_for` / `LkiStore` belongs to the layer unit (#40 FP-039 / #38
+FP-037) and is not implemented here. A `BecomeCopy` submitted on its own (a genuine post-entry
+copy) still goes through replacement and stays strict. The CR 614.12 ETB look-ahead (projected
+characteristics for other replacement effects) is still deferred to #40 FP-039 / #38 FP-037.
+**Rationale:** CR 707.5: an object that enters "as a copy" "becomes a copy as it enters the
+battlefield. It doesn't enter the battlefield, and then become a copy of that permanent." CR
+603.6d: such an effect occurs as part of the event that puts the permanent onto the battlefield;
+CR 614.1c makes "enters as" effects replacement effects; CR 616.1c ranks enter-as-copy effects;
+CR 614.12a: a choice for an enter-modifying effect is made before the permanent enters. CR 707.2:
+the copy takes the copiable values of the original. CR 608.2h and SRS 2.3 (REQ-CORE-003): an
+effect that needs information about an object that left its zone uses its last known
+information; in round 1 a source destroyed in the same call made the copy fail.
+**Alternatives:** The round 1 separate copy batch right after the entry batch (rejected in round
+2: the permanent existed for one executed batch as a non-copy, which CR 707.5 forbids); a
+`BecomeCopy` child through the bus (round 0; rejected in round 1: another effect could skip it).
+
+## #29 FP-028 — Scope note: enters-as-copy is part of the entry, through a new events entry point
+
+**Decision:** (Review round 2, G1/F6.) The bus sets an enters-as-copy link through one new,
+additive public method in `events/exec.rs`:
+`EventContext::execute_batch_with_entry_copies(&mut self, batch: &EventBatch, copies: &[(usize,
+ObjectId)]) -> Result<ExecutedBatch, EventError>`, each pair being (index into `batch.events()`
+of an entering event, copied object). It has exactly the semantics of `execute_batch` (planning
+run, LKI capture before any move of the batch, all-or-nothing, one logged `ExecutedBatch` iff an
+event occurred) plus, in the real run only, the copy link set right after a listed event that put
+an object onto the battlefield; the copied object must have a zone record or an LKI record (the
+planning run does not check, as LKI for same-batch departures does not exist there yet).
+`execute_batch` keeps its signature and behaviour and delegates with an empty list; `execute`
+is unchanged. A standalone `GameEvent::BecomeCopy` stays strict: `UnknownObject` for a copied
+object with no zone record, even when an LKI record exists. The method is used only by the bus.
+This is not a P3 contract change and no R2 request was filed: the P3 contract list (state model,
+canonical state hash, choice protocol and the others) does not include `EventContext`'s method
+set; no signature, `GameEvent` / `EventState` / `EventLog` encoding, state hash or replay format
+changes. Editing `events/exec.rs` is an R1 exception granted by the work item for this one
+additive method (and its unit test in `events/tests.rs`).
+**Rationale:** CR 707.5 forbids entering and then becoming a copy, so the link must be written
+inside the entering event's execution; the bus alone cannot do it, because `set_copy` is
+`pub(super)` to `events` and the link is only written by the executor, and a separate executed
+batch is exactly what CR 707.5 rules out. Loosening `become_copy` to accept LKI was rejected:
+`LkiStore` is never purged, so any long-departed id would become a valid standalone copy source.
+CR 608.2h and SRS 2.3 supply the LKI fallback for the source.
+**Alternatives:** Loosening `become_copy` (rejected, above); a `BecomeCopy` batch after the entry
+(round 1; rejected, CR 707.5); a new `GameEvent` variant or a field on `ZoneChange` /
+`CreateToken` (rejected: a P3 encoding and replay change).
+
+## #29 FP-028 — One prevention follow-up per effect and recipient per batch
+
+**Decision:** (Review round 2, G3; an R8 judgement.) Within one bus batch (one simultaneous batch
+of members; child batches are separate), a prevention effect without a shield
+(`effect.shield.is_none()`) whose action is `Prevent { then }` queues its `then` follow-up events
+once per key (effect id, affected object, affected player), however many simultaneous damage
+events to that recipient it prevents. Every one of those damage events is still fully prevented
+and counted in `BusReport::prevented`. This applies to every shield-less `Prevent { then }`
+effect, not only shield counters: a generic effect that prevents damage to one player from two
+simultaneous sources and then gains life queues its life gain once. `Shield::Uses` and
+`Shield::Pool` effects are unchanged (they count their own consumption and queue a follow-up per
+application). A later batch, a later call and a child batch each start with a fresh set, so
+separate damage batches remove separately. The work budget is charged only for follow-ups
+actually queued. `BusReport::applications` still lists the effect once per prevented damage event
+(each executed or prevented event's applied set contains it, and the field is "every application
+of an effect"); only the follow-up is grouped. The CR 704.7 merge and the pool and uses
+accounting are unchanged.
+**Rationale:** CR 122.1c: "One or more shield counters on a permanent create a single replacement
+effect and a single prevention effect that protect the permanent", whose prevention half is "If
+damage would be dealt to this permanent, prevent that damage and remove a shield counter from it."
+CR 615.13 speaks of a prevention effect being "applied to one or more simultaneous damage events",
+which treats one application as covering simultaneous damage. Without the grouping, each
+simultaneous damage event saw the counter before the queued removals ran and two counters were
+removed for one simultaneous strike. The counter-argument, CR 615.10's per-event wording, is
+limited to fixed-amount prevention. The CR does not settle the question; this is the
+better-supported reading, recorded as an R8 judgement.
+**Alternatives:** One follow-up per damage event (round 1; rejected in round 2: two counters for
+one simultaneous strike); grouping only counter-backed effects (rejected: a matcher-specific rule
+the bus would have to special-case); reporting one application per group (rejected: the applied
+sets of the prevented events each contain the effect).
 
 ## #29 FP-028 — Tiers are declarative data
 
