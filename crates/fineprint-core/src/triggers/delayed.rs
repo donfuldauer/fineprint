@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{ObjectId, PlayerId};
-use fineprint_dsl::ability::TriggeredAbilityAST;
+use fineprint_dsl::ability::{ActivationLimit, TriggeredAbilityAST};
 
 use super::detect::{TriggerEnv, TriggerRegistration, WaitingTrigger};
 use super::event::EventField;
@@ -43,6 +43,41 @@ struct Delayed {
     ability: TriggeredAbilityAST,
     captured: BTreeMap<String, EventField>,
     one_shot: bool,
+    /// The trigger-limit counters of this instance (CR 603.2h), counted by
+    /// [`DelayedTriggers::take_triggered`] after the intervening "if" passed (CR 603.4).
+    counts: LimitCounts,
+}
+
+/// The trigger-limit counters of one delayed triggered ability (CR 603.2h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LimitCounts {
+    /// The turn `this_turn` was last counted for; `None` before the first triggering.
+    turn: Option<u64>,
+    /// Triggerings during `turn`.
+    this_turn: u32,
+    /// Triggerings this game.
+    this_game: u32,
+}
+
+impl LimitCounts {
+    /// Counts one triggering in `turn` if `limit` allows it (CR 603.2h); false, with nothing
+    /// counted, if the limit is reached.
+    fn try_count(&mut self, limit: &ActivationLimit, turn: u64) -> bool {
+        let this_turn = if self.turn == Some(turn) {
+            self.this_turn
+        } else {
+            0
+        };
+        if limit.per_turn.is_some_and(|n| this_turn >= n)
+            || limit.per_game.is_some_and(|n| self.this_game >= n)
+        {
+            return false;
+        }
+        self.turn = Some(turn);
+        self.this_turn = this_turn.saturating_add(1);
+        self.this_game = self.this_game.saturating_add(1);
+        true
+    }
 }
 
 /// The registered delayed triggered abilities (REQ-EVENT-002, CR 603.7).
@@ -94,6 +129,7 @@ impl DelayedTriggers {
                 ability,
                 captured,
                 one_shot,
+                counts: LimitCounts::default(),
             },
         );
         DelayedTriggerId(id)
@@ -104,11 +140,14 @@ impl DelayedTriggers {
     /// replaced by `delayed#<n>` so every delayed instance is distinct (docs/DECISIONS.md,
     /// "#30 FP-029 CR round 1" item 1).
     ///
-    /// Each listed ability has its intervening "if" removed (`intervening_if` is `None`).
-    /// [`detect`](super::detect) checks an intervening "if" with the event's bindings only, but a
-    /// delayed trigger's condition must see the bindings it captured when it was created
-    /// (CR 603.4, CR 603.7). [`DelayedTriggers::take_triggered`] checks the stored condition
-    /// instead, with the captured bindings applied.
+    /// Each listed ability has its intervening "if" and its trigger limit removed
+    /// (`intervening_if` and `limit` are `None`). [`detect`](super::detect) checks an
+    /// intervening "if" with the event's bindings only, but a delayed trigger's condition must
+    /// see the bindings it captured when it was created (CR 603.4, CR 603.7).
+    /// [`DelayedTriggers::take_triggered`] checks the stored condition instead, with the
+    /// captured bindings applied, and only then the stored limit (CR 603.2h), so that an event
+    /// that fails the condition neither uses up the limit nor suppresses a later event that
+    /// passes it. Detect therefore never keeps limit counters in Memory for a delayed ability.
     #[must_use]
     pub fn registrations(&self) -> Vec<TriggerRegistration> {
         self.entries
@@ -139,7 +178,16 @@ impl DelayedTriggers {
     /// for that element ([`StateView::PreEvent`] if `look_back` is set, else
     /// [`StateView::PostEvent`]), for a registration whose ability id is `delayed#<n>` (as in
     /// [`DelayedTriggers::registrations`], which leaves the condition to this method). A false
-    /// condition drops the element: it does not trigger (CR 603.4).
+    /// condition drops the element: it does not trigger (CR 603.4), and nothing is counted.
+    ///
+    /// Then, if the stored ability has a `limit`, the element is checked against this
+    /// registration's own counters for `turn`, the turn number the limit counters are kept for
+    /// (the same value the caller passes to [`detect`](super::detect)): it is dropped if the
+    /// per-turn or per-game count has reached the limit, otherwise counted (CR 603.2h). The
+    /// limit is enforced here, after the condition, rather than by detect, so that an element
+    /// that fails its condition neither consumes the limit nor suppresses a later passing
+    /// element. Elements are counted in input order. A dropped element does not consume a
+    /// one-shot registration.
     ///
     /// Each remaining element yields a [`PendingTrigger`] with origin
     /// [`TriggerOrigin::Delayed`], the `delayed#<n>` ability id, the overlaid bindings, and
@@ -152,6 +200,7 @@ impl DelayedTriggers {
     pub fn take_triggered<E: TriggerEnv + ?Sized>(
         &mut self,
         env: &E,
+        turn: u64,
         waiting: &[WaitingTrigger],
     ) -> Vec<PendingTrigger> {
         let mut fired_once: BTreeSet<u64> = BTreeSet::new();
@@ -184,6 +233,16 @@ impl DelayedTriggers {
                     continue;
                 }
             }
+            // CR 603.2h: the trigger limit, counted only for an element whose condition held.
+            if let Some(limit) = d.ability.limit
+                && let Some(entry) = self.entries.get_mut(&n)
+                && !entry.counts.try_count(&limit, turn)
+            {
+                continue;
+            }
+            let Some(d) = self.entries.get(&n) else {
+                continue;
+            };
             if d.one_shot {
                 fired_once.insert(n);
             }
@@ -237,10 +296,12 @@ impl DelayedTriggers {
 }
 
 /// The registration of delayed trigger `id`: its stored source, controller and ability with the
-/// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`.
+/// ability id `delayed#<n>`; the intervening "if" kept iff `keep_condition`. The `limit` is
+/// always removed: [`DelayedTriggers::take_triggered`] enforces it (CR 603.2h).
 fn registration(id: u64, d: &Delayed, keep_condition: bool) -> TriggerRegistration {
     let mut ability = d.ability.clone();
     ability.base.ability_id = DelayedTriggerId(id).ability_id();
+    ability.limit = None;
     if !keep_condition {
         ability.intervening_if = None;
     }

@@ -5036,3 +5036,31 @@ keeps this unit's public API from changing twice.
 integration design and would change the public API again). Add the controller choice of (c) now
 (rejected: it needs the same request and answer protocol as the integration unit's choices and
 no card needs it yet).
+
+## #31 FP-030 CR round 2 — delayed trigger limits
+
+**Decision:** The trigger limit of a delayed triggered ability (`limit`, CR 603.2h) is kept by
+`DelayedTriggers` in per-registration counters (the turn last counted, the count that turn, the
+count this game). `DelayedTriggers::take_triggered(env, turn, waiting)` checks it for each
+element after the intervening "if" passed (CR 603.4) and before the one-shot bookkeeping
+(CR 603.7b), in input order. An element that fails its condition, or is dropped by the limit,
+counts nothing and does not consume a one-shot. `registrations()` lists every delayed ability
+with both `intervening_if` and `limit` set to `None`, so `detect` never counts a delayed
+ability's limit, and Memory carries no `trigger.limit.*` counters for delayed abilities. The
+counters are not keyed by source, so they survive the source leaving its zone and are not reset
+by it, consistent with "#31 FP-030 — Inferences and choices in the trigger lifecycle" (delayed
+triggers persist). `fire` (phase or step delayed triggers, no event) counts no limit. The
+registration given to `TriggerEnv::condition_holds` inside `take_triggered` keeps the
+intervening "if" and also has `limit` set to `None` (the same helper builds both).
+
+**Rationale:** `detect` (unit #30's `detect.rs`, which this unit may not change) counts a limit
+before it can see a delayed trigger's captured bindings, so since round 1 (where the condition
+moved to `take_triggered`) an event that failed the condition used up the limit, within one batch
+(the in-call tally) and across calls in the same turn (Memory), and suppressed a later passing
+event. Counting in `DelayedTriggers` after the condition restores the order condition, then
+limit.
+
+**Alternatives:** Change `detect.rs` to accept captured bindings for delayed registrations
+(rejected: the file belongs to #30 and must stay byte-identical). Roll Memory back after
+`take_triggered` drops an element (rejected: it does not repair the in-batch tally, which drops
+the later passing candidate before `take_triggered` sees it).
