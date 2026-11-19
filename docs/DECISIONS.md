@@ -2565,3 +2565,42 @@ a `{0+}` symbol.
 matches the Implementer's entries above and the nearest existing layout behaviour.
 **Alternatives:** Locked halves drop their indicator (rejected in "A locked Room half keeps its
 color indicator"); a separate mana-value error path for merged permanents (no rule asks for it).
+
+## #23 FP-022 — Room halves must share one type line
+
+CodeRabbit round 1, PR #172.
+**Decision:** A ROOM definition whose two faces' type lines differ (supertypes, card types or
+subtypes) is malformed and is rejected with `LayoutError::BadFaces` in every zone, the stack with
+any cast half and the battlefield with any door state included (both halves locked too, as in
+"Independent Tester judgement calls" (2)). The check runs in the shared selection path, after the
+face-set check and before `InvalidCast` and `Object`. Each type-line field is compared as a set
+(order and repeats ignored), because `Characteristics` and the combined view keep the types as
+sets. On the stack the cast half's record is returned; its type line equals the shared line (CR
+709.5a). The spec fixtures `room_left()`/`room_right()` behind `room_sample()` live in
+`tests/spec_layouts_composite_support.rs`, not under `src/layouts/` as the brief assumed; they
+were given the one shared type line there (the brief owns `room_sample()` "wherever it is
+defined"), and the spec tests that built a Room from one rejected half now put the rejected type
+line on both halves.
+**Rationale:** CR 709.5a gives both halves the one shared type line; 709.5b exempts only the
+halves' existence from 709.3b, so the shared type line also applies on the stack. Set comparison
+matches the semantics of the type-line field everywhere it is read.
+**Alternatives:** The union of both halves' types on the stack (rejected: it would accept data
+that contradicts the one shared type line); silently using the cast half's line (the CodeRabbit
+finding); an order-sensitive comparison of the stored lists (rejected: order carries no meaning
+in the type line as `Characteristics` stores it).
+
+## #23 FP-022 — Face-down merged components deferred to layer 1b (#39)
+
+CodeRabbit round 1, PR #172.
+**Decision:** `MergedPermanent::base_characteristics` returns the pre-layer-1b values (printed
+values selected with each component's layout), whatever any component's `face_up` flag says.
+`face_up()` reports the topmost component's status (CR 731.2e) so that layer 1b can apply CR
+708.2. The face-down characteristics of merged components are not modelled here. Whether a
+face-down lower component of a mutated permanent contributes its printed abilities is open for
+#39: CR 702.140e gives the permanent the abilities of each card and token that represents it, CR
+708.2 limits face-down permanents, and a component is not itself a permanent; no ruling was
+found. The unit tests no longer pin printed values to a face-down top.
+**Rationale:** SRS §4.3 / REQ-OBJ-003 apply face-down status in layer 1b (CR 613.2b), which is
+issue #39 FP-038; this module selects base characteristics and copiable values before layer 1b.
+**Alternatives:** Modelling face-down values in this module (rejected: it duplicates layer 1b and
+pins an unsettled rule).

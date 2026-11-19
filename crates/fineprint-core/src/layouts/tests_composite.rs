@@ -476,15 +476,28 @@ fn room_errors() {
         zone: ZoneKind::Stack,
     };
     assert_eq!(room_base(&good, q).unwrap_err(), invalid);
+    // CR 709.5a: one shared type line, so a rejected type line is on both halves.
     let mut bad = good.clone();
+    bad.faces[0] = bad_types(bad.faces[0].clone());
     bad.faces[1] = bad_types(bad.faces[1].clone());
     assert_eq!(room_base(&bad, q).unwrap_err(), invalid);
     assert_eq!(room_mv(&bad, q, OFF).unwrap_err(), invalid);
-    // Only the selected halves are type-checked.
-    assert!(room_base(&bad, q.with_cast(SplitHalf::Left)).is_ok());
+    for half in [SplitHalf::Left, SplitHalf::Right] {
+        assert_eq!(
+            room_base(&bad, q.with_cast(half)).unwrap_err(),
+            object_error()
+        );
+    }
+    // BadFaces (halves' type lines differ) beats InvalidCast and Object.
+    let mut differ = good.clone();
+    differ.faces[1] = bad_types(differ.faces[1].clone());
     assert_eq!(
-        room_base(&bad, q.with_cast(SplitHalf::Right)).unwrap_err(),
-        object_error()
+        room_base(&differ, q).unwrap_err(),
+        bad_faces(LayoutBehavior::Room)
+    );
+    assert_eq!(
+        room_mv(&differ, q, OFF).unwrap_err(),
+        bad_faces(LayoutBehavior::Room)
     );
     for zone in [ZoneKind::Hand, ZoneKind::Battlefield] {
         let q = RoomQuery::new(zone);
@@ -493,15 +506,68 @@ fn room_errors() {
     }
 }
 
+/// The `room(false)` definition with one half's type line changed: a differing card type, a
+/// differing subtype or a differing supertype, on either half.
+fn rooms_with_differing_type_lines() -> Vec<CardDefinitionDSL> {
+    let mut out = Vec::new();
+    for i in [0usize, 1] {
+        let mut card_type = room(false);
+        card_type.faces[i].card_types.push("Artifact".to_owned());
+        let mut subtype = room(false);
+        subtype.faces[i].subtypes = vec![subtype_of("Enchantment", 1)];
+        let mut supertype = room(false);
+        supertype.faces[i].supertypes = vec!["Legendary".to_owned()];
+        out.extend([card_type, subtype, supertype]);
+    }
+    out
+}
+
+/// REQ-OBJ-002, CR 709.5a: a Room has one shared type line; halves whose supertypes, card
+/// types or subtypes differ are `BadFaces` in every zone: the stack with either cast half,
+/// the battlefield with every door state, and every other zone. Order and repeats inside a
+/// type-line field do not matter (set comparison).
+#[test]
+fn room_differing_type_lines_rejected() {
+    let bad = bad_faces(LayoutBehavior::Room);
+    for d in rooms_with_differing_type_lines() {
+        for zone in ZoneKind::ALL {
+            for cast in [None, Some(SplitHalf::Left), Some(SplitHalf::Right)] {
+                for doors in DOORS {
+                    let q = RoomQuery { zone, cast, doors };
+                    assert_eq!(room_base(&d, q), Err(bad.clone()), "{zone:?} {cast:?}");
+                    assert_eq!(room_mv(&d, q, on(2)), Err(bad.clone()), "{zone:?}");
+                    assert_eq!(room_mv(&d, q, OFF), Err(bad.clone()), "{zone:?}");
+                }
+            }
+        }
+    }
+    // Same entries in another order, or repeated, are one shared type line.
+    let mut d = room(false);
+    d.faces[0].card_types = vec!["Enchantment".to_owned(), "Artifact".to_owned()];
+    d.faces[1].card_types = vec![
+        "Artifact".to_owned(),
+        "Enchantment".to_owned(),
+        "Artifact".to_owned(),
+    ];
+    let q = RoomQuery::new(ZoneKind::Stack).with_cast(SplitHalf::Right);
+    assert_eq!(
+        room_base(&d, q).unwrap().card_types,
+        set(&["Artifact", "Enchantment"])
+    );
+}
+
 // REQ-OBJ-002: sweep over zones x casts x door states: no panic, same result twice, and
 // mana_value fails exactly when base_characteristics does.
 #[test]
 fn room_sweep_deterministic() {
     let mut bad = room(false);
     bad.faces[0] = bad_types(bad.faces[0].clone());
+    bad.faces[1] = bad_types(bad.faces[1].clone());
+    let mut differ = room(false);
+    differ.faces[0] = bad_types(differ.faces[0].clone());
     let mut empty = room(false);
     empty.faces.clear();
-    for d in [room(false), room(true), bad, empty] {
+    for d in [room(false), room(true), bad, differ, empty] {
         for zone in ZoneKind::ALL {
             for cast in [None, Some(SplitHalf::Left), Some(SplitHalf::Right)] {
                 for doors in DOORS {
@@ -1187,11 +1253,8 @@ fn merged_merge_over_and_under() {
     assert_eq!(ids(under.components()), ["test.a", "test.b", "test.c"]);
     assert!(under.is_token());
     assert!(!under.face_up());
-    assert_eq!(under.mana_value(vocab()).unwrap(), 1);
-    assert_eq!(
-        under.base_characteristics(vocab()).unwrap().abilities,
-        abilities(&["a", "b", "c"])
-    );
+    // `under` has a face-down top: its characteristics, mana value and abilities belong to
+    // layer 1b (CR 708.2) and are deferred to #39 FP-038, so they are not asserted here.
     // The original is unchanged.
     assert_eq!(ids(base.components()), ["test.a", "test.b"]);
     // Over then under, and under then over.
@@ -1208,6 +1271,37 @@ fn merged_merge_over_and_under() {
     assert_eq!(ids(uo.components()), ids(ou.components()));
     // CR 731.3: every component leaves, top to bottom.
     assert_eq!(ids(&over.components_leaving()), ids(over.components()));
+}
+
+/// REQ-OBJ-002, CR 731.2e, 731.2d: a face-up top over a face-down lower component: the
+/// permanent is face up and its token status follows the top, before and after merging under
+/// and over. The face-down component's characteristics and abilities are deferred to layer 1b
+/// (#39 FP-038, CR 708.2) and are not asserted here.
+#[test]
+fn merged_face_up_top_over_face_down_lower() {
+    let a = mutate_card("a", "{1}", 1);
+    let b = normal_card("b", "{2}", 2);
+    let c = mutate_card("c", "{3}", 3);
+    let p = MergedPermanent::new(vec![comp(&a, true, true), comp(&b, false, false)], true).unwrap();
+    assert_eq!(ids(p.components()), ["test.a", "test.b"]);
+    assert!(p.face_up());
+    assert!(p.is_token());
+    // CR 731.2e: a face-down component merged under leaves the face-up top in place.
+    let under = p.merge(comp(&c, false, false), MergeSide::Under);
+    assert_eq!(ids(under.components()), ["test.a", "test.b", "test.c"]);
+    assert!(under.face_up());
+    assert!(under.is_token());
+    // A face-up non-token merged over becomes the top (CR 731.2d, 731.2e).
+    let over = under.merge(comp(&c, false, true), MergeSide::Over);
+    assert_eq!(
+        ids(over.components()),
+        ["test.c", "test.a", "test.b", "test.c"]
+    );
+    assert!(over.face_up());
+    assert!(!over.is_token());
+    // The original is unchanged.
+    assert_eq!(ids(p.components()), ["test.a", "test.b"]);
+    assert!(p.face_up());
 }
 
 // REQ-OBJ-002, CR 731.2a, 722.2c, 713.5b, 723.4: each component uses its own layout, always on

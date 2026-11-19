@@ -12,6 +12,8 @@
 //! The unlock special action (CR 709.5e) and effects that lock or unlock a door are actions and
 //! are not implemented here; [`RoomDoors`] is plain state supplied by the caller.
 
+use std::collections::BTreeSet;
+
 use fineprint_dsl::card::{
     CardDefinitionDSL, CardFaceDSL, FaceKind, LayoutBehavior, TextTokenStream,
 };
@@ -137,6 +139,21 @@ fn locked(half: Characteristics) -> Characteristics {
     }
 }
 
+/// The entries of one type-line field as a set: [`Characteristics`] and the combined view
+/// keep types as sets, so order and repeats carry no meaning (DECISIONS.md #23).
+fn type_set(items: &[String]) -> BTreeSet<&str> {
+    items.iter().map(String::as_str).collect()
+}
+
+/// Whether the two halves have one shared type line: equal supertypes, card types and
+/// subtypes (CR 709.5a).
+fn shared_type_line(left: &CardFaceDSL, right: &CardFaceDSL) -> bool {
+    // CR 709.5a: each half shares the types and subtypes on the card's one shared type line.
+    type_set(&left.supertypes) == type_set(&right.supertypes)
+        && type_set(&left.card_types) == type_set(&right.card_types)
+        && type_set(&left.subtypes) == type_set(&right.subtypes)
+}
+
 impl RoomLayout {
     /// The layout behavior this object handles: [`LayoutBehavior::Room`].
     #[must_use]
@@ -145,11 +162,18 @@ impl RoomLayout {
     }
 
     /// The left and right halves, and on the stack the half being cast.
+    ///
+    /// Every zone runs this, so no zone skips the face-set and shared-type-line checks.
     fn select<'a>(
         def: &'a CardDefinitionDSL,
         query: &RoomQuery,
     ) -> Result<(&'a CardFaceDSL, &'a CardFaceDSL, Option<SplitHalf>), LayoutError> {
         let [left, right] = faces(LAYOUT, def, [FaceKind::LeftHalf, FaceKind::RightHalf])?;
+        // CR 709.5a: a Room has one shared type line; halves whose type lines differ are a
+        // malformed definition, in every zone (before the cast half is checked).
+        if !shared_type_line(left, right) {
+            return Err(LayoutError::BadFaces { layout: LAYOUT });
+        }
         if query.zone != ZoneKind::Stack {
             return Ok((left, right, None));
         }
@@ -166,7 +190,8 @@ impl RoomLayout {
     /// The base characteristics of a Room object with definition `def` for `query`, before any
     /// layer effect.
     ///
-    /// - Stack: only the cast half (CR 709.3b).
+    /// - Stack: only the cast half (CR 709.3b). Its type line is the shared type line, which
+    ///   both halves carry (CR 709.5a; 709.5b does not stop that on the stack).
     /// - Battlefield: the name, mana cost, rules text and abilities of each *unlocked* half;
     ///   the type line is always both halves' (the shared type line, CR 709.5, 709.5a). Colors
     ///   come from the remaining mana cost and the halves' color indicators (DECISIONS.md #23).
@@ -176,7 +201,8 @@ impl RoomLayout {
     ///
     /// # Errors
     /// [`LayoutError::LayoutMismatch`], [`LayoutError::BadFaces`] (faces other than exactly
-    /// one left half and one right half), [`LayoutError::InvalidCast`] (on the stack with no
+    /// one left half and one right half, or the halves' type lines differ: supertypes, card
+    /// types or subtypes, compared as sets, CR 709.5a), [`LayoutError::InvalidCast`] (on the stack with no
     /// cast half), then [`LayoutError::Object`], in that order.
     pub fn base_characteristics(
         &self,
@@ -217,10 +243,11 @@ impl RoomLayout {
 
     /// The mana value of that object.
     ///
-    /// On the stack: the cast half's mana cost, with `ctx` for X, Y and Z (CR 202.3d). Off the
-    /// battlefield and stack: both halves' costs combined (CR 202.3d). On the battlefield: the
-    /// unlocked halves' costs, 0 with neither unlocked (CR 709.5, 202.3, 202.3a). Off the stack
-    /// X, Y and Z count 0 whatever `ctx` says (DECISIONS.md #22 Layouts API).
+    /// On the stack: the cast half's mana cost, with `ctx` for X, Y and Z (CR 202.3d, 202.3e).
+    /// Off the battlefield and stack: both halves' costs combined (CR 202.3d). On the
+    /// battlefield: the unlocked halves' costs, 0 with neither unlocked (CR 709.5, 202.3,
+    /// 202.3a). Off the stack X, Y and Z count 0 whatever `ctx` says (CR 202.3e; DECISIONS.md
+    /// #22 Layouts API).
     ///
     /// # Errors
     /// As [`RoomLayout::base_characteristics`]: the same selection runs first.

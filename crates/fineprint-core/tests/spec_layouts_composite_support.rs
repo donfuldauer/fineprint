@@ -45,10 +45,12 @@ pub fn bad_type(face: CardFaceDSL) -> CardFaceDSL {
 // ROOM
 // ---------------------------------------------------------------------------------------------
 
-/// The left door: a legendary enchantment Room, `{1}{W}`, one ability.
+/// The left door: `{1}{W}`, one ability, on the shared type line legendary artifact
+/// enchantment Room (CR 709.5a: both halves carry the one shared type line).
 pub fn room_left() -> CardFaceDSL {
     CardFaceDSL {
         supertypes: strings(&["Legendary"]),
+        card_types: strings(&["Artifact", "Enchantment"]),
         subtypes: strings(&["Room"]),
         ..spell(
             FaceKind::LeftHalf,
@@ -59,9 +61,11 @@ pub fn room_left() -> CardFaceDSL {
     }
 }
 
-/// The right door: an artifact enchantment Room, `{3}{U}{U}`, two abilities and a two-token text.
+/// The right door: `{3}{U}{U}`, two abilities and a two-token text, on the same shared type
+/// line as the left door (CR 709.5a).
 pub fn room_right() -> CardFaceDSL {
     CardFaceDSL {
+        supertypes: strings(&["Legendary"]),
         card_types: strings(&["Artifact", "Enchantment"]),
         subtypes: strings(&["Room"]),
         text: text(&["test.room_right", "second"]),
