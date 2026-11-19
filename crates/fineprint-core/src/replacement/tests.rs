@@ -922,8 +922,10 @@ fn req_event_001_cr_616_1b_control_beats_copy_etb() {
         let report = ok(&run);
         assert!(run.asked.is_empty());
         assert_eq!(report.applications, vec![e(control), e(copy)]);
-        // The token entered under player 2 and became a copy (child BecomeCopy).
-        assert_eq!(report.executed.len(), 2);
+        // The token entered under player 2 as a copy (CR 707.5: one executed batch, the copy
+        // link is part of the entry; no BecomeCopy event).
+        assert_eq!(report.executed.len(), 1);
+        assert_eq!(report.executed[0].events.len(), 1);
         let token = match report.executed[0].events[0].outcome {
             crate::events::Outcome::TokenCreated { object } => object,
             other => panic!("{other:?}"),
@@ -1407,8 +1409,9 @@ fn req_event_001_children_reenter_bus() {
     assert!(!run.state.permanents.get(x).unwrap().status().tapped);
 }
 
-/// REQ-EVENT-001: `EntersAsCopyOf` on a zone change to the battlefield emits a `BecomeCopy`
-/// of the new object; if the final event does not enter the battlefield nothing happens.
+/// REQ-EVENT-001: CR 707.5: `EntersAsCopyOf` on a zone change to the battlefield makes the new
+/// object a copy as part of its entry (one executed batch, no `BecomeCopy` event); if the
+/// final event does not enter the battlefield nothing happens.
 #[test]
 fn req_event_001_enters_as_copy_child() {
     let mut w = World::new();
@@ -1426,19 +1429,18 @@ fn req_event_001_enters_as_copy_child() {
         &[],
     );
     let report = ok(&run);
-    assert_eq!(report.executed.len(), 2);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 1);
     let new = match report.executed[0].events[0].outcome {
         crate::events::Outcome::ZoneChange(m) => m.new,
         other => panic!("{other:?}"),
     };
     assert_eq!(
-        report.executed[1].events[0].instance.event(),
-        &GameEvent::BecomeCopy {
-            object: new,
-            copied: original
-        }
+        report.executed[0].events[0].instance.event(),
+        &zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other)
     );
     assert_eq!(run.state.events.markers().copy_of(new), Some(original));
+    assert_eq!(run.state.events.log().len(), 1);
     // Redirected to exile by a self-replacement first: no copy.
     w.add(
         ReplacementEffect::new(
@@ -2464,31 +2466,25 @@ fn req_event_001_r1_f6_enters_as_copy_is_not_replaced() {
     );
     let report = ok(&run);
     assert_eq!(report.applications, vec![e(1)]);
-    assert_eq!(report.executed.len(), 2);
+    // CR 707.5 (round 2): one executed batch holding only the entering event.
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 1);
     let new = match report.executed[0].events[0].outcome {
         crate::events::Outcome::ZoneChange(m) => m.new,
         other => panic!("{other:?}"),
     };
-    assert_eq!(
-        report.executed[1].events[0].instance.event(),
-        &GameEvent::BecomeCopy {
-            object: new,
-            copied: original
-        }
-    );
-    assert!(
-        report.executed[1].events[0]
-            .instance
-            .applied_effects()
-            .is_empty()
-    );
+    assert!(matches!(
+        report.executed[0].events[0].instance.event(),
+        GameEvent::ZoneChange { .. }
+    ));
     assert_eq!(run.state.events.markers().copy_of(new), Some(original));
     // A token.
     let token = token_event(&mut w);
     let run = drive(&w, vec![token], false, &[]);
     let report = ok(&run);
     assert_eq!(report.applications, vec![e(3)]);
-    assert_eq!(report.executed.len(), 2);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 1);
     let object = match report.executed[0].events[0].outcome {
         crate::events::Outcome::TokenCreated { object } => object,
         other => panic!("{other:?}"),
@@ -2717,8 +2713,9 @@ fn req_event_001_r1_f8_pool_allocated_by_affected_player() {
     }
 }
 
-/// REQ-EVENT-001, F8: CR 615.7: an allotment larger than its source's damage stays in the
-/// shield; damage with no source draws on the pool in submission order.
+/// REQ-EVENT-001, F8 as amended by round 2 G4: CR 615.7: an allotment larger than its
+/// source's damage is rejected (the call fails, nothing changes); damage with no source is
+/// outside the division and draws on what is left of the pool in submission order.
 #[test]
 fn req_event_001_r1_f8_unused_allotment_stays() {
     let (w, a, b) = pool_world(4);
@@ -2727,12 +2724,22 @@ fn req_event_001_r1_f8_unused_allotment_stays() {
         damage_from_to_player(b, 2, 4),
         damage_player(2, 2),
     ];
-    // Eligible: 1 + 4 = 5 > 4, two sources: asked. A gets 3 but only uses 1.
-    let run = drive_with(&w, events, false, &[division(&[(a, 3), (b, 1)])]);
+    // Eligible: 1 + 4 = 5 > 4, two sources: asked. A's 3 exceeds its damage 1: rejected.
+    let before = w.state_hash();
+    let run = drive_with(&w, events.clone(), false, &[division(&[(a, 3), (b, 1)])]);
+    assert_eq!(run.asked.len(), 1);
+    assert!(matches!(
+        run.out,
+        Err(BusError::Choice(ChoiceError::Procedure(_)))
+    ));
+    assert_eq!(run.hash, before);
+    // A: 1 prevented; B: 3 prevented (1 dealt); the pool is drained, so the sourceless 2 is
+    // dealt.
+    let run = drive_with(&w, events, false, &[division(&[(a, 1), (b, 3)])]);
     assert_eq!(run.asked.len(), 1);
     let report = ok(&run);
-    // A: 1 prevented; B: 1 prevented (3 dealt); sourceless: 2 prevented from the rest.
     assert_eq!(report.prevented, 4);
+    assert_eq!(report.applications, vec![e(1), e(1)]);
     assert_eq!(run.state.life(2), 17);
     assert!(run.state.registry.get(e(1)).is_none());
 }
@@ -2817,4 +2824,659 @@ fn req_event_001_r1_f11_stun_only_on_real_untap() {
     assert_eq!(ok(&run).applications, vec![e(1)]);
     assert_eq!(run.state.counter(x, "stun"), 0);
     assert!(run.state.permanents.get(x).unwrap().status().tapped);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 2 (G1-G4, F2, F6)
+// ---------------------------------------------------------------------------------------------
+
+/// A world with `original` (P2) on the battlefield, `h` in P1's hand and an effect e1 making
+/// anything that enters the battlefield by a zone change enter as a copy of `original`.
+fn copy_world() -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let original = w.create(2, ZoneKind::Battlefield);
+    let h = w.create(1, ZoneKind::Hand);
+    w.add(ReplacementEffect::new(
+        e(1),
+        EventMatcher {
+            to: Some(ZoneKind::Battlefield),
+            ..EventMatcher::new(BusEventKind::ZoneChange)
+        },
+        Action::Modify(Modification::EntersAsCopyOf(original)),
+    ));
+    (w, original, h)
+}
+
+/// The object the executed zone change of `object`'s card put somewhere, from `report`.
+fn new_id_of(report: &BusReport, old: ObjectId) -> ObjectId {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .find_map(|ev| match ev.outcome {
+            crate::events::Outcome::ZoneChange(m) if m.old == old => Some(m.new),
+            _ => None,
+        })
+        .expect("no zone change of that object")
+}
+
+/// REQ-EVENT-001, REQ-CORE-003, G1: CR 707.5, CR 608.2h: a copy whose source leaves its zone in
+/// the same bus call succeeds, in both submission orders: the copy link names the source (its
+/// LKI is captured before the batch), the source is in the graveyard as a new object, and one
+/// executed batch holds both events (no `BecomeCopy`).
+#[test]
+fn req_event_001_r2_g1_copy_source_leaves_in_same_call() {
+    let (w, original, h) = copy_world();
+    let card = w.card_of(original);
+    let enter = zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other);
+    let leave = zc(original, ZoneKind::Graveyard, ZoneChangeCause::Destroy);
+    for events in [
+        vec![enter.clone(), leave.clone()],
+        vec![leave.clone(), enter.clone()],
+    ] {
+        let run = drive(&w, events, false, &[]);
+        let report = ok(&run);
+        assert_eq!(report.applications, vec![e(1)]);
+        assert_eq!(report.executed.len(), 1);
+        assert_eq!(report.executed[0].events.len(), 2);
+        let new = new_id_of(report, h);
+        assert_eq!(run.state.events.markers().copy_of(new), Some(original));
+        assert!(run.state.zones.object(original).is_none());
+        assert!(run.state.lki.get(original).is_some());
+        assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+        assert!(
+            report.executed[0]
+                .events
+                .iter()
+                .all(|ev| !matches!(ev.instance.event(), GameEvent::BecomeCopy { .. }))
+        );
+    }
+}
+
+/// REQ-EVENT-001, G1: CR 707.5: with the source staying in its zone the copy works (zone change
+/// and token); a never-issued source fails and rolls back (see the F6 test); a standalone
+/// `BecomeCopy` of a source that left in an EARLIER call stays an error (`UnknownObject`) and
+/// changes nothing, although its LKI exists.
+#[test]
+fn req_event_001_r2_g1_source_stays_and_standalone_stays_strict() {
+    let (mut w, original, h) = copy_world();
+    w.add(ReplacementEffect::new(
+        e(2),
+        EventMatcher::new(BusEventKind::CreateToken),
+        Action::Modify(Modification::EntersAsCopyOf(original)),
+    ));
+    let run = drive(
+        &w,
+        vec![zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other)],
+        false,
+        &[],
+    );
+    let new = new_id_of(ok(&run), h);
+    assert_eq!(run.state.events.markers().copy_of(new), Some(original));
+    let token = token_event(&mut w);
+    let run = drive(&w, vec![token], false, &[]);
+    let report = ok(&run);
+    let object = match report.executed[0].events[0].outcome {
+        crate::events::Outcome::TokenCreated { object } => object,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(run.state.events.markers().copy_of(object), Some(original));
+    // Standalone BecomeCopy of a source that left in an earlier call.
+    let mut w = World::new();
+    let original = w.create(2, ZoneKind::Battlefield);
+    let other = w.create(1, ZoneKind::Battlefield);
+    w.setup(zc(original, ZoneKind::Graveyard, ZoneChangeCause::Destroy));
+    assert!(w.lki.get(original).is_some());
+    let before = w.state_hash();
+    let run = drive(
+        &w,
+        vec![GameEvent::BecomeCopy {
+            object: other,
+            copied: original,
+        }],
+        false,
+        &[],
+    );
+    assert_eq!(
+        run.out,
+        Err(BusError::Event(EventError::UnknownObject(original)))
+    );
+    assert_eq!(run.hash, before);
+}
+
+/// REQ-EVENT-001, F6: CR 707.5, CR 603.6d: the call that enters a permanent as a copy logs ONE
+/// executed batch holding the entering event and no `BecomeCopy`; a `Skip` effect on
+/// `BecomeCopy` cannot affect it.
+#[test]
+fn req_event_001_r2_f6_one_executed_batch_for_the_entry() {
+    let (mut w, original, h) = copy_world();
+    w.add(ReplacementEffect::new(
+        e(2),
+        EventMatcher::new(BusEventKind::BecomeCopy),
+        Action::Skip,
+    ));
+    let log_before = w.events.log().len();
+    let run = drive(
+        &w,
+        vec![zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other)],
+        false,
+        &[],
+    );
+    let report = ok(&run);
+    assert_eq!(report.applications, vec![e(1)]);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 1);
+    assert_eq!(
+        report.executed[0].events[0].instance.event(),
+        &zc(h, ZoneKind::Battlefield, ZoneChangeCause::Other)
+    );
+    assert_eq!(run.state.events.log().len(), log_before + 1);
+    let new = new_id_of(report, h);
+    assert_eq!(run.state.events.markers().copy_of(new), Some(original));
+}
+
+/// A pool world plus a damage modifier `op` to player 2 at `tier` (effect e2).
+fn pool_world_with(pool: i64, op: AmountOp, tier: Tier) -> (World, ObjectId, ObjectId) {
+    let (mut w, a, b) = pool_world(pool);
+    w.add(
+        ReplacementEffect::new(
+            e(2),
+            EventMatcher {
+                affected_player: Some(p(2)),
+                ..EventMatcher::new(BusEventKind::Damage)
+            },
+            Action::Modify(Modification::Amount(op)),
+        )
+        .with_tier(tier),
+    );
+    (w, a, b)
+}
+
+/// The amount of the damage events from `source` executed in `report`.
+fn dealt_by(report: &BusReport, source: ObjectId) -> i64 {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter_map(|ev| match ev.instance.event() {
+            GameEvent::Damage {
+                source: Some(s),
+                amount,
+                ..
+            } if *s == source => Some(*amount),
+            _ => None,
+        })
+        .sum()
+}
+
+/// REQ-EVENT-001, G2: CR 615.7, CR 616.1f, CR 616.2: a self-replacement doubling (1 + 1 becomes
+/// 2 + 2) applies before the pool of 3, so the allocation is asked on the CURRENT damage (one
+/// `DIVIDE_VALUE`, total 3) and both mirrored answers are honoured; replays are identical.
+#[test]
+fn req_event_001_r2_g2_allocation_on_modified_damage() {
+    let (w, a, b) = pool_world_with(3, AmountOp::Mul(2), Tier::SelfReplacement);
+    let events = vec![
+        damage_from_to_player(a, 2, 1),
+        damage_from_to_player(b, 2, 1),
+    ];
+    for (share_a, share_b) in [(1, 2), (2, 1)] {
+        let answers = [division(&[(a, share_a), (b, share_b)])];
+        let run = drive_with(&w, events.clone(), false, &answers);
+        assert_eq!(run.asked.len(), 1);
+        let r = &run.asked[0];
+        assert_eq!(r.choice_type, ChoiceType::DivideValue);
+        assert_eq!(r.chooser, p(2));
+        assert_eq!(
+            r.payload,
+            ChoicePayload::DivideValue {
+                total: 3,
+                recipients: vec![(ChoiceTarget::Object(a), 0), (ChoiceTarget::Object(b), 0)],
+            }
+        );
+        assert_eq!(r.default_on_timeout, division(&[(a, 2), (b, 1)]));
+        let report = ok(&run);
+        assert_eq!(report.prevented, 3);
+        let dealt_a = 2 - i64::try_from(share_a).unwrap();
+        let dealt_b = 2 - i64::try_from(share_b).unwrap();
+        assert_eq!(dealt_by(report, a), dealt_a);
+        assert_eq!(dealt_by(report, b), dealt_b);
+        assert_eq!(run.state.life(2), 19);
+        assert!(run.state.registry.get(e(1)).is_none());
+        // Replay determinism.
+        let again = drive_with(&w, events.clone(), false, &answers);
+        assert_eq!(again.out, run.out);
+        assert_eq!(again.hash, run.hash);
+        assert_eq!(again.state.registry, run.state.registry);
+        assert_eq!(again.asked, run.asked);
+    }
+}
+
+/// REQ-EVENT-001, G2: CR 615.7, CR 616.2: a self-replacement reduction (2 + 2 becomes 1 + 1)
+/// leaves the pool of 3 covering everything: nothing is asked, both are fully prevented, the
+/// pool keeps 1.
+#[test]
+fn req_event_001_r2_g2_reduction_before_pool_asks_nothing() {
+    let (w, a, b) = pool_world_with(3, AmountOp::Add(-1), Tier::SelfReplacement);
+    let run = drive(
+        &w,
+        vec![
+            damage_from_to_player(a, 2, 2),
+            damage_from_to_player(b, 2, 2),
+        ],
+        false,
+        &[],
+    );
+    assert!(run.asked.is_empty());
+    let report = ok(&run);
+    assert_eq!(report.prevented, 2);
+    assert!(report.executed.is_empty());
+    assert_eq!(run.state.life(2), 20);
+    assert_eq!(
+        run.state.registry.get(e(1)).unwrap().shield,
+        Some(Shield::Pool(1))
+    );
+}
+
+/// REQ-EVENT-001, G2: CR 615.7, CR 616.1e, CR 616.1f: the doubling at the SAME tier as the pool
+/// is the chooser's choice per member. Shield first: 1 + 1 <= 3, no division, both prevented,
+/// requests [CHOOSE, CHOOSE]. Doubling first: 2 + 2 > 3, requests [CHOOSE, CHOOSE,
+/// DIVIDE_VALUE (total 3)].
+#[test]
+fn req_event_001_r2_g2_same_tier_shield_versus_modifier() {
+    let (w, a, b) = pool_world_with(3, AmountOp::Mul(2), Tier::Other);
+    let events = vec![
+        damage_from_to_player(a, 2, 1),
+        damage_from_to_player(b, 2, 1),
+    ];
+    let pick = |index| ChoiceResponse::SelectReplacement { index };
+    // Shield (e1, index 0) first.
+    let run = drive_with(&w, events.clone(), false, &[pick(0), pick(0)]);
+    let kinds: Vec<ChoiceType> = run.asked.iter().map(|r| r.choice_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ChoiceType::ChooseReplacementEffect,
+            ChoiceType::ChooseReplacementEffect
+        ]
+    );
+    let report = ok(&run);
+    assert_eq!(report.prevented, 2);
+    assert_eq!(report.applications, vec![e(1), e(1)]);
+    assert_eq!(run.state.life(2), 20);
+    assert_eq!(
+        run.state.registry.get(e(1)).unwrap().shield,
+        Some(Shield::Pool(1))
+    );
+    // Doubling (e2, index 1) first.
+    let run = drive_with(
+        &w,
+        events,
+        false,
+        &[pick(1), pick(1), division(&[(a, 2), (b, 1)])],
+    );
+    let kinds: Vec<ChoiceType> = run.asked.iter().map(|r| r.choice_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ChoiceType::ChooseReplacementEffect,
+            ChoiceType::ChooseReplacementEffect,
+            ChoiceType::DivideValue
+        ]
+    );
+    assert!(matches!(
+        run.asked[2].payload,
+        ChoicePayload::DivideValue { total: 3, .. }
+    ));
+    let report = ok(&run);
+    assert_eq!(report.prevented, 3);
+    assert_eq!(report.applications, vec![e(2), e(2), e(1), e(1)]);
+    assert_eq!(dealt_by(report, a), 0);
+    assert_eq!(dealt_by(report, b), 1);
+    assert_eq!(run.state.life(2), 19);
+}
+
+/// REQ-EVENT-001, G2: CR 615.7, CR 616.1: the allocation request comes AFTER the active
+/// player's unrelated `CHOOSE_REPLACEMENT_EFFECT` made before the pool is reached.
+#[test]
+fn req_event_001_r2_g2_request_order_choice_then_division() {
+    let (mut w, a, b) = pool_world(3);
+    for id in [5, 6] {
+        w.add(ReplacementEffect::new(
+            e(id),
+            EventMatcher {
+                affected_player: Some(p(1)),
+                ..EventMatcher::new(BusEventKind::LifeChange)
+            },
+            Action::Modify(Modification::Amount(AmountOp::Add(1))),
+        ));
+    }
+    let run = drive_with(
+        &w,
+        vec![
+            damage_from_to_player(a, 2, 3),
+            damage_from_to_player(b, 2, 3),
+            life(1, 1),
+        ],
+        false,
+        &[
+            ChoiceResponse::SelectReplacement { index: 0 },
+            division(&[(a, 3), (b, 0)]),
+        ],
+    );
+    let asked: Vec<(ChoiceType, PlayerId)> = run
+        .asked
+        .iter()
+        .map(|r| (r.choice_type, r.chooser))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            (ChoiceType::ChooseReplacementEffect, p(1)),
+            (ChoiceType::DivideValue, p(2))
+        ]
+    );
+    let report = ok(&run);
+    assert_eq!(report.prevented, 3);
+    assert_eq!(run.state.life(1), 23);
+    assert_eq!(run.state.life(2), 17);
+}
+
+/// The G3 world: `x` (P1) with `counters` shield counters and its shield-counter damage
+/// prevention (e1); sources `s1`, `s2`.
+fn shield_world(counters: i64) -> (World, ObjectId, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let s1 = w.create(2, ZoneKind::Battlefield);
+    let s2 = w.create(2, ZoneKind::Battlefield);
+    w.counters(x, "shield", counters);
+    w.add(ReplacementEffect::shield_counter_damage(e(1), x));
+    (w, x, s1, s2)
+}
+
+/// The `RemoveCounters` events executed in `report`.
+fn removals(report: &BusReport) -> usize {
+    report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter(|ev| matches!(ev.instance.event(), GameEvent::RemoveCounters { .. }))
+        .count()
+}
+
+/// REQ-EVENT-001, G3: CR 122.1c, CR 615.13: simultaneous damage from two sources to a permanent
+/// with 2 shield counters is prevented by ONE application per recipient for the follow-up:
+/// one counter removed, both events prevented, `applications` lists e1 per prevented event.
+/// With one counter both are still prevented and the one counter is removed.
+#[test]
+fn req_event_001_r2_g3_one_removal_for_simultaneous_damage() {
+    for (counters, left) in [(2, 1), (1, 0)] {
+        let (w, x, s1, s2) = shield_world(counters);
+        let run = drive(
+            &w,
+            vec![damage_from(s1, x, 1), damage_from(s2, x, 1)],
+            false,
+            &[],
+        );
+        let report = ok(&run);
+        assert_eq!(report.prevented, 2);
+        assert_eq!(report.applications, vec![e(1), e(1)]);
+        assert_eq!(report.executed.len(), 1);
+        assert_eq!(report.executed[0].events.len(), 1);
+        assert_eq!(removals(report), 1);
+        assert_eq!(run.state.counter(x, "shield"), left);
+        assert_eq!(run.state.events.markers().damage(x), 0);
+    }
+}
+
+/// REQ-EVENT-001, G3: CR 122.1c: separate damage batches remove separately (2 -> 1 -> 0); one
+/// damage event removes one; two different permanents each lose one.
+#[test]
+fn req_event_001_r2_g3_separate_batches_and_recipients() {
+    let (w, x, s1, s2) = shield_world(2);
+    let run = drive(&w, vec![damage_from(s1, x, 1)], false, &[]);
+    assert_eq!(removals(ok(&run)), 1);
+    assert_eq!(run.state.counter(x, "shield"), 1);
+    let run = drive(&run.state, vec![damage_from(s2, x, 1)], false, &[]);
+    assert_eq!(removals(ok(&run)), 1);
+    assert_eq!(ok(&run).prevented, 1);
+    assert_eq!(run.state.counter(x, "shield"), 0);
+    // Two recipients.
+    let (mut w, x, s1, s2) = shield_world(2);
+    let y = w.create(1, ZoneKind::Battlefield);
+    w.counters(y, "shield", 2);
+    w.add(ReplacementEffect::shield_counter_damage(e(2), y));
+    let run = drive(
+        &w,
+        vec![damage_from(s1, x, 1), damage_from(s2, y, 1)],
+        false,
+        &[],
+    );
+    let report = ok(&run);
+    assert_eq!(report.prevented, 2);
+    assert_eq!(removals(report), 2);
+    assert_eq!(run.state.counter(x, "shield"), 1);
+    assert_eq!(run.state.counter(y, "shield"), 1);
+}
+
+/// REQ-EVENT-001, G3: CR 615.13: a generic shield-less `Prevent { then }` on damage to one player
+/// from two simultaneous sources queues its follow-up once; a `Uses` shield is unchanged (one
+/// follow-up per application).
+#[test]
+fn req_event_001_r2_g3_generic_prevent_follow_up_once() {
+    let mut w = World::new();
+    let a = w.create(1, ZoneKind::Battlefield);
+    let b = w.create(1, ZoneKind::Battlefield);
+    let matcher = EventMatcher {
+        affected_player: Some(p(2)),
+        ..EventMatcher::new(BusEventKind::Damage)
+    };
+    w.add(ReplacementEffect::new(
+        e(1),
+        matcher.clone(),
+        Action::Prevent {
+            then: vec![life(1, 1)],
+        },
+    ));
+    let events = vec![
+        damage_from_to_player(a, 2, 2),
+        damage_from_to_player(b, 2, 3),
+    ];
+    let run = drive(&w, events.clone(), false, &[]);
+    let report = ok(&run);
+    assert_eq!(report.prevented, 5);
+    assert_eq!(report.applications, vec![e(1), e(1)]);
+    assert_eq!(run.state.life(1), 21);
+    assert_eq!(run.state.life(2), 20);
+    // With a Uses shield each application queues its follow-up.
+    let mut w = World::new();
+    let a = w.create(1, ZoneKind::Battlefield);
+    let b = w.create(1, ZoneKind::Battlefield);
+    w.add(
+        ReplacementEffect::new(
+            e(1),
+            matcher,
+            Action::Prevent {
+                then: vec![life(1, 1)],
+            },
+        )
+        .with_shield(Shield::Uses(2)),
+    );
+    let run = drive(
+        &w,
+        vec![
+            damage_from_to_player(a, 2, 2),
+            damage_from_to_player(b, 2, 3),
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(ok(&run).prevented, 5);
+    assert_eq!(run.state.life(1), 22);
+}
+
+/// REQ-EVENT-001, G4: CR 615.7: pool 4, A deals 3, B deals 2: each share is capped at its
+/// source's damage, so every point of the pool is used. (A:2, B:2) prevents 4, A deals 1, B
+/// none, the pool is gone; (A:3, B:1) is valid; (A:1, B:3) exceeds B's 2 and is rejected
+/// (nothing changes); the timeout default is (A:3, B:1).
+#[test]
+fn req_event_001_r2_g4_allotment_capped_at_source_damage() {
+    let (w, a, b) = pool_world(4);
+    let events = vec![
+        damage_from_to_player(a, 2, 3),
+        damage_from_to_player(b, 2, 2),
+    ];
+    let run = drive_with(&w, events.clone(), false, &[division(&[(a, 2), (b, 2)])]);
+    assert_eq!(run.asked.len(), 1);
+    assert_eq!(run.asked[0].default_on_timeout, division(&[(a, 3), (b, 1)]));
+    let report = ok(&run);
+    assert_eq!(report.prevented, 4);
+    assert_eq!(dealt_by(report, a), 1);
+    assert_eq!(dealt_by(report, b), 0);
+    assert_eq!(run.state.life(2), 19);
+    assert!(run.state.registry.get(e(1)).is_none());
+    let run = drive_with(&w, events.clone(), false, &[division(&[(a, 3), (b, 1)])]);
+    let report = ok(&run);
+    assert_eq!(report.prevented, 4);
+    assert_eq!(dealt_by(report, a), 0);
+    assert_eq!(dealt_by(report, b), 1);
+    assert!(run.state.registry.get(e(1)).is_none());
+    // Over the cap: rejected, everything restored.
+    let before = w.state_hash();
+    let run = drive_with(&w, events, false, &[division(&[(a, 1), (b, 3)])]);
+    assert!(matches!(
+        run.out,
+        Err(BusError::Choice(ChoiceError::Procedure(_)))
+    ));
+    assert_eq!(run.hash, before);
+    assert_eq!(run.state.registry, w.registry);
+}
+
+/// REQ-EVENT-001, G4: CR 615.7: pool 3, A deals 3, B deals 2: (3,0), (2,1), (1,2) each prevent
+/// 3 and leave 2 dealt; the default is (A:3, B:0). Pool 6 asks nothing, prevents 5, keeps 1,
+/// which prevents 1 of a later damage event.
+#[test]
+fn req_event_001_r2_g4_pool_three_and_pool_six() {
+    let (w, a, b) = pool_world(3);
+    let events = vec![
+        damage_from_to_player(a, 2, 3),
+        damage_from_to_player(b, 2, 2),
+    ];
+    for shares in [[(a, 3), (b, 0)], [(a, 2), (b, 1)], [(a, 1), (b, 2)]] {
+        let run = drive_with(&w, events.clone(), false, &[division(&shares)]);
+        assert_eq!(run.asked[0].default_on_timeout, division(&[(a, 3), (b, 0)]));
+        let report = ok(&run);
+        assert_eq!(report.prevented, 3);
+        assert_eq!(dealt_by(report, a) + dealt_by(report, b), 2);
+        assert_eq!(run.state.life(2), 18);
+        assert!(run.state.registry.get(e(1)).is_none());
+    }
+    let (w, a, b) = pool_world(6);
+    let run = drive(
+        &w,
+        vec![
+            damage_from_to_player(a, 2, 3),
+            damage_from_to_player(b, 2, 2),
+        ],
+        false,
+        &[],
+    );
+    assert!(run.asked.is_empty());
+    assert_eq!(ok(&run).prevented, 5);
+    assert_eq!(
+        run.state.registry.get(e(1)).unwrap().shield,
+        Some(Shield::Pool(1))
+    );
+    let run = drive(&run.state, vec![damage_from_to_player(a, 2, 3)], false, &[]);
+    assert_eq!(ok(&run).prevented, 1);
+    assert_eq!(run.state.life(2), 18);
+    assert!(run.state.registry.get(e(1)).is_none());
+}
+
+/// REQ-EVENT-001, F2: CR 704.7: the survivor of a coalesced group is chosen by content (least
+/// canonical event bytes, then applied-set bytes), so [destroy, sba move] and [sba move,
+/// destroy] of one permanent give identical reports, registries and state hashes, with a
+/// cause-sensitive shield-counter replacement and with a cause-sensitive one-use exile
+/// redirect; the outcome is the one the rule selects.
+#[test]
+fn req_event_001_r2_f2_coalescing_is_order_independent() {
+    let destroy_first = |x| {
+        vec![
+            zc(x, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+            zc(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        ]
+    };
+    // Which cause the content rule keeps (both applied sets are empty).
+    let probe = ObjectId::new(1);
+    let [d, s] = [
+        encode_to_vec(&zc(probe, ZoneKind::Graveyard, ZoneChangeCause::Destroy)),
+        encode_to_vec(&zc(
+            probe,
+            ZoneKind::Graveyard,
+            ZoneChangeCause::StateBasedAction,
+        )),
+    ];
+    let destroy_survives = d < s;
+    // Shield counter (destruction half).
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let card = w.card_of(x);
+    w.counters(x, "shield", 1);
+    w.add(ReplacementEffect::shield_counter_destroy(e(1), x));
+    let forward = destroy_first(x);
+    let mut backward = forward.clone();
+    backward.reverse();
+    let one = drive(&w, forward.clone(), true, &[]);
+    let two = drive(&w, backward.clone(), true, &[]);
+    assert_eq!(one.out, two.out);
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(one.state.registry, two.state.registry);
+    let report = ok(&one);
+    if destroy_survives {
+        assert_eq!(report.applications, vec![e(1)]);
+        assert_eq!(one.state.counter(x, "shield"), 0);
+        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Battlefield));
+    } else {
+        assert!(report.applications.is_empty());
+        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    }
+    let moves = report
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter(|ev| matches!(ev.instance.event(), GameEvent::ZoneChange { .. }))
+        .count();
+    assert_eq!(moves, usize::from(!destroy_survives));
+    // A one-use exile redirect of destructions only.
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let card = w.card_of(x);
+    w.add(
+        ReplacementEffect::new(
+            e(1),
+            EventMatcher {
+                cause: Some(ZoneChangeCause::Destroy),
+                ..EventMatcher::new(BusEventKind::ZoneChange)
+            },
+            Action::Modify(Modification::SetDestination(ZoneKind::Exile)),
+        )
+        .with_shield(Shield::Uses(1)),
+    );
+    let forward = destroy_first(x);
+    let mut backward = forward.clone();
+    backward.reverse();
+    let one = drive(&w, forward, true, &[]);
+    let two = drive(&w, backward, true, &[]);
+    assert_eq!(one.out, two.out);
+    assert_eq!(one.hash, two.hash);
+    assert_eq!(one.state.registry, two.state.registry);
+    let report = ok(&one);
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].events.len(), 1);
+    if destroy_survives {
+        assert_eq!(report.applications, vec![e(1)]);
+        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Exile));
+    } else {
+        assert!(report.applications.is_empty());
+        assert_eq!(one.state.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    }
 }

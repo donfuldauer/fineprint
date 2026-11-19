@@ -2468,3 +2468,132 @@ fn req_event_001_event_state_fresh() {
     assert_eq!(s.markers().counter(ObjectId::new(1), "x"), 0);
     assert_eq!(s.markers().copy_of(ObjectId::new(1)), None);
 }
+
+// REQ-EVENT-001, REQ-CORE-003: CR 707.5, CR 614.1c, CR 608.2h:
+// `execute_batch_with_entry_copies` sets the copy link as part of the entering event, in that
+// event's own executed batch (token and zone change); a copied object that left earlier in the
+// batch is accepted through its LKI; one with neither a zone record nor LKI is `UnknownObject`
+// and the call rolls back; a listed event that did not enter sets nothing; `execute_batch`
+// keeps standalone `BecomeCopy` strict for a departed copied object.
+#[test]
+fn req_event_001_cr_707_5_execute_batch_with_entry_copies() {
+    // Zone change, source stays.
+    let mut w = World::new();
+    let original = w.create(1, 2, ZoneKind::Battlefield);
+    let h = w.create(2, 1, ZoneKind::Hand);
+    let batch = EventBatch::from_events(vec![zc(h, ZoneKind::Battlefield)]);
+    let ex = w
+        .ctx()
+        .execute_batch_with_entry_copies(&batch, &[(0, original)])
+        .unwrap();
+    assert_eq!(ex.events.len(), 1);
+    let new = moved_of(&ex.events[0]).new;
+    assert_eq!(w.events.markers().copy_of(new), Some(original));
+    assert_eq!(w.events.log().len(), 1);
+    // A token.
+    let token = GameEvent::CreateToken {
+        owner: p(1),
+        card: c(9),
+        controller: None,
+    };
+    let ex = w
+        .ctx()
+        .execute_batch_with_entry_copies(&EventBatch::from_events(vec![token]), &[(0, original)])
+        .unwrap();
+    let Outcome::TokenCreated { object } = ex.events[0].outcome else {
+        panic!("not a token");
+    };
+    assert_eq!(w.events.markers().copy_of(object), Some(original));
+    assert_eq!(w.events.log().len(), 2);
+
+    // The source leaves earlier in the same batch: accepted through LKI captured before it.
+    for source_first in [true, false] {
+        let mut w = World::new();
+        let original = w.create(1, 2, ZoneKind::Battlefield);
+        let h = w.create(2, 1, ZoneKind::Hand);
+        let (events, index) = if source_first {
+            (vec![destroy(original), zc(h, ZoneKind::Battlefield)], 1)
+        } else {
+            (vec![zc(h, ZoneKind::Battlefield), destroy(original)], 0)
+        };
+        let ex = w
+            .ctx()
+            .execute_batch_with_entry_copies(&EventBatch::from_events(events), &[(index, original)])
+            .unwrap();
+        assert_eq!(ex.events.len(), 2);
+        let new = moved_of(&ex.events[index]).new;
+        assert_eq!(w.events.markers().copy_of(new), Some(original));
+        assert!(w.zones.object(original).is_none());
+        assert!(w.lki.get(original).is_some());
+        assert_eq!(w.events.log().len(), 1);
+        // Standalone BecomeCopy of the departed id stays strict.
+        assert_fails(
+            &mut w,
+            GameEvent::BecomeCopy {
+                object: new,
+                copied: original,
+            },
+            EventError::UnknownObject(original),
+        );
+        // In a later call the departed source is still accepted for an entering copy.
+        let h2 = w.create(3, 1, ZoneKind::Hand);
+        let ex = w
+            .ctx()
+            .execute_batch_with_entry_copies(
+                &EventBatch::from_events(vec![zc(h2, ZoneKind::Battlefield)]),
+                &[(0, original)],
+            )
+            .unwrap();
+        let new2 = moved_of(&ex.events[0]).new;
+        assert_eq!(w.events.markers().copy_of(new2), Some(original));
+    }
+
+    // Neither a zone record nor LKI: UnknownObject, everything rolls back.
+    let mut w = World::new();
+    let h = w.create(2, 1, ZoneKind::Hand);
+    let before = w.parts();
+    let batch = EventBatch::from_events(vec![life(1, 1), zc(h, ZoneKind::Battlefield)]);
+    assert_eq!(
+        w.ctx()
+            .execute_batch_with_entry_copies(&batch, &[(1, ObjectId::new(90))]),
+        Err(EventError::UnknownObject(ObjectId::new(90)))
+    );
+    assert!(w.parts() == before, "a failed batch changed state");
+
+    // A listed event that did not enter: nothing set, nothing fails (even for an unknown id).
+    let mut w = World::new();
+    let x = w.create(1, 1, ZoneKind::Battlefield);
+    let h = w.create(2, 1, ZoneKind::Hand);
+    let ex = w
+        .ctx()
+        .execute_batch_with_entry_copies(
+            &EventBatch::from_events(vec![zc(h, ZoneKind::Graveyard), life(1, 0)]),
+            &[(0, x), (1, ObjectId::new(90))],
+        )
+        .unwrap();
+    assert_eq!(ex.events.len(), 1);
+    let gone = moved_of(&ex.events[0]).new;
+    assert_eq!(w.events.markers().copy_of(gone), None);
+    assert_eq!(w.events.markers().copy_of(x), None);
+    // An empty list behaves as `execute_batch`.
+    let mut a = World::new();
+    let ha = a.create(2, 1, ZoneKind::Hand);
+    let mut b = a.clone();
+    let ea = a
+        .ctx()
+        .execute_batch_with_entry_copies(
+            &EventBatch::from_events(vec![zc(ha, ZoneKind::Battlefield)]),
+            &[],
+        )
+        .unwrap();
+    let eb = b.batch(vec![zc(ha, ZoneKind::Battlefield)]).unwrap();
+    assert_eq!(ea, eb);
+    assert!(a.parts() == b.parts());
+}
+
+fn life(player: u64, delta: i64) -> GameEvent {
+    GameEvent::LifeChange {
+        player: p(player),
+        delta,
+    }
+}
