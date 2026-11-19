@@ -4685,3 +4685,18 @@ effects.
 **Rationale:** Same approach as "#27 FP-026 — Standalone event state and the rollback set"; the
 integration unit joins the components.
 **Alternatives:** Storing the registry in `GameState` now (outside the owned paths).
+
+## #30 FP-029 — SRS §8.2 rule citations (CR 2026-11-06 wins)
+
+**Decision:** Trigger detection follows the CR where SRS §8.2 cites it loosely: (1) item 2's
+cost-payment LKI for tapped creatures rests on CR 702.122e, 702.171c and 702.184a, with LKI use
+per CR 608.2h and 113.7a, not CR 400.7j (which covers objects moved to a public zone); (2) item 7's
+ordering of waiting triggers is the two-part process of CR 603.3b (triggers whose condition is not
+another ability triggering go first); (3) item 8's once-per-turn limit cites CR 603.2h for the
+"Do this only once each turn" form; other once-per-turn limits are card text. A "from anywhere"
+zone-change trigger is never a leaves-the-battlefield ability (CR 603.6c) and uses the post-event
+state. The proposed SRS edit is a P8 line in docs/HUMAN_QUEUE.md.
+**Rationale:** rules-researcher answers for #30 against the 2026-11-06 baseline; the SRS list of
+603.10a–g look-back categories itself matches the CR.
+**Alternatives:** Following the SRS citations literally (would cite a rule that does not cover
+tapping).
