@@ -250,3 +250,9 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #29 (PR #178 review round 3) | Independent Tester | Opus 5.5 | 1 | done | 137 spec tests pass; fmt, clippy, guard clean | H2/H4/H5 specs incl. 120-seed group property test |
 | 03-events | #29 (PR #178 review round 3) | Docs | Haiku 5.5 | 1 | done | guard ok | SRS erratum entry; HUMAN_QUEUE P8 line |
 | 03-events | #29 (PR #178 review round 3) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
+| 03-events | #29 (PR #178 review round 3) | Work verifier | Sonnet 5.5 | 1 | pass @ 12a5fc9 | cargo test --workspace 2378 passed; fmt, clippy, guard, cr clean; coverage floors met, bus.rs 96.36% | H2, H5 replied and resolved; H1 top-level comment; H4 thread removed by reviewer |
+| 03-events | #29 (PR #178 review round 4) | Rules researcher | Opus 5.5 | 1 | answered | — | CR 704.8 pre-SBA LKI confirmed; one-object-two-zones silent -> redirect wins (R8) |
+| 03-events | #29 (PR #178 review round 4) | Classifier | Opus 5.5 | 1 | routed | — | T2: replace round-3 before-batch with resolve-then-execute-once for CR 704.7 groups (J1-J6, J8) |
+| 03-events | #29 (PR #178 review round 4) | Fixer (src) | Opus 5.5 | 1 | done | replacement lib 81 passed; fmt, clippy, guard clean; bus.rs 95.62% | resolve_batch + single execute; survivor rule redirect > canonical > plan |
+| 03-events | #29 (PR #178 review round 4) | Independent Tester | Opus 5.5 | 1 | done | 152 spec tests pass; fmt, clippy, guard clean | spec_replacement_round4.rs; 10 of 15 fail on 12a5fc9 |
+| 03-events | #29 (PR #178 review round 4) | Orchestrator (CR index) | Opus 5.5 | 1 | done | cr check ok | index regenerated after the last .rs edit |
