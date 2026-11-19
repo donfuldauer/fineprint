@@ -2727,3 +2727,91 @@ a moved object has a new id, a public -> hidden move falls through to LKI (CR 60
 carry-over rule (stack -> battlefield) cover both.
 **Alternatives:** Writing exiled_to_pay into the Linked Store under a reserved link id
 (rejected: no hardcoded link registry, SRS 2.6).
+
+## #25 FP-024: KnownTo is player memory
+
+**Decision:** The stored `KnownTo` set of a card persists across every zone change, including
+public-to-hidden moves and the CR 708.9 reveals; it is keyed by `CardId`. `Knowledge::on_move`
+adds every player when the object left a public zone face up, the owner when it left their hand,
+and the controller when it left the battlefield or the stack face down.
+**Rationale:** SRS 2.4 defines `KnownTo` as who knows the identity "because it was revealed,
+looked at, or seen in a public zone and tracked since". This is a design choice, not CR-derived:
+CR 400.7 makes a moved object a new object with no memory of its previous existence, which would
+reset the knowledge.
+**Alternatives:** Reset `KnownTo` at every zone change per CR 400.7 (players would "forget" a
+card they watched go into a library); keep it only for public-to-public moves.
+
+## #25 FP-024: Set knowledge survives a shuffle
+
+**Decision:** `shuffle_library` never touches `KnownTo`; the identities of a library's contents
+remain known as a set and the projection exposes them as `LibraryView::known_cards`.
+**Rationale:** SRS 2.4 ("It does not clear identity knowledge of the library's contents as a
+set"). Design-level, not CR-derived: CR 701.24a speaks only of order.
+**Alternatives:** Clearing identity knowledge on shuffle (contradicts SRS 2.4).
+
+## #25 FP-024: Shuffles clear position knowledge of the shuffled subset only
+
+**Decision:** `shuffle_library(owner, excluded)` removes every viewer's position entries for
+that library except entries whose object is in `excluded` and still at the recorded index
+(CR 701.24b: found cards are not part of the shuffle). `shuffle_face_down_pile` clears the
+stored `KnownTo` of the shuffled cards, which ends their CR 406.3 look permissions, and removes
+position entries naming them. Every id is validated before anything changes.
+**Rationale:** CR 701.24a/b and CR 406.3 as quoted in the brief.
+**Alternatives:** Clearing every entry including the excluded found cards (loses knowledge the
+player legitimately keeps).
+
+## #25 FP-024: Identity per CardId, positions per (viewer, library owner), pruned on change
+
+**Decision:** Identity knowledge is stored per `CardId` (the `ObjectId` changes at every zone
+change, CR 400.7). Position knowledge is a map per (viewer, library owner) from index to
+`ObjectId`. `position_known` filters lazily against the live library, and `on_move` also prunes
+stored entries of the libraries the move left or entered that no longer match the live library,
+besides dropping entries that name `moved.old`. A known card whose index shifts therefore becomes
+unknown until `set_position_known` is called again, and an entry can never become valid again by
+coincidence (for example a card put on top and later drawn would otherwise "restore" a stale
+entry below it).
+**Rationale:** Conservative: knowledge is never re-derived from an omniscient coincidence
+(R12, REQ-CORE-004). Moves that bypass `on_move` (or `create_object` into a library) are still
+covered by the lazy filter.
+**Alternatives:** Lazy filtering only (stale entries can reappear when the library returns to an
+earlier shape); shifting entries' indexes on every insert/remove (would need to know where every
+move inserted, and claims knowledge of positions after hidden inserts).
+
+## #25 FP-024: The view exposes library knowledge as a set of CardIds
+
+**Decision:** `LibraryView` holds only `count` and `known_cards: BTreeSet<CardId>`; opponent
+hands are `HandView::Opponent { count, known_cards }`. No position, no `ObjectId`, no number of
+known positions of a hidden zone is in `ZonesView`; a viewer reads its own position knowledge
+through `Knowledge::position_known`. Object ids of face-down objects in public zones are in the
+view (the object's existence is public). The wire view schema is later work.
+**Rationale:** SRS 2.4 ("A redacted library view SHALL expose that set knowledge, never
+position"); the ids of hidden objects would correlate with order and identity.
+**Alternatives:** Exposing known positions to the viewer in the view (SRS 2.4 forbids it for the
+redacted library view).
+
+## #25 FP-024: SRS 2.4 paraphrase gaps
+
+**Decision:** Implement per the CR as quoted for this unit. CR 708.5 covers only face-down spells
+on the stack and face-down permanents on the battlefield (including phased-out ones); the owner
+of a face-down card has no implicit right elsewhere ("any other zone"). SRS 2.4 does not cite
+CR 406.3 (face-down exile looks), CR 400.2, CR 401 or CR 402, which this unit implements as the
+visibility rules (REQ-ZONE-001). A one-line SRS precision edit would be a P8 item; this unit does
+not add it.
+**Rationale:** Implement what the CR says; record where the SRS paraphrase is narrower.
+**Alternatives:** Follow the SRS wording literally ("a controller may look at face-down
+permanents and spells they control") without the zone restriction.
+
+## #25 FP-024: Error order and validation choices
+
+**Decision:** (1) Errors are checked in this order: `add_known` UnknownObject then
+UnknownPlayer; `grant_look` UnknownObject, UnknownPlayer, then NotFaceDown; `can_identify`
+UnknownObject then UnknownPlayer (an unknown viewer is an error, not `false`);
+`set_position_known` UnknownPlayer (viewer, then library owner), UnknownObject, NotInLibrary,
+IndexMismatch (an index past the bottom is an IndexMismatch). (2) `shuffle_face_down_pile`
+reports UnknownObject for an unknown id. (3) `on_move` rule (a) also applies to a same-zone
+reposition of a public face-up object (harmless: everyone could already see it). (4)
+`KnowledgeError` keeps exactly the frozen derives (`Clone, Debug, PartialEq, Eq`) and is not
+`#[non_exhaustive]`, so external tests can match it exhaustively.
+**Rationale:** R12 (every caller-supplied id is validated, nothing panics) and the frozen API.
+**Alternatives:** `Ok(false)` for an unknown viewer in `can_identify` (silently hides caller
+bugs).
