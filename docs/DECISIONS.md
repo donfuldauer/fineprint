@@ -2615,12 +2615,18 @@ pins an unsettled rule).
 `Zones::move_object` (afterward the old record is gone), then calls
 `MemoryTable::apply_zone_change` with the returned `Moved`. For simultaneous state-based
 departures (CR 704.8) the caller captures every departing object first and only then moves them.
-Failure recovery: before capturing, the caller snapshots the `LkiStore` (`Clone` is a cheap `Arc`
-snapshot, and mutating the clone never changes the original). On any failed capture or failed
-`Zones::move_object`, the caller restores that snapshot, for a single move and for the whole
-simultaneous-departure batch alike. So after a failure the store holds no record for an object that
-did not leave its zone, and a retry can capture it again instead of getting `AlreadyCaptured`. This
-matches the transactional rollback that checkpoints (#26 FP-025) will provide once state is wired.
+Failure recovery: the batch is one transaction over every component it mutates: `Zones`, the
+`IdGenerator<ObjectId>`, the `LkiStore` and the `MemoryTable` (all derive `Clone`; the `LkiStore`
+clone is a cheap `Arc` snapshot, and mutating a clone never changes the original). Before the first
+capture, the caller snapshots all four. On any failed capture or failed `Zones::move_object`, the
+caller restores all of those snapshots together, for a single move and for the whole
+simultaneous-departure batch alike. So a partly applied batch (earlier moves succeeded, a later one
+failed) is fully undone: no object has moved, no ids are consumed, and no LKI record or
+`MemoryTable` change remains. A retry starts from the original state and can capture again instead
+of getting `AlreadyCaptured`. Equivalently, the batch may run on clones of the four components that
+are swapped in only when every step succeeds. Restoring only the `LkiStore` is not enough, since it
+would drop an earlier object's LKI but leave its move in place. This matches the transactional
+rollback that checkpoints (#26 FP-025) will provide once state is wired.
 A capture is made iff the request makes the object leave its zone (destination differs, or exile
 -> exile / command -> command, CR 400.8, 406.7, 400.10), which matches exactly when
 `Zones::move_object` issues a new id; same-zone repositions return `Ok(false)`. Records are keyed
