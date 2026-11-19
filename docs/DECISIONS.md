@@ -4807,3 +4807,42 @@ findings on PR #179.
 **Alternatives:** Adding an instance key to `TriggerRegistration` (breaks every environment fake);
 inventing a direction filter on `CONTROL_CHANGED` (the DSL is outside this unit's paths); modelling
 infect in the normalizer (no flag in the event).
+
+## #30 FP-029 CR round 2 (PR #179) — survival, discard and mill, token destination, unattach
+
+**Decision:**
+1. *Surviving sources keep their limit counts.* Whether detection writes a trigger limit counter
+   back to `Memory` is decided by `TriggerEnv::source_survives(source)`. It is true while the
+   object still exists under the same id after the batch: a phased-out permanent still exists
+   (CR 702.26d), while a zone change retires the id and its Memory (CR 400.7). The default method
+   treats a source as surviving if and only if a post-event registration lists it (the round-1
+   behaviour). The integration unit that implements `TriggerEnv` must override it with real object
+   liveness, so that a phased-out permanent with a `perGame` limit does not fire again after it
+   phases in. This supersedes the "survives" definition in "Trigger detection design" item 9:
+   survival is `source_survives`, not post-event registration membership.
+2. *Discard and mill players.* For `DISCARDED` and `MILLED`, the occurrence's player subject is the
+   owner of the source hand or library (CR 701.9a, 701.17a). A sacrifice keeps its LKI controller
+   (CR 701.21a).
+3. *Token destination.* A created token's `ENTERS` occurrence carries `to: BATTLEFIELD`, with no
+   `from` field and no `ZONE_CHANGE` kind (CR 701.7a, 603.6a).
+4. *UNATTACHED, deferred to #180 (FP-143).* Under CR 701.3d an attachment becomes unattached in
+   any of these cases:
+   - it moves to a new host;
+   - its host leaves the battlefield;
+   - it leaves the battlefield;
+   - its player host leaves the game.
+
+   Phasing does not unattach it (CR 702.26j). The executor's `Outcome::Attached` records no
+   previous host, and `Permanents::leave` logs nothing, so the normalizer cannot emit `UNATTACHED`
+   for these cases. Today only an explicit `Unattach` event emits it (CR 603.10c). Reporting the
+   lost links in executed outcomes changes the REQ-EVENT-001 outcome encoding, so it is its own
+   unit, #180. Once that lands, `events_from_batch` emits `UNATTACHED` occurrences from the new
+   records.
+
+**Rationale:** CodeRabbit round-2 findings on PR #179, using the cached CR 2026-11-06 text. The
+executor and its outcome encoding are owned by the closed #27 FP-026, so changing them needs the R2
+contract-change protocol.
+
+**Alternatives:** Deriving only the host-leaves case from LKI now (rejected: the move-to-new-host
+case would stay wrong and the behaviour would be split across two sources). Changing `Outcome`
+inside #30 (rejected: outside the owned paths, and it breaks the canonical encoding).

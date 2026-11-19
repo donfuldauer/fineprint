@@ -550,13 +550,13 @@
         "crates/fineprint-core/src/events/tests.rs:1135",
         "crates/fineprint-core/src/events/types.rs:359",
         "crates/fineprint-core/src/events/types.rs:361",
-        "crates/fineprint-core/src/triggers/event.rs:311",
+        "crates/fineprint-core/src/triggers/event.rs:319",
         "crates/fineprint-core/src/triggers/tests.rs:1868",
         "crates/fineprint-core/tests/spec_events_tokens.rs:33",
         "crates/fineprint-core/tests/spec_events_tokens.rs:6",
         "crates/fineprint-core/tests/spec_events_tokens.rs:61",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1006",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1047"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1067",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1112"
       ]
     },
     "111.6": {
@@ -821,34 +821,34 @@
         "crates/fineprint-core/src/events/history.rs:23",
         "crates/fineprint-core/src/events/tests.rs:1808",
         "crates/fineprint-core/src/events/tests.rs:789",
-        "crates/fineprint-core/src/triggers/event.rs:261",
+        "crates/fineprint-core/src/triggers/event.rs:269",
         "crates/fineprint-core/src/triggers/event.rs:31",
-        "crates/fineprint-core/src/triggers/event.rs:354",
+        "crates/fineprint-core/src/triggers/event.rs:366",
         "crates/fineprint-core/src/triggers/tests.rs:1645",
-        "crates/fineprint-core/src/triggers/tests.rs:2436",
+        "crates/fineprint-core/src/triggers/tests.rs:2439",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:82",
         "crates/fineprint-core/tests/spec_events_history.rs:130",
         "crates/fineprint-core/tests/spec_events_history.rs:155",
         "crates/fineprint-core/tests/spec_events_history.rs:6",
         "crates/fineprint-core/tests/spec_events_property.rs:308",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:623",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:662",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:685",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:713"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:684",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:723",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:746",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:774"
       ]
     },
     "120.3b": {
       "sha256": "330a88b7052642b8d0154e47de3a94276167d5dd116dd466dff13e041fc9f3e4",
       "locations": [
         "crates/fineprint-core/src/events/mod.rs:52",
-        "crates/fineprint-core/src/triggers/event.rs:263",
-        "crates/fineprint-core/src/triggers/event.rs:358"
+        "crates/fineprint-core/src/triggers/event.rs:271",
+        "crates/fineprint-core/src/triggers/event.rs:370"
       ]
     },
     "120.3c": {
       "sha256": "bd40a01d891255a85f061ac25e29b53acb2d72345726c23c55249feffcc1cabb",
       "locations": [
-        "crates/fineprint-core/tests/spec_triggers_events.rs:625"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:686"
       ]
     },
     "120.3d": {
@@ -866,7 +866,7 @@
         "crates/fineprint-core/src/events/state.rs:52",
         "crates/fineprint-core/src/events/tests.rs:814",
         "crates/fineprint-core/src/triggers/tests.rs:1646",
-        "crates/fineprint-core/src/triggers/tests.rs:2438",
+        "crates/fineprint-core/src/triggers/tests.rs:2441",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:105",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:122",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:193",
@@ -894,11 +894,11 @@
     "120.4b": {
       "sha256": "d5f63bf57968c855e57df2bdfc861b9de6b333b1752773e0eb240754f7dec98e",
       "locations": [
-        "crates/fineprint-core/src/triggers/event.rs:261",
-        "crates/fineprint-core/src/triggers/tests.rs:2436",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:623",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:685",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:713"
+        "crates/fineprint-core/src/triggers/event.rs:269",
+        "crates/fineprint-core/src/triggers/tests.rs:2439",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:684",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:746",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:774"
       ]
     },
     "120.6": {
@@ -916,7 +916,7 @@
         "crates/fineprint-core/src/events/types.rs:319",
         "crates/fineprint-core/src/replacement/bus.rs:710",
         "crates/fineprint-core/src/replacement/tests.rs:2385",
-        "crates/fineprint-core/src/triggers/event.rs:262",
+        "crates/fineprint-core/src/triggers/event.rs:270",
         "crates/fineprint-core/src/triggers/tests.rs:1685",
         "crates/fineprint-core/tests/spec_events_batch.rs:382",
         "crates/fineprint-core/tests/spec_events_damage_life.rs:45",
@@ -926,7 +926,7 @@
         "crates/fineprint-core/tests/spec_replacement_shields.rs:302",
         "crates/fineprint-core/tests/spec_replacement_shields.rs:317",
         "crates/fineprint-core/tests/spec_replacement_shields.rs:6",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:757"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:818"
       ]
     },
     "121": {
@@ -942,15 +942,15 @@
         "crates/fineprint-core/src/events/tests.rs:1645",
         "crates/fineprint-core/src/events/tests.rs:707",
         "crates/fineprint-core/src/events/types.rs:306",
-        "crates/fineprint-core/src/triggers/event.rs:230",
-        "crates/fineprint-core/src/triggers/tests.rs:2037",
-        "crates/fineprint-core/src/triggers/tests.rs:2374",
+        "crates/fineprint-core/src/triggers/event.rs:238",
+        "crates/fineprint-core/src/triggers/tests.rs:2040",
+        "crates/fineprint-core/src/triggers/tests.rs:2377",
         "crates/fineprint-core/tests/spec_events_draw.rs:217",
         "crates/fineprint-core/tests/spec_events_draw.rs:26",
         "crates/fineprint-core/tests/spec_events_draw.rs:5",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:512",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:533",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:555"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:573",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:594",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:616"
       ]
     },
     "121.2": {
@@ -1921,7 +1921,7 @@
         "crates/fineprint-core/src/knowledge/tests.rs:708",
         "crates/fineprint-core/src/knowledge/tests.rs:779",
         "crates/fineprint-core/src/knowledge/tests.rs:863",
-        "crates/fineprint-core/src/triggers/tests.rs:2374",
+        "crates/fineprint-core/src/triggers/tests.rs:2377",
         "crates/fineprint-core/src/zones/container.rs:637",
         "crates/fineprint-core/src/zones/tests.rs:60",
         "crates/fineprint-core/src/zones/tests.rs:953",
@@ -1947,8 +1947,8 @@
         "crates/fineprint-core/tests/spec_knowledge_zonechange.rs:590",
         "crates/fineprint-core/tests/spec_knowledge_zonechange.rs:6",
         "crates/fineprint-core/tests/spec_knowledge_zonechange.rs:60",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:512",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:555",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:573",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:616",
         "crates/fineprint-core/tests/spec_zones_model.rs:129",
         "crates/fineprint-core/tests/spec_zones_model.rs:156",
         "crates/fineprint-core/tests/spec_zones_model.rs:92"
@@ -2083,10 +2083,14 @@
         "crates/fineprint-core/src/replacement/tests.rs:4938",
         "crates/fineprint-core/src/replacement/types.rs:877",
         "crates/fineprint-core/src/replacement/types.rs:883",
-        "crates/fineprint-core/src/triggers/detect.rs:332",
+        "crates/fineprint-core/src/triggers/detect.rs:345",
+        "crates/fineprint-core/src/triggers/detect.rs:351",
+        "crates/fineprint-core/src/triggers/detect.rs:416",
+        "crates/fineprint-core/src/triggers/detect.rs:91",
         "crates/fineprint-core/src/triggers/event.rs:217",
-        "crates/fineprint-core/src/triggers/event.rs:353",
+        "crates/fineprint-core/src/triggers/event.rs:365",
         "crates/fineprint-core/src/triggers/tests.rs:1585",
+        "crates/fineprint-core/src/triggers/tests.rs:2704",
         "crates/fineprint-core/src/zones/container.rs:231",
         "crates/fineprint-core/src/zones/container.rs:257",
         "crates/fineprint-core/src/zones/container.rs:330",
@@ -2176,8 +2180,9 @@
         "crates/fineprint-core/tests/spec_replacement_round6.rs:612",
         "crates/fineprint-core/tests/spec_replacement_round6.rs:614",
         "crates/fineprint-core/tests/spec_replacement_round6.rs:709",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:410",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:912",
         "crates/fineprint-core/tests/spec_triggers_events.rs:471",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:532",
         "crates/fineprint-core/tests/spec_zones_exceptions.rs:64",
         "crates/fineprint-core/tests/spec_zones_exceptions.rs:8",
         "crates/fineprint-core/tests/spec_zones_identity.rs:109",
@@ -2423,7 +2428,7 @@
         "crates/fineprint-core/src/triggers/event.rs:218",
         "crates/fineprint-core/src/triggers/tests.rs:1553",
         "crates/fineprint-core/src/triggers/tests.rs:1586",
-        "crates/fineprint-core/src/triggers/tests.rs:2268",
+        "crates/fineprint-core/src/triggers/tests.rs:2271",
         "crates/fineprint-core/src/zones/container.rs:342",
         "crates/fineprint-core/src/zones/container.rs:393",
         "crates/fineprint-core/src/zones/mod.rs:22",
@@ -2437,7 +2442,7 @@
         "crates/fineprint-core/tests/spec_memory_support.rs:182",
         "crates/fineprint-core/tests/spec_triggers_events.rs:278",
         "crates/fineprint-core/tests/spec_triggers_events.rs:306",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:410",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:471",
         "crates/fineprint-core/tests/spec_zones_identity.rs:109",
         "crates/fineprint-core/tests/spec_zones_identity.rs:160",
         "crates/fineprint-core/tests/spec_zones_identity.rs:394",
@@ -2463,7 +2468,7 @@
         "crates/fineprint-core/src/zones/types.rs:240",
         "crates/fineprint-core/tests/spec_memory_lki.rs:246",
         "crates/fineprint-core/tests/spec_memory_support.rs:182",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:410",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:471",
         "crates/fineprint-core/tests/spec_zones_identity.rs:109",
         "crates/fineprint-core/tests/spec_zones_identity.rs:160",
         "crates/fineprint-core/tests/spec_zones_identity.rs:394",
@@ -2878,7 +2883,7 @@
         "crates/fineprint-core/src/triggers/event.rs:115",
         "crates/fineprint-core/src/triggers/event.rs:218",
         "crates/fineprint-core/src/triggers/tests.rs:1553",
-        "crates/fineprint-core/src/triggers/tests.rs:2268",
+        "crates/fineprint-core/src/triggers/tests.rs:2271",
         "crates/fineprint-core/src/zones/container.rs:342",
         "crates/fineprint-core/src/zones/container.rs:393",
         "crates/fineprint-core/src/zones/mod.rs:22",
@@ -2892,7 +2897,7 @@
         "crates/fineprint-core/tests/spec_memory_support.rs:182",
         "crates/fineprint-core/tests/spec_triggers_events.rs:278",
         "crates/fineprint-core/tests/spec_triggers_events.rs:306",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:410",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:471",
         "crates/fineprint-core/tests/spec_zones_identity.rs:109",
         "crates/fineprint-core/tests/spec_zones_identity.rs:160",
         "crates/fineprint-core/tests/spec_zones_identity.rs:394",
@@ -3500,16 +3505,17 @@
         "crates/fineprint-core/src/events/mod.rs:22",
         "crates/fineprint-core/src/events/state.rs:137",
         "crates/fineprint-core/src/events/types.rs:707",
-        "crates/fineprint-core/src/triggers/detect.rs:162",
-        "crates/fineprint-core/src/triggers/detect.rs:354",
+        "crates/fineprint-core/src/triggers/detect.rs:175",
+        "crates/fineprint-core/src/triggers/detect.rs:368",
         "crates/fineprint-core/src/triggers/detect.rs:5",
-        "crates/fineprint-core/src/triggers/event.rs:341",
-        "crates/fineprint-core/src/triggers/event.rs:349",
+        "crates/fineprint-core/src/triggers/event.rs:353",
+        "crates/fineprint-core/src/triggers/event.rs:361",
         "crates/fineprint-core/src/triggers/event.rs:5",
         "crates/fineprint-core/src/triggers/tests.rs:6",
         "crates/fineprint-core/src/triggers/tests.rs:937",
         "crates/fineprint-core/src/triggers/tests.rs:940",
         "crates/fineprint-core/src/triggers/tests.rs:986",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1014",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:136",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:192",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:211",
@@ -3518,13 +3524,12 @@
         "crates/fineprint-core/tests/spec_triggers_detect.rs:340",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:349",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:364",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:876",
         "crates/fineprint-core/tests/spec_triggers_events.rs:6",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:623",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:767",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:795",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:881",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:925",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:684",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:828",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:856",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:942",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:986",
         "docs/SRS.md:444"
       ]
     },
@@ -3541,13 +3546,13 @@
     "603.2c": {
       "sha256": "15c6b02036de8aeb65daccc05063f4d5c9fe413813cf6dc6f21ef88f96e1a88e",
       "locations": [
-        "crates/fineprint-core/src/triggers/detect.rs:323",
-        "crates/fineprint-core/src/triggers/detect.rs:356",
-        "crates/fineprint-core/src/triggers/detect.rs:367",
+        "crates/fineprint-core/src/triggers/detect.rs:336",
+        "crates/fineprint-core/src/triggers/detect.rs:370",
+        "crates/fineprint-core/src/triggers/detect.rs:381",
         "crates/fineprint-core/src/triggers/event.rs:32",
         "crates/fineprint-core/src/triggers/tests.rs:1050",
         "crates/fineprint-core/src/triggers/tests.rs:1053",
-        "crates/fineprint-core/src/triggers/tests.rs:2074",
+        "crates/fineprint-core/src/triggers/tests.rs:2077",
         "crates/fineprint-core/src/triggers/tests.rs:6",
         "crates/fineprint-core/tests/spec_events_log.rs:121",
         "crates/fineprint-core/tests/spec_events_log.rs:5",
@@ -3561,7 +3566,7 @@
         "crates/fineprint-core/tests/spec_triggers_detect.rs:718",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:732",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:87",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1170",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1256",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:733",
         "crates/fineprint-core/tests/spec_triggers_support.rs:5"
       ]
@@ -3570,36 +3575,43 @@
       "sha256": "649365a8f6938d553a5b232170f48b615c30b56ae2ca345eb1a84d7ddc1f5681",
       "locations": [
         "crates/fineprint-core/tests/spec_triggers_detect.rs:5",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1142"
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1228"
       ]
     },
     "603.2h": {
       "sha256": "fb3d8b56cc584a989ce206956bf54b6244d998f5950d7ba10506c7341d13e12f",
       "locations": [
-        "crates/fineprint-core/src/triggers/detect.rs:259",
-        "crates/fineprint-core/src/triggers/detect.rs:333",
-        "crates/fineprint-core/src/triggers/detect.rs:422",
+        "crates/fineprint-core/src/triggers/detect.rs:272",
+        "crates/fineprint-core/src/triggers/detect.rs:346",
+        "crates/fineprint-core/src/triggers/detect.rs:434",
         "crates/fineprint-core/src/triggers/tests.rs:1232",
         "crates/fineprint-core/src/triggers/tests.rs:1235",
-        "crates/fineprint-core/src/triggers/tests.rs:2120",
+        "crates/fineprint-core/src/triggers/tests.rs:2123",
+        "crates/fineprint-core/src/triggers/tests.rs:2649",
+        "crates/fineprint-core/src/triggers/tests.rs:2704",
+        "crates/fineprint-core/src/triggers/tests.rs:2732",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:758",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:778",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:807",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:823",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:861"
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:861",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:873",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:890",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:912",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:945"
       ]
     },
     "603.3": {
       "sha256": "89d0df626af0b1a067c6ceb388b2a871af176ca8edf9d1a124ae9cd2ea28c6a5",
       "locations": [
-        "crates/fineprint-core/src/triggers/detect.rs:92",
+        "crates/fineprint-core/src/triggers/detect.rs:105",
         "crates/fineprint-core/src/triggers/queue.rs:12",
         "crates/fineprint-core/src/triggers/queue.rs:5",
-        "crates/fineprint-core/src/triggers/tests.rs:2529",
-        "crates/fineprint-core/src/triggers/tests.rs:2543",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:1167",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:927",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:955"
+        "crates/fineprint-core/src/triggers/tests.rs:2532",
+        "crates/fineprint-core/src/triggers/tests.rs:2546",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1065",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1093",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1305"
       ]
     },
     "603.3b": {
@@ -3609,7 +3621,7 @@
         "crates/fineprint-core/src/choice/request.rs:373",
         "crates/fineprint-core/src/triggers/mod.rs:30",
         "crates/fineprint-core/src/triggers/queue.rs:14",
-        "crates/fineprint-core/src/triggers/tests.rs:2545",
+        "crates/fineprint-core/src/triggers/tests.rs:2548",
         "docs/SRS.md:1137",
         "docs/SRS.md:214",
         "docs/SRS.md:459",
@@ -3625,8 +3637,8 @@
     "603.4": {
       "sha256": "7ac136f2293f3591b724c61d2685b75513470166d023c081682e87311b15c229",
       "locations": [
-        "crates/fineprint-core/src/triggers/detect.rs:328",
-        "crates/fineprint-core/src/triggers/detect.rs:416",
+        "crates/fineprint-core/src/triggers/detect.rs:341",
+        "crates/fineprint-core/src/triggers/detect.rs:428",
         "crates/fineprint-core/src/triggers/detect.rs:6",
         "crates/fineprint-core/src/triggers/detect.rs:77",
         "crates/fineprint-core/src/triggers/mod.rs:23",
@@ -3650,16 +3662,21 @@
         "crates/fineprint-core/src/triggers/event.rs:110",
         "crates/fineprint-core/src/triggers/event.rs:135",
         "crates/fineprint-core/src/triggers/event.rs:145",
-        "crates/fineprint-core/src/triggers/event.rs:311",
+        "crates/fineprint-core/src/triggers/event.rs:319",
         "crates/fineprint-core/src/triggers/lookback.rs:132",
         "crates/fineprint-core/src/triggers/lookback.rs:64",
         "crates/fineprint-core/src/triggers/tests.rs:1523",
-        "crates/fineprint-core/src/triggers/tests.rs:1893",
+        "crates/fineprint-core/src/triggers/tests.rs:1869",
+        "crates/fineprint-core/src/triggers/tests.rs:1896",
+        "crates/fineprint-core/src/triggers/tests.rs:2860",
         "crates/fineprint-core/src/triggers/tests.rs:520",
         "crates/fineprint-core/src/triggers/tests.rs:523",
         "crates/fineprint-core/src/triggers/tests.rs:834",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1006",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1047",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:975",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:978",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1067",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1112",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1154",
         "crates/fineprint-core/tests/spec_triggers_events.rs:152",
         "crates/fineprint-core/tests/spec_triggers_events.rs:243",
         "crates/fineprint-core/tests/spec_triggers_events.rs:6",
@@ -3679,7 +3696,7 @@
         "crates/fineprint-core/src/triggers/lookback.rs:84",
         "crates/fineprint-core/src/triggers/lookback.rs:86",
         "crates/fineprint-core/src/triggers/tests.rs:1523",
-        "crates/fineprint-core/src/triggers/tests.rs:2491",
+        "crates/fineprint-core/src/triggers/tests.rs:2494",
         "crates/fineprint-core/src/triggers/tests.rs:520",
         "crates/fineprint-core/src/triggers/tests.rs:523",
         "crates/fineprint-core/src/triggers/tests.rs:570",
@@ -3738,9 +3755,9 @@
         "crates/fineprint-core/src/memory/lki.rs:42",
         "crates/fineprint-core/src/memory/mod.rs:8",
         "crates/fineprint-core/src/memory/tests.rs:180",
-        "crates/fineprint-core/src/triggers/detect.rs:137",
-        "crates/fineprint-core/src/triggers/detect.rs:321",
-        "crates/fineprint-core/src/triggers/detect.rs:354",
+        "crates/fineprint-core/src/triggers/detect.rs:150",
+        "crates/fineprint-core/src/triggers/detect.rs:334",
+        "crates/fineprint-core/src/triggers/detect.rs:368",
         "crates/fineprint-core/src/triggers/detect.rs:41",
         "crates/fineprint-core/src/triggers/detect.rs:44",
         "crates/fineprint-core/src/triggers/detect.rs:6",
@@ -3757,7 +3774,7 @@
         "crates/fineprint-core/src/triggers/tests.rs:842",
         "crates/fineprint-core/src/triggers/tests.rs:845",
         "crates/fineprint-core/tests/spec_events_log.rs:5",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:1220",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1358",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:275",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:305",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:321",
@@ -3784,10 +3801,10 @@
         "crates/fineprint-core/src/events/tests.rs:365",
         "crates/fineprint-core/src/events/tests.rs:490",
         "crates/fineprint-core/src/events/tests.rs:681",
-        "crates/fineprint-core/src/triggers/detect.rs:101",
-        "crates/fineprint-core/src/triggers/detect.rs:138",
-        "crates/fineprint-core/src/triggers/detect.rs:319",
-        "crates/fineprint-core/src/triggers/detect.rs:356",
+        "crates/fineprint-core/src/triggers/detect.rs:114",
+        "crates/fineprint-core/src/triggers/detect.rs:151",
+        "crates/fineprint-core/src/triggers/detect.rs:332",
+        "crates/fineprint-core/src/triggers/detect.rs:370",
         "crates/fineprint-core/src/triggers/detect.rs:86",
         "crates/fineprint-core/src/triggers/event.rs:111",
         "crates/fineprint-core/src/triggers/event.rs:136",
@@ -3809,11 +3826,11 @@
         "crates/fineprint-core/src/triggers/lookback.rs:94",
         "crates/fineprint-core/src/triggers/mod.rs:16",
         "crates/fineprint-core/src/triggers/tests.rs:1138",
-        "crates/fineprint-core/src/triggers/tests.rs:1973",
-        "crates/fineprint-core/src/triggers/tests.rs:2074",
-        "crates/fineprint-core/src/triggers/tests.rs:2315",
-        "crates/fineprint-core/src/triggers/tests.rs:2374",
-        "crates/fineprint-core/src/triggers/tests.rs:2491",
+        "crates/fineprint-core/src/triggers/tests.rs:1976",
+        "crates/fineprint-core/src/triggers/tests.rs:2077",
+        "crates/fineprint-core/src/triggers/tests.rs:2318",
+        "crates/fineprint-core/src/triggers/tests.rs:2377",
+        "crates/fineprint-core/src/triggers/tests.rs:2494",
         "crates/fineprint-core/src/triggers/tests.rs:317",
         "crates/fineprint-core/src/triggers/tests.rs:320",
         "crates/fineprint-core/src/triggers/tests.rs:346",
@@ -3836,8 +3853,8 @@
         "crates/fineprint-core/tests/spec_events_zone.rs:5",
         "crates/fineprint-core/tests/spec_events_zone.rs:54",
         "crates/fineprint-core/tests/spec_events_zone.rs:91",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:1199",
-        "crates/fineprint-core/tests/spec_triggers_detect.rs:1242",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1337",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:1380",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:666",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:701",
         "crates/fineprint-core/tests/spec_triggers_detect.rs:718",
@@ -3845,8 +3862,8 @@
         "crates/fineprint-core/tests/spec_triggers_events.rs:205",
         "crates/fineprint-core/tests/spec_triggers_events.rs:243",
         "crates/fineprint-core/tests/spec_triggers_events.rs:322",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:555",
         "crates/fineprint-core/tests/spec_triggers_events.rs:6",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:616",
         "crates/fineprint-core/tests/spec_triggers_events.rs:83",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:101",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:139",
@@ -3879,7 +3896,10 @@
       "locations": [
         "crates/fineprint-core/src/triggers/lookback.rs:117",
         "crates/fineprint-core/src/triggers/lookback.rs:24",
+        "crates/fineprint-core/src/triggers/tests.rs:2649",
         "crates/fineprint-core/src/triggers/tests.rs:445",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:873",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:890",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:127",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:437",
         "docs/SRS.md:447"
@@ -3888,11 +3908,11 @@
     "603.10c": {
       "sha256": "e807b07cd5e521e8cb35946ee55b6ca0b9c3481e81c02371c62033ba52dff38d",
       "locations": [
-        "crates/fineprint-core/src/triggers/event.rs:331",
+        "crates/fineprint-core/src/triggers/event.rs:343",
         "crates/fineprint-core/src/triggers/lookback.rs:119",
         "crates/fineprint-core/src/triggers/lookback.rs:26",
         "crates/fineprint-core/src/triggers/tests.rs:454",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1090",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1176",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:127",
         "crates/fineprint-core/tests/spec_triggers_lookback.rs:444",
         "docs/SRS.md:448"
@@ -3937,8 +3957,8 @@
     "603.10g": {
       "sha256": "e7fc897f7fe797c391ee4c71aff130d9a94e66a44a976c27df461671655f69cc",
       "locations": [
-        "crates/fineprint-core/src/triggers/detect.rs:101",
-        "crates/fineprint-core/src/triggers/detect.rs:319",
+        "crates/fineprint-core/src/triggers/detect.rs:114",
+        "crates/fineprint-core/src/triggers/detect.rs:332",
         "crates/fineprint-core/src/triggers/lookback.rs:11",
         "crates/fineprint-core/src/triggers/lookback.rs:130",
         "crates/fineprint-core/src/triggers/lookback.rs:35",
@@ -5429,12 +5449,18 @@
         "crates/fineprint-core/src/events/exec.rs:639",
         "crates/fineprint-core/src/events/tests.rs:1135",
         "crates/fineprint-core/src/events/types.rs:359",
-        "crates/fineprint-core/src/triggers/event.rs:311",
-        "crates/fineprint-core/src/triggers/tests.rs:1893",
+        "crates/fineprint-core/src/triggers/event.rs:319",
+        "crates/fineprint-core/src/triggers/tests.rs:1869",
+        "crates/fineprint-core/src/triggers/tests.rs:1896",
+        "crates/fineprint-core/src/triggers/tests.rs:2860",
         "crates/fineprint-core/tests/spec_events_tokens.rs:33",
         "crates/fineprint-core/tests/spec_events_tokens.rs:6",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1006",
-        "crates/fineprint-core/tests/spec_triggers_events.rs:1047"
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:975",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:978",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1067",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1105",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1112",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:1154"
       ]
     },
     "701.8": {
@@ -5449,7 +5475,7 @@
       "locations": [
         "crates/fineprint-core/src/replacement/tests.rs:2312",
         "crates/fineprint-core/src/triggers/lookback.rs:86",
-        "crates/fineprint-core/src/triggers/tests.rs:2491",
+        "crates/fineprint-core/src/triggers/tests.rs:2494",
         "crates/fineprint-core/src/triggers/tests.rs:570",
         "crates/fineprint-core/src/triggers/tests.rs:638",
         "crates/fineprint-core/tests/spec_replacement_merge.rs:279",
@@ -5464,7 +5490,7 @@
         "crates/fineprint-core/src/replacement/tests.rs:3566",
         "crates/fineprint-core/src/replacement/types.rs:516",
         "crates/fineprint-core/src/triggers/lookback.rs:88",
-        "crates/fineprint-core/src/triggers/tests.rs:2493",
+        "crates/fineprint-core/src/triggers/tests.rs:2496",
         "crates/fineprint-core/tests/spec_replacement_merge.rs:465",
         "crates/fineprint-core/tests/spec_replacement_merge.rs:665",
         "crates/fineprint-core/tests/spec_replacement_merge.rs:693",
@@ -5476,7 +5502,10 @@
     "701.9a": {
       "sha256": "153d9397b0a136ac57f61150856cc33570d2e57942b73b847583946900671f8c",
       "locations": [
-        "crates/fineprint-core/src/events/types.rs:81"
+        "crates/fineprint-core/src/events/types.rs:81",
+        "crates/fineprint-core/src/triggers/event.rs:229",
+        "crates/fineprint-core/src/triggers/tests.rs:2777",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:396"
       ]
     },
     "701.13a": {
@@ -5496,7 +5525,10 @@
     "701.17a": {
       "sha256": "5ebf61fa3fb77ea38c285c347dd89c17bf4e6dca3bd937911463a44a8825c19c",
       "locations": [
-        "crates/fineprint-core/src/events/types.rs:83"
+        "crates/fineprint-core/src/events/types.rs:83",
+        "crates/fineprint-core/src/triggers/event.rs:229",
+        "crates/fineprint-core/src/triggers/tests.rs:2777",
+        "crates/fineprint-core/tests/spec_triggers_events.rs:396"
       ]
     },
     "701.20a": {
@@ -5526,8 +5558,8 @@
         "crates/fineprint-core/src/events/types.rs:79",
         "crates/fineprint-core/src/triggers/event.rs:210",
         "crates/fineprint-core/src/triggers/event.rs:223",
-        "crates/fineprint-core/src/triggers/event.rs:356",
-        "crates/fineprint-core/src/triggers/tests.rs:2315",
+        "crates/fineprint-core/src/triggers/event.rs:368",
+        "crates/fineprint-core/src/triggers/tests.rs:2318",
         "crates/fineprint-core/tests/spec_triggers_events.rs:322"
       ]
     },
@@ -5978,7 +6010,15 @@
         "crates/fineprint-core/src/permanent/container.rs:175",
         "crates/fineprint-core/src/permanent/mod.rs:27",
         "crates/fineprint-core/src/permanent/tests.rs:396",
-        "crates/fineprint-core/tests/spec_permanent_control.rs:221"
+        "crates/fineprint-core/src/triggers/detect.rs:351",
+        "crates/fineprint-core/src/triggers/detect.rs:415",
+        "crates/fineprint-core/src/triggers/detect.rs:91",
+        "crates/fineprint-core/src/triggers/tests.rs:2586",
+        "crates/fineprint-core/src/triggers/tests.rs:2649",
+        "crates/fineprint-core/tests/spec_permanent_control.rs:221",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:873",
+        "crates/fineprint-core/tests/spec_triggers_detect.rs:890",
+        "crates/fineprint-core/tests/spec_triggers_support.rs:289"
       ]
     },
     "702.26g": {
