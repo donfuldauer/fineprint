@@ -4,7 +4,9 @@
 
 //! Spec tests for prevention and shields on the replacement bus, and the counter-backed
 //! effects (REQ-EVENT-001; CR 615.1, 615.6, 615.7, 615.8, 614.7, 614.7a, 120.8, 122.1c,
-//! 122.1d, 122.1h, 701.26b). Black-box: written from the work-item brief only.
+//! 122.1d, 122.1h, 701.26b, 615.13). Simultaneous damage a shield-less prevention effect prevents
+//! for one recipient queues its follow-up once per batch (review round 2, G3). Black-box: written
+//! from the work-item brief only.
 
 #[path = "spec_replacement_support.rs"]
 mod support;
@@ -362,4 +364,192 @@ fn req_event_001_r1_f11_stun_replaces_untap_of_tapped_permanent() {
     assert_eq!(r.applications(), eids(&[1]));
     assert!(r.world().tapped(obj));
     assert_eq!(r.world().counter(obj, "stun"), 0);
+}
+
+/// Damage `amount` from source object `source` to object `target` (no source controller).
+fn dmg_obj_from(
+    source: fineprint_base::ids::ObjectId,
+    target: fineprint_base::ids::ObjectId,
+    amount: i64,
+) -> GameEvent {
+    GameEvent::Damage {
+        source: Some(source),
+        source_controller: None,
+        target: fineprint_core::events::DamageTarget::Object(target),
+        amount,
+        combat: false,
+    }
+}
+
+/// The executed RemoveCounters events of a run.
+fn removals(r: &Run) -> Vec<GameEvent> {
+    r.executed()
+        .iter()
+        .filter(|e| matches!(e.instance.event(), GameEvent::RemoveCounters { .. }))
+        .map(|e| e.instance.event().clone())
+        .collect()
+}
+
+/// A permanent with `counters` shield counters and two source objects.
+fn shielded(
+    counters: i64,
+) -> (
+    World,
+    fineprint_base::ids::ObjectId,
+    [fineprint_base::ids::ObjectId; 2],
+) {
+    let mut w = World::new();
+    let x = w.create(ZoneKind::Battlefield, P1);
+    w.put_counters(x, "shield", counters);
+    let s1 = w.create(ZoneKind::Battlefield, P2);
+    let s2 = w.create(ZoneKind::Battlefield, P2);
+    (w, x, [s1, s2])
+}
+
+// REQ-EVENT-001, CR 122.1c, 615.13 (G3): simultaneous damage from two sources to a permanent with
+// two shield counters: both damage events are prevented (2), no damage is marked, and exactly ONE
+// shield counter is removed (one follow-up per effect and recipient per batch); `applications`
+// lists the effect once per prevented event.
+#[test]
+fn req_event_001_r2_g3_simultaneous_damage_removes_one_shield_counter() {
+    let (w, x, [s1, s2]) = shielded(2);
+    let r = run_batch(
+        Bus::new(w, vec![ReplacementEffect::shield_counter_damage(eid(1), x)]),
+        vec![dmg_obj_from(s1, x, 1), dmg_obj_from(s2, x, 1)],
+        false,
+        &[],
+    );
+    assert_eq!(r.report().prevented, 2);
+    assert_eq!(r.world().events.markers().damage(x), 0);
+    assert_eq!(removals(&r), vec![remove_counters(x, "shield", 1)]);
+    assert_eq!(r.world().counter(x, "shield"), 1);
+    assert_eq!(r.applications(), eids(&[1, 1]));
+    assert!(
+        r.executed()
+            .iter()
+            .all(|e| !matches!(e.instance.event(), GameEvent::Damage { .. }))
+    );
+}
+
+// REQ-EVENT-001, CR 122.1c, 615.13 (G3): the same two damage events in two separate calls each
+// remove a counter: 2 -> 1 -> 0.
+#[test]
+fn req_event_001_r2_g3_separate_calls_remove_one_each() {
+    let (w, x, [s1, s2]) = shielded(2);
+    let first = run_event(
+        Bus::new(w, vec![ReplacementEffect::shield_counter_damage(eid(1), x)]),
+        dmg_obj_from(s1, x, 1),
+        &[],
+    );
+    assert_eq!(first.report().prevented, 1);
+    assert_eq!(removals(&first), vec![remove_counters(x, "shield", 1)]);
+    assert_eq!(first.world().counter(x, "shield"), 1);
+    let second = run_event(next(&first), dmg_obj_from(s2, x, 1), &[]);
+    assert_eq!(second.report().prevented, 1);
+    assert_eq!(removals(&second), vec![remove_counters(x, "shield", 1)]);
+    assert_eq!(second.world().counter(x, "shield"), 0);
+    assert_eq!(second.world().events.markers().damage(x), 0);
+}
+
+// REQ-EVENT-001, CR 122.1c, 615.13 (G3): one damage event removes one counter (1 of 2 left).
+#[test]
+fn req_event_001_r2_g3_single_event_removes_one() {
+    let (w, x, [s1, _]) = shielded(2);
+    let r = run_event(
+        Bus::new(w, vec![ReplacementEffect::shield_counter_damage(eid(1), x)]),
+        dmg_obj_from(s1, x, 3),
+        &[],
+    );
+    assert_eq!(r.report().prevented, 3);
+    assert_eq!(removals(&r), vec![remove_counters(x, "shield", 1)]);
+    assert_eq!(r.world().counter(x, "shield"), 1);
+    assert_eq!(r.applications(), eids(&[1]));
+}
+
+// REQ-EVENT-001, CR 122.1c, 615.13 (G3): one shield counter and two simultaneous damage events:
+// both prevented, one removal, no counter left, no damage marked.
+#[test]
+fn req_event_001_r2_g3_one_counter_two_simultaneous_damages() {
+    let (w, x, [s1, s2]) = shielded(1);
+    let r = run_batch(
+        Bus::new(w, vec![ReplacementEffect::shield_counter_damage(eid(1), x)]),
+        vec![dmg_obj_from(s1, x, 2), dmg_obj_from(s2, x, 1)],
+        false,
+        &[],
+    );
+    assert_eq!(r.report().prevented, 3);
+    assert_eq!(removals(&r), vec![remove_counters(x, "shield", 1)]);
+    assert_eq!(r.world().counter(x, "shield"), 0);
+    assert_eq!(r.world().events.markers().damage(x), 0);
+    assert_eq!(r.applications(), eids(&[1, 1]));
+}
+
+// REQ-EVENT-001, CR 122.1c, 615.13 (G3): two different permanents, each with one shield counter
+// and its own damage shield, damaged simultaneously: one removal each.
+#[test]
+fn req_event_001_r2_g3_different_permanents_one_removal_each() {
+    let (mut w, x, [s1, s2]) = shielded(1);
+    let y = w.create(ZoneKind::Battlefield, P2);
+    w.put_counters(y, "shield", 1);
+    let r = run_batch(
+        Bus::new(
+            w,
+            vec![
+                ReplacementEffect::shield_counter_damage(eid(1), x),
+                ReplacementEffect::shield_counter_damage(eid(2), y),
+            ],
+        ),
+        vec![dmg_obj_from(s1, x, 1), dmg_obj_from(s2, y, 1)],
+        false,
+        &[],
+    );
+    assert_eq!(r.report().prevented, 2);
+    let mut got = removals(&r);
+    got.sort_by_key(|e| match e {
+        GameEvent::RemoveCounters { target, .. } => format!("{target:?}"),
+        _ => String::new(),
+    });
+    let mut expected = vec![
+        remove_counters(x, "shield", 1),
+        remove_counters(y, "shield", 1),
+    ];
+    expected.sort_by_key(|e| match e {
+        GameEvent::RemoveCounters { target, .. } => format!("{target:?}"),
+        _ => String::new(),
+    });
+    assert_eq!(got, expected);
+    assert_eq!(r.world().counter(x, "shield"), 0);
+    assert_eq!(r.world().counter(y, "shield"), 0);
+}
+
+// REQ-EVENT-001, CR 615.13 (G3): a generic shield-less `Prevent { then: [LifeChange P1 +1] }` on
+// damage to player 2 from two simultaneous sources: both prevented, the follow-up executes once.
+#[test]
+fn req_event_001_r2_g3_generic_follow_up_once_per_batch() {
+    let mut w = World::new();
+    let a = w.create(ZoneKind::Battlefield, P1);
+    let b = w.create(ZoneKind::Battlefield, P1);
+    let effect = fx(
+        1,
+        m_dmg_player(P2),
+        Action::Prevent {
+            then: vec![life_change(P1, 1)],
+        },
+    );
+    let r = run_batch(
+        Bus::new(w, vec![effect]),
+        vec![dmg_from(a, P2, 2), dmg_from(b, P2, 3)],
+        false,
+        &[],
+    );
+    assert_eq!(r.report().prevented, 5);
+    assert_eq!(r.world().life(P2), STARTING_LIFE);
+    assert_eq!(r.world().life(P1), STARTING_LIFE + 1);
+    let gains = r
+        .executed()
+        .iter()
+        .filter(|e| e.instance.event() == &life_change(P1, 1))
+        .count();
+    assert_eq!(gains, 1);
+    assert_eq!(r.applications(), eids(&[1, 1]));
 }

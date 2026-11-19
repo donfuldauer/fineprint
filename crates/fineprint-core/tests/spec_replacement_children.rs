@@ -178,8 +178,9 @@ fn req_event_001_children_of_dropped_event_are_processed() {
     assert_eq!(r.report().prevented, 3);
 }
 
-// REQ-EVENT-001, CR 616.1c: `EntersAsCopyOf` on a ZoneChange to the battlefield yields a child
-// BecomeCopy of the entered object's NEW id.
+// REQ-EVENT-001, REQ-CORE-003, CR 616.1c, 707.5 (G1, F6): `EntersAsCopyOf` on a ZoneChange to
+// the battlefield makes the entered object's NEW id a copy as part of the entry: one executed
+// batch, no BecomeCopy event.
 #[test]
 fn req_event_001_enters_as_copy_zone_change_uses_new_id() {
     let mut w = World::new();
@@ -199,25 +200,17 @@ fn req_event_001_enters_as_copy_zone_change_uses_new_id() {
         zone_change(card, ZoneKind::Battlefield, ZoneChangeCause::Other),
         &[],
     );
-    let batches = r.nonempty_batches();
-    assert_eq!(batches.len(), 2);
+    let batches = assert_one_entry_batch(&r);
     let entered = match batches[0].events[0].outcome {
         fineprint_core::events::Outcome::ZoneChange(m) => m.new,
         other => panic!("expected a ZoneChange outcome, got {other:?}"),
     };
     assert_ne!(entered, card);
-    assert_eq!(
-        batches[1].events[0].instance.event(),
-        &GameEvent::BecomeCopy {
-            object: entered,
-            copied: original
-        }
-    );
     assert_eq!(r.world().events.markers().copy_of(entered), Some(original));
 }
 
-// REQ-EVENT-001, CR 616.1c: `EntersAsCopyOf` on a CreateToken yields a child BecomeCopy of the
-// token's object id.
+// REQ-EVENT-001, REQ-CORE-003, CR 616.1c, 707.5 (G1, F6): `EntersAsCopyOf` on a CreateToken
+// makes the token a copy as part of its creation: one executed batch, no BecomeCopy event.
 #[test]
 fn req_event_001_enters_as_copy_create_token() {
     let mut w = World::new();
@@ -237,19 +230,11 @@ fn req_event_001_enters_as_copy_create_token() {
         },
         &[],
     );
-    let batches = r.nonempty_batches();
-    assert_eq!(batches.len(), 2);
+    let batches = assert_one_entry_batch(&r);
     let token = match batches[0].events[0].outcome {
         fineprint_core::events::Outcome::TokenCreated { object } => object,
         other => panic!("expected TokenCreated, got {other:?}"),
     };
-    assert_eq!(
-        batches[1].events[0].instance.event(),
-        &GameEvent::BecomeCopy {
-            object: token,
-            copied: original
-        }
-    );
     assert_eq!(r.world().events.markers().copy_of(token), Some(original));
 }
 
@@ -487,15 +472,37 @@ fn req_event_001_r1_f1_prevent_follow_up_has_fresh_applied_set() {
     assert!(applied_of(&executed[0]).is_empty());
 }
 
+/// Asserts the CR 707.5 entry-copy shape (G1, F6): the call executed and logged exactly one
+/// non-empty batch (the entry) and no BecomeCopy event; returns the executed batches.
+fn assert_one_entry_batch(r: &Run) -> Vec<fineprint_core::events::ExecutedBatch> {
+    let batches = r.nonempty_batches();
+    assert_eq!(batches.len(), 1, "one executed batch for the entry");
+    assert_eq!(r.new_log().len(), 1, "the log gains one batch");
+    assert!(
+        r.executed()
+            .iter()
+            .all(|e| !matches!(e.instance.event(), GameEvent::BecomeCopy { .. })),
+        "no BecomeCopy event"
+    );
+    assert!(
+        r.new_log()
+            .iter()
+            .flat_map(|b| b.events.iter())
+            .all(|e| !matches!(e.instance.event(), GameEvent::BecomeCopy { .. })),
+        "no BecomeCopy event logged"
+    );
+    batches
+}
+
 /// A Skip effect (id `n`) on every BecomeCopy.
 fn skip_become_copy(n: u64) -> ReplacementEffect {
     fx(n, EventMatcher::new(BusEventKind::BecomeCopy), Action::Skip)
 }
 
-// REQ-EVENT-001, CR 614.1c, 603.6d, 616.1c (F6): `EntersAsCopyOf` on a ZoneChange to the
-// battlefield makes the permanent enter as the copy: a Skip effect on BecomeCopy is not applied
-// and the new permanent is a copy; the copy is its own executed batch after the entry,
-// carrying the new id.
+// REQ-EVENT-001, REQ-CORE-003, CR 614.1c, 603.6d, 616.1c, 707.5 (F6, G1): `EntersAsCopyOf` on a
+// ZoneChange to the battlefield makes the permanent enter as the copy: a Skip effect on
+// BecomeCopy is not applied and the new permanent is a copy; the copy is part of the entry (one
+// executed batch, no BecomeCopy event).
 #[test]
 fn req_event_001_r1_f6_enters_as_copy_zone_change_ignores_become_copy_effects() {
     for (copy_id, skip_id) in [(1u64, 2u64), (2, 1)] {
@@ -520,22 +527,15 @@ fn req_event_001_r1_f6_enters_as_copy_zone_change_ignores_become_copy_effects() 
             &[],
         );
         assert_eq!(r.applications(), eids(&[copy_id]));
-        let batches = r.nonempty_batches();
-        assert_eq!(batches.len(), 2);
+        let batches = assert_one_entry_batch(&r);
         let entered = new_id(&batches[0].events[0].outcome);
-        assert_eq!(
-            batches[1].events[0].instance.event(),
-            &GameEvent::BecomeCopy {
-                object: entered,
-                copied: original
-            }
-        );
         assert_eq!(r.world().events.markers().copy_of(entered), Some(original));
         assert_eq!(r.world().zone_of(entered), Some(ZoneKind::Battlefield));
     }
 }
 
-// REQ-EVENT-001, CR 614.1c, 603.6d, 616.1c (F6): the same for a CreateToken.
+// REQ-EVENT-001, REQ-CORE-003, CR 614.1c, 603.6d, 616.1c, 707.5 (F6, G1): the same for a
+// CreateToken.
 #[test]
 fn req_event_001_r1_f6_enters_as_copy_token_ignores_become_copy_effects() {
     let mut w = World::new();
@@ -559,16 +559,8 @@ fn req_event_001_r1_f6_enters_as_copy_token_ignores_become_copy_effects() {
         &[],
     );
     assert_eq!(r.applications(), eids(&[1]));
-    let batches = r.nonempty_batches();
-    assert_eq!(batches.len(), 2);
+    let batches = assert_one_entry_batch(&r);
     let token = new_id(&batches[0].events[0].outcome);
-    assert_eq!(
-        batches[1].events[0].instance.event(),
-        &GameEvent::BecomeCopy {
-            object: token,
-            copied: original
-        }
-    );
     assert_eq!(r.world().events.markers().copy_of(token), Some(original));
 }
 
