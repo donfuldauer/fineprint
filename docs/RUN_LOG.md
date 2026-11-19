@@ -287,3 +287,9 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #30 (PR #179 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | triggers lib 44 passed; workspace green | detect_with_pre_event_memory, events_from_batch_with_lki, cross-view grouping |
 | 03-events | #30 (PR #179 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | detect 45, events 28, lookback 30 passed | black-box spec updates |
 | 03-events | #30 (PR #179 review round 1) | Orchestrator (T0 docs, CR index) | Opus 5.5 | 1 | done | cr check ok | DECISIONS round-1 entries |
+| 03-events | #30 (PR #179 review round 1) | work-verifier | Opus 5.5 | 1 | pass | 2605 passed; fmt, clippy, guard, coverage (core 99.30 %), cr check ok; spec suites ×10 stable | verified head eed9b3f; no test weakened vs f0a9448 |
+| 03-events | #30 (PR #179 review round 2) | work-classifier | Opus 5.5 | 1 | routed | — | 4 findings: 3 fixed (source_survives, discard/mill player, token `to`), 1 deferred to new issue #180 FP-143 (UNATTACHED needs executor outcome change) |
+| 03-events | #30 (PR #179 review round 2) | Orchestrator (new issue) | Opus 5.5 | 1 | done | — | opened #180 FP-143, blocked by #27 and #30 |
+| 03-events | #30 (PR #179 review round 2) | Fixer (src) | Opus 5.5 | 1 | done | triggers lib 49 passed; workspace 2615; core 99.19 % | TriggerEnv::source_survives (defaulted), discard/mill player, token `to` |
+| 03-events | #30 (PR #179 review round 2) | Fixer (tester) | Sonnet 5.5 | 1 | done | detect 49, events 29, lookback 30 passed | black-box spec updates; LiveEnv fake |
+| 03-events | #30 (PR #179 review round 2) | Orchestrator (T0 docs, CR index) | Opus 5.5 | 1 | done | cr check ok | DECISIONS round-2 entry |
