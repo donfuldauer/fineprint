@@ -12,7 +12,7 @@ use fineprint_dsl::card::{
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
 
-use super::colors::base_colors;
+use super::colors::{CdaColors, base_colors};
 use super::error::ObjectError;
 use super::mana_value::{ManaValueContext, ManaValueSubject, mana_value};
 use super::validation::validate_types;
@@ -78,7 +78,7 @@ impl Characteristics {
             colors: base_colors(
                 face.mana_cost.as_ref(),
                 face.color_indicator,
-                ColorBitmask::NONE,
+                CdaColors::None,
             ),
             supertypes: face.supertypes.iter().cloned().collect(),
             card_types: face.card_types.iter().cloned().collect(),
@@ -105,13 +105,17 @@ impl Characteristics {
         )
     }
 
-    /// Whether the object has power and toughness (CR 208.3): it must have a printed power or
-    /// toughness, and on the battlefield it must also be a creature.
+    /// Whether the object has power and toughness (CR 208.3, 208.5).
+    ///
+    /// A creature has power and toughness in every zone; a missing value counts as 0
+    /// (CR 208.5). A noncreature has them only off the battlefield and only when a power or
+    /// toughness is printed (CR 208.3); a noncreature permanent never has them.
     #[must_use]
     pub fn pt_applies(&self, on_battlefield: bool) -> bool {
-        // CR 208.3: a noncreature permanent has no power or toughness; a noncreature object off
-        // the battlefield has them only if printed.
-        (self.power.is_some() || self.toughness.is_some())
-            && (!on_battlefield || self.card_types.contains("Creature"))
+        // CR 208.5: a creature always has power and toughness (0 when it has no value).
+        // CR 208.3: a noncreature permanent has none; a noncreature object off the battlefield
+        // has them only if printed.
+        self.card_types.contains("Creature")
+            || (!on_battlefield && (self.power.is_some() || self.toughness.is_some()))
     }
 }

@@ -141,8 +141,12 @@ pub fn mana_value(subject: &ManaValueSubject<'_>, ctx: ManaValueContext) -> i64 
         ManaValueSubject::Melded { front_mana_costs } => cost_mana_value(front_mana_costs[0], ctx)
             .saturating_add(cost_mana_value(front_mana_costs[1], ctx)),
         // CR 202.3d: both halves off the stack or fused; one half when that half is cast.
+        // The split state decides the context: off the stack, X is 0 whatever `ctx` says
+        // (CR 202.3e, 107.3g); on the stack the supplied `ctx` applies.
         ManaValueSubject::Split { left, right, state } => match state {
-            SplitState::NotOnStack | SplitState::OnStackFused => {
+            SplitState::NotOnStack => cost_mana_value(left, ManaValueContext::OffStack)
+                .saturating_add(cost_mana_value(right, ManaValueContext::OffStack)),
+            SplitState::OnStackFused => {
                 cost_mana_value(left, ctx).saturating_add(cost_mana_value(right, ctx))
             }
             SplitState::OnStackHalf(SplitHalf::Left) => cost_mana_value(left, ctx),
