@@ -6352,3 +6352,102 @@ public `evaluate_with_provenance` entry point (rejected: two evaluators would dr
 would have to remember to use it); leaving it to #183 (rejected: it is a defect in this issue's
 deliverable); changing `provider.rs` or wiring `GameState` now (rejected: not needed; #183
 supplies the real environment).
+
+## #39 FP-038 — Ward {2} ability shape of the face-down profiles
+
+**Decision:** `FaceDownProfile::with_ward_2()` (disguise, cloak; CR 702.168a, 701.58a) is the
+default 2/2 profile plus exactly one ability, the JSON object `{"kind": "KEYWORD", "abilityId":
+"facedown:ward", "keyword": "ward", "cost": "{2}"}` (all string values). `has_ward_2()` is true
+iff the abilities contain that exact value, so a ward keyword with another cost is not ward {2}.
+**Rationale:** The brief pins this shape; it is the keyword shape of
+`layers::keyword_counter_ability` plus a cost member, so a later keyword macro for ward can read
+it the same way. Ward is not a keyword counter (SRS 6.1), hence its own `abilityId` prefix.
+**Alternatives:** A dedicated `Characteristics` field or a native-effect reference (rejected:
+the profile must be ordinary characteristics so it is the copiable values, CR 708.2); a numeric
+cost member (rejected: the AbilityAST placeholder carries costs as text).
+
+## #39 FP-038 — Turn-face-down refusal API and check order
+
+**Decision:** `layers::turn_face_down` takes a `FaceDownTarget { already_face_down,
+double_faced_permanent, merged_contains_double_faced }` supplied by the caller and refuses, in
+this order, `AlreadyFaceDown` (CR 708.2b), `DoubleFacedPermanent` (CR 712.13),
+`MergedContainsDoubleFaced` (CR 731.2j). A refusal changes nothing (no effect, no timestamp).
+Otherwise it stamps the object with `StampReason::TurnedFaceUpOrDown` on clones of the ledger
+and generator, builds `face_down_effect` with that timestamp, registers it (atomic in the
+registry) and commits the clones only after registration succeeded; a stamping or registration
+error is `FaceDownRefusal::Layer` with nothing changed. `layers::turn_face_up` checks
+`NotFaceDown` first (unknown id, not a `FaceDown` modification, or an affected set that is not a
+locked set containing the object), then `InstantOrSorcery` (CR 701.40g, 701.58g, 731.2g), then
+stamps and removes the effect, all or nothing. If a `FaceDown` effect's locked set holds other
+objects too, only the named object is taken out of the set (same id, same timestamp); the
+others stay face down. `face_down_effect` itself refuses nothing: a double-faced card may enter
+or be cast face down (CR 712.12).
+**Rationale:** The layer module does not know a permanent's card or status (it is standalone,
+#32), so the caller states the facts and the function applies the CR's "nothing happens". The
+order is the brief's. Checking `NotFaceDown` before `InstantOrSorcery` means a permanent that is
+not face down is never "revealed and left face down". Narrowing a shared set keeps the other
+objects' face-down status, which removing the whole effect would end; the builder only ever
+creates single-object sets, so this case arises only from hand-built effects.
+**Alternatives:** Reading the facts from `Zones`/`MergedPermanent` (rejected: couples layers to
+zones and layouts; the integration unit wires it); refusing a multi-object `FaceDown` effect as
+`NotFaceDown` (rejected: the object is face down by it, so the refusal would be wrong).
+
+## #39 FP-038 — Face-down merged components resolved (#23 open question)
+
+**Decision:** Resolves the open question of "#23 FP-022 — Face-down merged components deferred
+to layer 1b (#39)" for the merge effect as built: a merged permanent has only the topmost
+component's characteristics (CR 731.2a, `merge_effect` in layer 1a); its face-down status is
+the topmost component's (CR 731.2e) and is applied by one `face_down_effect` on the merged object
+in layer 1b, which wins over the merge in either timestamp order; turning it face up removes
+that effect and shows the topmost component's characteristics again (CR 731.2f for the whole
+permanent, 708.8). A face-down lower component of a non-mutated merged permanent contributes
+nothing. `layouts/merged.rs` is unchanged. Tests:
+`req_obj_003_merged_permanent_face_down_both_orders`, `req_obj_003_merged_refusals`.
+**Rationale:** CR 731.2a gives the merged permanent only the topmost component's
+characteristics; CR 731.2e makes the topmost component decide the status; CR 731.2f turns all
+components together, so one effect on the one object models it. Whether a face-down lower
+component of a *mutated* permanent contributes its abilities (CR 702.140e against CR 708.2) is a
+rules question reported to the Orchestrator for the rules-researcher; today `merge_effect` with
+`mutated = true` includes every component's abilities whatever its `face_up` flag, and changing
+that would touch `layouts/merged.rs` or `layers/copy.rs`, outside this unit's owned paths.
+**Alternatives:** Per-component face-down effects (rejected: components are not objects with
+their own characteristics, CR 731.2a); deciding the mutated case here (rejected: a rules
+question, which agents do not decide).
+
+## #39 FP-038 — LKI of a face-down permanent leaving the battlefield
+
+**Decision:** A face-down permanent's last known information is its face-down characteristics:
+the caller evaluates (for example through `LayeredProvider`) before it removes the face-down
+effect for the zone change, so the look-back sees the profile, not the card. Test:
+`req_obj_003_lki_before_leaving_is_the_profile`.
+**Rationale:** CR 603.10 looks back at "the appearance of objects immediately prior to the
+event"; immediately prior, the permanent is face down and has only the listed characteristics
+(CR 708.2). The 708.9 reveal on leaving tells players the card's identity; it does not change
+what the permanent looked like on the battlefield. This is an inference from those two rules,
+not a quoted ruling.
+**Alternatives:** Looking back at the revealed card's characteristics (rejected: that is the
+appearance after the event, not before it).
+
+## #39 FP-038 — Both directions of turning stamp the object
+
+**Decision:** `turn_face_down` and `turn_face_up` each give the object a new timestamp from the
+caller's generator with `StampReason::TurnedFaceUpOrDown`, and return it; the face-down effect's
+own timestamp is the one issued when turning face down. A refused call issues nothing.
+**Rationale:** CR 613.7f: "A permanent receives a new timestamp each time it turns face up or
+face down." The generator is monotonic, so the face-up timestamp is later than every effect
+stamped before it, a copy registered while face down included.
+**Alternatives:** Stamping only when turning face up (rejected: CR 613.7f names both).
+
+## #39 FP-038 — Scope of the reveal rule and the profile module
+
+**Decision:** `layouts::must_reveal_on_leave(face_down, from, to)` is true iff `face_down`,
+`from != to`, and either `from` is the battlefield or `from` is the stack and `to` is not the
+battlefield (CR 708.9). It is a predicate only; the reveals on a player leaving and at game end,
+and the looks of CR 708.5, stay in `knowledge::Knowledge` and are not reimplemented. The profile
+lives in `layouts/facedown.rs` (data, no layer effect) and the layer-1b builder and the turning
+plumbing in `layers/facedown.rs`, as the brief's owned paths split them.
+**Rationale:** The brief pins the predicate's truth table; a same-zone move is not leaving the
+zone. Keeping profiles in `layouts` follows that module's role (characteristics data before the
+layers) while the effect builders live with the other layer builders.
+**Alternatives:** Wiring the reveal into `Knowledge::on_move` now (rejected: outside owned paths;
+`Knowledge::on_move` already applies the CR 708.9 reveals to moves).
