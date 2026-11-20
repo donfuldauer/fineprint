@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude-code-remote__get_session",
+      "mcp__claude-code-remote__list_sessions",
+      "mcp__claude-code-remote__list_events",
+      "mcp__claude-code-remote__create_session",
+      "mcp__claude-code-remote__subscribe_pr_activity",
+      "mcp__claude-code-remote__unsubscribe_pr_activity",
+      "mcp__claude-code-remote__send_later",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__get_session",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__list_sessions",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__list_events",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__create_session",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__subscribe_pr_activity",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__unsubscribe_pr_activity",
+      "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__send_later"
+    ]
+  }
+}
