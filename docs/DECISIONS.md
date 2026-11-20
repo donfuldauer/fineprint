@@ -5682,3 +5682,24 @@ that the environment does not list are dropped in both passes.
 the stages.
 **Alternatives:** Grants grouped by kind (rejected: loses the application order the brief asks
 for).
+
+## #35 FP-034 - An effect that depends on a dependency loop waits for it
+
+**Decision:** In passes A and B, when no remaining effect is free, the earliest-key member of a
+dependency loop with no way out (a strongly connected group that depends on nothing outside
+itself) is applied next. An effect that depends on a loop member but is not in the loop still
+waits until that member has been applied. Example: e2 and e3 depend on each other and e1
+depends on e2, so the order is e2, e1, e3. This corrects the Implementer and Independent Tester
+briefs, which said "apply the earliest-key remaining effect".
+
+**Rationale:** CR 613.8b: "An effect dependent on one or more other effects waits to apply until
+just after all of those effects have been applied. ... If several dependent effects form a
+dependency loop, then this rule is ignored and the effects in the dependency loop are applied in
+timestamp order." Only effects in the loop drop the waiting rule. D2 ("Dependency hook in the
+passes after the layers") also asks for the same semantics as the layer ordering, and
+`layers/ordering.rs` already resolves loops this way. The two readings agree whenever every
+remaining effect is itself in a loop, which was the brief's stated precondition.
+
+**Alternatives:** Apply the earliest-key remaining effect even if it is outside the loop (the
+brief's literal wording). Rejected because an effect would then apply before an effect it
+depends on, which contradicts 613.8b.
