@@ -67,12 +67,14 @@
 //! iteration, integer arithmetic, no clock.
 //!
 //! **Standalone scope.** The registry is a separate component, not joined to `GameState`; the
-//! caller keeps it equal to the effects in force. ETB look-ahead (CR 614.12), optional effects
-//! and trigger detection are later units.
+//! caller keeps it equal to the effects in force. The ETB look-ahead (CR 614.12) is the
+//! standalone `etb` unit ([`project`], [`applicable`], [`resolve_entering`]), not yet joined to
+//! this bus; optional effects and trigger detection are later units.
 
 #![deny(missing_docs)]
 
 mod bus;
+mod etb;
 mod types;
 
 #[cfg(test)]
@@ -80,6 +82,11 @@ mod tests;
 
 pub use bus::{
     BusReport, MAX_BUS_EVENTS, MAX_CHILD_DEPTH, MAX_REPEATS, process_batch, process_event,
+};
+pub use etb::{
+    EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext, EtbEffect, EtbEffects,
+    EtbEntry, EtbError, EtbOption, EtbResolved, EtbScope, ProjectedPermanent, applicable, project,
+    resolve_entering,
 };
 pub use types::{
     Action, AmountOp, BusError, BusEventKind, BusInterrupt, EventMatcher, Modification,
