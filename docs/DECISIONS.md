@@ -6469,3 +6469,76 @@ layers) while the effect builders live with the other layer builders.
 **Rationale.** CR 708.8 requires the object to turn face up while the others stay face down, so refusing is wrong; CR 613.6 requires the parts of a multi-layer effect to keep applying to the objects the anchor applied to. `remove` deletes every `SameAsLayer` link to the anchor and `register` cannot restore them, so remove plus register lost the linked parts for the remaining objects. The new method is additive, a few lines, and leaves evaluation untouched.
 
 **Alternatives.** Refusing turn-up when links exist (violates CR 708.8); dropping the narrowed-set path (regresses the documented behaviour that the other objects stay face down); re-registering the whole group from facedown.rs (`register_group` needs a `LayerEnvironment`, which would change the `turn_face_up` signature).
+
+## #40 FP-039 — ETB projection API and modelling choices
+
+**Decision.** The ETB look-ahead of SRS 8.1 (REQ-EVENT-001, CR 614.12) is a standalone module,
+`crates/fineprint-core/src/replacement/etb.rs`, with the API fixed by the brief (`EtbEffect`,
+`EtbEffects`, `EtbContext`, `EtbEntry`, `EtbApplied`, `ProjectedPermanent`, `project`,
+`applicable`, `resolve_entering`, `EtbResolved::record_into`). Choices made in it:
+
+1. **An ETB effect model of its own.** `EtbEffect` carries a scope (`ThisPermanent` /
+   `OtherPermanents`), a condition on the projected permanent (`HasCardType`, `LacksCardType`,
+   `HasSubtype`) and an action (`EntersTapped`, `EntersWithCounters`, `EntersAsCopyOf`,
+   `AddCardTypes`, `Choose`). The bus `ReplacementEffect` cannot carry it: its `EventMatcher`
+   tests the event against the current state, and its tier is declarative data ("#29 FP-028 —
+   Tiers are declarative data"), whereas CR 614.12 needs conditions on the characteristics the
+   permanent would have on the battlefield. The tier of an `EtbEffect` is likewise declarative.
+2. **Standalone.** Nothing is wired into `process_batch` or `GameState` ("#29 FP-028 —
+   Standalone replacement registry", "#32 FP-031 — Follow-up work for later units"); the bus's
+   `Modification::EntersAsCopyOf` is untouched. Wiring the projection into `process_batch`,
+   compiling DSL ETB replacements (SRS 14.4.4 `CHOOSE ... store`) to `EtbEffect` and applying
+   the result (tapped status, counters, copy, Memory) to the entered permanent are later work.
+3. **Order of the three CR 614.12 inputs** (the CR and the SRS give none; the SRS a/b/c is not
+   an order): (a) applied copy effects replace the base characteristics, the highest `EffectId`
+   last (it wins); the object is always presented as on the battlefield (CR 208.3 P/T presence
+   follows); (b)+(c) the entry's own statics are registered on a clone of the continuous
+   effects in force and the layers are evaluated once over both, so their relative order is the
+   layer system's (CR 613); (a) applied `AddCardTypes` are unioned in after the layers; tapped
+   status and counters are collected from the applied effects. The base controller and the
+   counters are the environment's (the projection overrides only `on_battlefield`, the copied
+   characteristics and, for a copy, a plain mana-value provenance); the counters an entry
+   enters with are reported in `ProjectedPermanent::counters`, not fed to layer 7c.
+4. **Copy rule.** Once an `EntersAsCopyOf` is applied, the entry's `own_statics` are not
+   registered and `ThisPermanent` effects whose source is the entering object no longer become
+   applicable (an already applied one stays applied): the permanent's own abilities are
+   replaced by the copy's. `OtherPermanents` effects of other sources are unaffected.
+5. **Payable totals (CR 614.12b; the CR does not define "payable").** Each `EtbOption::cost`
+   is committed to the entry's controller. For a chooser present in `payable`, `remaining`
+   starts at its value. An option is allowed iff its cost is 0, or `cost + reserve <=
+   remaining`, where `reserve` (saturating) is the sum of the cheapest option cost of every
+   other undecided `Choose` of the same chooser: (i) for every LATER entry of the same
+   controller, the `Choose` effects applicable to it with an empty `EtbApplied` (computed once,
+   before the first entry is resolved), and (ii) for the current entry, the `Choose` effects
+   applicable now (all tiers) other than the one being decided. Earlier entries are fully
+   decided. Choosing subtracts the option's cost (saturating). No allowed option is
+   `EtbError::Unpayable` (reported as a procedure error whose text contains "not payable"). A
+   chooser absent from `payable` has no limit. This is a one-step lookahead: an effect that
+   only becomes applicable after another is applied is not reserved for.
+6. **Chosen values are visible to later steps.** The CR does not say that a later choice or a
+   later effect reads an earlier chosen value. The reading chosen: every chosen value is put in
+   `EtbApplied::chosen` as soon as it is made, so every later projection (and so a later
+   effect's applicability and action) carries it, and a later `Choose` with the same key
+   overwrites it ("the last chosen value", CR 607.2d). No current action or condition reads
+   `chosen`; the projection carries it for the integration unit.
+7. **Requests.** Replacement order uses `CHOOSE_REPLACEMENT_EFFECT` exactly as `Bus::choose`
+   (reason "CR 616.1", source the entering object, event `ZONE_CHANGE`); choices use
+   `CHOOSE_OPTION_OR_VALUE` with `option_type` `COLOR` / `CREATURE_TYPE` / `ANCHOR_WORD`,
+   citing CR 614.12a, or CR 614.12c for anchor words only ("#24 FP-023 — SRS precision notes").
+   One allowed option is taken without asking.
+8. **Memory.** `EtbResolved::memory` holds each chosen value through `Memory::set_choice`;
+   `record_into` writes the values under the keys of `projected.applied.chosen` (Memory has no
+   choice iterator) with `set_choice` for the new object (CR 400.7), keeping its other keys.
+
+**Rationale.** The API is fixed by the brief; the choices above are the readings most
+consistent with CR 614.12, CR 616.1f, SRS 8.1 and the earlier decisions cited, and keep the
+module a pure function of borrowed inputs and recorded answers (R3, "#28 FP-027").
+
+**Alternatives.** Extending the bus `ReplacementEffect` with projected conditions (rejected:
+changes the bus's declarative data and its matcher semantics, outside this unit); feeding
+`EntersWithCounters` into the layer evaluation (rejected: not in the brief's projection
+definition, which is what the spec tests check); a full combinatorial payability search over
+all orders of application (rejected: unbounded and not required by the CR text; the one-step
+lookahead is deterministic and covers the choices known at each entry's start);
+setting the projected controller to `EtbEntry::controller` (rejected: the brief defines the
+projection from the environment's base; no `ControlEtb` action exists yet).
