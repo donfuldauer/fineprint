@@ -5369,15 +5369,17 @@ in both states or untouched in both; for sets and colors, element by element (ke
 both, or present in both, or absent in both); for the ability list, each ability's copy count is
 the same in both or changed by the same amount; for numeric power and toughness, the same
 amount is added; the P/T pair also counts as unchanged when it is switched in both. Effect
-existence through the generating ability is not modelled: the registry has no link from an
-effect to the ability that creates it, so B's existence is read through its affected set. The
-set of `env.objects()` that a selector matches on other objects is not compared.
+existence through the generating ability is now checked through the
+`LayerEnvironment::generating_ability_exists` hook (superseded: see "#33 FP-032 — Review round 1
+dispositions"). The set of `env.objects()` that a selector matches on other objects is not
+compared.
 **Rationale:** Evaluation is per object, so the partially evaluated state of other objects is
 not available (layer-major evaluation across objects is #186 FP-146); evaluating them inside the
 trial would recurse through the whole game for every pair. Comparing what B does as a change
 rather than as a final state is what keeps unrelated effects independent (two type-adding
 effects, a setter after an adder) while any change of applicability is still found. The
-comparison reads only characteristics, never the modification kind (REQ-DSL-013, R4).
+comparison reads only characteristics, never the modification kind (REQ-DSL-013, R4), except
+the declared numeric P/T adjustment (see "#33 FP-032 — Review round 1 dispositions").
 **Alternatives:** Compare B's final output literally (rejected: every additive pair, such as two
 subtype grants, would form a loop); evaluate every object of `env.objects()` up to the current
 layer for the trial (deferred to layer-major evaluation, #186 FP-146).
@@ -5390,7 +5392,10 @@ grouping (it is ordered by the selection procedure alone), so `is_cda` decides o
 (c) of dependency there.
 **Rationale:** The brief asks to keep such an effect applying in the 7a order; the registry
 already accepts `SetPt` in 7a regardless of `is_cda`, and rejecting it would change the
-REQ-LAYER-001 registration contract (R2).
+REQ-LAYER-001 registration contract (R2). SRS 6.2 item 1 and CR 613.4a describe which effects
+belong to 7a; the validation "7a implies isCDA" belongs with DSL/override validation
+(REQ-DSL-004) or the #183 FP-144 wiring, and rejecting it in `register` would change merged #32
+behaviour and its tests (`layers/tests.rs` registers a non-CDA 7a effect) (review round 1, F3).
 **Alternatives:** Reject at registration (rejected: contract change); move it to 7b (rejected:
 reinterprets the declared layer).
 
@@ -5427,3 +5432,44 @@ there is no cached evaluation mode yet. The differential test belongs to the uni
 cache (REQ-LAYER-005).
 **Rationale:** Nothing to compare against; `evaluate` and `evaluate_with_order` always recompute.
 **Alternatives:** A placeholder test (rejected: it would assert nothing).
+
+## #33 FP-032 — Review round 1 dispositions
+
+**Decision:** (a) F4, effect existence (CR 613.8a, 611.3, 113.6): `LayerEnvironment` gains the
+additive method `generating_ability_exists(effect, source, source_view) -> bool`, default `true`.
+`step_applies` (used by both the real application and the dependency trial) applies an effect
+only if its affected set includes the object and, for an `EffectOrigin::Static` effect with
+`source: Some(src)`, the hook says its generating ability exists. `source_view` is the state so
+far only when `src` is the object being evaluated, `None` otherwise. `Resolved` effects
+(CR 611.2: they exist independently of their source's abilities) and static effects without a
+source are not checked. The trial then treats "B stops existing after A" exactly like "B stops
+matching". Existence for sources other than the evaluated object is left to #186 FP-146
+(layer-major evaluation) and a real ability-identity implementation of the hook to #183 FP-144.
+This supersedes the sentence "Effect existence through the generating ability is not modelled"
+of "#33 FP-032 — Scope of the trial application". `LayerEnvironment` is used only inside
+`layers/` (not a P3 contract), so the additive defaulted method is not an R2 contract change.
+(b) F1, saturation: for a step that declares a numeric P/T adjustment (a `ModifyPt` effect, or
+P/T counters: amount times the per-counter change, computed in `i128` without saturation), the
+"same amount added in both states" comparison uses the declared adjustment, not the difference
+of the saturated values. A step that does not apply, P/T counters on a non-creature and an
+object without a P/T pair declare nothing, so differences in whether the step does anything are
+still found; if either state declares, power and toughness count as unchanged exactly when the
+two declarations are equal. Saturating arithmetic in `apply_effect`/`apply_counter` is unchanged.
+The former fallback in the power/toughness comparison ("literal numbers with the same amount
+added", ordering.rs `number`) is removed: with adders declared, no modification that declares
+nothing can add the same nonzero amount in two different states (setters write the same value,
+a switch keeps toughness minus power only when it changes nothing), so it was unreachable.
+(c) F3: a non-CDA effect registered in layer 7a stays accepted (see the amended "#33 FP-032 —
+Non-CDA effects in layer 7a").
+**Rationale:** (a) Without the check, an effect whose generating ability another effect removed
+could start matching after that effect and apply (a false dependency); SRS 6.2 item 4 requires
+comparing B's existence. A hook keeps the layer system free of ability identity, which the
+registry does not model yet. (b) At the `i64` bounds the saturated write makes an adder appear
+to add a different amount depending on the state (0 at the bound, 1 below it), creating a false
+dependency between two adders and a result different from timestamp order. Reading the declared
+amount is a generic read of the modification, never of card identity (R4); it is the one
+exception to "the comparison never reads which modification B is".
+**Alternatives:** (a) Add an ability link to the registry now (rejected: contract change, and
+belongs to #183 FP-144); compare existence with a separate trial path (rejected: the real
+application and the trial would disagree). (b) Widen P/T to `i128` everywhere (rejected: changes
+the `i64` contract and the saturation behaviour); compare saturated values (the bug).
