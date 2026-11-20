@@ -5885,25 +5885,41 @@ copied).
 
 ## #37 FP-036 — Dependency between text effects
 
-**Decision:** Chained text-changing effects use the existing generic dependency trial
-(`ordering.rs`, CR 613.8a-c) unchanged. On text with a Swamp word and no Island word,
+**Decision:** Chained text-changing effects use the generic dependency trial (`ordering.rs`,
+CR 613.8a-c) plus one comparison specific to `REPLACE_TEXT_WORD`: when B is a word replacement
+with `from != to` and both A and B apply, B depends on A exactly when applying A changes the
+tokens B applies to (the word tokens of B's category and `from` value, by token position and id,
+CR 612.2), because B does the same thing (rewrite to `to`) to each of them (CR 613.8a (b)); a
+change A makes to any other token of the same `rules_text` creates no dependency. Every other
+case of the trial is unchanged (B does not apply in either state: independent; B's existence or
+affected set changes: dependent; A changes nothing: independent; the CDA / non-CDA exclusion;
+every B that is not a word replacement, `SetText` included, and a no-op `from == to`
+replacement keep the field-by-field comparison). On text with a Swamp word and no Island word,
 A = Swamp->Island and B = Island->Forest give Forest in both timestamp orders (B depends on A);
 A = Swamp->Island and B = Swamp->Forest depend on each other (a loop, applied in timestamp order,
-613.8b), so the earlier timestamp's `to` wins. Known gap G6: the trial compares the whole
-`rules_text` field, so on text holding both a Swamp word and an Island word A and B also depend on
-each other (a loop applied in timestamp order), which can differ from 613.8a's derivation (A only
-applies to Swamp words, which B never changes). Follow-up #194 (FP-149); nothing changed here.
-`SetText` and `REPLACE_TEXT_WORD` on the same object: the replacement depends on the `SetText`
-under CR 613.8a (b) (applying the `SetText` changes what the replacement does) and the `SetText`
-does not depend on the replacement, so per CR 613.8b the `SetText` applies first in both
-timestamp orders and the replacement rewrites the new text (derivation by the rules researcher,
-CR 2026-11-06; this supersedes the brief's original expectation that a later `SetText` wins
-unchanged). The generic trial already gives this; unit test
-`set_text_applies_before_replace_in_both_orders`.
-**Rationale:** The brief forbids changing ordering.rs; the generic trial already gives the CR
-result for the tested chains.
-**Alternatives:** A text-specific dependency rule comparing individual tokens (deferred: G6
-follow-up; it would change ordering.rs, outside this unit).
+613.8b), so the earlier timestamp's `to` wins. Former gap G6 is fixed in PR #196 (review round 1,
+CodeRabbit finding 4640489029): the trial no longer compares the whole `rules_text` field for a
+`REPLACE_TEXT_WORD`, so on mixed Swamp+Island text A = Swamp->Island, B = Island->Forest gives
+Forest for both words in both orders (B depends on A, A independent of B), and A = Swamp->Island
+with B = Island->Swamp is a real mutual dependency (each changes the other's matching tokens)
+applied in timestamp order (CR 613.8b): A earlier gives [Swamp, Swamp], B earlier gives
+[Island, Island]. The Island/Swamp swap result is an engine derivation of 613.8a/b, not a CR
+worked example. `SetText` and `REPLACE_TEXT_WORD` on the same object: the replacement depends on
+the `SetText` under CR 613.8a (b) (applying the `SetText` changes the tokens the replacement
+applies to) and the `SetText` does not depend on the replacement, so per CR 613.8b the `SetText`
+applies first in both timestamp orders and the replacement rewrites the new text (derivation by
+the rules researcher, CR 2026-11-06; this supersedes the brief's original expectation that a
+later `SetText` wins unchanged). Unit test `set_text_applies_before_replace_in_both_orders`
+still passes under the per-token comparison.
+**Rationale:** CR 613.8a (b) asks whether applying A changes what B applies to or what it does
+to them; for a word replacement that is exactly its set of matching tokens. The original brief
+kept ordering.rs out of scope, so the first submission used the generic trial alone; the
+per-token comparison was adopted in review round 1 (it closes follow-up #194, FP-149). It reads
+only token data (REQ-DSL-013) and is a pure function of the two scratch states (REQ-CORE-001).
+**Alternatives:** The generic whole-field trial for word replacements too (rejected in review
+round 1: on mixed Swamp+Island text it reports a mutual dependency and gives [Island, Forest]);
+the per-token comparison was adopted for `REPLACE_TEXT_WORD` only, and the generic trial remains
+for every other modification.
 
 ## #37 FP-036 — Engine gaps for #37
 
@@ -5919,7 +5935,8 @@ G3 the compile step from the DSL `REPLACE_TEXT_WORD` effect to `LayerModificatio
 G4 word references reachable only from a value expression outside predicates and selectors are not
 resolved by these helpers (also #195).
 G5 copy and text changes (CR 707.2) belong to #38.
-G6 whole-field dependency comparison of `rules_text` (entry above) is follow-up #194 (FP-149).
+G6 whole-field dependency comparison of `rules_text` (entry above): fixed in PR #196 review round 1
+(follow-up #194 is closed by that PR; no longer a gap).
 **Rationale:** Each gap is owned by another issue or needs one; the brief scopes this unit to the
 layers module.
 **Alternatives:** Implementing them here (rejected: outside owned paths and scope).

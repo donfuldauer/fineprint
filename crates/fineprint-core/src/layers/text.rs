@@ -394,3 +394,40 @@ pub(super) fn replace_in_rules_text(
     let rewritten = rewrite_text_words(&stream, category, from, to).ok()?;
     (rewritten != stream).then(|| encode_rules_text(&rewritten))
 }
+
+/// The tokens a `REPLACE_TEXT_WORD` of `category` and `from` applies to in `rules_text`
+/// (REQ-LAYER-002, REQ-DSL-012; CR 613.8a, 612.2): the `(position, token id)` of every word
+/// token whose category is `category` and whose value is exactly `from`, in stream order.
+///
+/// CR 612.2: only words used in that category's sense count, so literal text, name references
+/// (`SELF`, `OTHER`), card-name words and words of other categories or values are never in the
+/// set. Category `CARD_NAME` (not supported by the effect, CR 612.2), empty text and text that
+/// does not decode give the empty set; never panics (R12). Reads only token data, never a card
+/// name or id (REQ-DSL-013). The dependency trial compares this set before and after another
+/// effect (docs/DECISIONS.md "#37 FP-036 — Dependency between text effects").
+pub(super) fn replace_targets(
+    rules_text: &card::TextTokenStream,
+    category: RewritableCategory,
+    from: &str,
+) -> Vec<(usize, String)> {
+    if category == RewritableCategory::CardName {
+        return Vec::new();
+    }
+    let Ok(stream) = decode_rules_text(rules_text) else {
+        return Vec::new();
+    };
+    stream
+        .tokens()
+        .iter()
+        .enumerate()
+        .filter_map(|(position, token)| match token {
+            // CR 612.2: a word used as a word of `category`.
+            TextToken::Word {
+                id,
+                category: c,
+                value,
+            } if *c == category && value == from => Some((position, id.clone())),
+            _ => None,
+        })
+        .collect()
+}

@@ -16,7 +16,10 @@ use super::lockin::LockRecord;
 use super::pipeline::{
     Evaluated, LayerEnvironment, Step, apply_step, declared_pt_adjustment, step_applies, step_order,
 };
+use super::registry::{ContinuousEffect, LayerModification};
+use super::text::replace_targets;
 use crate::objects::Characteristics;
+use fineprint_dsl::text::RewritableCategory;
 
 /// The order in which the steps of one object's evaluation were used (REQ-LAYER-002). Plain,
 /// owned data, ready to be carried by a rules-trace event.
@@ -184,8 +187,15 @@ pub(super) fn run_layer(
 ///
 /// CR 613.8a: B depends on A iff (a) both are in this layer (they are), (b) applying A to a
 /// scratch copy of the current state changes whether B applies to the object (its existence and
-/// what it applies to) or what B does to it (its output, which carries its text), and (c) both or
-/// neither are from characteristic-defining abilities. The real state is never touched.
+/// what it applies to) or what B does to it, and (c) both or neither are from
+/// characteristic-defining abilities. The real state is never touched.
+///
+/// What B does is compared field by field ([`same_output`]), except for a `REPLACE_TEXT_WORD`
+/// B with `from != to`: it applies to its matching word tokens and does the same thing (rewrite
+/// to `to`) to each, so it depends on A exactly when applying A changes that set of tokens
+/// (position and id, [`super::text::replace_targets`]). A change A makes to any other token of
+/// the same rules text creates no dependency (docs/DECISIONS.md "#37 FP-036 — Dependency between
+/// text effects").
 fn dependencies(
     steps: &[Keyed<'_>],
     remaining: &[usize],
@@ -224,18 +234,48 @@ fn dependencies(
             deps[i][j] = match (&without[i], &with) {
                 // B applies (or exists) in neither state: nothing changed.
                 (None, None) => false,
-                // CR 613.8a (b): its output differs.
-                (Some(out0), Some(out1)) => !same_output(
-                    (&scratch.state, &out0.state, &after_a.state, &out1.state),
-                    declared_pt_adjustment(step_b, scratch),
-                    declared_pt_adjustment(step_b, &after_a),
-                ),
+                (Some(out0), Some(out1)) => match replaced_word(step_b) {
+                    // CR 613.8a (b), CR 612.2: a word replacement applies to its matching
+                    // tokens and does the same thing to each, so applying A changes what it
+                    // applies to, or what it does, exactly when that set of tokens changes.
+                    Some((category, from)) => {
+                        replace_targets(&scratch.state.characteristics.rules_text, category, from)
+                            != replace_targets(
+                                &after_a.state.characteristics.rules_text,
+                                category,
+                                from,
+                            )
+                    }
+                    // CR 613.8a (b): its output differs.
+                    None => !same_output(
+                        (&scratch.state, &out0.state, &after_a.state, &out1.state),
+                        declared_pt_adjustment(step_b, scratch),
+                        declared_pt_adjustment(step_b, &after_a),
+                    ),
+                },
                 // CR 613.8a (b): its existence or what it applies to changed.
                 _ => true,
             };
         }
     }
     deps
+}
+
+/// The category and `from` word of a `REPLACE_TEXT_WORD` effect step that changes something
+/// (`from != to`), whose dependency is decided by the tokens it applies to (CR 613.8a (b)).
+/// `None` for every other step, a no-op replacement included, which keeps the generic
+/// comparison. Reads only the modification kind, never a card name or id (REQ-DSL-013).
+fn replaced_word<'s>(step: &Step<'s>) -> Option<(RewritableCategory, &'s str)> {
+    match step {
+        Step::Effect(
+            _,
+            ContinuousEffect {
+                modification: LayerModification::ReplaceTextWord { category, from, to },
+                ..
+            },
+        ) if from != to => Some((*category, from.as_str())),
+        _ => None,
+    }
 }
 
 /// `step` applied to a clone of `from`, or `None` if it does not apply to the object there.
