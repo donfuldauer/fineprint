@@ -733,7 +733,9 @@ fn req_event_001_copy_replaces_base_and_drops_own_abilities() {
 /// fields; an answer of the wrong kind or out of range is refused.
 #[test]
 fn req_event_001_tiers_and_request() {
-    let env = Env::default().with(o(4), artifact("test.etb_card_a"));
+    let mut env = Env::default().with(o(4), artifact("test.etb_card_a"));
+    // One controller per projection (H2): the environment reports the entry's controller.
+    env.bases.get_mut(&o(4)).unwrap().controller = Some(p(2));
     let continuous = ContinuousEffects::new();
     let fx = effects(vec![
         EtbEffect::new(e(9), EtbAction::EntersTapped).with_description("test.desc_tapped"),
@@ -847,7 +849,9 @@ fn req_event_001_choice_requests_and_memory() {
     ];
     for with_source in [false, true] {
         for (kind, option_type, cr, stored) in cases.clone() {
-            let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+            let mut env = Env::default().with(o(1), artifact("test.etb_card_a"));
+            // One controller per projection (H2): the environment reports the entry's.
+            env.bases.get_mut(&o(1)).unwrap().controller = Some(p(3));
             let continuous = ContinuousEffects::new();
             let mut fx = EtbEffect::new(
                 e(1),
@@ -1132,7 +1136,15 @@ fn req_event_001_payable_unpayable_free_and_unlimited() {
     );
     assert_eq!(out.asked[1].payload, texts(&["cheap_b", "dear_b"]));
     assert!(out.result.is_ok());
-    // A different chooser's entry is not reserved: budget 3 for p(1), the second entry is p(2).
+    // A different chooser's entry is not reserved: budget 3 for p(1), the second entry is p(2)
+    // (one controller per projection, H2: the environment reports p(2) for it).
+    let mut env = env;
+    env.bases.get_mut(&o(2)).unwrap().controller = Some(p(2));
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
     let budget: BTreeMap<PlayerId, u64> = [(p(1), 3)].into();
     let out = drive(
         &ctx,
@@ -2566,4 +2578,402 @@ fn req_event_001_every_start_validated_before_requests() {
             Some(&ChoiceValue::Color("free_b".to_owned()))
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR #202 review round 3 (H1-H3)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-EVENT-001, CR 614.12a, CR 614.12b (H1, thread 4648051968): a `Choose` whose options repeat
+/// a text is refused by `add` (`DuplicateOptionText`, the set unchanged): the answer `Text(x)`
+/// could not tell the two costs apart. The empty-options check comes first. Distinct texts, a
+/// single free option and distinct texts of equal cost are accepted.
+#[test]
+fn req_event_001_duplicate_option_text_rejected() {
+    let mut fx = effects(vec![EtbEffect::new(e(1), EtbAction::EntersTapped)]);
+    let before = fx.clone();
+    let dup = EtbEffect::new(
+        e(2),
+        choose(
+            "a",
+            EtbChoiceKind::Color,
+            vec![opt("x", 2), opt("y", 0), opt("x", 1)],
+        ),
+    );
+    let expected = EtbError::DuplicateOptionText {
+        effect: e(2),
+        text: "x".to_owned(),
+    };
+    assert_eq!(fx.add(dup), Err(expected.clone()));
+    assert_eq!(fx, before);
+    assert!(fx.get(e(2)).is_none());
+    assert!(!expected.to_string().is_empty());
+    // Empty options are still `EmptyChoice`.
+    assert_eq!(
+        fx.add(EtbEffect::new(
+            e(2),
+            choose("a", EtbChoiceKind::Color, Vec::new())
+        )),
+        Err(EtbError::EmptyChoice(e(2)))
+    );
+    // Accepted: distinct texts, one free option, distinct texts of equal cost.
+    for (id, options) in [
+        (3, vec![opt("x", 2), opt("y", 1)]),
+        (4, vec![opt("z", 0)]),
+        (5, vec![opt("u", 1), opt("v", 1)]),
+    ] {
+        fx.add(EtbEffect::new(
+            e(id),
+            choose(&format!("k{id}"), EtbChoiceKind::Color, options),
+        ))
+        .unwrap();
+    }
+    assert_eq!(fx.len(), 4);
+}
+
+/// The H2 entrant: two free values asked for any entering permanent, so a run that passed the
+/// controller check would publish a request.
+fn free_choice_fx() -> EtbEffects {
+    effects(vec![EtbEffect::new(
+        e(1),
+        choose(
+            "a",
+            EtbChoiceKind::Color,
+            vec![opt("free_a", 0), opt("free_b", 0)],
+        ),
+    )])
+}
+
+/// REQ-EVENT-001, CR 614.12, CR 707.5 (H2, outside-diff etb.rs:490): one controller per
+/// projection. The environment reports player 1 for the entrant and the entry names player 2:
+/// `project`, `applicable` and `resolve_entering` (before any request, budgeted or not) fail
+/// with `ControllerMismatch`. The check precedes layer evaluation (an own static duplicating an
+/// id in force still reports the mismatch); an unknown object keeps `UnknownObject`; equal
+/// controllers and a `None` base controller are unchanged, and the projected controller is never
+/// the entry's.
+#[test]
+fn req_event_001_controller_mismatch_rejected() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = free_choice_fx();
+    let mut continuous = ContinuousEffects::new();
+    continuous
+        .register(e(500), add_subtype(o(9), "Golem"))
+        .unwrap();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let mismatch = EtbError::ControllerMismatch {
+        object: o(1),
+        entry: p(2),
+        environment: p(1),
+    };
+    assert!(!mismatch.to_string().is_empty());
+    let other = entry(o(1), p(2));
+    assert_eq!(
+        project(&ctx, &other, &EtbApplied::default()),
+        Err(mismatch.clone())
+    );
+    assert_eq!(
+        applicable(&ctx, &other, &EtbApplied::default()),
+        Err(mismatch.clone())
+    );
+    let budget: BTreeMap<PlayerId, u64> = [(p(2), 5)].into();
+    for payable in [&budget, &no_limit()] {
+        let out = drive(
+            &ctx,
+            std::slice::from_ref(&other),
+            payable,
+            &[text("free_a")],
+        );
+        assert!(out.asked.is_empty(), "{payable:?}");
+        assert_eq!(
+            out.result,
+            Err(ChoiceError::Procedure(mismatch.to_string()))
+        );
+        // A valid first entry is not asked either: every start is checked first.
+        let both = [entry(o(1), p(1)), other.clone()];
+        let out = drive(&ctx, &both, payable, &[text("free_a")]);
+        assert!(out.asked.is_empty(), "{payable:?}");
+        assert_eq!(
+            out.result,
+            Err(ChoiceError::Procedure(mismatch.to_string()))
+        );
+    }
+    // Before layer evaluation: a duplicate own-static id reports the mismatch.
+    let dup = EtbEntry {
+        own_statics: vec![(e(500), add_subtype(o(1), "Wall"))],
+        ..entry(o(1), p(2))
+    };
+    assert_eq!(
+        project(&ctx, &dup, &EtbApplied::default()),
+        Err(mismatch.clone())
+    );
+    // An unknown object keeps `UnknownObject`.
+    assert_eq!(
+        project(&ctx, &entry(o(7), p(2)), &EtbApplied::default()),
+        Err(EtbError::Layer(LayerError::UnknownObject(o(7))))
+    );
+    // Same controller: unchanged.
+    let same = entry(o(1), p(1));
+    let projected = project(&ctx, &same, &EtbApplied::default()).unwrap();
+    assert_eq!(projected.evaluated.controller, Some(p(1)));
+    let out = drive(
+        &ctx,
+        std::slice::from_ref(&same),
+        &no_limit(),
+        &[text("free_b")],
+    );
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(
+        out.result.unwrap()[0].memory.choice("a"),
+        Some(&ChoiceValue::Color("free_b".to_owned()))
+    );
+    // No controller known: accepted, the projected controller stays `None`.
+    let mut unknown_controller = env.clone();
+    unknown_controller.bases.get_mut(&o(1)).unwrap().controller = None;
+    let ctx = EtbContext {
+        env: &unknown_controller,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let projected = project(&ctx, &other, &EtbApplied::default()).unwrap();
+    assert_eq!(projected.evaluated.controller, None);
+    assert_eq!(
+        applicable(&ctx, &other, &EtbApplied::default()),
+        Ok(vec![e(1)])
+    );
+    let out = drive(
+        &ctx,
+        std::slice::from_ref(&other),
+        &budget,
+        &[text("free_a")],
+    );
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(out.asked[0].chooser, p(2));
+    assert!(out.result.is_ok());
+}
+
+/// REQ-EVENT-001, CR 707.5, CR 614.12 (H2): with a copied "artifacts you control are creatures"
+/// static, an environment reporting player 1 and an entry naming player 2 is a mismatch from
+/// `project`, `applicable` and `resolve_entering` (no request); with player 2 on both sides the
+/// copied static matches its own entrant as before.
+#[test]
+fn req_event_001_controller_mismatch_with_copied_static() {
+    let your_artifacts_are_creatures = ContinuousEffect {
+        affected: Affected::Selector(ObjectSelectorAST::Ref(
+            fineprint_dsl::expr::ReferenceAST::SelfRef,
+        )),
+        ..add_type(Some(o(77)), o(77), "Creature")
+    };
+    let mut fx = effects(vec![
+        copy_of(1, artifact("test.etb_model_artifact")),
+        creature_tapped(2),
+    ]);
+    fx.set_copy_abilities(
+        e(1),
+        CopyAbilities {
+            statics: vec![(e(400), your_artifacts_are_creatures)],
+            etb: Vec::new(),
+        },
+    )
+    .unwrap();
+    let continuous = ContinuousEffects::new();
+    let env = YourArtifacts {
+        inner: Env::default().with(o(1), artifact("test.etb_card_a")),
+    };
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = entry(o(1), p(2));
+    let mismatch = EtbError::ControllerMismatch {
+        object: o(1),
+        entry: p(2),
+        environment: p(1),
+    };
+    assert_eq!(project(&ctx, &en, &applied(&[1])), Err(mismatch.clone()));
+    assert_eq!(applicable(&ctx, &en, &applied(&[1])), Err(mismatch.clone()));
+    let budget: BTreeMap<PlayerId, u64> = [(p(2), 3)].into();
+    for payable in [&budget, &no_limit()] {
+        let out = drive(&ctx, std::slice::from_ref(&en), payable, &[]);
+        assert!(out.asked.is_empty());
+        assert_eq!(
+            out.result,
+            Err(ChoiceError::Procedure(mismatch.to_string()))
+        );
+    }
+    // Player 2 on both sides: the copied static applies to its own entrant.
+    let mut inner = Env::default().with(o(1), artifact("test.etb_card_a"));
+    inner.bases.get_mut(&o(1)).unwrap().controller = Some(p(2));
+    let env = YourArtifacts { inner };
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let after = project(&ctx, &en, &applied(&[1])).unwrap();
+    assert_eq!(
+        after.evaluated.characteristics.card_types,
+        set(["Artifact", "Creature"])
+    );
+    assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![e(2)]));
+}
+
+/// The H3 effects: effect 1, a cost-1 choice that applies only while the entrant is not a
+/// creature; effect 2, a free "enters as an additional creature"; with `third`, effect 3, a
+/// second cost-1 choice gated like effect 1. All of one tier, ids ascending.
+fn paid_first(third: bool) -> EtbEffects {
+    let mut list = vec![
+        EtbEffect::new(e(1), choose("a", EtbChoiceKind::Color, vec![opt("x", 1)]))
+            .with_condition(EtbCondition::LacksCardType("Creature".to_owned()))
+            .with_description("paid"),
+        EtbEffect::new(e(2), EtbAction::AddCardTypes(set(["Creature"])))
+            .with_description("free creature"),
+    ];
+    if third {
+        list.push(
+            EtbEffect::new(e(3), choose("c", EtbChoiceKind::Color, vec![opt("z", 1)]))
+                .with_condition(EtbCondition::LacksCardType("Creature".to_owned()))
+                .with_description("paid too"),
+        );
+    }
+    effects(list)
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b (H3, outside-diff etb.rs:1135): with a budget of 0, the
+/// paid choice sorts first but only the free creature addition has a payable continuation, so
+/// the `CHOOSE_REPLACEMENT_EFFECT` default is index 1; every candidate is still offered. Answering
+/// the default completes the entry as a creature with no choice made; answering index 0 is not
+/// payable. With an unlimited chooser the default stays 0.
+#[test]
+fn req_event_001_default_is_first_payable_candidate() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = paid_first(false);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let zero: BTreeMap<PlayerId, u64> = [(p(1), 0)].into();
+    let out = drive(&ctx, &en, &zero, &[]);
+    assert_eq!(out.asked.len(), 1);
+    let request = &out.asked[0];
+    assert_eq!(request.choice_type, ChoiceType::ChooseReplacementEffect);
+    assert_eq!(request.default_on_timeout, pick(1));
+    assert_eq!(
+        request.options,
+        ChoiceOptions::Enumerated(vec![ChoiceOption::Number(0), ChoiceOption::Number(1)])
+    );
+    assert_eq!(
+        request.payload,
+        ChoicePayload::ChooseReplacementEffect {
+            event: "ZONE_CHANGE".to_owned(),
+            effects: vec!["paid".to_owned(), "free creature".to_owned()],
+        }
+    );
+    // Answering the default completes the entry.
+    let out = drive(&ctx, &en, &zero, &[pick(1)]);
+    assert_eq!(out.asked.len(), 1);
+    let r = &out.result.unwrap()[0];
+    assert_eq!(r.projected.applied.order, vec![e(2)]);
+    assert!(r.projected.applied.chosen.is_empty());
+    assert_eq!(
+        r.projected.evaluated.characteristics.card_types,
+        set(["Artifact", "Creature"])
+    );
+    // A manual answer of the unpayable index is still refused.
+    let out = drive(&ctx, &en, &zero, &[pick(0)]);
+    assert!(procedure_message(out.result).contains("not payable"));
+    // Unlimited chooser: default 0 (and picking it asks nothing more: the choice has one option).
+    let out = drive(&ctx, &en, &no_limit(), &[]);
+    assert_eq!(out.asked[0].default_on_timeout, pick(0));
+    assert_eq!(out.asked[0].payload, request.payload);
+    // A budget of 1: candidate 0 is payable, default 0.
+    let one: BTreeMap<PlayerId, u64> = [(p(1), 1)].into();
+    let out = drive(&ctx, &en, &one, &[]);
+    assert_eq!(out.asked[0].default_on_timeout, pick(0));
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b (H3): the session's `submit_default` (a timeout) on the
+/// paid-first request with a budget of 0 completes the entry.
+#[test]
+fn req_event_001_default_submit_completes_entry() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = paid_first(false);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let zero: BTreeMap<PlayerId, u64> = [(p(1), 0)].into();
+    let proc = |_s: &mut Nil, c: &mut ChoiceContext<'_>| resolve_entering(&ctx, &en, &zero, c);
+    let mut session = ChoiceSession::start(Nil, proc).unwrap();
+    let id = session.pending().unwrap().request_id;
+    session.submit_default(id).unwrap();
+    let Status::Done { output, .. } = session.status() else {
+        panic!("the default did not complete the entry");
+    };
+    assert_eq!(output[0].projected.applied.order, vec![e(2)]);
+    assert!(output[0].projected.applied.chosen.is_empty());
+    assert_eq!(session.answers(), &[pick(1)]);
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b (H3): of three candidates only the second has a payable
+/// continuation (budget 0): the default is 1 and all three are offered; with every candidate
+/// unpayable (two cost-1 choices, budget 0) the default stays 0; with a budget of 1 and the
+/// three candidates, candidate 0 is payable (default 0).
+#[test]
+fn req_event_001_default_payable_three_and_none() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let continuous = ContinuousEffects::new();
+    let en = [entry(o(1), p(1))];
+    let zero: BTreeMap<PlayerId, u64> = [(p(1), 0)].into();
+    let fx = paid_first(true);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &zero, &[]);
+    assert_eq!(out.asked[0].default_on_timeout, pick(1));
+    assert_eq!(
+        out.asked[0].payload,
+        ChoicePayload::ChooseReplacementEffect {
+            event: "ZONE_CHANGE".to_owned(),
+            effects: vec![
+                "paid".to_owned(),
+                "free creature".to_owned(),
+                "paid too".to_owned()
+            ],
+        }
+    );
+    for unpayable in [0, 2] {
+        let out = drive(&ctx, &en, &zero, &[pick(unpayable)]);
+        assert!(procedure_message(out.result).contains("not payable"));
+    }
+    let out = drive(&ctx, &en, &zero, &[pick(1)]);
+    assert_eq!(out.result.unwrap()[0].projected.applied.order, vec![e(2)]);
+    let one: BTreeMap<PlayerId, u64> = [(p(1), 1)].into();
+    let out = drive(&ctx, &en, &one, &[]);
+    assert_eq!(out.asked[0].default_on_timeout, pick(0));
+    // Every candidate unpayable: default 0.
+    let fx = effects(vec![
+        EtbEffect::new(e(1), choose("a", EtbChoiceKind::Color, vec![opt("x", 1)])),
+        EtbEffect::new(e(2), choose("b", EtbChoiceKind::Color, vec![opt("y", 1)])),
+    ]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &zero, &[]);
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(out.asked[0].default_on_timeout, pick(0));
 }
