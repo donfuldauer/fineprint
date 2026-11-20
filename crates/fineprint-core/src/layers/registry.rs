@@ -12,11 +12,12 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream};
 use fineprint_dsl::expr::ObjectSelectorAST;
 use fineprint_dsl::text::RewritableCategory;
 
+use super::copy::CopyException;
 use super::error::LayerError;
 use super::lockin::{ForAsLongAsWindow, PreparedGroup, prepare_group};
 use super::pipeline::LayerEnvironment;
 use super::text::validate_modification;
-use crate::objects::Characteristics;
+use crate::objects::{Characteristics, ManaValueContext};
 
 /// Where a continuous effect comes from; decides its timestamp (CR 613.7a, 613.7b).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,112 @@ pub enum EffectOrigin {
     },
     /// The resolution of a spell or ability (CR 611.2, CR 613.7b).
     Resolved,
+}
+
+/// How an object's mana value is derived (CR 202.3a-c, 713.5c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValueSource {
+    /// Its own mana cost (also a modal DFC face, a token, a face-down object).
+    Plain,
+    /// The mana value is fixed from outside the characteristics: the back face of a nonmodal
+    /// DFC (front cost), a melded permanent (sum of fronts), a merged permanent (top component).
+    Fixed {
+        /// The mana value.
+        mana_value: i64,
+    },
+    /// A copy of the back face of a nonmodal DFC or of a melded permanent: mana value 0
+    /// (CR 202.3b, 202.3c). Copying a `CopyOfBackFaceOrMelded` keeps it.
+    CopyOfBackFaceOrMelded,
+}
+
+/// The provenance of an object's mana value and colors through layer 1 (CR 202.3a-c, 613.2c,
+/// 707.9b): its [`ValueSource`], whether a copy of it has mana value 0 (a [`ValueSource::Fixed`]
+/// value from a nonmodal back face or a melded permanent, CR 202.3b, 202.3c), and whether its
+/// colors were set or kept by a copy exception ([`ManaValueProvenance::colors_pinned`]) rather
+/// than derived from its mana cost and color indicator.
+///
+/// Built only from a [`crate::layers::CopiableValues`] ([`crate::layers::CopiableValues::provenance`])
+/// or as [`ManaValueProvenance::plain`], so the copy classification is always consistent with
+/// the source; the evaluator only updates the colors pin
+/// ([`LayerModification::ApplyCopyExceptions`]). Carried by
+/// [`LayerModification::CopyValuesWithProvenance`] and by
+/// [`crate::layers::Evaluated::mana_value_provenance`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManaValueProvenance {
+    /// How the mana value is derived.
+    pub(super) source: ValueSource,
+    /// `Fixed` from a nonmodal back face or melded permanent: a copy has mana value 0.
+    pub(super) zero_when_copied: bool,
+    /// The colors were set or kept by a copy exception ([`CopyException::SetColors`],
+    /// [`CopyException::NotCopied`] of the colors): they are a copiable value of their own
+    /// (CR 707.9b) and a later [`CopyException::SetManaCost`] does not re-derive them.
+    pub(super) colors_pinned: bool,
+}
+
+impl ManaValueProvenance {
+    /// The mana value is the characteristics' own ([`ValueSource::Plain`]); a copy of it is
+    /// plain too.
+    #[must_use]
+    pub const fn plain() -> ManaValueProvenance {
+        ManaValueProvenance {
+            source: ValueSource::Plain,
+            zero_when_copied: false,
+            colors_pinned: false,
+        }
+    }
+
+    /// How the mana value is derived.
+    #[must_use]
+    pub fn source(&self) -> &ValueSource {
+        &self.source
+    }
+
+    /// Whether the colors were set or kept by a copy exception ([`CopyException::SetColors`],
+    /// [`CopyException::NotCopied`] of the colors) rather than derived from the mana cost and
+    /// color indicator: such colors are part of the copiable values (CR 707.9b) and a later
+    /// [`CopyException::SetManaCost`] leaves them. `false` for [`ManaValueProvenance::plain`].
+    #[must_use]
+    pub fn colors_pinned(&self) -> bool {
+        self.colors_pinned
+    }
+
+    /// Whether a copy of an object with this provenance has mana value 0 (CR 202.3b, 202.3c):
+    /// the source is [`ValueSource::CopyOfBackFaceOrMelded`], or a [`ValueSource::Fixed`] from a
+    /// nonmodal back face or a melded permanent.
+    #[must_use]
+    pub fn copies_as_zero(&self) -> bool {
+        match self.source {
+            ValueSource::CopyOfBackFaceOrMelded => true,
+            ValueSource::Fixed { .. } => self.zero_when_copied,
+            ValueSource::Plain => false,
+        }
+    }
+
+    /// Whether this is [`ManaValueProvenance::plain`] (a pinned provenance is not plain).
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        *self == ManaValueProvenance::plain()
+    }
+
+    /// The mana value of an object with characteristics `c` and this provenance (CR 202.3):
+    /// [`ValueSource::Plain`] `c`'s own in `ctx` (X counts 0 off the stack and the chosen
+    /// number on it, CR 202.3e); `Fixed` the stored value in every context;
+    /// [`ValueSource::CopyOfBackFaceOrMelded`] 0 (CR 202.3b, 202.3c).
+    #[must_use]
+    pub fn mana_value(&self, c: &Characteristics, ctx: ManaValueContext) -> i64 {
+        match self.source {
+            ValueSource::Plain => c.mana_value(ctx),
+            ValueSource::Fixed { mana_value } => mana_value,
+            // CR 202.3b, 202.3c: a copy of a nonmodal back face or of a melded permanent is 0.
+            ValueSource::CopyOfBackFaceOrMelded => 0,
+        }
+    }
+}
+
+impl Default for ManaValueProvenance {
+    fn default() -> ManaValueProvenance {
+        ManaValueProvenance::plain()
+    }
 }
 
 /// The objects a continuous effect applies to.
@@ -52,8 +159,29 @@ pub enum Affected {
 /// documentation (CR 613.1, 613.2, 613.4). [`LayerModification::belongs_to`] is the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayerModification {
-    /// Layer 1a (CR 613.2a): replaces all characteristics with the given copiable values.
+    /// Layer 1a (CR 613.2a): replaces all characteristics with the given copiable values. The
+    /// mana value of the result is the characteristics' own ([`ManaValueProvenance::plain`]).
     CopyValues(Box<Characteristics>),
+    /// Layer 1a (CR 613.2a, 202.3b, 202.3c): replaces all characteristics with the given
+    /// copiable values, exactly as [`LayerModification::CopyValues`], and sets the mana-value
+    /// provenance of the result to `provenance` (a fixed mana value, or a copy of a back face or
+    /// melded permanent with mana value 0). Built by [`crate::layers::copiable_effect`] for
+    /// values whose provenance is not plain.
+    CopyValuesWithProvenance {
+        /// The copiable values.
+        characteristics: Box<Characteristics>,
+        /// How the mana value of the result is derived.
+        provenance: ManaValueProvenance,
+    },
+    /// Layer 1a (CR 613.2a, 707.2): a copiable modification that is not a copy (an "as ...
+    /// enters" ability setting power and toughness): the exceptions, in order, applied to the
+    /// object's current characteristics. [`CopyException::NotCopied`] is ignored (it changes no
+    /// field and pins nothing). Only the fields the exceptions set change; no
+    /// characteristic-defining ability is dropped; the mana-value source and zero flag are
+    /// unchanged, and the colors pin of the provenance starts from the current one and is set
+    /// by a [`CopyException::SetColors`] ([`ManaValueProvenance::colors_pinned`]). Built by
+    /// [`crate::layers::modification_effect`].
+    ApplyCopyExceptions(Vec<CopyException>),
     /// Layer 1b (CR 613.2b): replaces all characteristics with the given face-down values.
     FaceDown(Box<Characteristics>),
     /// Layer 2 (CR 613.1b): the object's controller becomes the player.
@@ -131,7 +259,9 @@ impl LayerModification {
     #[must_use]
     pub fn belongs_to(&self, layer: Layer) -> bool {
         let allowed: &[Layer] = match self {
-            LayerModification::CopyValues(_) => &[Layer::L1a],
+            LayerModification::CopyValues(_)
+            | LayerModification::CopyValuesWithProvenance { .. }
+            | LayerModification::ApplyCopyExceptions(_) => &[Layer::L1a],
             LayerModification::FaceDown(_) => &[Layer::L1b],
             LayerModification::SetController(_) => &[Layer::L2],
             LayerModification::SetText(_) | LayerModification::ReplaceTextWord { .. } => {
