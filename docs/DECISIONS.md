@@ -6504,3 +6504,180 @@ layers) while the effect builders live with the other layer builders.
 **Rationale.** CR 708.8 requires the object to turn face up while the others stay face down, so refusing is wrong; CR 613.6 requires the parts of a multi-layer effect to keep applying to the objects the anchor applied to. `remove` deletes every `SameAsLayer` link to the anchor and `register` cannot restore them, so remove plus register lost the linked parts for the remaining objects. The new method is additive, a few lines, and leaves evaluation untouched.
 
 **Alternatives.** Refusing turn-up when links exist (violates CR 708.8); dropping the narrowed-set path (regresses the documented behaviour that the other objects stay face down); re-registering the whole group from facedown.rs (`register_group` needs a `LayerEnvironment`, which would change the `turn_face_up` signature).
+
+## #40 FP-039 — ETB projection API and modelling choices
+
+**Decision.** The ETB look-ahead of SRS 8.1 (REQ-EVENT-001, CR 614.12) is a standalone module,
+`crates/fineprint-core/src/replacement/etb.rs`, with the API fixed by the brief (`EtbEffect`,
+`EtbEffects`, `EtbContext`, `EtbEntry`, `EtbApplied`, `ProjectedPermanent`, `project`,
+`applicable`, `resolve_entering`, `EtbResolved::record_into`; since PR #202 review round 1 also
+`EtbApplied::order`, `EtbApplied::sequence`, `CopyAbilities`, `EtbEffects::set_copy_abilities`
+and `EtbError::NotACopyEffect`). `EtbApplied::order` is the application order (CR 616.1f),
+first applied first, filled by `resolve_entering`; `effects` stays the set that stops an effect
+applying twice. `sequence()` is `order` (skipping ids not in `effects` and repeated ids), then
+every id of `effects` not in `order`, ascending: with an empty `order` it is ascending id.
+Choices made in it:
+
+1. **An ETB effect model of its own.** `EtbEffect` carries a scope (`ThisPermanent` /
+   `OtherPermanents`), a condition on the projected permanent (`HasCardType`, `LacksCardType`,
+   `HasSubtype`) and an action (`EntersTapped`, `EntersWithCounters`, `EntersAsCopyOf`,
+   `AddCardTypes`, `Choose`). The bus `ReplacementEffect` cannot carry it: its `EventMatcher`
+   tests the event against the current state, and its tier is declarative data ("#29 FP-028 —
+   Tiers are declarative data"), whereas CR 614.12 needs conditions on the characteristics the
+   permanent would have on the battlefield. The tier of an `EtbEffect` is likewise declarative.
+2. **Standalone.** Nothing is wired into `process_batch` or `GameState` ("#29 FP-028 —
+   Standalone replacement registry", "#32 FP-031 — Follow-up work for later units"); the bus's
+   `Modification::EntersAsCopyOf` is untouched. Wiring the projection into `process_batch`,
+   compiling DSL ETB replacements (SRS 14.4.4 `CHOOSE ... store`) to `EtbEffect` and applying
+   the result (tapped status, counters, copy, Memory) to the entered permanent are later work.
+3. **Order of the three CR 614.12 inputs** (the CR and the SRS give none; the SRS a/b/c is not
+   an order): (a) applied effects are replayed in `EtbApplied::sequence()` order and the LAST
+   applied copy effect replaces the base characteristics (CR 707.2, CR 616.1f); the object is
+   always presented as on the battlefield (CR 208.3 P/T presence follows); (b)+(c) the entry's
+   own statics (or the last copy's declared statics, item 4) are registered on a clone of the
+   continuous effects in force and the layers are evaluated once over both, so their relative
+   order is the layer system's (CR 613); (a) applied `AddCardTypes` are one synthetic layer-4
+   `AddTypes` effect (CR 613.1d, CR 205.1b) registered on the same clone, with an id strictly
+   above every registered id and a timestamp strictly above every registered timestamp (checked
+   arithmetic, `LayerError::IdExhausted` on overflow; CR 613.7), source and locked affected set
+   (`Affected::Objects({entrant})`) the entrant, origin `EffectOrigin::Resolved`; it is
+   invisible to the caller. It realises a replacement effect, not a static ability of the
+   entrant, so it is not a generating-ability effect: the layer pipeline asks
+   `LayerEnvironment::generating_ability_exists` only for `EffectOrigin::Static` effects with a
+   source, and so never consults the hook for it (an environment answering false for every id
+   still sees the added type; CR 613.1d). A static origin with no source would also skip the
+   hook; `Resolved` with the entrant as source was chosen because it keeps the source and the
+   locked set the entrant's and states that the effect exists independently of any ability. No rule classifies an additive
+   "enters as an additional type" effect or fixes its timestamp: the reading chosen is a
+   replacement effect (CR 614.1c) whose type change is a layer-4 continuous effect later than
+   every other, so P/T (CR 208.3, CR 208.3a) and layers 5-7 see the added type; it is not
+   copiable (CR 707.2). The earlier "unioned in after the layers" is withdrawn (a printed-P/T
+   noncreature lost its P/T). Tapped status and counters are collected from the applied
+   effects. The base controller and the
+   counters are the environment's (the projection overrides only `on_battlefield`, the copied
+   characteristics and, for a copy, a plain mana-value provenance); the counters an entry
+   enters with are reported in `ProjectedPermanent::counters`, not fed to layer 7c.
+4. **Copy rule.** The LAST applied copy supplies the base (CR 707.2, CR 616.1f). Once an
+   `EntersAsCopyOf` is applied, the entry's `own_statics` are not registered and
+   `ThisPermanent` effects whose source is the entering object no longer become applicable (an
+   already applied one stays applied). The copy model's abilities replace them through its
+   declared `CopyAbilities` (CR 707.5): its `statics` are registered bound to the entrant
+   (`source` the entrant; `controller` the entrant's `EtbEntry::controller`, so a
+   controller-relative selector such as "artifacts you control" reads the entrant's controller
+   through `MatchContext::effect_controller`, CR 707.5: the copied abilities are the entrant's;
+   an `Affected::Objects` set becomes `{entrant}`, a selector is kept) and its `etb` ids apply
+   to the entrant as `ThisPermanent` effects of the entrant. One controller per projection
+   (CR 614.12, CR 707.5): `project` (so `applicable` and `resolve_entering`, which reports it as
+   a procedure error before any request) refuses an entry whose environment base reports
+   `controller: Some(c)` with `c != EtbEntry::controller`, with
+   `EtbError::ControllerMismatch { object, entry, environment }`, before any layer is evaluated
+   or copied static registered (an unknown object stays `LayerError::UnknownObject`); a base with
+   `controller: None` is accepted and the entry's controller is then the only one (copied
+   statics and the added-types effect use it). Otherwise a copied "artifacts you control" static
+   bound to the entry's controller would not match its own entrant evaluated under the
+   environment's controller. Only the
+   last applied copy's declaration counts, never an earlier copy's (in the spirit of CR 707.9e:
+   a later copy effect overrides what an earlier one gave). Without a declaration a copy brings
+   no statics and no ETB effects. Every `ThisPermanent` effect also needs
+   `LayerEnvironment::generating_ability_exists(effect.id, entry.object, Some(projected))` to be
+   true (CR 614.12, CR 603.6d: the "enters with" ability is a static ability of the permanent as
+   it would exist); the ETB effect id shares the static-effect id space for this query (default
+   true). `OtherPermanents` effects of other sources are unaffected.
+5. **Payable totals (CR 614.12b; the CR does not define "payable").** Each `EtbOption::cost`
+   is committed to the entry's controller. For a chooser present in `payable`, `remaining`
+   starts at its value. An option is allowed iff its cost is 0, or `cost + reserve <=
+   remaining` in u128 (no saturation), where `reserve` comes from an EXACT lookahead (CR 614.12b,
+   CR 616.2). Effects never apply twice and no condition reads `chosen`, so an entry's state is
+   its applied set plus its last applied copy id (which fixes the projection). `mincost(state)`
+   is 0 if nothing applies, else the minimum over the candidates c of the top applicable tier
+   (CR 616.1a-e) of `cheapest(c) + mincost(state + c)` (`cheapest` = the cheapest option of a
+   `Choose`, 0 for other actions): it counts effects that become applicable (CR 616.2) and not
+   those a mandatory replacement removes. It is memoised per entry on (applied set, last copy)
+   with at most 4096 states (`MAX_LOOKAHEAD_STATES`; exceeding it is a procedure error, never a
+   silent truncation, R3). Every distinct state, the starting state first, is charged when it
+   is ENTERED (before anything below it is explored), including a state whose value is 0 at
+   once because no unapplied effect can commit a cost (that shortcut still skips the
+   projection); a memo hit is free. So an entry whose reachable states number exactly 4096
+   passes and 4097 fail, for a deep chain as for a wide search. The procedure error text is
+   "the CR 614.12b lookahead of object N exceeds 4096 states". The search is iterative (an
+   explicit stack of frames, each holding its state, its top-tier candidates, the next one to
+   explore and the least total so far), so a 4096-deep chain cannot overflow the call stack.
+   Within `resolve_entering`, the reserve lookahead of each entry's start and the lookahead of
+   the entry's own resolution are separate searches, each with its own count. The reserve of option o of `Choose` X in state S is
+   `mincost(S + X)` plus the sum of `mincost(empty)` of every LATER entry of the same
+   controller (entries are independent; computed before the first entry is resolved). Earlier
+   entries have already deducted their costs. Choosing subtracts the option's cost. No allowed
+   option is `EtbError::Unpayable` (reported as a procedure error whose text contains "not
+   payable"). A chooser absent from `payable` has no limit and runs no lookahead. The CR 616.1
+   order choice (`CHOOSE_REPLACEMENT_EFFECT`, CR 616.1e) is never filtered by payability: CR
+   614.12b restricts only the choices the effects require. Every candidate is offered, but the
+   request's `default_on_timeout` is `SelectReplacement { index: k }` with k the smallest
+   candidate index (ascending effect id) whose continuation is payable under the same exact
+   lookahead, `cheapest(c) + mincost(state + c) + later <= remaining` (u128), so a timeout never
+   picks an unpayable order when a payable one exists; k = 0 when candidate 0 is payable, when
+   no candidate is, or when the chooser has no budget (no lookahead runs). A manual answer of an
+   unpayable candidate is still the "not payable" error. Applying the reserve across the
+   SEVERAL effects of one entry goes beyond the CR's literal text (which speaks of multiple
+   permanents); it is kept on purpose, as the original brief required (requirement 7). A
+   `Choose` with an empty `options` list is refused by `EtbEffects::add` with
+   `EtbError::EmptyChoice(id)` (the set unchanged): it has no feasible continuation, and
+   counting it as cost 0 would let an earlier choice spend the budget before the impossible
+   choice fails (CR 614.12b). A `Choose` with at least one option, a single cost-0 option
+   included, is accepted and always payable. A `Choose` whose options repeat a text is refused
+   by `add` with `EtbError::DuplicateOptionText { effect, text }` (the set unchanged; checked
+   after the empty-options check): the answer is `Text(x)`, which cannot tell two options of one
+   text (and two costs) apart, so the cheaper one could never be chosen (CR 614.12a,
+   CR 614.12b). Distinct texts, of equal costs or not, stay accepted. `set_copy_abilities` is
+   unaffected.
+   Before any reserve is computed and before any request, `resolve_entering` projects EVERY
+   entry from its empty `EtbApplied`, whether or not its chooser has a budget, and fails with
+   the first projection error (an unknown object, a duplicate own-static id, ...) as a
+   procedure error: all choices are made before anything enters (CR 614.12a), so no request is
+   issued for an earlier entry of a call that cannot complete. The reserve's zero-cost shortcut
+   is kept.
+6. **Chosen values are visible to later steps.** The CR does not say that a later choice or a
+   later effect reads an earlier chosen value. The reading chosen: every chosen value is put in
+   `EtbApplied::chosen` as soon as it is made, so every later projection (and so a later
+   effect's applicability and action) carries it, and a later `Choose` with the same key
+   overwrites it ("the last chosen value", CR 607.2d). No current action or condition reads
+   `chosen`; the projection carries it for the integration unit.
+7. **Requests.** Replacement order uses `CHOOSE_REPLACEMENT_EFFECT` exactly as `Bus::choose`
+   (reason "CR 616.1", source the entering object, event `ZONE_CHANGE`); choices use
+   `CHOOSE_OPTION_OR_VALUE` with `option_type` `COLOR` / `CREATURE_TYPE` / `ANCHOR_WORD`,
+   citing CR 614.12a, or CR 614.12c for anchor words only ("#24 FP-023 — SRS precision notes").
+   One allowed option is taken without asking.
+8. **Memory.** `EtbResolved::memory` holds each chosen value through `Memory::set_choice`;
+   `record_into` writes the values under the keys of `projected.applied.chosen` (Memory has no
+   choice iterator) with `set_choice` for the new object (CR 400.7), keeping its other keys.
+
+**Rationale.** The API is fixed by the brief; the choices above are the readings most
+consistent with CR 614.12, CR 616.1f, SRS 8.1 and the earlier decisions cited, and keep the
+module a pure function of borrowed inputs and recorded answers (R3, "#28 FP-027").
+
+**Alternatives.** Extending the bus `ReplacementEffect` with projected conditions (rejected:
+changes the bus's declarative data and its matcher semantics, outside this unit); feeding
+`EntersWithCounters` into the layer evaluation (rejected: not in the brief's projection
+definition, which is what the spec tests check); a full combinatorial payability search over
+all orders of application (rejected: unbounded and not required by the CR text; the one-step
+lookahead was chosen first and replaced by the exact memoised lookahead in PR #202 review,
+because it missed newly applicable choices and counted removed ones); unioning added types
+after the layers (withdrawn in PR #202 review: P/T and later layers must see the type);
+setting the projected controller to `EtbEntry::controller` (rejected: the brief defines the
+projection from the environment's base, and no `ControlEtb` action exists yet; a mismatch
+between the two is refused instead, item 4, PR #202 review round 3 H2); a dedicated
+`ChoiceError` variant for the lookahead-limit error (declined in PR #202 review round 3: it
+needs a change in `choice/`, the FP-027 choice-protocol contract, R1/R2; the procedure error
+keeps the text "the CR 614.12b lookahead of object N exceeds 4096 states").
+
+Amended in PR #202 review round 1 (F1-F8).
+
+Amended in PR #202 review round 2 (G1-G5): copied statics take the entrant's controller (G1);
+the synthetic type effect is `Resolved` and never consults the generating-ability hook (G2);
+empty `Choose` options are refused at `add` (G3); lookahead states are charged when entered,
+memo hits free, iterative search (G4); every starting projection is validated before any
+reserve or request (G5).
+
+Amended in PR #202 review round 3 (H1-H3): duplicate option texts refused at `add` (H1, item 5);
+a controller mismatch between the environment base and the entry refused, `None` accepted (H2,
+item 4); the `CHOOSE_REPLACEMENT_EFFECT` default is the first candidate with a payable
+continuation, else 0, every candidate still offered (H3, item 5).
