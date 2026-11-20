@@ -875,6 +875,8 @@ pick work independently).
 
 ## Self-chaining — handoff through the backstop scheduled task
 
+**Superseded** by "Self-chaining — handoff on PR merge" below: `fire_trigger` is refused for this task.
+
 **Context (2026-11-20).** Self-chaining used `create_session`, so each session started the next.
 That ran without prompts while the chain descended from a session the owner started. After the
 chain broke, the backstop scheduled task restarted it. From then on every session descended from a
@@ -907,6 +909,54 @@ same issue. A run that finds another live chain stops, so at most one chain surv
 **Alternatives.** Keep `create_session` and approve each handoff (rejected: the chain is meant to
 run unattended). Have the owner restart the chain by hand after every break (rejected: the
 backstop exists to do that).
+
+## Self-chaining — handoff on PR merge
+
+**Context (2026-11-20).** The handoff through `fire_trigger` (entry above) never worked. When
+#40 merged (PR #202), its session's `fire_trigger` call was refused: "this routine was created
+via "http_api", not by an agent. Agents can only fire routines they created (via
+create_trigger)." The backstop task was created in the web UI, so no session can fire it. The
+#40 session was started by another session through `create_session`, so its `list_triggers`,
+`fire_trigger` and `unsubscribe_pr_activity` calls also asked the owner for approval. The
+allow rules in `.claude/settings.json` did not stop those prompts, as the entry above records.
+The backstop's scheduled run at 20:06 UTC called `list_sessions` without a prompt.
+
+**Decision.** The owner adds a GitHub trigger to the existing backstop task: `pull_request.closed`
+with the filters Is merged = true, Base branch equals `main`, and Head branch starts with
+`issue/`. A merge therefore starts a fresh task session, the same kind of session as a scheduled
+run. `work-issue` §8 posts a marker comment on the issue before the merge call. The marker names
+the merging session, and the session cancels it if the merge fails. The task's prompt continues
+the chain from a merge only if the merged issue has an uncancelled marker. When it checks for a
+live chain, it ignores the session the marker names, which may still be finishing §7. Sessions
+fire nothing.
+
+Sessions cannot edit the task either (`update_trigger` is refused the same way), so the owner
+replaces its prompt with this text in the web UI:
+
+```text
+You are the backstop for the Fine Print self-chaining work loop in donfuldauer/fineprint. This task runs on its 4-hourly schedule, and also when a pull request from an issue/ branch merges into main: that merge is how each next session in the chain starts.
+
+1. Work out how this run started. If a GitHub pull request event started it, take the merged PR, find the issue it closes (its head branch is issue/<N>-..., or its body says "Closes #<N>"), and read that issue's comments for the latest one starting "Self-chain:". If there is none, or it says "handoff cancelled", report "PR #<P> did not request chaining" in one line and stop without changing anything. Otherwise note the session ID the marker names. A scheduled run notes no session.
+2. Call list_sessions (mine: true). Ignore the session noted in step 1, which merged the PR and may still be finishing. If any other session tagged "fineprint-chain" has status_bucket "working" or "blocked", a chain is alive: report that in one line and stop without changing anything.
+3. If the repository is not already checked out in this session, call add_repo (owner "donfuldauer", repo "fineprint", access "push"), run the clone command it returns, then call register_repo_root, so the repo's CLAUDE.md and skills load.
+4. Tag this session "fineprint-chain" (set_session_tags), then: Start work on the next ready issue and self-chain.
+   (Use the work-issue skill. If an issue is already in-progress with no live session, or one of your PRs is open, resume that first. If nothing is ready, report why and stop. To chain, follow work-issue §8: post the handoff marker before merging; never call create_session or fire_trigger.)
+```
+
+**Rationale.** No session needs to fire a task. Every chained session is started by the task the
+owner created, which ran without remote-session prompts. The marker keeps "never chain unless
+asked" true: a merge without one, such as a session the owner started without self-chain, stops
+at once. Pull-request events take filters and issue events do not, so the trigger is on the merge,
+not on the issue closing.
+
+**Risks.** The task has not yet run from a GitHub event. If those runs prompt, or cannot see which
+PR merged, the 4-hourly scheduled run still restarts the chain. Every `issue/` merge starts a
+short session that may stop at once. A GitHub event and a scheduled run can start together, and
+claim ordering (§1 step 4) keeps them off the same issue.
+
+**Alternatives.** Recreate the backstop task from a session with `create_trigger` so sessions can
+fire it (rejected: nobody has checked whether sessions started by a task a session created run
+without prompts). Rely on the 4-hourly run alone (rejected: up to four hours idle after each merge).
 
 ## CI — PR load
 
