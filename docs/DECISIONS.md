@@ -5305,3 +5305,171 @@ FP-055 (predicate evaluation).
 **Alternatives:** Leave `RemoveKeyword` exact and defer 702.11e to DSL compilation (rejected:
 the classifier already exists and the review asked for it); remove variants of every keyword
 (rejected: no CR rule says so for other keywords).
+
+## #33 FP-032 tester - Outside dependent of a loop that the first application breaks
+
+**Decision:** The spec tests for a dependency loop with an outside dependent effect assert the
+SRS 6.2 step 3 sequence literally: the loop's earliest member is applied (Loop), the relation
+is recomputed (CR 613.8c), and the outside effect waits only for the effects it still depends
+on. In `loop_with_outside_dependent_waits_for_all_members` (three-member loop) the outside
+effect still depends on a remaining member and waits until after all of them, as the brief
+states. In `two_effect_loop_with_earlier_outside_dependent_recomputes` (two-member loop, outside
+effect earliest) the first application stops the other member from applying, so the outside
+effect no longer depends on it and is applied before it.
+
+**Rationale:** SRS 6.2 requires recomputing after each application and choosing the earliest
+candidate; a member that no longer applies changes nothing, so nothing depends on it. The
+brief's "waits until after all of them" holds whenever the dependency persists.
+
+**Alternatives:** Assert that the outside effect always follows every loop member (rejected:
+contradicts SRS 6.2 step 3 and CR 613.8c as quoted in the brief).
+
+## #33 FP-032 tester - Modelling the SRS 6.2 dependency examples
+
+**Decision:** The synthetic dependency examples use condition 613.8a (b) "what it applies to":
+the dependent effect has a selector (has the marker ability; is a creature) that the other
+effect's application changes. Effect existence is not modelled (the registry API has no link
+from an effect to the ability that generates it). An effect that grants a keyword and one that
+removes it, two P/T-setting effects, and two effects that overwrite each other are treated as
+timestamp cases, not dependencies. A CDA chosen in layers 2-6 while a non-CDA step of its layer
+is unapplied is recorded as CdaFirst even when it is also the earliest step (the brief's
+Selection definition).
+
+**Rationale:** Applicability is the only (b) relation observable through the pre-existing API;
+the timestamp cases follow the SRS 6.2 timestamp example and the brief's item 4.
+
+**Alternatives:** Model existence through `source` (rejected: no API for it).
+
+## #33 FP-032 — Dependency loop definition
+
+**Decision:** When no unapplied step of a layer is a candidate (every one depends on another),
+the loop applied is a strongly connected component of the dependency graph over the unapplied
+steps whose members depend on no step outside it (no incoming edge from outside, edges read
+"A must precede B"). With several such components, the one containing the step with the
+earliest ordering key is taken; only its earliest member is applied, labelled `Loop`, and the
+whole relation is recomputed before the next choice (CR 613.8b, 613.8c). This is an engine
+interpretation of "dependency loop" (SRS 6.2), not CR text.
+**Rationale:** SRS 6.2 step 3 defines the loop this way. A step that depends on a loop member
+without being depended on by it is not part of the loop and waits for it; such a component
+always exists when there is no candidate, so the procedure never stalls. Applying one member
+at a time follows SRS 6.2 ("Apply the earliest-timestamped member, recompute, and repeat").
+**Alternatives:** Any cycle (rejected: a step outside the loop that waits for it would be
+treated as a member); applying every member of the loop in one go (rejected: SRS 6.2 and
+CR 613.8c require recomputing after each application).
+
+## #33 FP-032 — Scope of the trial application
+
+**Decision:** Dependency (CR 613.8a (b)) is judged on the object under evaluation only. For
+each unapplied A, A is applied to a clone of the object's partially evaluated state (the
+scratch copy, never the real state); B depends on A when B's affected set includes the object
+in exactly one of the two states (its existence and what it applies to), or when B applies in
+both and what B does differs. "What B does" is compared field by field on the object's
+characteristics and controller: a field counts as unchanged when B leaves it with the same value
+in both states or untouched in both; for sets and colors, element by element (kept as it was in
+both, or present in both, or absent in both); for the ability list, each ability's copy count is
+the same in both or changed by the same amount; for numeric power and toughness, the same
+amount is added; the P/T pair also counts as unchanged when it is switched in both. Effect
+existence through the generating ability is now checked through the
+`LayerEnvironment::generating_ability_exists` hook (superseded: see "#33 FP-032 — Review round 1
+dispositions"). The set of `env.objects()` that a selector matches on other objects is not
+compared.
+**Rationale:** Evaluation is per object, so the partially evaluated state of other objects is
+not available (layer-major evaluation across objects is #186 FP-146); evaluating them inside the
+trial would recurse through the whole game for every pair. Comparing what B does as a change
+rather than as a final state is what keeps unrelated effects independent (two type-adding
+effects, a setter after an adder) while any change of applicability is still found. The
+comparison reads only characteristics, never the modification kind (REQ-DSL-013, R4), except
+the declared numeric P/T adjustment (see "#33 FP-032 — Review round 1 dispositions").
+**Alternatives:** Compare B's final output literally (rejected: every additive pair, such as two
+subtype grants, would form a loop); evaluate every object of `env.objects()` up to the current
+layer for the trial (deferred to layer-major evaluation, #186 FP-146).
+
+## #33 FP-032 — Non-CDA effects in layer 7a
+
+**Decision:** An effect registered in layer 7a with `is_cda: false` is neither rejected nor moved:
+it applies in layer 7a in the selection order like any 7a effect. Layer 7a has no CDA-first
+grouping (it is ordered by the selection procedure alone), so `is_cda` decides only condition
+(c) of dependency there.
+**Rationale:** The brief asks to keep such an effect applying in the 7a order; the registry
+already accepts `SetPt` in 7a regardless of `is_cda`, and rejecting it would change the
+REQ-LAYER-001 registration contract (R2). SRS 6.2 item 1 and CR 613.4a describe which effects
+belong to 7a; the validation "7a implies isCDA" belongs with DSL/override validation
+(REQ-DSL-004) or the #183 FP-144 wiring, and rejecting it in `register` would change merged #32
+behaviour and its tests (`layers/tests.rs` registers a non-CDA 7a effect) (review round 1, F3).
+**Alternatives:** Reject at registration (rejected: contract change); move it to 7b (rejected:
+reinterprets the declared layer).
+
+## #33 FP-032 — Tie-break unchanged; simultaneous timestamps out of scope
+
+**Decision:** The ordering key stays the one of "#32 FP-031 — Ordering, tie-break and P/T
+presence": timestamp, then effects before counters, then ascending `EffectId`, then ascending
+counter kind. It decides the order among candidates and the earliest member of a loop.
+Assigning timestamps (CR 613.7m APNAP order, CR 613.7n static before resolved) is the timestamp
+ledger's job (#32 FP-031); this unit only orders by the timestamps it is given.
+**Rationale:** No CR rule orders two effects with equal timestamps from separate static abilities
+of one object; keeping the existing key makes the no-dependency, no-CDA order identical to the
+REQ-LAYER-001 order (property test).
+**Alternatives:** A new key (rejected: changes REQ-LAYER-001 results without a rules reason).
+
+## #33 FP-032 — Selection labels in the order record
+
+**Decision:** Each `OrderStep` is labelled: `Loop` if chosen as the earliest member of a
+dependency loop; else `CdaFirst` if chosen in layers 2-6 while it is a CDA and a non-CDA step of
+its layer is still unapplied; else `Dependency` if an unapplied step of its layer with an
+earlier ordering key existed when it was chosen (it was released by dependency); else
+`Timestamp`. `applied` is false only for an effect whose affected set did not include the object
+when it was chosen; counters are always applied. A CDA chosen first while non-CDAs wait is
+`CdaFirst` even when it is also the earliest step.
+**Rationale:** The brief's definition; the labels are computed from plain data, so the record is
+deterministic and ready for a rules-trace event.
+**Alternatives:** Label by cause analysis (which dependency released it) (rejected: more data
+than the record needs, and not required by SRS 6.2).
+
+## #33 FP-032 — Cached versus full-recompute differential
+
+**Decision:** The P5 gate item "cached and full-recompute agree" is not applicable to this unit:
+there is no cached evaluation mode yet. The differential test belongs to the unit that adds the
+cache (REQ-LAYER-005).
+**Rationale:** Nothing to compare against; `evaluate` and `evaluate_with_order` always recompute.
+**Alternatives:** A placeholder test (rejected: it would assert nothing).
+
+## #33 FP-032 — Review round 1 dispositions
+
+**Decision:** (a) F4, effect existence (CR 613.8a, 611.3, 113.6): `LayerEnvironment` gains the
+additive method `generating_ability_exists(effect, source, source_view) -> bool`, default `true`.
+`step_applies` (used by both the real application and the dependency trial) applies an effect
+only if its affected set includes the object and, for an `EffectOrigin::Static` effect with
+`source: Some(src)`, the hook says its generating ability exists. `source_view` is the state so
+far only when `src` is the object being evaluated, `None` otherwise. `Resolved` effects
+(CR 611.2: they exist independently of their source's abilities) and static effects without a
+source are not checked. The trial then treats "B stops existing after A" exactly like "B stops
+matching". Existence for sources other than the evaluated object is left to #186 FP-146
+(layer-major evaluation) and a real ability-identity implementation of the hook to #183 FP-144.
+This supersedes the sentence "Effect existence through the generating ability is not modelled"
+of "#33 FP-032 — Scope of the trial application". `LayerEnvironment` is used only inside
+`layers/` (not a P3 contract), so the additive defaulted method is not an R2 contract change.
+(b) F1, saturation: for a step that declares a numeric P/T adjustment (a `ModifyPt` effect, or
+P/T counters: amount times the per-counter change, computed in `i128` without saturation), the
+"same amount added in both states" comparison uses the declared adjustment, not the difference
+of the saturated values. A step that does not apply, P/T counters on a non-creature and an
+object without a P/T pair declare nothing, so differences in whether the step does anything are
+still found; if either state declares, power and toughness count as unchanged exactly when the
+two declarations are equal. Saturating arithmetic in `apply_effect`/`apply_counter` is unchanged.
+The former fallback in the power/toughness comparison ("literal numbers with the same amount
+added", ordering.rs `number`) is removed: with adders declared, no modification that declares
+nothing can add the same nonzero amount in two different states (setters write the same value,
+a switch keeps toughness minus power only when it changes nothing), so it was unreachable.
+(c) F3: a non-CDA effect registered in layer 7a stays accepted (see the amended "#33 FP-032 —
+Non-CDA effects in layer 7a").
+**Rationale:** (a) Without the check, an effect whose generating ability another effect removed
+could start matching after that effect and apply (a false dependency); SRS 6.2 item 4 requires
+comparing B's existence. A hook keeps the layer system free of ability identity, which the
+registry does not model yet. (b) At the `i64` bounds the saturated write makes an adder appear
+to add a different amount depending on the state (0 at the bound, 1 below it), creating a false
+dependency between two adders and a result different from timestamp order. Reading the declared
+amount is a generic read of the modification, never of card identity (R4); it is the one
+exception to "the comparison never reads which modification B is".
+**Alternatives:** (a) Add an ability link to the registry now (rejected: contract change, and
+belongs to #183 FP-144); compare existence with a separate trial path (rejected: the real
+application and the trial would disagree). (b) Widen P/T to `i128` everywhere (rejected: changes
+the `i64` contract and the saturation behaviour); compare saturated values (the bug).
