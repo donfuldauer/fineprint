@@ -18,8 +18,12 @@ use fineprint_core::layers::{
     CopiableValues, EffectOrigin, FaceDownRefusal, FaceDownTarget, FaceUpRefusal, LayerError,
     LayerModification, StampReason, evaluate, face_down_effect, turn_face_down, turn_face_up,
 };
-use fineprint_core::layouts::FaceDownProfile;
+use fineprint_core::layouts::{
+    FaceDownProfile, FaceUp, LayoutQuery, LayoutStatus, base_characteristics,
+};
 use fineprint_core::objects::Characteristics;
+use fineprint_core::zones::ZoneKind;
+use fineprint_dsl::card::{CardDefinitionDSL, FaceKind, LayoutBehavior};
 use support::*;
 
 const X: u64 = 1;
@@ -323,24 +327,71 @@ fn req_obj_003_turn_face_down_exhausted_ids_is_layer_and_unchanged() {
     w.assert_unchanged(&snap, "exhausted");
 }
 
-/// REQ-OBJ-003, CR 712.12, 708.3: a double-faced card may enter the battlefield (or be cast)
-/// face down: building the effect directly is not refused and the object has the profile.
+/// A synthetic nonmodal double-faced definition: front `{2}{G}` 3/3 Werewolf
+/// `test.fd_dfc_front`, back 5/4 Elf `test.fd_dfc_back` (every distinguishing field differs).
+fn fd_dfc_def() -> CardDefinitionDSL {
+    let mut back = creature_face(FaceKind::Back, "test.fd_dfc_back", "", "Elf", (5, 4));
+    back.card_types.push("Artifact".to_string());
+    def(
+        "test.fd_dfc",
+        LayoutBehavior::DfcNonmodal,
+        vec![
+            creature_face(
+                FaceKind::Main,
+                "test.fd_dfc_front",
+                "{2}{G}",
+                "Werewolf",
+                (3, 3),
+            ),
+            back,
+        ],
+    )
+}
+
+/// The base characteristics of [`fd_dfc_def`] on the battlefield with `face` up, selected by
+/// the layout API (CR 712.6c).
+fn fd_dfc_base(face: FaceUp) -> Characteristics {
+    let query = LayoutQuery::new(ZoneKind::Battlefield).with_status(LayoutStatus {
+        face_up: face,
+        ..LayoutStatus::default()
+    });
+    base_characteristics(&fd_dfc_def(), &query, vocab()).expect("synthetic DFC selects")
+}
+
+/// REQ-OBJ-003, CR 712.12, 712.12a, 708.3: a double-faced card may enter the battlefield (or be
+/// cast) face down: building the effect directly is not refused and the object has the
+/// profile. Turned face up, it has its front face up (712.12a): the characteristics equal the
+/// layout's front-face base and not the back-face base.
 #[test]
 fn req_obj_003_712_12_dfc_entering_face_down_is_not_refused() {
+    let front_base = fd_dfc_base(FaceUp::Front);
+    let back_base = fd_dfc_base(FaceUp::Back);
+    // The two faces differ in every field checked below, so a wrong face selection fails.
+    assert_ne!(front_base.names, back_base.names);
+    assert_ne!(front_base.power, back_base.power);
+    assert_ne!(front_base.subtypes, back_base.subtypes);
+    assert_ne!(front_base.card_types, back_base.card_types);
     for (p, want) in profiles() {
         let mut w = FdWorld::new();
-        let front = Characteristics {
-            subtypes: set(&["Werewolf"]),
-            ..creature("test.fd_dfc_front", 3, 3)
-        };
-        w.env.put(oid(X), front);
+        w.env.put(oid(X), front_base.clone());
         let t = w.next_ts();
         w.reg(eid(1), fd_eff_at(&p, t, oid(X)));
         assert_eq!(w.chars(oid(X)), want);
         // And it turns face up front face up (712.12a): the base again.
         let t2 = ok_ts(up(&mut w, eid(1), oid(X), false), "turn up");
         assert!(t2 > t);
-        assert_eq!(w.chars(oid(X)).names, set(&["test.fd_dfc_front"]));
+        let got = w.chars(oid(X));
+        assert_eq!(got.names, set(&["test.fd_dfc_front"]));
+        assert_eq!(got, norm(&front_base));
+        assert_eq!(got.names, front_base.names);
+        assert_eq!(got.power, norm(&front_base).power);
+        assert_eq!(got.subtypes, front_base.subtypes);
+        assert_eq!(got.card_types, front_base.card_types);
+        assert_ne!(got, norm(&back_base));
+        assert_ne!(got.names, back_base.names);
+        assert_ne!(got.power, norm(&back_base).power);
+        assert_ne!(got.subtypes, back_base.subtypes);
+        assert_ne!(got.card_types, back_base.card_types);
     }
 }
 

@@ -93,8 +93,13 @@ fn req_obj_003_613_2b_face_down_effect_shape() {
 
 /// REQ-OBJ-003, REQ-LAYER-001, CR 708.2, 708.2a, 708.3: a permanent that is face down (here as
 /// if it entered face down) has exactly the profile's characteristics, every field: its name,
-/// cost, colors, subtypes, text, ETB-like ability, other abilities and 5/5 are gone, so the
-/// ETB ability neither exists nor applies (708.3). Other objects are untouched.
+/// cost, colors, subtypes, text, ETB-like ability, other abilities and 5/5 are gone: the
+/// object's evaluated characteristics are exactly the profile's, so the face-up ETB-like
+/// ability is absent from them. Other objects are untouched. CR 708.3: "Objects that are put
+/// onto the battlefield face down are turned face down before they enter the battlefield, so
+/// the permanent's enters-the-battlefield abilities won't trigger (if triggered) or have any
+/// effect (if static)." Trigger suppression (that no enters-the-battlefield trigger is
+/// dispatched) is not covered here.
 #[test]
 fn req_obj_003_708_3_face_down_permanent_is_exactly_the_profile() {
     for (p, want) in profiles() {
