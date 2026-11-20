@@ -16,7 +16,12 @@ threads.
 ## 1. Load and check the issue
 
 0. **No issue number** ("the next ready issue"):
-   - **Resume abandoned work first.** Candidates are open issues labelled `in-progress` (a closed
+   - **Finish recent unblocking first.** A merge starts this session (§8), sometimes before the
+     merging session reaches §7 step 3, and a session can end before finishing it. List the
+     `work-unit` issues closed in the last 24 hours, every page
+     (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit&state=closed&since=<now minus 24h, ISO 8601>'`,
+     keeping those whose `closed_at` falls in the window), and run §7 step 3 for each.
+   - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
      comment on it names a live session.
@@ -24,11 +29,7 @@ threads.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
    - Claim it with step 4. If the claim loses, pick the next candidate.
-   - If none qualifies, first finish the unblocking of the latest merge: the merge that started
-     this session can do so before the merging session reaches §7 step 3. Find the most
-     recently closed `work-unit` issue (`gh api 'repos/donfuldauer/fineprint/issues?labels=work-unit&state=closed&sort=updated&direction=desc&per_page=5'`,
-     the latest `closed_at`), run §7 step 3 for it, and list ready issues again. If still none
-     qualifies, tell the user why and stop.
+   - If none qualifies, tell the user why and stop.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
    `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
