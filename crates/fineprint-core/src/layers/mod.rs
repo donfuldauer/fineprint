@@ -33,6 +33,20 @@
 //! recomputed after every application (CR 613.8b, 613.8c). [`evaluate_with_order`] also returns
 //! the [`OrderRecord`] of the order used, ready for a rules-trace event.
 //!
+//! **Text changes** (REQ-DSL-012, SRS 14.5). [`LayerModification::ReplaceTextWord`] is the
+//! layer 3 text-changing effect `REPLACE_TEXT_WORD` (CR 612.1, 613.1c): it decodes the object's
+//! rules text into a token stream ([`decode_rules_text`]), replaces every rewritable word of its
+//! category whose value is exactly `from` by `to` ([`rewrite_text_words`]) and writes the text
+//! back only if a word changed ([`encode_rules_text`]). Literal text, name references (CR 201.5,
+//! 612.2) and card-name words are never rewritten; category `CARD_NAME` and empty or
+//! noncharacter words are rejected at registration (CR 612.2). Text that is empty or does not
+//! decode is left unchanged. Only the object's own text changes: abilities granted by effects
+//! are not rewritten (CR 612.3). Chained text effects are ordered by the generic dependency
+//! trial above (CR 613.8). AST nodes read rewritable words by token id: [`resolve_word_ref`],
+//! [`text_token_matches`], [`resolve_predicate_words`] and [`resolve_selector_words`] read them
+//! through the current table, so a dependent ability applies to different objects after a
+//! change.
+//!
 //! **Lock-in** (REQ-LAYER-003, SRS 6.3). A multi-layer effect is registered as a group of
 //! parts, one per layer or sublayer ([`ContinuousEffects::register_group`]). A part whose
 //! affected set is [`Affected::SameAsLayer`] follows its anchor, the part of the group's first
@@ -94,6 +108,7 @@ mod pipeline;
 mod post;
 mod provider;
 mod registry;
+mod text;
 mod timestamps;
 
 #[cfg(test)]
@@ -104,6 +119,8 @@ mod lockin_tests;
 mod ordering_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_tests;
 
 pub use cache::{
     CacheStats, FULL_RECOMPUTE, Invalidation, LayerCache, StateVersion, evaluated_digest,
@@ -124,6 +141,10 @@ pub use post::{
 pub use provider::LayeredProvider;
 pub use registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+};
+pub use text::{
+    TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
+    resolve_selector_words, resolve_word_ref, rewrite_text_words, text_token_matches,
 };
 pub use timestamps::{
     CounterHolder, SimultaneousStamp, StampReason, TimestampLedger, restamp_static_effects,
