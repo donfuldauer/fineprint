@@ -12,14 +12,16 @@ use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
+use super::copy::apply_exceptions;
 use super::error::LayerError;
 use super::lockin::LockRecord;
 use super::ordering::{OrderRecord, Scratch, run_layer};
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+    ManaValueProvenance,
 };
 use super::text::replace_in_rules_text;
-use crate::objects::Characteristics;
+use crate::objects::{Characteristics, ManaValueContext};
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
 /// Variants such as "hexproof from red" (CR 702.11d) are recognised by
@@ -54,13 +56,33 @@ pub struct ObjectBase {
     pub on_battlefield: bool,
 }
 
-/// An object's characteristics and controller after the layers applied so far.
+/// An object's characteristics and controller after the layers applied so far, with the
+/// provenance of its mana value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evaluated {
     /// The characteristics.
     pub characteristics: Characteristics,
     /// The controller (set in layer 2, CR 613.1b).
     pub controller: Option<PlayerId>,
+    /// How the mana value is derived (CR 202.3a-c): for the base,
+    /// [`LayerEnvironment::base_mana_value_provenance`] (plain, the characteristics' own, by
+    /// default); set by every layer-1 effect that replaces all characteristics
+    /// ([`LayerModification::CopyValuesWithProvenance`] to its provenance,
+    /// [`LayerModification::CopyValues`] and [`LayerModification::FaceDown`] to plain);
+    /// [`LayerModification::ApplyCopyExceptions`] may only set its colors pin (CR 707.9b); no
+    /// other modification changes it. Read through [`Evaluated::mana_value`].
+    pub mana_value_provenance: ManaValueProvenance,
+}
+
+impl Evaluated {
+    /// The mana value (CR 202.3), exactly as [`crate::layers::CopiableValues::mana_value`]:
+    /// plain provenance the characteristics' own in `ctx` (CR 202.3e); `Fixed` the stored value;
+    /// a copy of a nonmodal back face or of a melded permanent 0 (CR 202.3b, 202.3c).
+    #[must_use]
+    pub fn mana_value(&self, ctx: ManaValueContext) -> i64 {
+        self.mana_value_provenance
+            .mana_value(&self.characteristics, ctx)
+    }
 }
 
 /// What [`LayerEnvironment::matches`] sees when a selector effect is about to apply.
@@ -84,6 +106,28 @@ pub trait LayerEnvironment {
 
     /// The base of `id`; `None` means unknown.
     fn base(&self, id: ObjectId) -> Option<ObjectBase>;
+
+    /// The provenance of the base mana value of `id` before layer 1 (CR 613.1): how the mana
+    /// value of [`ObjectBase::characteristics`] is derived. Called only after [`Self::base`]
+    /// returned `Some` for `id`; both [`evaluate`] and [`crate::layers::copiable_values`] start
+    /// from it. Default: [`ManaValueProvenance::plain`], right for an ordinary object.
+    ///
+    /// For the back face of a nonmodal double-faced object, return
+    /// [`crate::layers::CopiableValues::nonmodal_back_face`]`(..).provenance()`; for a melded
+    /// permanent, [`crate::layers::CopiableValues::melded`]`(..)?.provenance()` (CR 202.3b,
+    /// 202.3c, 713.5c): the object then has the fixed mana value and a copy of it has mana value
+    /// 0. Layers 1a and 1b may replace it: [`LayerModification::CopyValues`] and
+    /// [`LayerModification::FaceDown`] reset it to plain,
+    /// [`LayerModification::CopyValuesWithProvenance`] sets it, and
+    /// [`LayerModification::ApplyCopyExceptions`] keeps it (it may only pin the colors).
+    ///
+    /// The value is part of the object's base: a change to it is declared to a
+    /// [`crate::layers::LayerCache`] with the same invalidation as any other base change
+    /// ([`crate::layers::Invalidation::ZoneChange`]). It must be a pure read (REQ-CORE-001).
+    fn base_mana_value_provenance(&self, id: ObjectId) -> ManaValueProvenance {
+        let _ = id;
+        ManaValueProvenance::plain()
+    }
 
     /// The counters on `id`: kind to amount (at least 1). Default: none.
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
@@ -385,12 +429,15 @@ pub fn evaluate_with_order(
 ) -> Result<(Evaluated, OrderRecord), LayerError> {
     // CR 613.1: start with the actual object.
     let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
+    // CR 202.3b, 202.3c, 713.5c: the base's own mana-value provenance (plain by default).
+    let base_provenance = env.base_mana_value_provenance(id);
     let on_battlefield = base.on_battlefield;
     // `pt` is `None` until layer 7 starts or when the object has no power and toughness.
     let mut scratch = Scratch {
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
+            mana_value_provenance: base_provenance,
         },
         pt: None,
     };
@@ -514,9 +561,28 @@ fn write_pt(state: &mut Evaluated, (p, t): (i64, i64)) {
 fn apply_effect(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, m: &LayerModification) {
     let c = &mut state.characteristics;
     match m {
-        // CR 613.2a, 613.2b: layer 1 replaces the characteristics (CR 613.2c: copiable values).
+        // CR 613.2a, 613.2b: layer 1 replaces the characteristics (CR 613.2c: copiable values);
+        // the mana value is the new characteristics' own (a face-down object has no mana cost,
+        // CR 708.2, 202.3a).
         LayerModification::CopyValues(v) | LayerModification::FaceDown(v) => {
             *c = (**v).clone();
+            state.mana_value_provenance = ManaValueProvenance::plain();
+        }
+        // CR 613.2a, 202.3b, 202.3c: a copy that also fixes how the mana value is derived.
+        LayerModification::CopyValuesWithProvenance {
+            characteristics,
+            provenance,
+        } => {
+            *c = (**characteristics).clone();
+            state.mana_value_provenance = provenance.clone();
+        }
+        // CR 613.2a, 707.2: a copiable modification that is not a copy changes only what its
+        // exceptions set; it copies nothing, so `NotCopied` is ignored; no CDA is dropped; the
+        // mana-value source and zero flag are kept and the colors pin is carried (CR 707.9b).
+        LayerModification::ApplyCopyExceptions(exceptions) => {
+            let pinned = state.mana_value_provenance.colors_pinned;
+            state.mana_value_provenance.colors_pinned =
+                apply_exceptions(c, None, exceptions, pinned);
         }
         // CR 613.1b
         LayerModification::SetController(p) => state.controller = Some(*p),

@@ -62,6 +62,34 @@
 //! registers nothing when its [`ForAsLongAsWindow`] makes the effect do nothing (CR 611.2b).
 //! [`ContinuousEffects::register`] never locks a selector and rejects `SameAsLayer`.
 //!
+//! **Layer 1a: copiable values** (REQ-OBJ-002, CR 613.2a, 613.2c, 707, 731.2a).
+//! [`CopiableValues`] are an object's characteristics at the end of layer 1 with the source of
+//! its mana value ([`ValueSource`], CR 202.3b, 202.3c). [`CopiableValues::copy_with`] gives what
+//! a copy effect copies, with its [`CopyException`]s (CR 707.9a-d);
+//! [`CopiableValues::modified`] applies a non-copy modification to values (CR 613.2a).
+//! [`copiable_effect`] wraps either as a layer-1a effect that replaces all characteristics, a
+//! snapshot taken when it is built (CR 707.2b, 707.2c): [`LayerModification::CopyValues`] for
+//! plain values, [`LayerModification::CopyValuesWithProvenance`] for a fixed or zero mana value
+//! or colors pinned by a copy exception (CR 707.9b, [`ManaValueProvenance::colors_pinned`]),
+//! which [`Evaluated::mana_value_provenance`] and [`Evaluated::mana_value`] then report
+//! (CR 202.3b, 202.3c; [`ManaValueProvenance`]). [`modification_effect`] is the layer-1a effect
+//! of a non-copy modification ([`LayerModification::ApplyCopyExceptions`]): it changes only the
+//! fields it sets (a `NotCopied` exception is ignored), so removing an earlier copy removes what
+//! was copied. An "as ... enters" power and toughness setting is a [`modification_effect`]
+//! registered with [`EffectOrigin::Resolved`] so it outlasts the ability (CR 208.2b, 611.2a), not
+//! a [`copiable_effect`] snapshot, which would keep an earlier copy's characteristics after that
+//! copy ends. [`merge_effect`] is the
+//! layer-1a effect of a merged permanent stamped at the merge (CR 731.2a). Merge and copy
+//! effects order by timestamp within layer 1a like any other effects; the evaluator has no
+//! special case. [`copiable_values`] reads an object's copiable values with their mana-value
+//! provenance, [`copiable_characteristics`] the characteristics only: layers 1a and 1b only, no
+//! counters (CR 707.2). Both [`evaluate`] and [`copiable_values`] start from the base's
+//! provenance, [`LayerEnvironment::base_mana_value_provenance`] (plain by default; the
+//! environment supplies it for a nonmodal back face or melded permanent, CR 202.3b, 202.3c,
+//! 713.5c). Reading `copiable_values` after registering [`copiable_effect`] of `V` gives `V`'s
+//! characteristics and exported provenance (not necessarily a value `==` to `V`) when the effect
+//! applies to the object and nothing else changes them before the end of layer 1.
+//!
 //! **Timestamps.** [`TimestampLedger`] and the free functions assign timestamps per
 //! CR 613.7a-n from the caller's single monotonic `IdGenerator<Timestamp>`.
 //!
@@ -101,6 +129,7 @@
 //! of registration never changes a result (REQ-CORE-001).
 
 mod cache;
+mod copy;
 mod error;
 mod lockin;
 mod ordering;
@@ -114,6 +143,8 @@ mod timestamps;
 #[cfg(test)]
 mod cache_tests;
 #[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
 mod lockin_tests;
 #[cfg(test)]
 mod ordering_tests;
@@ -124,6 +155,10 @@ mod text_tests;
 
 pub use cache::{
     CacheStats, FULL_RECOMPUTE, Invalidation, LayerCache, StateVersion, evaluated_digest,
+};
+pub use copy::{
+    CopiableValues, CopiedCharacteristic, CopyException, ValueSource, copiable_characteristics,
+    copiable_effect, copiable_values, merge_effect, modification_effect,
 };
 pub use error::LayerError;
 pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
@@ -141,6 +176,7 @@ pub use post::{
 pub use provider::LayeredProvider;
 pub use registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+    ManaValueProvenance,
 };
 pub use text::{
     TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
