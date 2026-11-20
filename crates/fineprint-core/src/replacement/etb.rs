@@ -38,7 +38,9 @@
 //! offered only if its cost, plus the least total cost the rest of its entry can still commit
 //! (an exact lookahead over the effects that apply or become applicable), plus that least total
 //! of every later entry of the same chooser, fits the remaining budget (u128 arithmetic, at most
-//! [`MAX_LOOKAHEAD_STATES`] states per entry). The CR 616.1 order choice is never filtered.
+//! [`MAX_LOOKAHEAD_STATES`] states per entry, each charged when first entered; an iterative
+//! search). The CR 616.1 order choice is never filtered. Every entry's starting projection is
+//! checked before any reserve or request (CR 614.12a).
 //!
 //! **Standalone scope.** Not joined to the bus or `GameState`: the caller supplies every input
 //! and applies the result. Determinism (REQ-CORE-001): ordered containers, integer arithmetic,
@@ -247,8 +249,9 @@ impl EtbEffect {
 pub struct CopyAbilities {
     /// Static abilities of the copy model, as continuous effects. When this copy is the LAST
     /// applied copy of an entry, [`project`] registers them on the cloned registry bound to the
-    /// entrant: `source` is set to `Some(entry.object)`, and an [`Affected::Objects`] set is
-    /// replaced by `{entry.object}` (an [`Affected::Selector`] is kept).
+    /// entrant: `source` is set to `Some(entry.object)`, `controller` to `entry.controller`, and
+    /// an [`Affected::Objects`] set is replaced by `{entry.object}` (an [`Affected::Selector`] is
+    /// kept).
     pub statics: Vec<(EffectId, ContinuousEffect)>,
     /// Ids of [`EtbEffects`] entries (scope [`EtbScope::ThisPermanent`]) that are replacement
     /// abilities of the copy model. When this copy is the last applied copy, they apply to the
@@ -274,10 +277,19 @@ impl EtbEffects {
     /// Adds `effect` under its id.
     ///
     /// # Errors
-    /// [`EtbError::DuplicateEffect`] if an effect with that id is present (nothing changes).
+    /// [`EtbError::DuplicateEffect`] if an effect with that id is present;
+    /// [`EtbError::EmptyChoice`] if it is an [`EtbAction::Choose`] without options (nothing
+    /// changes).
     pub fn add(&mut self, effect: EtbEffect) -> Result<(), EtbError> {
         if self.effects.contains_key(&effect.id) {
             return Err(EtbError::DuplicateEffect(effect.id));
+        }
+        // CR 614.12b: a choice with no option has no payable continuation; it is refused here so
+        // the lookahead never reserves a cost for it.
+        if let EtbAction::Choose { options, .. } = &effect.action
+            && options.is_empty()
+        {
+            return Err(EtbError::EmptyChoice(effect.id));
         }
         self.effects.insert(effect.id, effect);
         Ok(())
@@ -339,6 +351,8 @@ pub enum EtbError {
     DuplicateEffect(EffectId),
     /// [`EtbEffects::set_copy_abilities`] names an effect that is absent or not a copy effect.
     NotACopyEffect(EffectId),
+    /// [`EtbEffects::add`] was given an [`EtbAction::Choose`] with an empty `options` list.
+    EmptyChoice(EffectId),
     /// The layer system failed (an unknown object, a duplicate own-static id, ...).
     Layer(LayerError),
     /// A choice has no option whose cost leaves the combined costs payable (CR 614.12b).
@@ -358,6 +372,9 @@ impl fmt::Display for EtbError {
             }
             EtbError::NotACopyEffect(id) => {
                 write!(f, "ETB effect {} is not a present copy effect", id.get())
+            }
+            EtbError::EmptyChoice(id) => {
+                write!(f, "ETB effect {} is a choice without options", id.get())
             }
             EtbError::Layer(e) => write!(f, "layer error: {e}"),
             EtbError::Unpayable { chooser, key } => write!(
@@ -537,11 +554,13 @@ fn last_copy<'a>(ctx: &EtbContext<'a>, applied: &EtbApplied) -> Option<&'a EtbEf
         .find(|e| matches!(e.action, EtbAction::EntersAsCopyOf(_)))
 }
 
-/// `effect` bound to the entrant `object`: its source, and a locked object set, become the
-/// entrant (CR 707.5: the copy's static abilities are the entrant's).
-fn bind_to(object: ObjectId, effect: &ContinuousEffect) -> ContinuousEffect {
+/// `effect` bound to the entrant `object` entering under `controller`: its source, and a
+/// locked object set, become the entrant, and its controller the entrant's (CR 707.5: the
+/// copy's static abilities are the entrant's).
+fn bind_to(object: ObjectId, controller: PlayerId, effect: &ContinuousEffect) -> ContinuousEffect {
     let mut bound = effect.clone();
     bound.source = Some(object);
+    bound.controller = controller;
     if let Affected::Objects(_) = bound.affected {
         bound.affected = Affected::Objects([object].into_iter().collect());
     }
@@ -550,6 +569,9 @@ fn bind_to(object: ObjectId, effect: &ContinuousEffect) -> ContinuousEffect {
 
 /// The synthetic layer-4 effect adding `types` to `object` (CR 613.1d, CR 205.1b): an id and a
 /// timestamp strictly above every effect of `continuous` (CR 613.7), so it applies after them.
+/// It realises a replacement effect, not a static ability of `object`, so it is registered as
+/// [`EffectOrigin::Resolved`] with the locked set `{object}`: the layer pipeline never asks
+/// [`LayerEnvironment::generating_ability_exists`] about it.
 ///
 /// # Errors
 /// [`LayerError::IdExhausted`] if no such id or timestamp exists.
@@ -575,7 +597,8 @@ fn added_types_effect(
             timestamp: Timestamp::new(ts),
             layer: Layer::L4,
             is_cda: false,
-            origin: EffectOrigin::Static { granted_at: None },
+            // CR 613.1d: no generating ability to check; the set is locked to the entrant.
+            origin: EffectOrigin::Resolved,
             affected: Affected::Objects([object].into_iter().collect()),
             modification: LayerModification::AddTypes {
                 supertypes: BTreeSet::new(),
@@ -638,7 +661,7 @@ pub fn project(
             .map(|a| {
                 a.statics
                     .iter()
-                    .map(|(sid, s)| (*sid, bind_to(entry.object, s)))
+                    .map(|(sid, s)| (*sid, bind_to(entry.object, entry.controller, s)))
                     .collect()
             })
             .unwrap_or_default(),
@@ -771,12 +794,13 @@ fn procedure(e: &EtbError) -> Interrupt {
     Interrupt::Error(ChoiceError::Procedure(e.to_string()))
 }
 
-/// The most lookahead states (applied set, last copy) one entry may visit (R3: a fixed bound,
+/// The most lookahead states (applied set, last copy) one entry may enter (R3: a fixed bound,
 /// exceeding it is an error, never a silent truncation).
 const MAX_LOOKAHEAD_STATES: usize = 4096;
 
 /// The cheapest cost `effect` commits when it applies: the cheapest option of a `Choose`
-/// (CR 614.12b), 0 for any other action.
+/// (CR 614.12b; [`EtbEffects::add`] refuses a `Choose` without options), 0 for any other
+/// action.
 fn cheapest(effect: &EtbEffect) -> u128 {
     match &effect.action {
         EtbAction::Choose { options, .. } => {
@@ -786,15 +810,53 @@ fn cheapest(effect: &EtbEffect) -> u128 {
     }
 }
 
+/// A lookahead state: the applied set and the last applied copy (which fixes the projection,
+/// CR 707.2).
+type State = (BTreeSet<EffectId>, Option<EffectId>);
+
 /// The exact CR 614.12b lookahead of one entry: the least total cost the rest of the entry can
 /// commit from a state, over every CR 616.1 order (CR 616.1f, CR 616.2: effects that become
 /// applicable count, effects a mandatory replacement removes do not). The option costs never
-/// change the projection, so a state is the applied set plus the last applied copy (which fixes
-/// the projection, CR 707.2).
+/// change the projection, so a state is the applied set plus the last applied copy.
+///
+/// Every distinct state is charged against [`MAX_LOOKAHEAD_STATES`] when it is first entered,
+/// before anything below it is explored; a state already evaluated is a memo hit and costs
+/// nothing. The search is iterative (an explicit stack), so a deep chain of states cannot
+/// overflow the call stack.
 struct Lookahead<'c, 'a> {
     ctx: &'c EtbContext<'a>,
     entry: &'c EtbEntry,
-    memo: BTreeMap<(BTreeSet<EffectId>, Option<EffectId>), u128>,
+    memo: BTreeMap<State, u128>,
+    /// The distinct states entered so far (evaluated or being evaluated).
+    entered: usize,
+}
+
+/// A state being evaluated: its top-tier candidates (CR 616.1a-e), the next one to explore and
+/// the least total found so far.
+struct Frame<'a> {
+    state: State,
+    candidates: Vec<&'a EtbEffect>,
+    next: usize,
+    best: Option<u128>,
+}
+
+impl Frame<'_> {
+    /// Records `rest`, the least total after the candidate `next`, and moves to the next one.
+    fn settle(&mut self, rest: u128) {
+        let Some(effect) = self.candidates.get(self.next) else {
+            return;
+        };
+        // At most one u64 per effect: u128 cannot overflow.
+        let total = cheapest(effect).saturating_add(rest);
+        self.best = Some(self.best.map_or(total, |b| b.min(total)));
+        self.next = self.next.saturating_add(1);
+    }
+}
+
+/// A state entered: its value is known at once, or it must be explored.
+enum Entered<'a> {
+    Done(u128),
+    Open(Frame<'a>),
 }
 
 /// The lookahead state after `id` is applied to (`set`, `last`).
@@ -803,7 +865,7 @@ fn step(
     set: &BTreeSet<EffectId>,
     last: Option<EffectId>,
     id: EffectId,
-) -> (BTreeSet<EffectId>, Option<EffectId>) {
+) -> State {
     let mut next = set.clone();
     next.insert(id);
     let is_copy = ctx
@@ -819,7 +881,52 @@ impl<'c, 'a> Lookahead<'c, 'a> {
             ctx,
             entry,
             memo: BTreeMap::new(),
+            entered: 0,
         }
+    }
+
+    /// Enters the new `state` (not in the memo): charges it against the limit (R3), then gives
+    /// its value when nothing below it can commit a cost, else its frame.
+    fn enter(&mut self, state: State) -> Result<Entered<'a>, Interrupt> {
+        if self.entered >= MAX_LOOKAHEAD_STATES {
+            return Err(Interrupt::Error(ChoiceError::Procedure(format!(
+                "the CR 614.12b lookahead of object {} exceeds {MAX_LOOKAHEAD_STATES} states",
+                self.entry.object.get()
+            ))));
+        }
+        self.entered = self.entered.saturating_add(1);
+        // No unapplied effect can commit a cost: nothing to look at (no projection).
+        let any_cost = self
+            .ctx
+            .effects
+            .effects
+            .values()
+            .any(|e| !state.0.contains(&e.id) && cheapest(e) > 0);
+        if !any_cost {
+            self.memo.insert(state, 0);
+            return Ok(Entered::Done(0));
+        }
+        // The projection of the state: the last copy applied last.
+        let (set, last) = &state;
+        let mut order: Vec<EffectId> = set.iter().copied().filter(|i| Some(*i) != *last).collect();
+        order.extend(*last);
+        let applied = EtbApplied {
+            effects: set.clone(),
+            chosen: BTreeMap::new(),
+            order,
+        };
+        let projected = project(self.ctx, self.entry, &applied).map_err(|e| procedure(&e))?;
+        let candidates = top_tier(self.ctx, &applicable_to(self.ctx, self.entry, &projected));
+        if candidates.is_empty() {
+            self.memo.insert(state, 0);
+            return Ok(Entered::Done(0));
+        }
+        Ok(Entered::Open(Frame {
+            state,
+            candidates,
+            next: 0,
+            best: None,
+        }))
     }
 
     /// `mincost(set, last)`: 0 if nothing applies, else the minimum over the candidates `c` of
@@ -829,47 +936,43 @@ impl<'c, 'a> Lookahead<'c, 'a> {
         set: &BTreeSet<EffectId>,
         last: Option<EffectId>,
     ) -> Result<u128, Interrupt> {
-        // No unapplied effect can commit a cost: nothing to look at.
-        let any_cost = self
-            .ctx
-            .effects
-            .effects
-            .values()
-            .any(|e| !set.contains(&e.id) && cheapest(e) > 0);
-        if !any_cost {
-            return Ok(0);
-        }
-        let key = (set.clone(), last);
-        if let Some(v) = self.memo.get(&key) {
+        let root: State = (set.clone(), last);
+        if let Some(v) = self.memo.get(&root) {
             return Ok(*v);
         }
-        if self.memo.len() >= MAX_LOOKAHEAD_STATES {
-            return Err(Interrupt::Error(ChoiceError::Procedure(format!(
-                "the CR 614.12b lookahead of object {} exceeds {MAX_LOOKAHEAD_STATES} states",
-                self.entry.object.get()
-            ))));
-        }
-        // The projection of the state: the last copy applied last.
-        let mut order: Vec<EffectId> = set.iter().copied().filter(|i| Some(*i) != last).collect();
-        order.extend(last);
-        let applied = EtbApplied {
-            effects: set.clone(),
-            chosen: BTreeMap::new(),
-            order,
+        let mut stack: Vec<Frame<'a>> = match self.enter(root)? {
+            Entered::Done(v) => return Ok(v),
+            Entered::Open(frame) => vec![frame],
         };
-        let projected = project(self.ctx, self.entry, &applied).map_err(|e| procedure(&e))?;
-        let candidates = top_tier(self.ctx, &applicable_to(self.ctx, self.entry, &projected));
-        let mut best: Option<u128> = None;
-        for effect in candidates {
-            let (next, next_last) = step(self.ctx, set, last, effect.id);
-            let rest = self.mincost(&next, next_last)?;
-            // At most one u64 per effect: u128 cannot overflow.
-            let total = cheapest(effect).saturating_add(rest);
-            best = Some(best.map_or(total, |b| b.min(total)));
+        // The value just found for the top frame's current candidate, or for a finished frame.
+        let mut found: Option<u128> = None;
+        while let Some(top) = stack.last_mut() {
+            if let Some(v) = found.take() {
+                top.settle(v);
+            }
+            let Some(effect) = top.candidates.get(top.next).copied() else {
+                // Every candidate explored: the state's value is known.
+                let value = top.best.unwrap_or(0);
+                if let Some(done) = stack.pop() {
+                    self.memo.insert(done.state, value);
+                }
+                found = Some(value);
+                continue;
+            };
+            let child = step(self.ctx, &top.state.0, top.state.1, effect.id);
+            found = match self.memo.get(&child).copied() {
+                // A memo hit consumes nothing.
+                Some(v) => Some(v),
+                None => match self.enter(child)? {
+                    Entered::Done(v) => Some(v),
+                    Entered::Open(frame) => {
+                        stack.push(frame);
+                        None
+                    }
+                },
+            };
         }
-        let value = best.unwrap_or(0);
-        self.memo.insert(key, value);
-        Ok(value)
+        Ok(found.unwrap_or(0))
     }
 }
 
@@ -900,16 +1003,20 @@ pub fn resolve_entering(
     payable: &BTreeMap<PlayerId, u64>,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<Vec<EtbResolved>, Interrupt> {
+    // CR 614.12a: every choice is made before anything enters, so every entry's starting
+    // projection is checked first: a projection error (an unknown object, a duplicate
+    // own-static id, ...) of any entry fails the call before any reserve or request.
+    for entry in entries {
+        project(ctx, entry, &EtbApplied::default()).map_err(|e| procedure(&e))?;
+    }
     // CR 614.12b, CR 616.2: the least total cost each entry can commit from its start, for the
     // reserve of the entries not yet resolved (entries are independent). Unlimited choosers
-    // need no reserve; every entry is projected first so a projection error comes before any
-    // request.
+    // need no reserve.
     let mut start_reserve: Vec<(PlayerId, u128)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let reserve = if payable.contains_key(&entry.controller) {
             Lookahead::new(ctx, entry).mincost(&BTreeSet::new(), None)?
         } else {
-            project(ctx, entry, &EtbApplied::default()).map_err(|e| procedure(&e))?;
             0
         };
         start_reserve.push((entry.controller, reserve));
