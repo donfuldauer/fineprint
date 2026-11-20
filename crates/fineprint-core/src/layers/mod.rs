@@ -90,6 +90,20 @@
 //! characteristics and exported provenance (not necessarily a value `==` to `V`) when the effect
 //! applies to the object and nothing else changes them before the end of layer 1.
 //!
+//! **Layer 1b: face-down** (REQ-OBJ-003, CR 613.2b, 613.2c, 708). [`face_down_effect`] is the
+//! layer-1b effect giving an object the characteristics of a
+//! [`crate::layouts::FaceDownProfile`] ([`LayerModification::FaceDown`], CR 708.2): it replaces
+//! all characteristics, resets the mana-value provenance to plain, and applies after layer 1a
+//! whatever the timestamps, so the profile is the object's copiable values (CR 613.2c, 707.2,
+//! 708.10). The same builder serves entering the battlefield face down, being cast face down and
+//! turning face down (CR 708.2a, 708.3, 708.4). [`turn_face_down`] refuses, changing nothing, a
+//! face-down permanent (CR 708.2b), a double-faced permanent (CR 712.13) and a merged permanent
+//! with a double-faced component (CR 731.2j) ([`FaceDownTarget`], [`FaceDownRefusal`]); otherwise
+//! it stamps the object (CR 613.7f) and registers the effect. [`turn_face_up`] stamps the object
+//! (CR 613.7f) and removes the effect, so the copiable values revert (CR 708.8); it refuses an
+//! instant or sorcery (CR 701.40g, 701.58g, 731.2g, [`FaceUpRefusal`]). The turn-face-up special
+//! action and its costs are later work.
+//!
 //! **Timestamps.** [`TimestampLedger`] and the free functions assign timestamps per
 //! CR 613.7a-n from the caller's single monotonic `IdGenerator<Timestamp>`.
 //!
@@ -131,6 +145,7 @@
 mod cache;
 mod copy;
 mod error;
+mod facedown;
 mod lockin;
 mod ordering;
 mod pipeline;
@@ -144,6 +159,8 @@ mod timestamps;
 mod cache_tests;
 #[cfg(test)]
 mod copy_tests;
+#[cfg(test)]
+mod facedown_tests;
 #[cfg(test)]
 mod lockin_tests;
 #[cfg(test)]
@@ -161,6 +178,9 @@ pub use copy::{
     copiable_effect, copiable_values, merge_effect, modification_effect,
 };
 pub use error::LayerError;
+pub use facedown::{
+    FaceDownRefusal, FaceDownTarget, FaceUpRefusal, face_down_effect, turn_face_down, turn_face_up,
+};
 pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
 pub use ordering::{OrderItem, OrderRecord, OrderStep, Selection};
 pub use pipeline::{
