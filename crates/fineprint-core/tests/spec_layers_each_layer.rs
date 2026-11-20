@@ -471,6 +471,97 @@ fn layer_6_remove_keyword_removes_every_instance_only() {
     );
 }
 
+/// Evaluates `abilities` on one creature under a layer-6 `RemoveKeyword(k)` and returns the
+/// remaining abilities.
+fn remaining_after_remove_keyword(abilities: Vec<AbilityAST>, k: &str) -> Vec<AbilityAST> {
+    let mut env = TestEnv::new();
+    let a = env.put(
+        oid(1),
+        with_abilities(creature("test.loaded_2_2", 2, 2), abilities),
+    );
+    let r = registry(&[(
+        1,
+        eff(
+            Layer::L6,
+            1,
+            objs(&[a]),
+            LayerModification::RemoveKeyword(k.to_string()),
+        ),
+    )]);
+    evaluate(&r, &env, a).unwrap().characteristics.abilities
+}
+
+// REQ-LAYER-001, REQ-TEST-001, CR 702.11d, 702.11e, 613.1f: removing hexproof also removes every
+// "hexproof from [quality]" ability; look-alikes and other keywords stay, in original order.
+#[test]
+fn remove_keyword_hexproof_removes_variants() {
+    let left = remaining_after_remove_keyword(
+        vec![
+            kw_ability("k1", "hexproof"),
+            kw_ability("k2", "hexproof from red"),
+            kw_ability("k3", "hexproof from artifacts"),
+            kw_ability("k4", "flying"),
+            kw_ability("k5", "hexproofish"),
+            static_ability("test.own"),
+            kw_ability("k6", "ward 2"),
+        ],
+        "hexproof",
+    );
+    assert_eq!(
+        left,
+        vec![
+            kw_ability("k4", "flying"),
+            kw_ability("k5", "hexproofish"),
+            static_ability("test.own"),
+            kw_ability("k6", "ward 2"),
+        ]
+    );
+}
+
+// REQ-LAYER-001, REQ-TEST-001, CR 702.11e, 613.1f: RemoveKeyword("hexproof from red") matches
+// that keyword exactly.
+#[test]
+fn remove_keyword_variant_is_exact() {
+    let left = remaining_after_remove_keyword(
+        vec![
+            kw_ability("k1", "hexproof"),
+            kw_ability("k2", "hexproof from red"),
+            kw_ability("k3", "hexproof from blue"),
+        ],
+        "hexproof from red",
+    );
+    assert_eq!(
+        left,
+        vec![
+            kw_ability("k1", "hexproof"),
+            kw_ability("k3", "hexproof from blue")
+        ]
+    );
+}
+
+// REQ-LAYER-001, REQ-TEST-001, CR 702.11e, 613.1f: variant removal is specific to hexproof;
+// RemoveKeyword("flying") leaves "flying from red" alone.
+#[test]
+fn remove_keyword_non_hexproof_stays_exact() {
+    let left = remaining_after_remove_keyword(
+        vec![
+            kw_ability("k1", "flying"),
+            kw_ability("k2", "flying from red"),
+            kw_ability("k3", "protection from red"),
+            kw_ability("k4", "shadow"),
+        ],
+        "flying",
+    );
+    assert_eq!(
+        left,
+        vec![
+            kw_ability("k2", "flying from red"),
+            kw_ability("k3", "protection from red"),
+            kw_ability("k4", "shadow"),
+        ]
+    );
+}
+
 // REQ-LAYER-001, CR 613.4a, 613.4b: SetPt in 7a and 7b sets Some values and leaves None
 // values.
 #[test]
