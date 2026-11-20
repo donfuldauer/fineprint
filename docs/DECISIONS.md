@@ -5910,7 +5910,24 @@ applies to) and the `SetText` does not depend on the replacement, so per CR 613.
 applies first in both timestamp orders and the replacement rewrites the new text (derivation by
 the rules researcher, CR 2026-11-06; this supersedes the brief's original expectation that a
 later `SetText` wins unchanged). Unit test `set_text_applies_before_replace_in_both_orders`
-still passes under the per-token comparison.
+still passes under the per-token comparison. Review round 2 (CodeRabbit finding 4640922156):
+the per-token comparison applies only when A is also a `REPLACE_TEXT_WORD`; for a whole-text
+`SetText` A the trial keeps the field-by-field comparison of B's output. Under the round-1 rule
+a `SetText` that keeps B's matched word at the same position with the same id (base
+[Swamp w, "old"], `SetText` to [Swamp w, "new"], B = Swamp->Island) left B's token set
+unchanged, so neither effect depended on the other; with B earlier the `SetText` then overwrote
+B's result and gave [Swamp, "new"]. Now B depends on the `SetText` and both timestamp orders
+give [Island, "new"], `SetText` first (tests
+`set_text_keeping_matched_word_applies_before_replace_in_both_orders`,
+`set_text_keeping_matched_word_and_replace_both_orders`). Check of other A kinds: the only
+layer-3 modifications are `SetText` and `REPLACE_TEXT_WORD` (`LayerModification::belongs_to`
+in registry.rs; `apply_effect` in pipeline.rs writes `rules_text` in layer 3 only for these
+two); `CopyValues` and `FaceDown` also change `rules_text` but are layer 1 and are never
+compared with a layer-3 B (CR 613.8a (a)); counters are not text. A `REPLACE_TEXT_WORD` A cannot
+keep B's token set and still change B's outcome: it decodes, rewrites only the `value` of
+matching word tokens and re-encodes (ids, order and kinds kept, REQ-DSL-012), and B's outcome
+depends only on which tokens match B's category and `from` (each is rewritten to `to`), so its
+effect on B is fully captured by B's token set. No counterexample found.
 **Rationale:** CR 613.8a (b) asks whether applying A changes what B applies to or what it does
 to them; for a word replacement that is exactly its set of matching tokens. The original brief
 kept ordering.rs out of scope, so the first submission used the generic trial alone; the
@@ -5919,7 +5936,9 @@ only token data (REQ-DSL-013) and is a pure function of the two scratch states (
 **Alternatives:** The generic whole-field trial for word replacements too (rejected in review
 round 1: on mixed Swamp+Island text it reports a mutual dependency and gives [Island, Forest]);
 the per-token comparison was adopted for `REPLACE_TEXT_WORD` only, and the generic trial remains
-for every other modification.
+for every other modification. The per-token comparison for every A, `SetText` included
+(rejected in review round 2: a whole-text `SetText` that keeps the matched word's position and
+id was missed, so the `SetText` overwrote the replacement).
 
 ## #37 FP-036 — Engine gaps for #37
 
