@@ -268,11 +268,14 @@ pub fn stamp_static_and_resolved(
 /// Re-stamps the static-ability effects of `object` after it moved from timestamp
 /// `old_object_ts` to `new_object_ts` (CR 613.7a, second sentence).
 ///
-/// A static effect of `object` whose granting effect is later than `old_object_ts` gets a new
-/// timestamp from `ids` (later than `new_object_ts` when the caller issued that one from the same
-/// generator), in ascending order of its old (timestamp, [`EffectId`]), so their relative order
-/// stays the same; every other static effect of `object` gets `new_object_ts`. Resolved effects
-/// are never touched.
+/// A static effect of `object` from a granted ability (`granted_at: Some(_)`) whose current
+/// timestamp is later than `old_object_ts` (it followed the granting effect, not the host) gets
+/// a new timestamp from `ids` (later than `new_object_ts` when the caller issued that one from
+/// the same generator), in ascending order of its old (timestamp, [`EffectId`]), so their
+/// relative order stays the same; every other static effect of `object` (printed, or granted
+/// with a timestamp not later than `old_object_ts`) gets `new_object_ts`. Resolved effects and
+/// other objects' effects are never touched. The current timestamp, not `granted_at`, decides,
+/// so repeated re-stamps keep the order.
 ///
 /// # Errors
 /// [`LayerError::IdExhausted`]; the registry and `ids` are then unchanged.
@@ -290,9 +293,11 @@ pub fn restamp_static_effects(
             continue;
         }
         match effect.origin {
+            // CR 613.7a: judged on the current timestamp, so a second re-stamp still tells the
+            // effects that followed the granting effect from those that shared the host's.
             EffectOrigin::Static {
-                granted_at: Some(g),
-            } if g > old_object_ts => granted.push((effect.timestamp, id)),
+                granted_at: Some(_),
+            } if effect.timestamp > old_object_ts => granted.push((effect.timestamp, id)),
             EffectOrigin::Static { .. } => own.push(id),
             EffectOrigin::Resolved => {}
         }
