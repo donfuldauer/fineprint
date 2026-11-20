@@ -9,7 +9,9 @@
 #[path = "spec_layers_support.rs"]
 mod support;
 
-use fineprint_core::layers::{ContinuousEffects, LayerModification, evaluate};
+use fineprint_core::layers::{
+    ContinuousEffects, LayerModification, evaluate, keyword_counter_ability,
+};
 use fineprint_core::objects::Characteristics;
 use support::*;
 
@@ -342,12 +344,9 @@ fn creature_made_noncreature_has_no_pt() {
     assert_eq!(pt(&evaluate(&r, &env, a).unwrap()), (None, None));
 }
 
-// REQ-LAYER-001, CR 208.3, 122.1a: a noncreature card off the battlefield with printed P/T
-// has P/T and its P/T counters apply.
-#[test]
-fn noncreature_off_battlefield_with_printed_pt_counts_counters() {
-    let mut env = TestEnv::new();
-    let a = env.put_full(
+/// A noncreature artifact card with printed 2/1, off the battlefield.
+fn artifact_card_2_1_off_battlefield(env: &mut TestEnv) -> fineprint_base::ids::ObjectId {
+    env.put_full(
         oid(1),
         Characteristics {
             power: Some(lit(2)),
@@ -356,12 +355,153 @@ fn noncreature_off_battlefield_with_printed_pt_counts_counters() {
         },
         None,
         false,
+    )
+}
+
+// REQ-LAYER-001, CR 122.1a, 208.3: a noncreature card off the battlefield with printed P/T
+// keeps that P/T (presence unchanged) but a +X/+Y counter does not change it: +X/+Y counters
+// apply only to a creature or a creature card.
+#[test]
+fn noncreature_off_battlefield_with_printed_pt_ignores_counters() {
+    let mut env = TestEnv::new();
+    let a = artifact_card_2_1_off_battlefield(&mut env);
+    env.counter(a, "+1/+1", 1, 1);
+    assert_eq!(
+        pt(&evaluate(&ContinuousEffects::new(), &env, a).unwrap()),
+        spt(2, 1)
     );
+}
+
+// REQ-LAYER-001, CR 122.1a: a -X/-Y counter on that noncreature artifact card changes nothing
+// either.
+#[test]
+fn minus_counter_on_noncreature_card_with_printed_pt_changes_nothing() {
+    let mut env = TestEnv::new();
+    let a = artifact_card_2_1_off_battlefield(&mut env);
+    env.counter(a, "-1/-1", 1, 1);
+    assert_eq!(
+        pt(&evaluate(&ContinuousEffects::new(), &env, a).unwrap()),
+        spt(2, 1)
+    );
+}
+
+// REQ-LAYER-001, CR 122.1a, 613.4c, 613.1d: the same artifact made a creature by a layer-4
+// effect while on the battlefield: the counter applies (3/2).
+#[test]
+fn pt_counter_applies_once_a_layer_4_effect_makes_it_a_creature() {
+    let mut env = TestEnv::new();
+    let a = env.put(
+        oid(1),
+        Characteristics {
+            power: Some(lit(2)),
+            toughness: Some(lit(1)),
+            ..artifact("test.vehicle_like_card")
+        },
+    );
+    env.counter(a, "+1/+1", 1, 1);
+    let r = registry(&[(
+        1,
+        eff(Layer::L4, 2, objs(&[a]), add_card_types(&["Creature"])),
+    )]);
+    assert_eq!(pt(&evaluate(&r, &env, a).unwrap()), spt(3, 2));
+}
+
+// REQ-LAYER-001, CR 122.1a: a creature card in a zone other than the battlefield with printed
+// 2/1 and a +1/+1 counter is 3/2.
+#[test]
+fn pt_counter_applies_to_creature_card_off_battlefield() {
+    let mut env = TestEnv::new();
+    let a = env.put_full(oid(1), creature("test.vanilla_2_1", 2, 1), None, false);
     env.counter(a, "+1/+1", 1, 1);
     assert_eq!(
         pt(&evaluate(&ContinuousEffects::new(), &env, a).unwrap()),
         spt(3, 2)
     );
+}
+
+// REQ-LAYER-001, CR 122.1b, 702.11d, 613.1f: a keyword-counter kind is one of the 15 names, or
+// one of them followed by one space and more text (a variant). The ability uses the FULL kind
+// string; `keyword_counter_ability` yields exactly that.
+#[test]
+fn keyword_counter_variant_gives_the_full_string_ability() {
+    let mut env = TestEnv::new();
+    let a = env.put(oid(1), creature("test.vanilla_2_2", 2, 2));
+    env.counter(a, "hexproof from red", 3, 2);
+    let c = evaluate(&ContinuousEffects::new(), &env, a)
+        .unwrap()
+        .characteristics;
+    assert_eq!(
+        keywords(&c),
+        vec![(
+            "counter:hexproof from red".to_string(),
+            "hexproof from red".to_string()
+        )]
+    );
+    assert_eq!(c.abilities.len(), 1);
+    assert_eq!(
+        c.abilities,
+        vec![keyword_counter_ability("hexproof from red")]
+    );
+    assert_eq!(
+        c.abilities,
+        vec![kw_ability("counter:hexproof from red", "hexproof from red")]
+    );
+}
+
+// REQ-LAYER-001, CR 122.1b, 613.1f, 613.7c: a variant counter applies in layer 6 at the
+// counter's timestamp, in both orders against RemoveAllAbilities (earlier: removed; later:
+// kept).
+#[test]
+fn keyword_counter_variant_versus_remove_all_abilities_both_orders() {
+    for (counter_ts, present) in [(3, false), (7, true)] {
+        let mut env = TestEnv::new();
+        let a = env.put(oid(1), creature("test.vanilla_2_2", 2, 2));
+        env.counter(a, "hexproof from red", 1, counter_ts);
+        let r = registry(&[(
+            1,
+            eff(
+                Layer::L6,
+                5,
+                objs(&[a]),
+                LayerModification::RemoveAllAbilities,
+            ),
+        )]);
+        let c = evaluate(&r, &env, a).unwrap().characteristics;
+        assert_eq!(
+            has_kw(&c, "hexproof from red"),
+            present,
+            "counter at {counter_ts}, removal at 5"
+        );
+    }
+}
+
+// REQ-LAYER-001, CR 122.1b: "ward" and "ward 2" are not keyword counters; neither are kinds
+// that merely start with a keyword name without a space.
+#[test]
+fn ward_and_near_miss_kinds_give_nothing() {
+    for kind in ["ward", "ward 2", "flyingx", "hexproofish"] {
+        let mut env = TestEnv::new();
+        let base = creature("test.vanilla_2_2", 2, 2);
+        let a = env.put(oid(1), base.clone());
+        env.counter(a, kind, 1, 2);
+        let c = evaluate(&ContinuousEffects::new(), &env, a)
+            .unwrap()
+            .characteristics;
+        assert!(c.abilities.is_empty(), "{kind}");
+    }
+}
+
+// REQ-LAYER-001, CR 122.1b, 702.11d: a variant counter on a noncreature permanent works.
+#[test]
+fn keyword_counter_variant_on_noncreature_permanent() {
+    let mut env = TestEnv::new();
+    let a = env.put(oid(1), artifact("test.plain_artifact"));
+    env.counter(a, "hexproof from red", 1, 2);
+    let c = evaluate(&ContinuousEffects::new(), &env, a)
+        .unwrap()
+        .characteristics;
+    assert_eq!(count_kw(&c, "hexproof from red"), 1);
+    assert_eq!(c.power, None);
 }
 
 // REQ-LAYER-001, CR 208.2, 604.3, 613.4a: a non-literal base power is resolved by

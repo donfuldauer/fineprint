@@ -139,7 +139,15 @@ fn random_effect(rng: &mut Lcg) -> ContinuousEffect {
         _ => (Layer::L7d, LayerModification::SwitchPt),
     };
     // small timestamp range so that ties happen
-    let mut e = eff(layer, rng.below(8), random_affected(rng), m);
+    // CR 613.4a: layer 7a holds only characteristic-defining abilities (static, `is_cda`);
+    // resolved setters live in layer 7b.
+    let t = rng.below(8);
+    let affected = random_affected(rng);
+    let mut e = if layer == Layer::L7a {
+        cda_eff(layer, t, affected, m)
+    } else {
+        eff(layer, t, affected, m)
+    };
     e.source = if rng.below(2) == 0 {
         Some(oid(1 + rng.below(OBJECTS)))
     } else {
@@ -214,7 +222,7 @@ fn pt_matches_a_reference_model() {
         for i in 0..n {
             let t = rng.below(6);
             let e = match rng.below(4) {
-                0 => eff(
+                0 => cda_eff(
                     Layer::L7a,
                     t,
                     objs(&[a]),
@@ -313,15 +321,25 @@ fn ledger_stamps_are_strictly_increasing() {
                     let t = ledger.stamp_object(&mut tsg, o, reason).unwrap();
                     check(t, "object", &mut high);
                     assert_eq!(ledger.object_timestamp(o), Some(t));
-                    // stickers follow right after their host
+                    // stickers follow right after their host (CR 613.7k): sorted, they are
+                    // exactly t+1, t+2, ... (no duplicates, no gaps, nothing in between)
+                    let mut stickers: Vec<u64> = Vec::new();
                     for s in 0..3u32 {
                         if let Some(st) = ledger.sticker_timestamp(o, s) {
                             assert!(st > t, "seed {seed}: sticker before its host");
+                            stickers.push(st.get());
                             if st > high {
                                 high = st;
                             }
                         }
                     }
+                    stickers.sort_unstable();
+                    let expected: Vec<u64> =
+                        (1..=stickers.len() as u64).map(|k| t.get() + k).collect();
+                    assert_eq!(
+                        stickers, expected,
+                        "seed {seed}: sticker timestamps after host {t:?}"
+                    );
                     assert_eq!(high.get(), tsg.last_issued(), "seed {seed}");
                 }
                 1 => {
