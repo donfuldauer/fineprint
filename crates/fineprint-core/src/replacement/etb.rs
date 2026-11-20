@@ -21,7 +21,8 @@
 //! its generating ability on the projected permanent
 //! ([`LayerEnvironment::generating_ability_exists`], CR 614.12, CR 603.6d). The three CR 614.12
 //! inputs have no order in the CR; the order used is docs/DECISIONS.md "#40 FP-039 — ETB
-//! projection API and modelling choices".
+//! projection API and modelling choices". One controller per projection: an environment base
+//! whose controller differs from [`EtbEntry::controller`] is refused (CR 707.5).
 //!
 //! **Loop** ([`resolve_entering`]). Per entry, in slice order: the applicable effects
 //! ([`applicable`]) of the current projection; only the highest-priority [`Tier`] present is
@@ -39,7 +40,8 @@
 //! (an exact lookahead over the effects that apply or become applicable), plus that least total
 //! of every later entry of the same chooser, fits the remaining budget (u128 arithmetic, at most
 //! [`MAX_LOOKAHEAD_STATES`] states per entry, each charged when first entered; an iterative
-//! search). The CR 616.1 order choice is never filtered. Every entry's starting projection is
+//! search). The CR 616.1 order choice is never filtered; its default on timeout is the first
+//! candidate with a payable continuation (else the first). Every entry's starting projection is
 //! checked before any reserve or request (CR 614.12a).
 //!
 //! **Standalone scope.** Not joined to the bus or `GameState`: the caller supplies every input
@@ -278,8 +280,8 @@ impl EtbEffects {
     ///
     /// # Errors
     /// [`EtbError::DuplicateEffect`] if an effect with that id is present;
-    /// [`EtbError::EmptyChoice`] if it is an [`EtbAction::Choose`] without options (nothing
-    /// changes).
+    /// [`EtbError::EmptyChoice`] if it is an [`EtbAction::Choose`] without options;
+    /// [`EtbError::DuplicateOptionText`] if its options repeat a text (nothing changes).
     pub fn add(&mut self, effect: EtbEffect) -> Result<(), EtbError> {
         if self.effects.contains_key(&effect.id) {
             return Err(EtbError::DuplicateEffect(effect.id));
@@ -290,6 +292,17 @@ impl EtbEffects {
             && options.is_empty()
         {
             return Err(EtbError::EmptyChoice(effect.id));
+        }
+        // CR 614.12a, CR 614.12b: the answer is the option's text, so a text names one option
+        // (and one cost).
+        if let EtbAction::Choose { options, .. } = &effect.action {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            if let Some(dup) = options.iter().find(|o| !seen.insert(o.text.as_str())) {
+                return Err(EtbError::DuplicateOptionText {
+                    effect: effect.id,
+                    text: dup.text.clone(),
+                });
+            }
         }
         self.effects.insert(effect.id, effect);
         Ok(())
@@ -353,6 +366,25 @@ pub enum EtbError {
     NotACopyEffect(EffectId),
     /// [`EtbEffects::add`] was given an [`EtbAction::Choose`] with an empty `options` list.
     EmptyChoice(EffectId),
+    /// [`EtbEffects::add`] was given an [`EtbAction::Choose`] whose `options` contain `text`
+    /// twice: the answer names a text, so two options with one text cannot be told apart
+    /// (CR 614.12a, CR 614.12b).
+    DuplicateOptionText {
+        /// The refused effect.
+        effect: EffectId,
+        /// The repeated option text.
+        text: String,
+    },
+    /// The environment reports a controller for the entering object other than the entry's
+    /// (one controller per projection: CR 614.12, CR 707.5).
+    ControllerMismatch {
+        /// The entering object.
+        object: ObjectId,
+        /// [`EtbEntry::controller`].
+        entry: PlayerId,
+        /// The controller of the environment's base of the object.
+        environment: PlayerId,
+    },
     /// The layer system failed (an unknown object, a duplicate own-static id, ...).
     Layer(LayerError),
     /// A choice has no option whose cost leaves the combined costs payable (CR 614.12b).
@@ -376,6 +408,22 @@ impl fmt::Display for EtbError {
             EtbError::EmptyChoice(id) => {
                 write!(f, "ETB effect {} is a choice without options", id.get())
             }
+            EtbError::DuplicateOptionText { effect, text } => write!(
+                f,
+                "ETB effect {} is a choice with the option text {text:?} more than once",
+                effect.get()
+            ),
+            EtbError::ControllerMismatch {
+                object,
+                entry,
+                environment,
+            } => write!(
+                f,
+                "entering object {} names controller {} but the environment reports controller {}",
+                object.get(),
+                entry.get(),
+                environment.get()
+            ),
             EtbError::Layer(e) => write!(f, "layer error: {e}"),
             EtbError::Unpayable { chooser, key } => write!(
                 f,
@@ -615,8 +663,10 @@ fn added_types_effect(
 /// CR 616.1f).
 ///
 /// # Errors
-/// [`EtbError::Layer`]: `LayerError::UnknownObject(entry.object)` if the environment does not
-/// know the object, `LayerError::DuplicateEffect` if an own static's (or a declared copy
+/// [`EtbError::ControllerMismatch`] if the environment's base of the (known) object reports a
+/// controller other than `entry.controller` (a base without a controller is accepted), checked
+/// before any layer is evaluated; [`EtbError::Layer`]: `LayerError::UnknownObject(entry.object)`
+/// if the environment does not know the object, `LayerError::DuplicateEffect` if an own static's (or a declared copy
 /// static's) id is already registered, `LayerError::IdExhausted` if no id or timestamp is left
 /// for the added card types, or any other evaluation error.
 pub fn project(
@@ -627,6 +677,17 @@ pub fn project(
     let Some(base) = ctx.env.base(entry.object) else {
         return Err(EtbError::Layer(LayerError::UnknownObject(entry.object)));
     };
+    // CR 614.12, CR 707.5: one controller per projection: the copied statics are bound to
+    // `entry.controller`, so the evaluated entrant must have that controller too.
+    if let Some(environment) = base.controller
+        && environment != entry.controller
+    {
+        return Err(EtbError::ControllerMismatch {
+            object: entry.object,
+            entry: entry.controller,
+            environment,
+        });
+    }
     // CR 614.12 (first input), CR 707.2, CR 616.1f: applied copy effects replace the base, the
     // last applied winning.
     let mut copy: Option<(EffectId, &Characteristics)> = None;
@@ -678,8 +739,8 @@ pub fn project(
             // CR 613.1d, CR 613.7, CR 205.1b: "enters as an additional <type>" is a layer-4
             // type addition later than every other effect; P/T (CR 208.3) and later layers see
             // the type.
-            let controller = base.controller.unwrap_or(entry.controller);
-            let (id, effect) = added_types_effect(&continuous, entry.object, controller, added)?;
+            let (id, effect) =
+                added_types_effect(&continuous, entry.object, entry.controller, added)?;
             continuous.register(id, effect)?;
         }
         evaluate(&continuous, &env, entry.object)?
@@ -1059,11 +1120,19 @@ fn resolve_one(
                 memory,
             });
         }
+        let budget = remaining.get(&entry.controller).copied();
         // CR 616.1e: the order choice is never filtered by payability (CR 614.12b restricts
-        // only the choices the effects require).
-        let chosen = choose_effect(entry, &set, choices)?;
+        // only the choices the effects require); only its default is the first candidate with
+        // a payable continuation.
+        let default = if set.len() > 1
+            && let Some(b) = budget
+        {
+            first_payable(ctx, &applied, &set, &mut lookahead, later, b)?
+        } else {
+            0
+        };
+        let chosen = choose_effect(entry, &set, default, choices)?;
         if let EtbAction::Choose { key, kind, options } = &chosen.action {
-            let budget = remaining.get(&entry.controller).copied();
             // CR 614.12b, CR 616.2: the least the rest of this entry can still commit once
             // this choice is made, plus the later entries' least totals.
             let reserve = match budget {
@@ -1106,11 +1175,36 @@ fn resolve_one(
     }
 }
 
+/// CR 616.1e, CR 614.12b: the smallest index of `set` whose continuation is payable from
+/// `applied` with `budget` left: `cheapest(c) + mincost(state + c) + later <= budget` (u128);
+/// 0 when no candidate is.
+fn first_payable(
+    ctx: &EtbContext<'_>,
+    applied: &EtbApplied,
+    set: &[&EtbEffect],
+    lookahead: &mut Lookahead<'_, '_>,
+    later: u128,
+    budget: u64,
+) -> Result<u32, Interrupt> {
+    let last = last_copy(ctx, applied).map(|c| c.id);
+    for (index, candidate) in set.iter().enumerate() {
+        let (next, next_last) = step(ctx, &applied.effects, last, candidate.id);
+        let total = cheapest(candidate)
+            .saturating_add(lookahead.mincost(&next, next_last)?)
+            .saturating_add(later);
+        if total <= u128::from(budget) {
+            return Ok(u32::try_from(index).unwrap_or(0));
+        }
+    }
+    Ok(0)
+}
+
 /// SRS 8.1 step [4] (CR 616.1): the one candidate, or the chooser's pick through
-/// `CHOOSE_REPLACEMENT_EFFECT`.
+/// `CHOOSE_REPLACEMENT_EFFECT`, whose default on timeout is the candidate `default`.
 fn choose_effect<'e>(
     entry: &EtbEntry,
     set: &[&'e EtbEffect],
+    default: u32,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<&'e EtbEffect, Interrupt> {
     if let [only] = set {
@@ -1132,7 +1226,7 @@ fn choose_effect<'e>(
         max: 1,
         hidden: false,
         reveal_to: Vec::new(),
-        default_on_timeout: ChoiceResponse::SelectReplacement { index: 0 },
+        default_on_timeout: ChoiceResponse::SelectReplacement { index: default },
         options: ChoiceOptions::Enumerated(options),
         payload: ChoicePayload::ChooseReplacementEffect {
             event: BusEventKind::ZoneChange.name().to_owned(),
