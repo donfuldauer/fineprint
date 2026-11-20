@@ -6066,3 +6066,93 @@ token creation, layer 1b semantics) owned by other units.
 FP-038 (see "#23 FP-022 — Face-down merged components deferred to layer 1b (#39)").
 **Rationale:** Layer 1b semantics and turning face up are #39's scope.
 **Alternatives:** Modelling them here (rejected: outside scope).
+
+## #38 FP-037 — CodeRabbit round 1: colors pinned by SetColors and NotCopied(Colors)
+
+**Decision:** `apply_exceptions` keeps a local `colors_pinned` flag, false at the start of each
+call. `SetColors(_)` and `NotCopied(Colors)` set it (CR 707.9b, 707.9c, 707.9d); no other
+exception changes it. `SetManaCost` re-derives the colors only when the flag is false and the
+colors still equal the derivation of the old cost and color indicator. So on a green `{2}{G}`
+source `[SetColors(GREEN), SetManaCost({1}{W})]` stays green, `[SetManaCost({1}{W})]` becomes
+white, `[SetManaCost({1}{W}), SetColors(GREEN)]` is green and two costs re-derive twice. The flag
+is per call (one copy effect, one `modified` call or one `ApplyCopyExceptions` effect); it is not
+carried to a later copy. This refines "#38 FP-037 — SetManaCost and colors".
+**Rationale:** The equality guard alone cannot tell colors derived from the cost from colors an
+exception set to the same value (CodeRabbit PR #197). The equality stays as the second guard for
+colors the source had that were not derived from its cost.
+**Alternatives:** Tracking a per-characteristic "derived" bit in `Characteristics` (rejected:
+changes a shared type outside the owned paths); never re-deriving colors (rejected: a cost-only
+exception must update cost-derived colors).
+
+## #38 FP-037 — CodeRabbit round 1: a back-face top of a merged permanent is always Fixed
+
+**Decision:** `CopiableValues::merged` decides first whether the topmost component is a nonmodal
+double-faced card with its back face up or copying a back face. Such a top always gives
+`ValueSource::Fixed { mana_value }` with the copy-as-0 classification, even when the merged mana
+value equals the characteristics' own (a `{0}` front over a back without a mana cost). Any other
+top is `Plain` when the numbers match and `Fixed` (copying as `Plain`) otherwise.
+**Rationale:** CR 202.3b: a copy of a nonmodal back face has mana value 0, so the classification
+must survive equal numbers; otherwise a copy with a set cost `{5}` had mana value 5.
+**Alternatives:** Keeping the early `Plain` return (rejected: loses the classification).
+
+## #38 FP-037 — CodeRabbit round 1: mana-value provenance in layer 1a and Evaluated
+
+**Decision:** `ValueSource` moves to `layers/registry.rs` (re-exported from `copy` and `layers`,
+so `fineprint_core::layers::ValueSource` is unchanged). A new public `ManaValueProvenance` holds a
+`ValueSource` and the copy-as-0 flag in crate-private fields; it is built only by
+`ManaValueProvenance::plain()` (also `Default`) or `CopiableValues::provenance()`, so the flag
+stays consistent with the source and `CopiableValues`' own flag stays private. Accessors:
+`source()`, `copies_as_zero()`, `is_plain()`, `mana_value(&Characteristics, ctx)`.
+`LayerModification::CopyValuesWithProvenance { characteristics: Box<Characteristics>, provenance:
+ManaValueProvenance }` is new, layer 1a only, and replaces all characteristics like `CopyValues`,
+which is unchanged and means plain provenance. `copiable_effect` builds `CopyValues` for plain
+values and the new variant otherwise. `Evaluated` gains `pub mana_value_provenance`, plain at the
+start of `evaluate_with_order` and of the layer-1 run; `CopyValues` and `FaceDown` reset it to
+plain (a face-down object has no mana cost, CR 708.2, 202.3a), the new variant sets it, nothing
+else changes it. `Evaluated::mana_value(ctx)` reads it exactly as `CopiableValues::mana_value`.
+`copiable_values(effects, env, id)` runs the same layer 1a and 1b as `copiable_characteristics`
+(kept, same signature) and returns `CopiableValues::with_provenance(characteristics,
+provenance)`; registering `copiable_effect(V)` and reading `copiable_values` gives `V` back.
+`evaluated_digest` encodes the provenance (variant tag, the `Fixed` number, the flag) and its tag
+becomes `fineprint.layers.evaluated.v2`; no golden digest constant exists (checked with grep).
+Limit: a base object that is itself a nonmodal back face or melded permanent starts with plain
+provenance in `ObjectBase`, because layouts supply its mana value outside the layer module; #183
+wires that in. This supersedes "#38 FP-037 — Copiable values API and the `ValueSource` design"
+where it says no existing file changed and `CopyValues` is the only layer-1a payload.
+**Rationale:** CodeRabbit PR #197: the provenance was lost between `copiable_effect` and a later
+copy, so a back-face copy with a set cost came back with mana value 5. Additive: `CopyValues` and
+every existing constructor keep their meaning, and spec tests that build `CopyValues` still hold.
+**Alternatives:** Changing `CopyValues` to carry the provenance (rejected: breaks existing
+callers and spec tests); public fields `source` and `zero_when_copied` on the new variant
+(rejected: allows inconsistent combinations and exposes the private flag); a side table keyed by
+`EffectId` (rejected: not a value of the effect, so registration order and the cache would need
+special handling).
+
+## #38 FP-037 — CodeRabbit round 1: P/T-only layer-1a modification
+
+**Decision:** `LayerModification::ApplyCopyExceptions(Vec<CopyException>)` is new, layer 1a
+only. Its apply arm runs `apply_exceptions` on the object's current characteristics with those
+characteristics as "own" (so `NotCopied` changes nothing), drops no characteristic-defining
+ability and keeps the mana-value provenance. `modification_effect(exceptions, source, controller,
+origin, timestamp, objects)` builds it (layer 1a, not a CDA, `Affected::Objects`). It orders by
+timestamp like any layer-1a effect: an earlier copy is overridden only in the fields it sets and
+removing that copy restores the object's own values while the set power and toughness stay; a
+later copy replaces everything. `CopiableValues::modified` and the snapshot use of
+`copiable_effect` are unchanged; their documentation points to `modification_effect` as the form
+that carries only the fields an "as ... enters" ability sets.
+**Rationale:** CodeRabbit PR #197: a snapshot built by `modified` and stored as `CopyValues`
+carries the copied name, cost and abilities, which then survive the removal of the copy effect.
+CR 613.2a, 707.2.
+**Alternatives:** A dedicated P/T-only variant (rejected: other "as ... enters" abilities may set
+more characteristics, and the exception vocabulary already exists); changing `modified` to return
+a delta (rejected: breaks its tested values-level behaviour).
+
+## #38 FP-037 — CodeRabbit round 1: layer-4 CDA parts deferred
+
+**Decision:** The current policy stays: any type-line exception drops any layer-4
+characteristic-defining ability. The reason is stated on `CopyException::cda_target`: the
+placeholder ability data does not say which part of the type line a layer-4 CDA defines; per-part
+targets are tracked in #198 (FP-151).
+**Rationale:** The layer-4 CHAR modification is `{"op": <free string>, ...}` with no op
+vocabulary, so the defined part cannot be read without inventing names (R4, R8).
+**Alternatives:** Reading op names now (rejected: would invent a vocabulary #198 owns).
