@@ -184,11 +184,13 @@ fn plain_eff(layer: Layer, t: u64, target: ObjectId, m: LayerModification) -> Co
 }
 
 /// A synthetic environment: bases on the battlefield, counters, and the value 5 for every
-/// non-literal expression.
+/// non-literal expression. The generating ability of every effect exists except those in
+/// `lost` (its source lost the ability).
 #[derive(Default, Clone)]
 struct Env {
     bases: BTreeMap<ObjectId, ObjectBase>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    lost: BTreeSet<EffectId>,
 }
 
 impl Env {
@@ -232,6 +234,15 @@ impl LayerEnvironment for Env {
 
     fn eval_value(&self, expr: &ValueExpressionAST, _: ObjectId) -> Option<i64> {
         literal_of(expr).or(Some(5))
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        _: ObjectId,
+        _: Option<&Evaluated>,
+    ) -> bool {
+        !self.lost.contains(&effect)
     }
 }
 
@@ -1441,9 +1452,27 @@ fn registration_order_is_irrelevant() {
         (7, copy_eff(&back_face_copy_costed(), y, 6)),
         (8, pt_mod(x, 6, 4, 5)),
         (9, pt_mod(y, 6, 2, 3)),
+        // Pinned colors and an ignored NotCopied (CodeRabbit round 2).
+        (
+            10,
+            mod_eff(
+                &[
+                    CopyException::SetColors(ColorBitmask::WHITE),
+                    CopyException::NotCopied(CopiedCharacteristic::Colors),
+                ],
+                x,
+                10,
+            ),
+        ),
+        (
+            11,
+            mod_eff(&[CopyException::SetManaCost(Some(cost("{1}{B}")))], x, 11),
+        ),
     ];
     let reference = registry(list.clone());
     let want_eval = evaluate_all(&reference, &env).unwrap();
+    assert!(want_eval[&x].mana_value_provenance.colors_pinned());
+    assert_eq!(want_eval[&x].characteristics.colors, ColorBitmask::WHITE);
     let want_copiable: Vec<Characteristics> = [x, y, z]
         .iter()
         .map(|&id| copiable_characteristics(&reference, &env, id).unwrap())
@@ -1830,7 +1859,8 @@ fn face_down_over_zero_copy_is_plain() {
 }
 
 /// Every kind of mana-value provenance over `c`: Plain, Fixed copying as 0, Fixed copying as
-/// itself, a copy of a back face.
+/// itself, a copy of a back face; then Plain, Fixed copying as 0 and a copy of a back face with
+/// pinned colors.
 fn provenance_kinds(c: &Characteristics) -> Vec<CopiableValues> {
     vec![
         CopiableValues::plain(c.clone()),
@@ -1840,9 +1870,35 @@ fn provenance_kinds(c: &Characteristics) -> Vec<CopiableValues> {
             ManaValueProvenance {
                 source: ValueSource::Fixed { mana_value: 2 },
                 zero_when_copied: false,
+                colors_pinned: false,
             },
         ),
         CopiableValues::nonmodal_back_face(c.clone(), None).copy_with(&other("test.k"), &[]),
+        // CR 707.9b: the same sources with pinned colors (round 2).
+        CopiableValues::with_provenance(
+            c.clone(),
+            ManaValueProvenance {
+                source: ValueSource::Plain,
+                zero_when_copied: false,
+                colors_pinned: true,
+            },
+        ),
+        CopiableValues::with_provenance(
+            c.clone(),
+            ManaValueProvenance {
+                source: ValueSource::Fixed { mana_value: 2 },
+                zero_when_copied: true,
+                colors_pinned: true,
+            },
+        ),
+        CopiableValues::with_provenance(
+            c.clone(),
+            ManaValueProvenance {
+                source: ValueSource::CopyOfBackFaceOrMelded,
+                zero_when_copied: false,
+                colors_pinned: true,
+            },
+        ),
     ]
 }
 
@@ -1889,6 +1945,7 @@ fn digest_covers_mana_value_provenance() {
         ManaValueProvenance {
             source: ValueSource::Fixed { mana_value: 2 },
             zero_when_copied: true,
+            colors_pinned: false,
         },
     ));
     let maps: Vec<BTreeMap<ObjectId, Evaluated>> = kinds
@@ -2114,4 +2171,559 @@ fn modification_effect_pinned_colors() {
     assert_eq!(got.mana_cost, Some(cost("{1}{W}")));
     let got = run(&[set_w]);
     assert_eq!(got.colors, ColorBitmask::WHITE);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 2 (PR #197): explicit colors carried with the copiable values, provenance
+// export, NotCopied in non-copy modifications, the qualified round trip, Resolved-origin
+// as-enters P/T settings
+// ---------------------------------------------------------------------------------------------
+
+/// A resolved layer-1a non-copy modification of `target` with `exceptions` at `t`.
+fn mod_eff(exceptions: &[CopyException], target: ObjectId, t: u64) -> ContinuousEffect {
+    modification_effect(
+        exceptions,
+        None,
+        p(1),
+        EffectOrigin::Resolved,
+        ts(t),
+        objs(&[target]),
+    )
+}
+
+/// The green `{2}{G}` 3/3 source of the round-2 color cases.
+fn green_source() -> CopiableValues {
+    CopiableValues::plain(creature("test.orig", 3, 3))
+}
+
+fn set_white_cost() -> CopyException {
+    CopyException::SetManaCost(Some(cost("{1}{W}")))
+}
+
+// REQ-OBJ-002; CR 707.9b, 707.9c, 707.9d, docs/DECISIONS.md "#38 FP-037 — CodeRabbit round 2:
+// explicit colors carried with the copiable values": explicit green set by a first copy stays
+// green when that copy is copied with only a white cost; cost-derived colors still follow the
+// cost; colors kept by NotCopied(Colors) stay; the three round-1 single-effect cases keep their
+// results and pin.
+#[test]
+fn round2_pin_survives_copy_of_copy() {
+    let own = other("test.own");
+    let first = green_source().copy_with(&own, &[CopyException::SetColors(ColorBitmask::GREEN)]);
+    assert!(first.provenance().colors_pinned());
+    assert!(!first.provenance().is_plain());
+    let second = first.copy_with(&own, &[set_white_cost()]);
+    assert_eq!(second.characteristics.colors, ColorBitmask::GREEN);
+    assert_eq!(second.characteristics.mana_cost, Some(cost("{1}{W}")));
+    assert!(second.provenance().colors_pinned());
+    // No color exception first: the colors are cost-derived and follow the cost.
+    let unpinned = green_source().copy_with(&own, &[]);
+    assert!(!unpinned.provenance().colors_pinned());
+    assert_eq!(unpinned, CopiableValues::plain(creature("test.orig", 3, 3)));
+    let second = unpinned.copy_with(&own, &[set_white_cost()]);
+    assert_eq!(second.characteristics.colors, ColorBitmask::WHITE);
+    assert!(!second.provenance().colors_pinned());
+    // NotCopied(Colors) first: the copier's own colors are kept by the later cost.
+    let kept = green_source().copy_with(
+        &own,
+        &[CopyException::NotCopied(CopiedCharacteristic::Colors)],
+    );
+    assert!(kept.provenance().colors_pinned());
+    let second = kept.copy_with(&creature("test.c", 1, 1), &[set_white_cost()]);
+    assert_eq!(second.characteristics.colors, own.colors);
+    assert_eq!(second.characteristics.color_indicator, own.color_indicator);
+    // The round-1 cases: same colors as before; SetColors pins, two costs do not.
+    for (exceptions, want, pinned) in [
+        (
+            vec![
+                CopyException::SetColors(ColorBitmask::GREEN),
+                CopyException::SetManaCost(Some(cost("{W}"))),
+            ],
+            ColorBitmask::GREEN,
+            true,
+        ),
+        (
+            vec![
+                set_white_cost(),
+                CopyException::SetColors(ColorBitmask::GREEN),
+            ],
+            ColorBitmask::GREEN,
+            true,
+        ),
+        (
+            vec![
+                set_white_cost(),
+                CopyException::SetManaCost(Some(cost("{1}{B}"))),
+            ],
+            ColorBitmask::BLACK,
+            false,
+        ),
+    ] {
+        let v = green_source().copy_with(&own, &exceptions);
+        assert_eq!(v.characteristics.colors, want);
+        assert_eq!(v.provenance().colors_pinned(), pinned);
+        assert_eq!(v.source, ValueSource::Plain);
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 613.2c, 707.2, 707.9b: the pin survives the round trip
+// copiable_effect -> copiable_values (and evaluate), so a copy of the read values with only a
+// white cost stays green; a first copy without color exception gives white. The second copy
+// registered on another object gives the same, in both EffectId assignments.
+#[test]
+fn round2_pin_round_trips_through_layer_one() {
+    let (y, z) = (o(2), o(3));
+    let own = other("test.own");
+    let env = Env::default()
+        .with(y, own.clone())
+        .with(z, creature("test.z", 1, 1));
+    for (first_exceptions, want) in [
+        (
+            vec![CopyException::SetColors(ColorBitmask::GREEN)],
+            ColorBitmask::GREEN,
+        ),
+        (Vec::new(), ColorBitmask::WHITE),
+    ] {
+        let first = green_source().copy_with(&own, &first_exceptions);
+        for (id_a, id_b) in [(1, 2), (2, 1)] {
+            let mut r = registry(vec![(id_a, copy_eff(&first, y, 1))]);
+            let read = copiable_values(&r, &env, y).unwrap();
+            assert_eq!(read, first);
+            let ev = evaluate(&r, &env, y).unwrap();
+            assert_eq!(ev.mana_value_provenance, first.provenance());
+            let second = read.copy_with(&creature("test.z", 1, 1), &[set_white_cost()]);
+            assert_eq!(second.characteristics.colors, want);
+            assert_eq!(second.characteristics.mana_cost, Some(cost("{1}{W}")));
+            r.register(e(id_b), copy_eff(&second, z, 2)).unwrap();
+            assert_eq!(eval(&r, &env, z).colors, want);
+            assert_eq!(copiable_values(&r, &env, z).unwrap(), second);
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 707.2, 707.9b: a SetColors applied by a non-copy
+// modification (ApplyCopyExceptions) pins the colors in the evaluated provenance and in
+// copiable_values; a later cost-only modification or copy keeps them. Without SetColors the
+// cost-only modification re-derives them. Both EffectId assignments and both timestamp orders
+// of the two modifications (the later one sees the earlier one's pin).
+#[test]
+fn round2_pin_set_by_modification_effect() {
+    let x = o(1);
+    let env = Env::default().with(x, creature("test.x0", 1, 1));
+    let set_green = [CopyException::SetColors(ColorBitmask::GREEN)];
+    let r = registry(vec![(1, mod_eff(&set_green, x, 1))]);
+    let read = copiable_values(&r, &env, x).unwrap();
+    assert!(read.provenance().colors_pinned());
+    assert_eq!(read.source, ValueSource::Plain);
+    assert!(
+        evaluate(&r, &env, x)
+            .unwrap()
+            .mana_value_provenance
+            .colors_pinned()
+    );
+    let copy = read.copy_with(&other("test.own"), &[set_white_cost()]);
+    assert_eq!(copy.characteristics.colors, ColorBitmask::GREEN);
+    for (id_a, id_b) in [(1, 2), (2, 1)] {
+        // SetColors at 1, cost at 2: green stays.
+        let r = registry(vec![
+            (id_a, mod_eff(&set_green, x, 1)),
+            (id_b, mod_eff(&[set_white_cost()], x, 2)),
+        ]);
+        let got = evaluate(&r, &env, x).unwrap();
+        assert_eq!(got.characteristics.colors, ColorBitmask::GREEN);
+        assert_eq!(got.characteristics.mana_cost, Some(cost("{1}{W}")));
+        assert!(got.mana_value_provenance.colors_pinned());
+        // Cost at 1, SetColors at 2: green by the later SetColors.
+        let r = registry(vec![
+            (id_a, mod_eff(&set_green, x, 2)),
+            (id_b, mod_eff(&[set_white_cost()], x, 1)),
+        ]);
+        assert_eq!(eval(&r, &env, x).colors, ColorBitmask::GREEN);
+    }
+    // Cost only: re-derived, unpinned.
+    let r = registry(vec![(1, mod_eff(&[set_white_cost()], x, 1))]);
+    let got = evaluate(&r, &env, x).unwrap();
+    assert_eq!(got.characteristics.colors, ColorBitmask::WHITE);
+    assert!(got.mana_value_provenance.is_plain());
+    // A pinned modification over a provenance-carrying copy keeps its source and zero flag.
+    let r = registry(vec![
+        (1, copy_eff(&back_face_copy_costed(), x, 1)),
+        (2, mod_eff(&set_green, x, 2)),
+    ]);
+    let read = copiable_values(&r, &env, x).unwrap();
+    assert_eq!(read.source, ValueSource::CopyOfBackFaceOrMelded);
+    assert!(read.provenance().copies_as_zero());
+    assert!(read.provenance().colors_pinned());
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 613.2b, 708.2: a later plain copy or a face-down
+// effect resets the pin (plain provenance), so a later cost-only copy re-derives the colors.
+#[test]
+fn round2_pin_reset_by_plain_copy_and_face_down() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let pinned = green_source().copy_with(
+        &other("test.copier"),
+        &[CopyException::SetColors(ColorBitmask::GREEN)],
+    );
+    for (id_a, id_b) in [(1, 2), (2, 1)] {
+        let r = registry(vec![
+            (id_a, copy_eff(&pinned, y, 1)),
+            (id_b, copy_eff(&green_source(), y, 2)),
+        ]);
+        let read = copiable_values(&r, &env, y).unwrap();
+        assert_eq!(read, green_source());
+        assert!(
+            evaluate(&r, &env, y)
+                .unwrap()
+                .mana_value_provenance
+                .is_plain()
+        );
+        let copy = read.copy_with(&other("test.c"), &[set_white_cost()]);
+        assert_eq!(copy.characteristics.colors, ColorBitmask::WHITE);
+        let r = registry(vec![
+            (id_a, copy_eff(&pinned, y, 1)),
+            (
+                id_b,
+                plain_eff(
+                    Layer::L1b,
+                    2,
+                    y,
+                    LayerModification::FaceDown(Box::new(face_down())),
+                ),
+            ),
+        ]);
+        assert_eq!(
+            copiable_values(&r, &env, y).unwrap(),
+            CopiableValues::plain(face_down())
+        );
+        assert!(
+            evaluate(&r, &env, y)
+                .unwrap()
+                .mana_value_provenance
+                .is_plain()
+        );
+    }
+}
+
+// REQ-LAYER-005, REQ-CORE-001; CR 707.9b: the digest differs when only the pin differs, is equal
+// for equal inputs; the cache and a fresh evaluation agree on a pinned provenance, before and
+// after a registry change (also under full-recompute).
+#[test]
+fn round2_pin_digest_and_cache() {
+    let c = creature("test.d", 1, 1);
+    let map = |pinned: bool| {
+        let v = if pinned {
+            CopiableValues::plain(c.clone()).modified(&[CopyException::SetColors(c.colors)])
+        } else {
+            CopiableValues::plain(c.clone()).modified(&[])
+        };
+        assert_eq!(v.characteristics, c);
+        BTreeMap::from([(
+            o(1),
+            Evaluated {
+                characteristics: c.clone(),
+                controller: Some(p(1)),
+                mana_value_provenance: v.provenance(),
+            },
+        )])
+    };
+    assert_eq!(evaluated_digest(&map(true)), evaluated_digest(&map(true)));
+    assert_eq!(evaluated_digest(&map(false)), evaluated_digest(&map(false)));
+    assert_ne!(evaluated_digest(&map(true)), evaluated_digest(&map(false)));
+    let (x, y) = (o(1), o(2));
+    let env = Env::default()
+        .with(x, creature("test.x", 1, 1))
+        .with(y, other("test.y"));
+    let pinned = green_source().copy_with(
+        &other("test.y"),
+        &[CopyException::SetColors(ColorBitmask::GREEN)],
+    );
+    let mut r = registry(vec![
+        (1, copy_eff(&pinned, y, 1)),
+        (
+            2,
+            mod_eff(&[CopyException::SetColors(ColorBitmask::BLUE)], x, 2),
+        ),
+    ]);
+    let mut cache = LayerCache::new();
+    for _ in 0..2 {
+        let cached = cache.evaluate_all(&r, &env).unwrap();
+        let fresh = evaluate_all(&r, &env).unwrap();
+        assert_eq!(cached, fresh);
+        assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+        assert!(cached[&x].mana_value_provenance.colors_pinned());
+        assert!(cached[&y].mana_value_provenance.colors_pinned());
+    }
+    r.register(e(3), mod_eff(&[set_white_cost()], x, 3))
+        .unwrap();
+    let cached = cache.evaluate_all(&r, &env).unwrap();
+    let fresh = evaluate_all(&r, &env).unwrap();
+    assert_eq!(cached, fresh);
+    assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+    assert_eq!(cached[&x].characteristics.colors, ColorBitmask::BLUE);
+}
+
+// REQ-OBJ-002; CR 202.3b, 202.3c, docs/DECISIONS.md "#38 FP-037 — CodeRabbit round 2: provenance
+// export and NotCopied in non-copy modifications": the zero flag is exported only for a Fixed
+// source. Back-face values reassigned to Plain export a plain provenance and digest as plain;
+// reassigned to CopyOfBackFaceOrMelded they still copy as 0. Genuine back-face and melded
+// values keep the flag; a Fixed value without it does not copy as 0.
+#[test]
+fn round2_provenance_export_normalizes_zero_flag() {
+    let c = creature("test.b", 2, 2);
+    let digest = |v: &CopiableValues| {
+        evaluated_digest(&BTreeMap::from([(
+            o(1),
+            Evaluated {
+                characteristics: c.clone(),
+                controller: None,
+                mana_value_provenance: v.provenance(),
+            },
+        )]))
+    };
+    let genuine = CopiableValues::nonmodal_back_face(c.clone(), Some(cost("{2}{R}")));
+    assert!(genuine.provenance().copies_as_zero());
+    assert_eq!(
+        genuine.copy_with(&other("test.o"), &[]).source,
+        ValueSource::CopyOfBackFaceOrMelded
+    );
+    let mut as_plain = genuine.clone();
+    as_plain.source = ValueSource::Plain;
+    assert!(as_plain.provenance().is_plain());
+    assert_eq!(as_plain.provenance(), ManaValueProvenance::plain());
+    assert_eq!(digest(&as_plain), digest(&CopiableValues::plain(c.clone())));
+    assert_eq!(
+        as_plain.copy_with(&other("test.o"), &[]).source,
+        ValueSource::Plain
+    );
+    assert_eq!(as_plain.mana_value(OFF), 3);
+    // `==` still compares the raw private flag.
+    assert_ne!(as_plain, CopiableValues::plain(c.clone()));
+    let mut as_zero = genuine.clone();
+    as_zero.source = ValueSource::CopyOfBackFaceOrMelded;
+    assert!(as_zero.provenance().copies_as_zero());
+    assert_eq!(as_zero.mana_value(OFF), 0);
+    assert_eq!(
+        as_zero.provenance(),
+        CopiableValues::nonmodal_back_face(c.clone(), None)
+            .copy_with(&other("test.o"), &[])
+            .provenance()
+    );
+    let (a, b) = (meld_a(), meld_b());
+    let melded = CopiableValues::melded(&MeldedPair::new(&a, &b).unwrap(), vocab()).unwrap();
+    assert!(melded.provenance().copies_as_zero());
+    assert_eq!(
+        melded.copy_with(&other("test.o"), &[]).source,
+        ValueSource::CopyOfBackFaceOrMelded
+    );
+    let fixed = CopiableValues::with_provenance(
+        c.clone(),
+        ManaValueProvenance {
+            source: ValueSource::Fixed { mana_value: 2 },
+            zero_when_copied: false,
+            colors_pinned: false,
+        },
+    );
+    assert!(!fixed.provenance().copies_as_zero());
+    assert_eq!(
+        fixed.copy_with(&other("test.o"), &[]).source,
+        ValueSource::Plain
+    );
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 707.2, 707.9c: in a non-copy modification NotCopied is
+// ignored: on a 3/3, [SetPower(5), NotCopied(Power)] gives 5 in either exception order, through
+// CopiableValues::modified and the evaluator, alone, over a copy and split over two effects (both
+// EffectId assignments); NotCopied(Colors) neither keeps nor pins; in copy_with NotCopied still
+// keeps the copier's value.
+#[test]
+fn round2_not_copied_ignored_in_modifications() {
+    let x = o(1);
+    let base = creature("test.x0", 3, 3);
+    let env = Env::default().with(x, base.clone());
+    let set5 = CopyException::SetPower(literal(5));
+    let not_p = CopyException::NotCopied(CopiedCharacteristic::Power);
+    for exceptions in [
+        vec![set5.clone(), not_p.clone()],
+        vec![not_p.clone(), set5.clone()],
+    ] {
+        let m = CopiableValues::plain(base.clone()).modified(&exceptions);
+        assert_eq!(m.characteristics.power, Some(literal(5)));
+        assert!(m.provenance().is_plain());
+        let r = registry(vec![(1, mod_eff(&exceptions, x, 1))]);
+        assert_eq!(eval(&r, &env, x).power, Some(literal(5)));
+        assert_eq!(
+            copiable_values(&r, &env, x).unwrap(),
+            CopiableValues::plain(base.clone()).modified(&exceptions)
+        );
+        for (id_a, id_b) in [(1, 2), (2, 1)] {
+            // Over a copy of a 7/8: the set 5 stays, the copied 7 is not restored.
+            let r = registry(vec![
+                (
+                    id_a,
+                    copy_eff(&CopiableValues::plain(other("test.y")), x, 1),
+                ),
+                (id_b, mod_eff(&exceptions, x, 2)),
+            ]);
+            assert_eq!(eval(&r, &env, x).power, Some(literal(5)));
+        }
+    }
+    for (id_a, id_b) in [(1, 2), (2, 1)] {
+        let r = registry(vec![
+            (id_a, mod_eff(std::slice::from_ref(&set5), x, 1)),
+            (
+                id_b,
+                mod_eff(
+                    &[not_p.clone(), CopyException::SetToughness(literal(6))],
+                    x,
+                    2,
+                ),
+            ),
+        ]);
+        let got = eval(&r, &env, x);
+        assert_eq!(
+            (got.power, got.toughness),
+            (Some(literal(5)), Some(literal(6)))
+        );
+    }
+    // NotCopied(Colors) then a cost == the cost alone.
+    let not_c = CopyException::NotCopied(CopiedCharacteristic::Colors);
+    let with = [not_c.clone(), set_white_cost()];
+    let alone = [set_white_cost()];
+    let r_with = registry(vec![(1, mod_eff(&with, x, 1))]);
+    let r_alone = registry(vec![(1, mod_eff(&alone, x, 1))]);
+    assert_eq!(
+        evaluate(&r_with, &env, x).unwrap(),
+        evaluate(&r_alone, &env, x).unwrap()
+    );
+    assert_eq!(eval(&r_with, &env, x).colors, ColorBitmask::WHITE);
+    let src = CopiableValues::plain(base.clone());
+    assert_eq!(src.modified(&with), src.modified(&alone));
+    assert!(!src.modified(&[not_c]).provenance().colors_pinned());
+    // A copy keeps the copier's own power (7).
+    let copy = src.copy_with(&other("test.own"), &[set5, not_p]);
+    assert_eq!(copy.characteristics.power, Some(literal(7)));
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2b, 613.2c, 708.2, docs/DECISIONS.md "#38 FP-037 —
+// CodeRabbit round 2: round-trip guarantee qualified": with a layer-1b FaceDown effect,
+// copiable_values of a registered copiable_effect(V) is the face-down values with plain
+// provenance, not V; without it the round trip gives V. Both timestamp orders.
+#[test]
+fn round2_round_trip_qualified_by_face_down() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let pinned = green_source().copy_with(
+        &other("test.copier"),
+        &[CopyException::SetColors(ColorBitmask::GREEN)],
+    );
+    for v in [back_face_values(), back_face_copy_costed(), pinned] {
+        let r = registry(vec![(1, copy_eff(&v, y, 1))]);
+        assert_eq!(copiable_values(&r, &env, y).unwrap(), v);
+        for (copy_ts, down_ts) in [(1, 2), (2, 1)] {
+            let r = registry(vec![
+                (1, copy_eff(&v, y, copy_ts)),
+                (
+                    2,
+                    plain_eff(
+                        Layer::L1b,
+                        down_ts,
+                        y,
+                        LayerModification::FaceDown(Box::new(face_down())),
+                    ),
+                ),
+            ]);
+            let read = copiable_values(&r, &env, y).unwrap();
+            assert_ne!(read, v);
+            assert_eq!(read, CopiableValues::plain(face_down()));
+            assert!(read.provenance().is_plain());
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001, REQ-CORE-001, REQ-LAYER-005; CR 613.2a, 707.2, 707.9b, 707.9c:
+// property over 200 random cases: two random non-copy modifications (NotCopied and SetColors
+// included) evaluate exactly as CopiableValues::modified applied twice, characteristics and
+// provenance (pin included), in both EffectId assignments; the cache and a fresh evaluation
+// give the same digest.
+#[test]
+fn property_modification_effect_matches_modified() {
+    let mut rng = Lcg(0x2b2);
+    let x = o(1);
+    for n in 0..200 {
+        let base = random_chars(&mut rng, n);
+        let env = Env::default().with(x, base.clone());
+        let first: Vec<CopyException> = (0..rng.below(4))
+            .map(|_| random_exception(&mut rng))
+            .collect();
+        let second: Vec<CopyException> = (0..rng.below(4))
+            .map(|_| random_exception(&mut rng))
+            .collect();
+        let want = CopiableValues::plain(base.clone())
+            .modified(&first)
+            .modified(&second);
+        for (id_a, id_b) in [(1, 2), (2, 1)] {
+            let r = registry(vec![
+                (id_a, mod_eff(&first, x, 1)),
+                (id_b, mod_eff(&second, x, 2)),
+            ]);
+            assert_eq!(copiable_values(&r, &env, x).unwrap(), want);
+            let fresh = evaluate_all(&r, &env).unwrap();
+            assert_eq!(fresh[&x].mana_value_provenance, want.provenance());
+            let cached = LayerCache::new().evaluate_all(&r, &env).unwrap();
+            assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 208.2b, 614.1c, 614.1e, 611.2a, 611.3b, docs/DECISIONS.md
+// "#38 FP-037 — CodeRabbit round 2: as-enters P/T settings are Resolved-origin effects": an
+// as-enters P/T setting registered with EffectOrigin::Resolved keeps applying after its source
+// loses the generating ability, alone, over an earlier copy and after that copy is removed (both
+// EffectId assignments); the same setting with a Static origin is dropped.
+#[test]
+fn round2_as_enters_pt_survives_lost_ability() {
+    let x = o(1);
+    let base = creature("test.x0", 1, 1);
+    let as_enters = |origin: EffectOrigin, t: u64| {
+        modification_effect(
+            &[
+                CopyException::SetPower(literal(4)),
+                CopyException::SetToughness(literal(5)),
+            ],
+            Some(x),
+            p(1),
+            origin,
+            ts(t),
+            objs(&[x]),
+        )
+    };
+    let pt = |c: &Characteristics| (c.power.clone(), c.toughness.clone());
+    let want = (Some(literal(4)), Some(literal(5)));
+    for (copy_id, mod_id) in [(1, 2), (2, 1)] {
+        let mut env = Env::default().with(x, base.clone());
+        env.lost.insert(e(mod_id));
+        let r = registry(vec![(mod_id, as_enters(EffectOrigin::Resolved, 2))]);
+        assert_eq!(pt(&eval(&r, &env, x)), want);
+        let mut r = registry(vec![
+            (
+                copy_id,
+                copy_eff(&CopiableValues::plain(other("test.y")), x, 1),
+            ),
+            (mod_id, as_enters(EffectOrigin::Resolved, 2)),
+        ]);
+        let got = eval(&r, &env, x);
+        assert_eq!(got.names, set(&["test.y"]));
+        assert_eq!(pt(&got), want);
+        assert!(r.remove(e(copy_id)));
+        let got = eval(&r, &env, x);
+        assert_eq!(got.names, set(&["test.x0"]));
+        assert_eq!(pt(&got), want);
+        // Contrast: a Static-origin effect whose ability is gone does not apply (CR 611.3b).
+        let r = registry(vec![(
+            mod_id,
+            as_enters(EffectOrigin::Static { granted_at: None }, 2),
+        )]);
+        assert_eq!(eval(&r, &env, x), base);
+    }
 }
