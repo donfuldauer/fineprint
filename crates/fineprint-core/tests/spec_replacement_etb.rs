@@ -15,10 +15,11 @@
 #[path = "spec_layers_support.rs"]
 mod layers;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::hash::{Digest, sha256};
-use fineprint_base::ids::{EffectId, ObjectId, PlayerId};
+use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_base::prng::Pcg64Dxsm;
 use fineprint_core::choice::{
     AllowedValues, ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload,
@@ -26,17 +27,18 @@ use fineprint_core::choice::{
     RequestId, Status,
 };
 use fineprint_core::layers::{
-    Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, Evaluated, LayerError,
-    LayerModification,
+    Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, Evaluated, LayerEnvironment,
+    LayerError, LayerModification, MatchContext, ObjectBase,
 };
 use fineprint_core::memory::{ChoiceValue as MemChoice, Memory, MemoryTable};
 use fineprint_core::objects::Characteristics;
 use fineprint_core::replacement::{
-    BusEventKind, EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext, EtbEffect,
-    EtbEffects, EtbEntry, EtbError, EtbOption, EtbResolved, EtbScope, ProjectedPermanent, Tier,
-    applicable, project, resolve_entering,
+    BusEventKind, CopyAbilities, EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext,
+    EtbEffect, EtbEffects, EtbEntry, EtbError, EtbOption, EtbResolved, EtbScope,
+    ProjectedPermanent, Tier, applicable, project, resolve_entering,
 };
 use fineprint_core::txn::Transactional;
+use fineprint_dsl::expr::ObjectSelectorAST;
 use layers::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -240,6 +242,17 @@ fn applied_of(ns: &[u64]) -> EtbApplied {
     EtbApplied {
         effects: ids(ns),
         chosen: BTreeMap::new(),
+        ..Default::default()
+    }
+}
+
+/// The applied set of `ns` with `order` = `ns` as given (CR 616.1f: the order the effects were
+/// applied in, first applied first).
+fn applied_in_order(ns: &[u64]) -> EtbApplied {
+    EtbApplied {
+        effects: ids(ns),
+        chosen: BTreeMap::new(),
+        order: ns.iter().map(|&n| eid(n)).collect(),
     }
 }
 
@@ -264,6 +277,8 @@ struct PObs {
     counters: BTreeMap<String, i64>,
     effects: BTreeSet<EffectId>,
     chosen: BTreeMap<String, MemChoice>,
+    /// The application order (CR 616.1f).
+    order: Vec<EffectId>,
 }
 
 fn pobs(p: &ProjectedPermanent) -> PObs {
@@ -277,6 +292,7 @@ fn pobs(p: &ProjectedPermanent) -> PObs {
         counters: p.counters.clone(),
         effects: p.applied.effects.clone(),
         chosen: p.applied.chosen.clone(),
+        order: p.applied.order.clone(),
     }
 }
 
@@ -1143,6 +1159,7 @@ fn req_event_001_r5_project_carries_chosen() {
     let applied = EtbApplied {
         effects: ids(&[1]),
         chosen: BTreeMap::from([(KEY_A.to_owned(), MemChoice::Color(OPT_B.to_owned()))]),
+        ..Default::default()
     };
     let p = proj_ok(&ctx, &entry(1, P1), &applied);
     assert_eq!(p.applied.chosen, applied.chosen);
@@ -1436,10 +1453,13 @@ fn req_event_001_copy_project_details() {
     assert_eq!(both.evaluated.characteristics.names, model.names);
 }
 
-// REQ-EVENT-001, CR 614.12, CR 616.1c — several applied copies replace the base in ascending
-// EffectId order (the highest id is the final base), in both id assignments.
+// REQ-EVENT-001, CR 614.12, CR 616.1c, CR 707.2 — the documented fallback of an EMPTY `order`:
+// `EtbApplied::sequence` is then the ascending-id order, so several applied copies replace the
+// base in ascending EffectId order (the highest id is the final base), in both id assignments.
+// The order-aware rule (the last APPLIED copy wins) is
+// `req_event_001_f1_project_follows_order_last_copy_wins` below.
 #[test]
-fn req_event_001_copy_ascending_effect_id() {
+fn req_event_001_copy_ascending_effect_id_empty_order_fallback() {
     let m1 = artifact("test.etb_model_one");
     let m2 = enchantment("test.etb_model_two");
     for (low, high) in [(m1.clone(), m2.clone()), (m2, m1)] {
@@ -1454,7 +1474,10 @@ fn req_event_001_copy_ascending_effect_id() {
             continuous: &cont,
             effects: &effects,
         };
-        let p = proj_ok(&ctx, &entry(1, P1), &applied_of(&[1, 2]));
+        let both = applied_of(&[1, 2]);
+        assert!(both.order.is_empty(), "the fallback case: no order");
+        assert_eq!(both.sequence(), vec![eid(1), eid(2)]);
+        let p = proj_ok(&ctx, &entry(1, P1), &both);
         assert_eq!(p.evaluated.characteristics, norm(&high));
         let p = proj_ok(&ctx, &entry(1, P1), &applied_of(&[1]));
         assert_eq!(p.evaluated.characteristics, norm(&low));
@@ -1544,7 +1567,8 @@ fn req_event_001_tiers_in_order_with_requests() {
                     r.evaluated.characteristics.names,
                     set(&["test.etb_tier_model"])
                 );
-                // AddCardTypes is unioned after the layers: it survives the copy.
+                // AddCardTypes is a layer-4 addition (CR 613.1d, CR 205.1b): it survives the
+                // layer-1 copy.
                 assert_eq!(
                     r.evaluated.characteristics.card_types,
                     set(&[CREATURE, TYPE_Y])
@@ -1765,8 +1789,8 @@ fn req_event_001_continuous_in_force_changes_types() {
         assert_eq!(run.out[0].projected.effects, ids(&[1]));
         assert!(run.out[0].projected.tapped);
     }
-    // A layer-4 SetTypes in force, then AddCardTypes applied: the added type survives (it is
-    // unioned after the layers).
+    // A layer-4 SetTypes in force, then AddCardTypes applied: the added type survives (its
+    // layer-4 effect has a later timestamp, CR 613.7, CR 205.1b).
     let mut cont = ContinuousEffects::new();
     cont.register(
         eid(301),
@@ -1875,6 +1899,7 @@ fn req_event_001_r6_no_input_mutated() {
     assert_eq!(payable, payable_before);
     assert_eq!(applied.effects, ids(&[4]));
     assert!(applied.chosen.is_empty());
+    assert!(applied.order.is_empty());
 
     // Sanity of the run itself: object 1 (own static type_x) gets 1, 2, 4; object 2 (type_y in
     // force) is copied first, then 4.
@@ -2537,6 +2562,7 @@ fn req_event_001_prop_applicable_and_project() {
         let applied = EtbApplied {
             effects: random_subset(&mut rng, 8),
             chosen: BTreeMap::new(),
+            ..Default::default()
         };
         let probe: Vec<u64> = (1..=9).collect();
         let effects_before = effects_snapshot(&effects, &probe);
@@ -2553,6 +2579,7 @@ fn req_event_001_prop_applicable_and_project() {
             let next = EtbApplied {
                 effects: more,
                 chosen: BTreeMap::new(),
+                ..Default::default()
             };
             assert!(!appl_ok(&ctx, &e, &next).contains(id), "{id:?} reappeared");
         }
@@ -2571,9 +2598,10 @@ fn req_event_001_prop_applicable_and_project() {
     }
 }
 
-// REQ-EVENT-001, CR 616.1, CR 616.1f — `resolve_entering` of independent entries (no budget)
-// in any permutation gives, per entry, the same result; two runs are equal; every result's
-// applied set leaves nothing applicable.
+// REQ-EVENT-001, CR 616.1, CR 616.1f, CR 707.2 — `resolve_entering` of independent entries (no
+// budget) in any permutation gives, per entry, the same result (including the application
+// order); two runs are equal; every result's applied record (set and order) leaves nothing
+// applicable and re-projects to the result.
 #[test]
 fn req_event_001_prop_permutation_independent() {
     let mut rng = Pcg64Dxsm::from_u64_seed(0x0e7b_0002);
@@ -2604,11 +2632,31 @@ fn req_event_001_prop_permutation_independent() {
             assert_eq!(out.len(), 3);
             for (r, e) in out.iter().zip(ordered.iter()) {
                 assert_eq!(r.object, e.object);
+                // CR 616.1f: `order` lists every applied effect once, in application order.
+                let order_set: BTreeSet<EffectId> = r.projected.order.iter().copied().collect();
+                assert_eq!(
+                    order_set.len(),
+                    r.projected.order.len(),
+                    "order repeats an id"
+                );
+                assert_eq!(
+                    order_set, r.projected.effects,
+                    "order is not the applied set"
+                );
+                // The re-projection supplies the real `order`: with several copies among the
+                // effects, the bare set (ascending-id fallback) can name a different last copy
+                // (CR 707.2, CR 616.1f), so the order is part of the input here.
                 let applied = EtbApplied {
                     effects: r.projected.effects.clone(),
                     chosen: r.projected.chosen.clone(),
+                    order: r.projected.order.clone(),
                 };
                 assert!(appl_ok(&ctx, e, &applied).is_empty(), "loop stopped early");
+                // The result is the projection of its own applied record.
+                let again = pobs(&proj_ok(&ctx, e, &applied));
+                assert_eq!(again.evaluated, r.projected.evaluated);
+                assert_eq!(again.tapped, r.projected.tapped);
+                assert_eq!(again.counters, r.projected.counters);
                 for (k, v) in &r.projected.chosen {
                     assert_eq!(r.memory.choice(k), Some(v));
                 }
@@ -2823,4 +2871,1280 @@ fn req_event_001_api_empty_inputs() {
         pobs(&proj_ok(&ctx, &entry(1, P1), &EtbApplied::default()))
     );
     assert_eq!(run.out[0].memory, Memory::new());
+}
+
+// =============================================================================================
+// FIX ROUND 1 (CodeRabbit F1-F8) — shared helpers
+// =============================================================================================
+
+/// The object a copy model's static abilities are printed on (never entering, never in an
+/// environment): a declared static is rebound from it to the entrant (CR 707.5).
+const MODEL_OBJ: u64 = 77;
+/// The source of the "external" ETB effects below (a permanent that is not entering).
+const EXTERNAL: u64 = 9;
+
+/// An environment of noncreature enchantment bases (none is on the battlefield yet).
+fn enchantment_env(objs: &[(u64, PlayerId)]) -> TestEnv {
+    let list: Vec<(u64, Characteristics, PlayerId)> = objs
+        .iter()
+        .map(|&(o, p)| (o, enchantment(&format!("test.etb_fix_base_{o}")), p))
+        .collect();
+    env_of(&list)
+}
+
+fn eids(ns: &[u64]) -> Vec<EffectId> {
+    ns.iter().map(|&n| eid(n)).collect()
+}
+
+/// A static ability of the copy model (printed on `MODEL_OBJ`), layer 4.
+fn model_static(id: u64, affected: Affected, m: LayerModification) -> (EffectId, ContinuousEffect) {
+    (
+        eid(id),
+        ContinuousEffect {
+            source: Some(oid(MODEL_OBJ)),
+            controller: P1,
+            timestamp: ts(id),
+            layer: Layer::L4,
+            is_cda: false,
+            origin: EffectOrigin::Static { granted_at: None },
+            affected,
+            modification: m,
+        },
+    )
+}
+
+/// Declares what copy effect `copy` gives its entrant (CR 707.5, CR 614.12).
+fn declare(e: &mut EtbEffects, copy: u64, statics: Vec<(EffectId, ContinuousEffect)>, etb: &[u64]) {
+    let abilities = CopyAbilities {
+        statics,
+        etb: eids(etb),
+    };
+    if let Err(err) = e.set_copy_abilities(eid(copy), abilities) {
+        panic!("declaring the abilities of copy {copy} failed: {err}");
+    }
+}
+
+fn assert_not_payable(e: &ChoiceError, what: &str) {
+    match e {
+        ChoiceError::Procedure(msg) => assert!(msg.contains("not payable"), "{what}: {msg}"),
+        other => panic!("{what}: expected Procedure(not payable), got {other:?}"),
+    }
+}
+
+fn reversed<T: Clone>(v: &[T]) -> Vec<T> {
+    v.iter().rev().cloned().collect()
+}
+
+// =============================================================================================
+// F1 — the last APPLIED copy supplies the base (CR 616.1f, CR 707.2)
+// =============================================================================================
+
+const F1_CREATURE_MODEL: &str = "test.etb_f1_model_creature";
+const F1_ARTIFACT_MODEL: &str = "test.etb_f1_model_artifact";
+
+/// `c` copies a creature model, `a` an artifact model (both tier 616.1c); `t` "enters tapped"
+/// if the permanent is a creature.
+fn f1_effects(c: u64, a: u64, t: u64) -> EtbEffects {
+    effects_of(vec![
+        fx(c, copy_of(creature(F1_CREATURE_MODEL, 3, 3))).with_tier(Tier::CopyEtb),
+        fx(a, copy_of(artifact(F1_ARTIFACT_MODEL))).with_tier(Tier::CopyEtb),
+        fx(t, EtbAction::EntersTapped)
+            .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+    ])
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 616.1f, CR 707.2 — finding F1 through `resolve_entering`: the
+// controller picks which copy applies first (one request); the copy applied LAST is the final
+// base. Artifact first then creature: a creature, so the creature-only effect becomes applicable
+// and applies (tapped); creature first then artifact: an artifact, untapped. Every id
+// assignment, so the result never follows the ids. `order` records the real sequence.
+// Fails before the fix: the base followed ascending ids, so one of the two answers gave the
+// wrong model in every id assignment.
+#[test]
+fn req_event_001_f1_resolve_last_applied_copy_wins() {
+    let creature_model = norm(&creature(F1_CREATURE_MODEL, 3, 3));
+    let artifact_model = norm(&artifact(F1_ARTIFACT_MODEL));
+    for p in permutations(&[1, 2, 3]) {
+        let (c, a, t) = (p[0], p[1], p[2]);
+        let env = enchantment_env(&[(1, P1)]);
+        let cont = ContinuousEffects::new();
+        let effects = f1_effects(c, a, t);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let offered: Vec<String> = ascending(&[c, a]).iter().map(|e| desc(e.get())).collect();
+
+        // Artifact copy first, creature copy last.
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(a))]);
+        assert_eq!(
+            run.requests,
+            vec![replacement_request(0, P1, 1, &offered)],
+            "{p:?}"
+        );
+        let r = &run.out[0].projected;
+        assert_eq!(r.evaluated.characteristics, creature_model, "{p:?}");
+        assert_eq!(r.effects, ids(&[c, a, t]), "{p:?}");
+        assert_eq!(r.order, eids(&[a, c, t]), "{p:?}");
+        assert!(r.tapped, "{p:?}");
+        assert_eq!(pt(&r.evaluated), spt(3, 3));
+
+        // Creature copy first, artifact copy last.
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(c))]);
+        assert_eq!(
+            run.requests,
+            vec![replacement_request(0, P1, 1, &offered)],
+            "{p:?}"
+        );
+        let r = &run.out[0].projected;
+        assert_eq!(r.evaluated.characteristics, artifact_model, "{p:?}");
+        assert_eq!(r.effects, ids(&[c, a]), "{p:?}");
+        assert_eq!(r.order, eids(&[c, a]), "{p:?}");
+        assert!(!r.tapped, "{p:?}");
+    }
+}
+
+// REQ-EVENT-001, CR 616.1f, CR 707.2 — finding F1 through `project`/`applicable` with a
+// hand-built `order`: the last copy in `order` is the base whatever the ids; the
+// creature-only effect is applicable exactly when the creature copy is last. Fails before the
+// fix (`order` was ignored).
+#[test]
+fn req_event_001_f1_project_follows_order_last_copy_wins() {
+    let creature_model = norm(&creature(F1_CREATURE_MODEL, 3, 3));
+    let artifact_model = norm(&artifact(F1_ARTIFACT_MODEL));
+    for p in permutations(&[1, 2, 3]) {
+        let (c, a, t) = (p[0], p[1], p[2]);
+        let env = enchantment_env(&[(1, P1)]);
+        let cont = ContinuousEffects::new();
+        let effects = f1_effects(c, a, t);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let e = entry(1, P1);
+
+        let creature_last = applied_in_order(&[a, c]);
+        let pc = proj_ok(&ctx, &e, &creature_last);
+        assert_eq!(norm(&pc.evaluated.characteristics), creature_model, "{p:?}");
+        assert_eq!(appl_ok(&ctx, &e, &creature_last), vec![eid(t)], "{p:?}");
+        assert!(proj_ok(&ctx, &e, &applied_in_order(&[a, c, t])).tapped);
+
+        let artifact_last = applied_in_order(&[c, a]);
+        let pa = proj_ok(&ctx, &e, &artifact_last);
+        assert_eq!(norm(&pa.evaluated.characteristics), artifact_model, "{p:?}");
+        assert!(appl_ok(&ctx, &e, &artifact_last).is_empty(), "{p:?}");
+
+        // A partial order: the listed copy first, the unlisted one after it.
+        let only_a = EtbApplied {
+            order: eids(&[a]),
+            ..applied_of(&[c, a])
+        };
+        assert_eq!(
+            norm(&proj_ok(&ctx, &e, &only_a).evaluated.characteristics),
+            creature_model,
+            "{p:?}"
+        );
+        // Ids not applied and repeated ids in `order` are skipped (first occurrence kept).
+        let noisy = EtbApplied {
+            order: eids(&[40, a, c, a, 41]),
+            ..applied_of(&[c, a])
+        };
+        assert_eq!(noisy.sequence(), eids(&[a, c]));
+        assert_eq!(
+            norm(&proj_ok(&ctx, &e, &noisy).evaluated.characteristics),
+            creature_model,
+            "{p:?}"
+        );
+
+        // The documented fallback: an empty order is the ascending-id order.
+        let fallback = applied_of(&[c, a]);
+        let expected = if c > a {
+            &creature_model
+        } else {
+            &artifact_model
+        };
+        assert_eq!(
+            &norm(&proj_ok(&ctx, &e, &fallback).evaluated.characteristics),
+            expected,
+            "{p:?}"
+        );
+    }
+}
+
+// REQ-EVENT-001, CR 616.1f — `EtbApplied::sequence`: `order` without ids outside `effects`
+// and without repeats, then the unlisted ids ascending; empty `order` = ascending ids.
+#[test]
+fn req_event_001_f1_sequence() {
+    let a = EtbApplied {
+        effects: ids(&[1, 2, 3, 5]),
+        chosen: BTreeMap::new(),
+        order: eids(&[3, 9, 3, 1]),
+    };
+    assert_eq!(a.sequence(), eids(&[3, 1, 2, 5]));
+    assert!(EtbApplied::default().sequence().is_empty());
+    assert_eq!(applied_of(&[4, 2, 7]).sequence(), eids(&[2, 4, 7]));
+    assert_eq!(applied_in_order(&[7, 2, 4]).sequence(), eids(&[7, 2, 4]));
+    // An order of ids that were not applied contributes nothing.
+    let stray = EtbApplied {
+        order: eids(&[8, 6]),
+        ..applied_of(&[5])
+    };
+    assert_eq!(stray.sequence(), eids(&[5]));
+    // Derives kept.
+    let copy = a.clone();
+    assert_eq!(copy, a);
+    assert_ne!(copy, applied_of(&[1, 2, 3, 5]));
+}
+
+// =============================================================================================
+// F2 — a copy brings its model's static and ETB abilities (CR 614.12, CR 707.5)
+// =============================================================================================
+
+// REQ-EVENT-001, CR 614.12, CR 707.5 — finding F2, statics: the copy model's declared static
+// (a layer-4 "is a creature", printed on another object and affecting it) is rebound to the
+// entrant, so after the copy the entrant is an artifact creature and the creature-only effect
+// applies; an `Affected::Selector` static works as well. The original's own static is gone.
+// Without a declaration the copy is a plain artifact. Both id orders; the caller's registry is
+// unchanged. Fails before the fix (no copy abilities: never a creature, never tapped).
+#[test]
+fn req_event_001_f2_copy_model_static_rebound_to_entrant() {
+    let model = artifact("test.etb_f2_model");
+    for p in permutations(&[1, 2]) {
+        let (k, h) = (p[0], p[1]);
+        for affected in [
+            Affected::Objects([oid(MODEL_OBJ)].into_iter().collect()),
+            Affected::Selector(sel(SEL_ALL)),
+        ] {
+            let env = enchantment_env(&[(1, P1)]);
+            let cont = ContinuousEffects::new();
+            let e = entry_with(
+                1,
+                P1,
+                vec![own_static(100, 1, Layer::L4, add_types_mod(&[TYPE_X]))],
+            );
+            let list = || {
+                vec![
+                    fx(k, copy_of(model.clone())).with_tier(Tier::CopyEtb),
+                    fx(h, EtbAction::EntersTapped)
+                        .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+                ]
+            };
+            let plain = effects_of(list());
+            let mut declared = effects_of(list());
+            declare(
+                &mut declared,
+                k,
+                vec![model_static(
+                    500,
+                    affected.clone(),
+                    add_types_mod(&[CREATURE]),
+                )],
+                &[],
+            );
+
+            // Without a declaration: a plain artifact copy.
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &plain,
+            };
+            let run = drive_ok(&ctx, std::slice::from_ref(&e), &no_budget(), &[]);
+            let r = &run.out[0].projected;
+            assert_eq!(r.effects, ids(&[k]), "{p:?}");
+            assert!(!r.tapped);
+            assert_eq!(r.evaluated.characteristics.card_types, set(&[ARTIFACT]));
+
+            // Declared: the static makes it a creature, so `h` applies.
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &declared,
+            };
+            assert!(
+                !appl_ok(&ctx, &e, &EtbApplied::default()).contains(&eid(h)),
+                "{p:?}: the model's static does not apply before the copy"
+            );
+            let after = applied_in_order(&[k]);
+            assert_eq!(
+                types_of(&proj_ok(&ctx, &e, &after)),
+                set(&[ARTIFACT, CREATURE]),
+                "{p:?} {affected:?}"
+            );
+            assert_eq!(appl_ok(&ctx, &e, &after), vec![eid(h)], "{p:?}");
+            let run = drive_ok(&ctx, std::slice::from_ref(&e), &no_budget(), &[]);
+            assert!(run.requests.is_empty());
+            let r = &run.out[0].projected;
+            assert_eq!(r.effects, ids(&[k, h]), "{p:?}");
+            assert_eq!(r.order, eids(&[k, h]), "{p:?}");
+            assert!(r.tapped, "{p:?}");
+            assert_eq!(
+                r.evaluated.characteristics.card_types,
+                set(&[ARTIFACT, CREATURE])
+            );
+            // Not leaked into the caller's registry.
+            assert_eq!(cont, ContinuousEffects::new());
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 707.2, CR 707.5, CR 616.1f — finding F2, two copies: only the declaration
+// of the LAST applied copy counts. `k1` declares "is a creature", `k2` declares a subtype; both
+// application orders, every id assignment. Fails before the fix.
+#[test]
+fn req_event_001_f2_only_last_copy_declaration_counts() {
+    for p in permutations(&[1, 2, 3]) {
+        let (k1, k2, h) = (p[0], p[1], p[2]);
+        let env = enchantment_env(&[(1, P1)]);
+        let cont = ContinuousEffects::new();
+        let mut effects = effects_of(vec![
+            fx(k1, copy_of(artifact("test.etb_f2_model_one"))).with_tier(Tier::CopyEtb),
+            fx(k2, copy_of(artifact("test.etb_f2_model_two"))).with_tier(Tier::CopyEtb),
+            fx(h, EtbAction::EntersTapped)
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+        ]);
+        let objs = || Affected::Objects([oid(MODEL_OBJ)].into_iter().collect());
+        declare(
+            &mut effects,
+            k1,
+            vec![model_static(500, objs(), add_types_mod(&[CREATURE]))],
+            &[],
+        );
+        declare(
+            &mut effects,
+            k2,
+            vec![model_static(501, objs(), add_subtypes_mod(&[SUB_A]))],
+            &[],
+        );
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let e = entry(1, P1);
+
+        // k1 first, k2 last: k2's subtype only.
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(k1))]);
+        assert_eq!(run.requests.len(), 1);
+        let r = &run.out[0].projected;
+        assert_eq!(r.order, eids(&[k1, k2]), "{p:?}");
+        assert_eq!(r.effects, ids(&[k1, k2]), "{p:?}");
+        assert!(!r.tapped, "{p:?}");
+        assert_eq!(r.evaluated.characteristics.card_types, set(&[ARTIFACT]));
+        assert_eq!(r.evaluated.characteristics.subtypes, set(&[SUB_A]));
+        let pr = proj_ok(&ctx, &e, &applied_in_order(&[k1, k2]));
+        assert_eq!(types_of(&pr), set(&[ARTIFACT]));
+        assert_eq!(pr.evaluated.characteristics.subtypes, set(&[SUB_A]));
+
+        // k2 first, k1 last: k1's creature type only.
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(k2))]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.order, eids(&[k2, k1, h]), "{p:?}");
+        assert_eq!(r.effects, ids(&[k1, k2, h]), "{p:?}");
+        assert!(r.tapped, "{p:?}");
+        assert_eq!(
+            r.evaluated.characteristics.card_types,
+            set(&[ARTIFACT, CREATURE])
+        );
+        assert!(r.evaluated.characteristics.subtypes.is_empty());
+        let pr = proj_ok(&ctx, &e, &applied_in_order(&[k2, k1]));
+        assert_eq!(types_of(&pr), set(&[ARTIFACT, CREATURE]));
+        assert!(pr.evaluated.characteristics.subtypes.is_empty());
+    }
+}
+
+// REQ-EVENT-001, CR 614.12, CR 707.5 — finding F2, ETB abilities: the copy model's declared
+// "enters tapped" (a ThisPermanent effect sourced on the model) applies to the entrant once the
+// copy applied, and not before; the ORIGINAL's own ThisPermanent effect does not apply once the
+// copy applied. Without a declaration nothing of the model applies. Every id assignment.
+// Fails before the fix (never tapped).
+#[test]
+fn req_event_001_f2_copy_model_etb_ability_applies_to_entrant() {
+    for p in permutations(&[1, 2, 3]) {
+        let (k, m, t) = (p[0], p[1], p[2]);
+        let env = enchantment_env(&[(1, P1)]);
+        let cont = ContinuousEffects::new();
+        let list = || {
+            vec![
+                fx(k, copy_of(artifact("test.etb_f2_etb_model"))).with_tier(Tier::CopyEtb),
+                own_fx(m, MODEL_OBJ, EtbAction::EntersTapped),
+                own_fx(t, 1, counters(CTR_A, 1)),
+            ]
+        };
+        let plain = effects_of(list());
+        let mut declared = effects_of(list());
+        declare(&mut declared, k, Vec::new(), &[m]);
+        let e = entry(1, P1);
+
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &plain,
+        };
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.effects, ids(&[k]), "{p:?}");
+        assert!(!r.tapped);
+        assert!(r.counters.is_empty());
+
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &declared,
+        };
+        assert_eq!(
+            appl_ok(&ctx, &e, &EtbApplied::default()),
+            ascending(&[k, t]),
+            "{p:?}: the model's ETB ability waits for the copy"
+        );
+        assert_eq!(
+            appl_ok(&ctx, &e, &applied_in_order(&[k])),
+            vec![eid(m)],
+            "{p:?}: the model's ability applies, the original's own does not"
+        );
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+        assert!(run.requests.is_empty(), "{p:?}");
+        let r = &run.out[0].projected;
+        assert_eq!(r.effects, ids(&[k, m]), "{p:?}");
+        assert_eq!(r.order, eids(&[k, m]), "{p:?}");
+        assert!(r.tapped, "{p:?}");
+        assert!(r.counters.is_empty(), "{p:?}");
+    }
+}
+
+// REQ-EVENT-001, CR 707.5, CR 616.1f — finding F2, two copies with ETB abilities: only the last
+// applied copy's declared ETB ability applies (both application orders, every id assignment).
+#[test]
+fn req_event_001_f2_two_copies_only_last_etb_abilities() {
+    for p in permutations(&[1, 2, 3, 4]) {
+        let (k1, k2, m1, m2) = (p[0], p[1], p[2], p[3]);
+        let env = enchantment_env(&[(1, P1)]);
+        let cont = ContinuousEffects::new();
+        let mut effects = effects_of(vec![
+            fx(k1, copy_of(artifact("test.etb_f2_model_one"))).with_tier(Tier::CopyEtb),
+            fx(k2, copy_of(artifact("test.etb_f2_model_two"))).with_tier(Tier::CopyEtb),
+            own_fx(m1, MODEL_OBJ, EtbAction::EntersTapped),
+            own_fx(m2, MODEL_OBJ + 1, counters(CTR_B, 1)),
+        ]);
+        declare(&mut effects, k1, Vec::new(), &[m1]);
+        declare(&mut effects, k2, Vec::new(), &[m2]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(k1))]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.order, eids(&[k1, k2, m2]), "{p:?}");
+        assert_eq!(r.effects, ids(&[k1, k2, m2]), "{p:?}");
+        assert!(!r.tapped, "{p:?}");
+        assert_eq!(r.counters, BTreeMap::from([(CTR_B.to_owned(), 1)]));
+
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Desc(desc(k2))]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.order, eids(&[k2, k1, m1]), "{p:?}");
+        assert_eq!(r.effects, ids(&[k1, k2, m1]), "{p:?}");
+        assert!(r.tapped, "{p:?}");
+        assert!(r.counters.is_empty(), "{p:?}");
+    }
+}
+
+// REQ-EVENT-001, CR 707.5 — finding F2, `set_copy_abilities`: an id not in the set, or an
+// effect that is not a copy, is `NotACopyEffect` (set unchanged, Display non-empty); a second
+// declaration replaces the first; `remove` drops the declaration.
+#[test]
+fn req_event_001_f2_set_copy_abilities_api() {
+    let (k, n, m1, m2) = (1, 2, 3, 4);
+    let list = || {
+        vec![
+            fx(k, copy_of(artifact("test.etb_f2_api_model"))).with_tier(Tier::CopyEtb),
+            fx(n, counters(CTR_A, 1)),
+            own_fx(m1, MODEL_OBJ, EtbAction::EntersTapped),
+            own_fx(m2, MODEL_OBJ, counters(CTR_B, 2)),
+        ]
+    };
+    let mut effects = effects_of(list());
+    let before = effects_snapshot(&effects, &[1, 2, 3, 4, 99]);
+    for bad in [n, 99] {
+        match effects.set_copy_abilities(eid(bad), CopyAbilities::default()) {
+            Err(EtbError::NotACopyEffect(id)) => assert_eq!(id, eid(bad)),
+            other => panic!("expected NotACopyEffect({bad}), got {other:?}"),
+        }
+    }
+    assert_eq!(effects_snapshot(&effects, &[1, 2, 3, 4, 99]), before);
+    assert!(!EtbError::NotACopyEffect(eid(5)).to_string().is_empty());
+    assert_eq!(CopyAbilities::default(), CopyAbilities::default());
+
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = ContinuousEffects::new();
+
+    // Declared [m1], then replaced by [m2]: only m2 applies.
+    declare(&mut effects, k, Vec::new(), &[m1]);
+    declare(&mut effects, k, Vec::new(), &[m2]);
+    {
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        // `n` and `m2` share a tier: the controller is asked between them (and only them).
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[Ans::Index(0)]);
+        assert_eq!(
+            run.requests,
+            vec![replacement_request(0, P1, 1, &[desc(n), desc(m2)])]
+        );
+        let r = &run.out[0].projected;
+        assert_eq!(r.effects, ids(&[k, m2, n]));
+        assert_eq!(r.order, eids(&[k, n, m2]));
+        assert!(!r.tapped);
+        assert_eq!(
+            r.counters,
+            BTreeMap::from([(CTR_A.to_owned(), 1), (CTR_B.to_owned(), 2)])
+        );
+    }
+    // Removed and added back without a declaration: a plain copy.
+    let removed = effects.remove(eid(k)).expect("the copy is in the set");
+    if let Err(err) = effects.add(removed) {
+        panic!("re-adding the copy failed: {err}");
+    }
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+    let r = &run.out[0].projected;
+    assert_eq!(r.effects, ids(&[k, n]));
+    assert!(!r.tapped);
+    assert_eq!(r.counters, BTreeMap::from([(CTR_A.to_owned(), 1)]));
+}
+
+// =============================================================================================
+// F3 — AddCardTypes is a layer-4 effect (CR 613.1d, CR 613.7, CR 205.1b, CR 208.3)
+// =============================================================================================
+
+fn printed_pt_artifact() -> Characteristics {
+    Characteristics {
+        power: Some(lit(3)),
+        toughness: Some(lit(2)),
+        ..artifact("test.etb_f3_artifact")
+    }
+}
+
+// REQ-EVENT-001, CR 613.1d, CR 208.3, CR 205.1b — finding F3: a noncreature artifact with a
+// printed 3/2 has no power or toughness; with an applied AddCardTypes{Creature} it is an artifact
+// creature 3/2 (layer 7 sees the type), and a creature-only effect becomes applicable and
+// applies. Fails before the fix (the type was unioned after the layers: P/T stayed absent).
+#[test]
+fn req_event_001_f3_added_creature_type_gets_printed_pt() {
+    for p in permutations(&[1, 2]) {
+        let (a, b) = (p[0], p[1]);
+        let env = env_of(&[(1, printed_pt_artifact(), P1)]);
+        let cont = ContinuousEffects::new();
+        let effects = effects_of(vec![
+            fx(a, add_card_types(&[CREATURE])).with_tier(Tier::SelfReplacement),
+            fx(b, EtbAction::EntersTapped)
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+        ]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let e = entry(1, P1);
+
+        let plain = proj_ok(&ctx, &e, &EtbApplied::default());
+        assert_eq!(types_of(&plain), set(&[ARTIFACT]));
+        assert_eq!(plain.evaluated.characteristics.power, None);
+        assert_eq!(plain.evaluated.characteristics.toughness, None);
+
+        let added = proj_ok(&ctx, &e, &applied_of(&[a]));
+        assert_eq!(types_of(&added), set(&[ARTIFACT, CREATURE]));
+        assert_eq!(pt(&added.evaluated), spt(3, 2), "{p:?}");
+        assert_eq!(appl_ok(&ctx, &e, &applied_of(&[a])), vec![eid(b)]);
+
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.effects, ids(&[a, b]), "{p:?}");
+        assert!(r.tapped);
+        assert_eq!(pt(&r.evaluated), spt(3, 2));
+        // The synthetic layer-4 effect is invisible to the caller.
+        assert_eq!(cont, ContinuousEffects::new());
+    }
+}
+
+// REQ-EVENT-001, CR 613.1d, CR 208.3a — finding F3: layers 6 and 7 and creature selectors see
+// the added type: an in-force layer-6 "creatures have a keyword" and a layer-7c "creatures get
+// +1/+1" apply to the entrant only when AddCardTypes{Creature} is applied. Fails before the fix.
+#[test]
+fn req_event_001_f3_added_type_seen_by_layers_6_and_7() {
+    let env = env_of(&[(1, printed_pt_artifact(), P1)]);
+    let mut cont = ContinuousEffects::new();
+    cont.register(
+        eid(300),
+        eff(
+            Layer::L6,
+            1,
+            Affected::Selector(sel(SEL_CREATURE)),
+            LayerModification::AddAbility(kw_ability("test.kw_granted", "test_keyword")),
+        ),
+    )
+    .expect("register");
+    cont.register(
+        eid(301),
+        eff(
+            Layer::L7c,
+            2,
+            Affected::Selector(sel(SEL_CREATURE)),
+            LayerModification::ModifyPt {
+                power: 1,
+                toughness: 1,
+            },
+        ),
+    )
+    .expect("register");
+    let before = cont.clone();
+    let effects = effects_of(vec![fx(1, add_card_types(&[CREATURE]))]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let e = entry(1, P1);
+
+    let plain = proj_ok(&ctx, &e, &EtbApplied::default());
+    assert_eq!(pt(&plain.evaluated), (None, None));
+    assert!(!has_kw(&plain.evaluated.characteristics, "test_keyword"));
+
+    let added = proj_ok(&ctx, &e, &applied_of(&[1]));
+    assert_eq!(pt(&added.evaluated), spt(4, 3));
+    assert!(has_kw(&added.evaluated.characteristics, "test_keyword"));
+    assert_eq!(cont, before);
+}
+
+// REQ-EVENT-001, CR 613.7, CR 205.1b — finding F3: the synthetic layer-4 effect has a timestamp
+// later than every existing one (an own static SetTypes with a high timestamp, an in-force one
+// near the top of the range) and an id that clashes with no registered id or own static; the
+// added type survives, nothing is leaked into the caller's registry.
+#[test]
+fn req_event_001_f3_synthetic_effect_timestamp_and_id() {
+    let set_artifact = || LayerModification::SetTypes {
+        supertypes: None,
+        card_types: Some(set(&[ARTIFACT])),
+        subtypes: None,
+    };
+    let env = env_n(1);
+    let effects = effects_of(vec![fx(1, add_card_types(&[TYPE_X]))]);
+
+    // An own static SetTypes (timestamp 900) and in-force effects with ids 2..=4.
+    let mut cont = ContinuousEffects::new();
+    for id in 2..=4 {
+        cont.register(eid(id), in_force(1, id, Layer::L7c, modify_pt(0, 0)))
+            .expect("register");
+    }
+    let before = cont.clone();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let e = entry_with(1, P1, vec![own_static(900, 1, Layer::L4, set_artifact())]);
+    assert_eq!(
+        types_of(&proj_ok(&ctx, &e, &applied_of(&[1]))),
+        set(&[ARTIFACT, TYPE_X])
+    );
+    assert_eq!(
+        types_of(&proj_ok(&ctx, &e, &EtbApplied::default())),
+        set(&[ARTIFACT])
+    );
+    assert_eq!(cont, before);
+
+    // In force with the second-highest id and timestamp: the synthetic effect still fits.
+    let mut cont = ContinuousEffects::new();
+    cont.register(
+        eid(u64::MAX - 1),
+        in_force(1, u64::MAX - 1, Layer::L4, set_artifact()),
+    )
+    .expect("register");
+    let before = cont.clone();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    assert_eq!(
+        types_of(&proj_ok(&ctx, &entry(1, P1), &applied_of(&[1]))),
+        set(&[ARTIFACT, TYPE_X])
+    );
+    assert_eq!(cont, before);
+}
+
+// REQ-EVENT-001, CR 613.7 — finding F3: no fresh id or timestamp above the maximum exists:
+// an in-force effect (or own static) with the maximum id or timestamp, plus an applied
+// AddCardTypes, is a layer error (checked arithmetic, no wrap-around).
+#[test]
+fn req_event_001_f3_fresh_id_or_timestamp_overflow_is_layer_error() {
+    let env = env_n(1);
+    let effects = effects_of(vec![fx(1, add_card_types(&[TYPE_X]))]);
+    let none = || Affected::Selector(sel(SEL_NONE));
+    let cases: Vec<(&str, ContinuousEffects, EtbEntry)> = vec![
+        (
+            "max id in force",
+            {
+                let mut c = ContinuousEffects::new();
+                c.register(eid(u64::MAX), eff(Layer::L7c, 1, none(), modify_pt(0, 0)))
+                    .expect("register");
+                c
+            },
+            entry(1, P1),
+        ),
+        (
+            "max timestamp in force",
+            {
+                let mut c = ContinuousEffects::new();
+                c.register(eid(5), eff(Layer::L7c, u64::MAX, none(), modify_pt(0, 0)))
+                    .expect("register");
+                c
+            },
+            entry(1, P1),
+        ),
+        (
+            "max id and timestamp as an own static",
+            ContinuousEffects::new(),
+            entry_with(
+                1,
+                P1,
+                vec![own_static(u64::MAX, 1, Layer::L7c, modify_pt(0, 0))],
+            ),
+        ),
+    ];
+    for (what, cont, e) in cases {
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        match project(&ctx, &e, &applied_of(&[1])) {
+            Err(EtbError::Layer(_)) => {}
+            Err(other) => panic!("{what}: expected a layer error, got {other}"),
+            Ok(p) => panic!("{what}: expected a layer error, got {:?}", types_of(&p)),
+        }
+    }
+}
+
+// =============================================================================================
+// F4 — the generating ability must still exist (CR 614.12, CR 603.6d)
+// =============================================================================================
+
+/// How the test environment answers `generating_ability_exists`.
+#[derive(Clone, Debug)]
+enum Hook {
+    /// False for the listed effect ids, true otherwise.
+    Deny(BTreeSet<EffectId>),
+    /// True iff the source's view (when given) still has an ability.
+    AbilitiesPresent,
+}
+
+/// A `TestEnv` with an overridable ability hook that records every call as
+/// (effect, source, number of abilities in the source view).
+struct HookEnv {
+    inner: TestEnv,
+    hook: Hook,
+    calls: RefCell<Vec<(EffectId, ObjectId, Option<usize>)>>,
+}
+
+impl HookEnv {
+    fn new(inner: TestEnv, hook: Hook) -> HookEnv {
+        HookEnv {
+            inner,
+            hook,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl LayerEnvironment for HookEnv {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.inner.objects()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.inner.base(id)
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.inner.counters(id)
+    }
+
+    fn counter_timestamp(&self, id: ObjectId, kind: &str) -> Option<Timestamp> {
+        self.inner.counter_timestamp(id, kind)
+    }
+
+    fn attached_here(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.inner.attached_here(id)
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        self.inner.matches(selector, ctx)
+    }
+
+    fn eval_value(&self, expr: &ValueExpressionAST, object: ObjectId) -> Option<i64> {
+        self.inner.eval_value(expr, object)
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        self.calls.borrow_mut().push((
+            effect,
+            source,
+            source_view.map(|v| v.characteristics.abilities.len()),
+        ));
+        match &self.hook {
+            Hook::Deny(ids) => !ids.contains(&effect),
+            Hook::AbilitiesPresent => {
+                source_view.is_none_or(|v| !v.characteristics.abilities.is_empty())
+            }
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 614.12, CR 603.6d — finding F4: a ThisPermanent "enters tapped" applies only
+// while its generating ability exists, as the environment's hook says when asked with the
+// effect id, the entrant and its projected view. An in-force layer-6 "loses all abilities" on
+// the entrant with a hook answering false for the effect: not tapped (not applicable); the
+// same with a hook answering true (or false only for another id): tapped. A hook that models
+// existence from the view: no ability left, not tapped; ability present, tapped. Fails before
+// the fix (the hook was never asked).
+#[test]
+fn req_event_001_f4_this_permanent_needs_its_generating_ability() {
+    let t = 5;
+    let effects = effects_of(vec![own_fx(t, 1, EtbAction::EntersTapped)]);
+    let mut removed = ContinuousEffects::new();
+    removed
+        .register(
+            eid(300),
+            in_force(1, 1, Layer::L6, LayerModification::RemoveAllAbilities),
+        )
+        .expect("register");
+    let intact = ContinuousEffects::new();
+    let base = || enchantment_env(&[(1, P1)]);
+
+    let cases: Vec<(&str, Hook, &ContinuousEffects, bool)> = vec![
+        (
+            "removed, hook false",
+            Hook::Deny(ids(&[t])),
+            &removed,
+            false,
+        ),
+        (
+            "removed, hook true",
+            Hook::Deny(BTreeSet::new()),
+            &removed,
+            true,
+        ),
+        (
+            "removed, other id denied",
+            Hook::Deny(ids(&[6])),
+            &removed,
+            true,
+        ),
+        ("intact, hook false", Hook::Deny(ids(&[t])), &intact, false),
+        ("removed, modelled", Hook::AbilitiesPresent, &removed, false),
+        ("intact, modelled", Hook::AbilitiesPresent, &intact, true),
+    ];
+    for (what, hook, cont, applies) in cases {
+        let env = HookEnv::new(base(), hook);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: cont,
+            effects: &effects,
+        };
+        let expected = if applies { vec![eid(t)] } else { Vec::new() };
+        assert_eq!(
+            appl_ok(&ctx, &entry(1, P1), &EtbApplied::default()),
+            expected,
+            "{what}"
+        );
+        let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+        let r = &run.out[0].projected;
+        assert_eq!(r.tapped, applies, "{what}");
+        assert_eq!(
+            r.effects,
+            if applies { ids(&[t]) } else { ids(&[]) },
+            "{what}"
+        );
+        // The hook was asked about the effect, for the entrant, with its projected view.
+        let calls = env.calls.borrow();
+        let asked: Vec<&(EffectId, ObjectId, Option<usize>)> =
+            calls.iter().filter(|c| c.0 == eid(t)).collect();
+        assert!(!asked.is_empty(), "{what}: the hook was not asked");
+        for c in &asked {
+            assert_eq!(c.1, oid(1), "{what}");
+            let abilities =
+                c.2.unwrap_or_else(|| panic!("{what}: no source view given"));
+            if std::ptr::eq(cont, &removed) {
+                assert_eq!(abilities, 0, "{what}: the view is the projected one");
+            } else {
+                assert!(abilities > 0, "{what}");
+            }
+        }
+    }
+}
+
+// =============================================================================================
+// F5-F8 — exact payability lookahead (CR 614.12b, CR 616.2)
+// =============================================================================================
+
+// REQ-EVENT-001, CR 614.12b, CR 616.2 — finding F5: budget 2; entry 1 chooses {two: 2, one: 1};
+// entry 2 first copies itself into a creature, whereupon an external creature-only Choose {1}
+// applies to it. The lookahead reserves that 1, so entry 1 may only take "one" (applied
+// without a request). Both declared option orders, both slice orders; with budget 3 entry 1 is
+// asked with both options in declared order. Fails before the fix (entry 2's reserve was read
+// on its unprojected, noncreature form: 0).
+#[test]
+fn req_event_001_f5_reserve_sees_choice_enabled_by_later_copy() {
+    let two_one = [(OPT_B, 2u64), (OPT_A, 1u64)];
+    for list in [two_one.to_vec(), reversed(&two_one)] {
+        let env = enchantment_env(&[(1, P1), (2, P1)]);
+        let cont = ContinuousEffects::new();
+        let effects = effects_of(vec![
+            own_fx(10, 1, choose(KEY_A, K::Color, &list)),
+            own_fx(20, 2, copy_of(creature("test.etb_f5_model", 1, 1))).with_tier(Tier::CopyEtb),
+            fx(30, choose(KEY_B, K::Color, &[(OPT_C, 1)]))
+                .with_source(oid(EXTERNAL))
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+        ]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        for order in [[1u64, 2], [2, 1]] {
+            let entries: Vec<EtbEntry> = order.iter().map(|&o| entry(o, P1)).collect();
+            let run = drive_ok(&ctx, &entries, &budget(&[(P1, 2)]), &[]);
+            assert!(run.requests.is_empty(), "{list:?} {order:?}");
+            for (r, &o) in run.out.iter().zip(order.iter()) {
+                if o == 1 {
+                    assert_eq!(
+                        r.memory.choice(KEY_A),
+                        Some(&MemChoice::Color(OPT_A.to_owned())),
+                        "{list:?} {order:?}"
+                    );
+                    assert_eq!(r.projected.effects, ids(&[10]));
+                } else {
+                    assert_eq!(
+                        r.memory.choice(KEY_B),
+                        Some(&MemChoice::Color(OPT_C.to_owned()))
+                    );
+                    assert_eq!(r.projected.order, eids(&[20, 30]));
+                }
+            }
+        }
+        // Budget 3: both options are payable for entry 1.
+        let declared: Vec<&str> = list.iter().map(|(t, _)| *t).collect();
+        let run = drive_ok(
+            &ctx,
+            &[entry(1, P1), entry(2, P1)],
+            &budget(&[(P1, 3)]),
+            &[Ans::Text(OPT_B.to_owned())],
+        );
+        assert_eq!(
+            run.requests,
+            vec![option_request(
+                0,
+                P1,
+                "CR 614.12a",
+                Some(oid(1)),
+                "COLOR",
+                &declared
+            )]
+        );
+    }
+}
+
+// REQ-EVENT-001, CR 614.12b, CR 616.2 — finding F6: budget 2; entry 1 needs 2; entry 2 (a
+// creature) has its own Choose {1}, but an external mandatory copy into an artifact (higher
+// tier, creature-only) applies first and removes it: the real total is 2, no error. Without
+// the copy the 1 is reserved and the run is not payable (budget 3 is). Both declared option
+// orders, both slice orders. Fails before the fix (entry 2's own Choose was reserved from its
+// unprojected form although the copy removes it).
+#[test]
+fn req_event_001_f6_reserve_drops_choice_removed_by_copy() {
+    let opts2 = [(OPT_A, 2u64), (OPT_B, 3u64)];
+    for list in [opts2.to_vec(), reversed(&opts2)] {
+        let env = env_of(&[(1, enchantment("test.etb_f6_base_1"), P1), (2, body(2), P1)]);
+        let cont = ContinuousEffects::new();
+        let choices = || {
+            vec![
+                own_fx(10, 1, choose(KEY_A, K::Color, &list)),
+                own_fx(20, 2, choose(KEY_B, K::Color, &[(OPT_C, 1)])),
+            ]
+        };
+        let mut with_copy_list = choices();
+        with_copy_list.push(
+            fx(30, copy_of(artifact("test.etb_f6_model")))
+                .with_tier(Tier::CopyEtb)
+                .with_source(oid(EXTERNAL))
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+        );
+        let with_copy = effects_of(with_copy_list);
+        let without_copy = effects_of(choices());
+        for order in [[1u64, 2], [2, 1]] {
+            let entries: Vec<EtbEntry> = order.iter().map(|&o| entry(o, P1)).collect();
+
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &with_copy,
+            };
+            let run = drive_ok(&ctx, &entries, &budget(&[(P1, 2)]), &[]);
+            assert!(run.requests.is_empty(), "{list:?} {order:?}");
+            for (r, &o) in run.out.iter().zip(order.iter()) {
+                if o == 1 {
+                    assert_eq!(
+                        r.memory.choice(KEY_A),
+                        Some(&MemChoice::Color(OPT_A.to_owned()))
+                    );
+                } else {
+                    assert_eq!(r.projected.effects, ids(&[30]), "{list:?} {order:?}");
+                    assert_eq!(r.memory.choice(KEY_B), None);
+                    assert_eq!(
+                        r.projected.evaluated.characteristics.card_types,
+                        set(&[ARTIFACT])
+                    );
+                }
+            }
+
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &without_copy,
+            };
+            let e = drive_err(&ctx, &entries, &budget(&[(P1, 2)]), &[]);
+            assert_not_payable(&e, &format!("no copy, {list:?} {order:?}"));
+            let run = drive_ok(&ctx, &entries, &budget(&[(P1, 3)]), &[]);
+            assert_eq!(run.out.len(), 2);
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 614.12b, CR 616.2 — finding F7: budget 3; entry 1 first chooses (tier
+// 616.1a-style SelfReplacement) between {one: 1, two: 2}, then a mandatory copy makes it a
+// creature and an external creature-only Choose {1} applies; entry 2 needs 1. Only "one" is
+// allowed (1 + 1 + 1 = 3), applied without a request. Both declared option orders, both slice
+// orders; with budget 4 both options are offered in declared order. Fails before the fix (the
+// same-entry reserve was read on the current projection, without the copy).
+#[test]
+fn req_event_001_f7_reserve_sees_same_entry_choice_after_copy() {
+    let one_two = [(OPT_A, 1u64), (OPT_B, 2u64)];
+    for list in [one_two.to_vec(), reversed(&one_two)] {
+        let env = enchantment_env(&[(1, P1), (2, P1)]);
+        let cont = ContinuousEffects::new();
+        let effects = effects_of(vec![
+            own_fx(10, 1, choose(KEY_A, K::Color, &list)).with_tier(Tier::SelfReplacement),
+            own_fx(20, 1, copy_of(creature("test.etb_f7_model", 1, 1))).with_tier(Tier::CopyEtb),
+            fx(30, choose(KEY_B, K::Color, &[(OPT_C, 1)]))
+                .with_source(oid(EXTERNAL))
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+            own_fx(40, 2, choose(&key(2), K::Color, &[(OPT_C, 1)])),
+        ]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        for order in [[1u64, 2], [2, 1]] {
+            let entries: Vec<EtbEntry> = order.iter().map(|&o| entry(o, P1)).collect();
+            let run = drive_ok(&ctx, &entries, &budget(&[(P1, 3)]), &[]);
+            assert!(run.requests.is_empty(), "{list:?} {order:?}");
+            for (r, &o) in run.out.iter().zip(order.iter()) {
+                if o == 1 {
+                    assert_eq!(
+                        r.memory.choice(KEY_A),
+                        Some(&MemChoice::Color(OPT_A.to_owned())),
+                        "{list:?} {order:?}"
+                    );
+                    assert_eq!(
+                        r.memory.choice(KEY_B),
+                        Some(&MemChoice::Color(OPT_C.to_owned()))
+                    );
+                    assert_eq!(r.projected.order, eids(&[10, 20, 30]));
+                } else {
+                    assert_eq!(
+                        r.memory.choice(&key(2)),
+                        Some(&MemChoice::Color(OPT_C.to_owned()))
+                    );
+                }
+            }
+        }
+        let declared: Vec<&str> = list.iter().map(|(t, _)| *t).collect();
+        let run = drive_ok(
+            &ctx,
+            &[entry(1, P1), entry(2, P1)],
+            &budget(&[(P1, 4)]),
+            &[Ans::Text(OPT_B.to_owned())],
+        );
+        assert_eq!(
+            run.requests,
+            vec![option_request(
+                0,
+                P1,
+                "CR 614.12a",
+                Some(oid(1)),
+                "COLOR",
+                &declared
+            )]
+        );
+    }
+}
+
+// REQ-EVENT-001, CR 614.12b — finding F8: the payability sum is exact (no saturation). Budget
+// u64::MAX, entry 1 chooses between {u64::MAX, u64::MAX - 1}, entry 2 needs 1: only
+// u64::MAX - 1 is allowed (applied without a request). Alone, entry 1 is asked with both. Both
+// declared option orders, both slice orders. Fails before the fix (u64::MAX + 1 saturated to
+// u64::MAX, which looked payable).
+#[test]
+fn req_event_001_f8_exact_sum_no_saturation() {
+    let big = [(OPT_A, u64::MAX), (OPT_B, u64::MAX - 1)];
+    for list in [big.to_vec(), reversed(&big)] {
+        let env = env_n(2);
+        let cont = ContinuousEffects::new();
+        let effects = effects_of(vec![
+            own_fx(1, 1, choose(KEY_A, K::Color, &list)),
+            own_fx(2, 2, choose(KEY_B, K::Color, &[(OPT_C, 1)])),
+        ]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        for order in [[1u64, 2], [2, 1]] {
+            let entries: Vec<EtbEntry> = order.iter().map(|&o| entry(o, P1)).collect();
+            let run = drive_ok(&ctx, &entries, &budget(&[(P1, u64::MAX)]), &[]);
+            assert!(run.requests.is_empty(), "{list:?} {order:?}");
+            for (r, &o) in run.out.iter().zip(order.iter()) {
+                if o == 1 {
+                    assert_eq!(
+                        r.memory.choice(KEY_A),
+                        Some(&MemChoice::Color(OPT_B.to_owned())),
+                        "{list:?} {order:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        r.memory.choice(KEY_B),
+                        Some(&MemChoice::Color(OPT_C.to_owned()))
+                    );
+                }
+            }
+        }
+        let declared: Vec<&str> = list.iter().map(|(t, _)| *t).collect();
+        let run = drive_ok(
+            &ctx,
+            &[entry(1, P1)],
+            &budget(&[(P1, u64::MAX)]),
+            &[Ans::Text(OPT_A.to_owned())],
+        );
+        assert_eq!(
+            run.requests,
+            vec![option_request(
+                0,
+                P1,
+                "CR 614.12a",
+                Some(oid(1)),
+                "COLOR",
+                &declared
+            )]
+        );
+        assert_eq!(
+            run.out[0].memory.choice(KEY_A),
+            Some(&MemChoice::Color(OPT_A.to_owned()))
+        );
+    }
+}
+
+// REQ-EVENT-001, CR 614.12b, CR 616.1e — the CHOOSE_REPLACEMENT_EFFECT candidates are never
+// filtered by payability: budget 1; a Choose {2} applicable only while the permanent lacks
+// test.type_x, and an effect adding test.type_x, in one tier. Both are offered; taking the type
+// first is payable (the Choose never applies), taking the Choose first is not.
+#[test]
+fn req_event_001_payable_replacement_candidates_not_filtered() {
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![
+        fx(1, choose(KEY_A, K::Color, &[(OPT_A, 2)]))
+            .with_condition(EtbCondition::LacksCardType(TYPE_X.to_owned())),
+        fx(2, add_card_types(&[TYPE_X])),
+    ]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let run = drive_ok(&ctx, &[entry(1, P1)], &budget(&[(P1, 1)]), &[Ans::Index(1)]);
+    assert_eq!(
+        run.requests,
+        vec![replacement_request(0, P1, 1, &[desc(1), desc(2)])]
+    );
+    assert_eq!(run.out[0].projected.effects, ids(&[2]));
+    assert_eq!(run.out[0].memory.choice(KEY_A), None);
+    let e = drive_err(&ctx, &[entry(1, P1)], &budget(&[(P1, 1)]), &[Ans::Index(0)]);
+    assert_not_payable(&e, "the Choose first");
+}
+
+/// Entry 1 with a first-tier Choose {1, 2} and `others` Other-tier single-option Choose {1}
+/// effects (ids 2..), all applicable together.
+fn wide_choices(others: u64) -> EtbEffects {
+    let mut list = vec![
+        own_fx(1, 1, choose(KEY_A, K::Color, &[(OPT_A, 1), (OPT_B, 2)]))
+            .with_tier(Tier::SelfReplacement),
+    ];
+    for n in 2..2 + others {
+        list.push(fx(n, choose(&key(n), K::Color, &[(OPT_C, 1)])));
+    }
+    effects_of(list)
+}
+
+// REQ-EVENT-001, CR 614.12b (R3) — the lookahead is bounded: 13 further Choose effects of one
+// tier give 2^13 states, beyond the bound, which is a procedure error, never a silent
+// truncation; 7 of them (2^7 states) are within it and resolve.
+#[test]
+fn req_event_001_payable_lookahead_bounded() {
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+
+    let effects = wide_choices(13);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    match drive(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)]), &[]) {
+        Err(ChoiceError::Procedure(msg)) => assert!(!msg.is_empty()),
+        Err(other) => panic!("expected a procedure error, got {other:?}"),
+        Ok(r) => panic!("expected a procedure error, got {:?}", r.out),
+    }
+
+    let effects = wide_choices(7);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let (out, _, _) = match drive_inspect(
+        &ctx,
+        &[entry(1, P1)],
+        &budget(&[(P1, 1000)]),
+        content_answer,
+        |o| o.iter().map(obs).collect::<Vec<_>>(),
+    ) {
+        Ok(r) => r,
+        Err(e) => panic!("resolve_entering failed: {e}"),
+    };
+    assert_eq!(out[0].projected.effects, ids(&[1, 2, 3, 4, 5, 6, 7, 8]));
 }
