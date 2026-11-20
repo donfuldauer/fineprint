@@ -274,13 +274,16 @@ fn pass_a_two_cycle_applies_in_timestamp_order() {
     }
 }
 
-/// REQ-LAYER-004: per the #35 brief ("if none qualifies (every remaining effect is in or behind
-/// a cycle), apply the earliest-key remaining effect and continue"), the earliest-key remaining
-/// effect applies even when it sits behind the loop rather than in it (CR 613.8b).
+/// REQ-LAYER-004: when no effect is free, the earliest-key member of a dependency loop with no
+/// way out applies; an effect that depends on a loop member but is not in the loop still waits
+/// until that member has been applied (CR 613.8b: "waits to apply until just after all of those
+/// effects have been applied"; only effects in the loop drop the waiting rule). Decision:
+/// DECISIONS.md "#35 FP-034 - An effect that depends on a dependency loop waits for it".
 #[test]
-fn pass_a_everything_blocked_applies_earliest_key() {
+fn pass_a_effect_behind_a_loop_waits_for_its_member() {
     // CR 613.8b
-    // 2 <-> 3 is a loop; 1 (ts 1) depends on 2 and sits behind it.
+    // 2 <-> 3 is a loop; 1 (ts 1) depends on 2 and sits behind it: 2 applies first (earliest
+    // loop member), then 1 is free and has the earliest key, then 3.
     let items = [
         (1, 1, fixed(&[P1])),
         (2, 2, fixed(&[P1])),
@@ -289,7 +292,7 @@ fn pass_a_everything_blocked_applies_earliest_key() {
     let env = Env::two().depends(2, 3).depends(3, 2).depends(1, 2);
     for order in permutations(items.len()) {
         let props = compute_player_properties(&registry(&items, &order), &env);
-        assert_eq!(applied_ids(&props, P1), eids(&[1, 2, 3]), "{order:?}");
+        assert_eq!(applied_ids(&props, P1), eids(&[2, 1, 3]), "{order:?}");
     }
 }
 
