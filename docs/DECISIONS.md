@@ -6461,3 +6461,11 @@ zone. Keeping profiles in `layouts` follows that module's role (characteristics 
 layers) while the effect builders live with the other layer builders.
 **Alternatives:** Wiring the reveal into `Knowledge::on_move` now (rejected: outside owned paths;
 `Knowledge::on_move` already applies the CR 708.9 reveals to moves).
+
+## #39 FP-038 — Turning one object of a shared face-down effect up narrows the anchor in place
+
+**Decision.** Add `ContinuousEffects::narrow_objects` and use it in `turn_face_up` when other objects remain; links to the anchor are kept. An effect whose set becomes empty is still removed with `remove` (nothing remains to apply to, so its links are dropped).
+
+**Rationale.** CR 708.8 requires the object to turn face up while the others stay face down, so refusing is wrong; CR 613.6 requires the parts of a multi-layer effect to keep applying to the objects the anchor applied to. `remove` deletes every `SameAsLayer` link to the anchor and `register` cannot restore them, so remove plus register lost the linked parts for the remaining objects. The new method is additive, a few lines, and leaves evaluation untouched.
+
+**Alternatives.** Refusing turn-up when links exist (violates CR 708.8); dropping the narrowed-set path (regresses the documented behaviour that the other objects stay face down); re-registering the whole group from facedown.rs (`register_group` needs a `LayerEnvironment`, which would change the `turn_face_up` signature).
