@@ -318,3 +318,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 03-events | #31 (PR #181 review round 4) | work-classifier | Opus 5.5 | 1 | routed | — | thread 4636585241 valid: `fire(env, turn, id)` evaluates intervening "if" before limit; sweep: state-trigger limit and delayed-state outstanding gaps documented (#182), sourceless.rs and place.rs clean |
 | 03-events | #31 (PR #181 review round 4) | Fixer (src) | Sonnet 5.5 | 1 | done | core lib 657 passed; clippy, guard, cr check clean | shared `condition_ok`; delayed.rs docs; state.rs docs; DECISIONS x2 |
 | 03-events | #31 (PR #181 review round 4) | Fixer (tester) | Sonnet 5.5 | 1 | done | spec_triggers_stack_delayed 43 passed | condition-before-limit spec tests, new `fire` signature |
+| 04-layers | #32 | work-classifier | Opus 5.5 | 1 | needs-rules | — | T2 Implementer + T2 Independent Tester planned; rules questions CR 613.1–613.7n, 604.3, 611.2/611.3a, 122.1a–b |
+| 04-layers | #32 | rules-researcher | Opus 5.5 | 1 | answered | — | baseline CR-2026-11-06 matches SRS; no 613.2d/613.7l; SRS discrepancies none verified |
+| 04-layers | #32 | work-classifier | Opus 5.5 | 2 | routed | — | T2 both briefs; standalone module; follow-ups #183 (GameState wiring) and #184 (consumers switched); Fable not considered (no failed T2 attempt, allowance insufficient) |
+| 04-layers | #32 | Independent Tester | Opus 5.5 | 1 | done | spec_layers_* 105 passed; fmt, clippy, guard, cr check clean | 3fdc5f1 |
+| 04-layers | #32 | Implementer | Opus 5.5 | 1 | done | workspace 2919 passed; fmt, clippy, guard, cr check clean; core 98.81 % | 5d04eed; DECISIONS x6 |
