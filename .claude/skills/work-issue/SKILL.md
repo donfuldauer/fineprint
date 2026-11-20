@@ -219,18 +219,27 @@ another session asks a person to approve every remote-session tool call, while a
 by the scheduled task does not (DECISIONS.md "Self-chaining — handoff through the backstop
 scheduled task"). There is no depth limit: the chain runs until no issue is ready.
 
-1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: handed
-   off" comment from this session already exists, the handoff was already made: fire nothing
-   more, and end the turn.
-2. **Find the task.** Call `list_triggers` and take the enabled task named
+1. **Find the task.** Call `list_triggers` and take the enabled task named
    `Fine Print: next ready issue (backstop)`. If none exists or it is disabled, post no marker,
    say so in the final message (a person must restore it), and end the turn.
-3. Post the marker comment on the merged issue: "Self-chain: handed off to the backstop scheduled
-   task by session <this session's ID>." Then call `fire_trigger` with the task's ID and the text
-   `Handoff: session <this session's ID> merged #<N> and fired this run. In step 1, ignore that
-   session.`
-4. If `fire_trigger` fails, edit the marker comment to add "Firing failed: <reason>; the next
-   scheduled run picks up the chain." and say the same in the final message.
+2. **Check for an earlier attempt.** Read the merged issue's comments for a marker from this
+   session (step 3).
+   - "Self-chain: handed off" or "Self-chain: handoff failed" (final): fire nothing more; end
+     the turn.
+   - "Self-chain: handing off" (pending): an earlier attempt stopped before confirming. If the
+     task's `last_run.fired_at` is later than the marker's `created_at`, a run started after it:
+     edit the marker to the confirmed text (step 4) and end the turn without firing. Otherwise
+     fire as in step 3, reusing this marker instead of posting a new one.
+   - No marker: go on to step 3.
+3. Post the pending marker on the merged issue: "Self-chain: handing off to the backstop
+   scheduled task (session <this session's ID>)." Then call `fire_trigger` with the task's ID and
+   the text `Handoff: session <this session's ID> merged #<N> and fired this run. In step 1,
+   ignore that session.`
+4. If `fire_trigger` succeeds, edit the marker to the confirmed text: "Self-chain: handed off to
+   the backstop scheduled task (session <this session's ID>)." If it fails, edit the marker to
+   "Self-chain: handoff failed (session <this session's ID>): <reason>; the next scheduled run
+   picks up the chain." and say the same in the final message. A retry does not fire again
+   after a failure.
 5. End the turn. Fire at most once per merge, and never chain from a session whose prompt did
    not ask for it.
 
