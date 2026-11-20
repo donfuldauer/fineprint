@@ -8,8 +8,11 @@
 # its pull_request event; see docs/DECISIONS.md "CI — PR load"). On a pull request whose changes
 # are documentation only (job `changes`), fmt, clippy and test still report success but skip
 # their steps, and coverage is skipped; pushes to main always run everything.
-# Third-party actions: actions/checkout and actions/cache only, both first-party,
-# pinned to exact version tags (checkout v4.2.2, cache v4.2.0).
+# Jobs `differential` (cached versus full-recompute layer results, REQ-LAYER-005) and `bench`
+# (layer recompute benchmark, REQ-NFR-009; not a required check) follow the same gating as test.
+# Third-party actions: actions/checkout, actions/cache and actions/upload-artifact only, all
+# first-party, pinned to exact version tags (checkout v4.2.2, cache v4.2.0, upload-artifact
+# v4.6.2).
 name: CI
 
 on:
@@ -255,3 +258,157 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/req_coverage.py
+
+  differential:
+    name: differential (ubuntu-latest)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Keep incremental compiler state for the two feature modes out of the archived target.
+      CARGO_INCREMENTAL: "0"
+    # REQ-LAYER-005: the whole suite also runs in full-recompute mode (the cached mode is the
+    # test job), and the layer results of the differential scenarios must be byte-identical in
+    # both modes. Linux only: the comparison is platform-independent. FINEPRINT_DIFF_DIR is
+    # absolute because cargo runs a test binary in its package directory.
+    steps:
+      - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-differential-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-differential-
+      - name: cargo test (full-recompute mode)
+        if: needs.changes.outputs.code == 'true'
+        run: cargo test --workspace --locked --features fineprint-core/full-recompute
+      - name: Scenario digests (cached mode)
+        if: needs.changes.outputs.code == 'true'
+        env:
+          FINEPRINT_DIFF_DIR: ${{ github.workspace }}/target/differential/cached
+        run: cargo test --locked -p fineprint-core --test spec_layers_cache_diff
+      - name: Scenario digests (full-recompute mode)
+        if: needs.changes.outputs.code == 'true'
+        env:
+          FINEPRINT_DIFF_DIR: ${{ github.workspace }}/target/differential/full
+        run: cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff
+      - name: Compare digests
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cached=target/differential/cached
+          full=target/differential/full
+          count=$(find "$cached" -maxdepth 1 -type f -name '*.digest' | wc -l)
+          echo "cached-mode digest files: $count"
+          if [ "$count" -lt 5 ]; then
+            echo "error: expected at least 5 *.digest files in $cached, found $count"
+            exit 1
+          fi
+          names_cached=$(cd "$cached" && ls -1 | sort)
+          names_full=$(cd "$full" && ls -1 | sort)
+          if [ "$names_cached" != "$names_full" ]; then
+            echo "error: the two modes wrote different scenario files:"
+            diff <(printf '%s\n' "$names_cached") <(printf '%s\n' "$names_full") || true
+            exit 1
+          fi
+          if ! diff -r "$cached" "$full" > /dev/null; then
+            echo "error: cached and full-recompute digests differ for:"
+            for f in $names_cached; do
+              cmp -s "$cached/$f" "$full/$f" || echo "  $f"
+            done
+            exit 1
+          fi
+          echo "all $count scenario digests are identical in both modes"
+
+  bench:
+    name: bench (ubuntu-latest)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # REQ-NFR-009: the layer recompute benchmark runs on the reference runner and its results are
+    # uploaded for trend tracking; slow numbers never fail this job (the phase gate compares).
+    steps:
+      - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-bench-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-bench-
+      # Publish only Criterion results from the current run: Criterion writes to a fresh
+      # directory outside the cached target, so a result for a renamed benchmark cannot be
+      # restored and labelled with the current SHA.
+      - name: cargo bench
+        if: needs.changes.outputs.code == 'true'
+        env:
+          CRITERION_HOME: ${{ runner.temp }}/criterion
+        run: cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot
+      - name: Summarise medians
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          python3 -I - "$RUNNER_TEMP/criterion" >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          groups = [
+              "full_recompute_200",
+              "cached_cold_200",
+              "cached_warm_200",
+              "cached_after_invalidation_200",
+          ]
+          rows = []
+          for name in groups:
+              est = root / name / "new" / "estimates.json"
+              if not est.is_file():
+                  sys.exit(f"error: missing benchmark result {est}")
+              median_ns = json.loads(est.read_text())["median"]["point_estimate"]
+              rows.append(f"| {name} | {median_ns / 1e6:.3f} |")
+          print("| benchmark | median (ms) |")
+          print("| --- | ---: |")
+          print("\n".join(rows))
+          EOF
+      - name: Upload criterion results
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: criterion-layers-recompute-${{ github.sha }}
+          path: ${{ runner.temp }}/criterion
+          if-no-files-found: error
+          retention-days: 90

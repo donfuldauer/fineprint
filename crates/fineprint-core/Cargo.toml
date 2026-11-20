@@ -13,3 +13,17 @@ fineprint-base.workspace = true
 fineprint-dsl.workspace = true
 serde = { workspace = true }
 rmp-serde = { workspace = true }
+
+[features]
+# Full-recompute debug mode of the layer cache (REQ-LAYER-005): the cache stores nothing and
+# every evaluation is computed afresh. Not a default; CI's `differential` job enables it.
+full-recompute = []
+
+[dev-dependencies]
+# Benchmark harness (REQ-NFR-009); exact pin, no plotters or rayon (docs/DECISIONS.md
+# "#36 FP-035 — criterion pin").
+criterion = { version = "=0.8.2", default-features = false }
+
+[[bench]]
+name = "layers_recompute"
+harness = false
