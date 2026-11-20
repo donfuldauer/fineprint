@@ -359,3 +359,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 04-layers | #35 | Implementer | Opus 5.5 | 1 | done | fmt, clippy, guard, cr check clean; core 98.89 % | post-layer passes A and B, RuleSet, 601.2f cost stages; 7 DECISIONS entries |
 | 04-layers | #35 | Independent Tester | Opus 5.5 | 1 | done | 46/47; F1 brief error on dependency loops | spec_layers_post_* (5 files) |
 | 04-layers | #35 | Fixer (tester) | Opus 5.5 | 1 | done | workspace 3156 passed 0 failed | F1: brief corrected per CR 613.8b (DECISIONS "#35 FP-034 - An effect that depends on a dependency loop waits for it") |
+| 04-layers | #35 | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy, guard, cr check clean; workspace 3156 passed 0 failed 0 ignored; core 98.89 %; owned paths clean per commit; F1 correction weakened nothing vs fc230cc | head ce027e2 |
