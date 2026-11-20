@@ -2,7 +2,7 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Per-object evaluation through layers 1a-7d (REQ-LAYER-001, CR 613.1-613.5).
+//! Per-object evaluation through layers 1a-7d (REQ-LAYER-001, REQ-LAYER-002, CR 613.1-613.5).
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -13,7 +13,10 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
-use super::registry::{Affected, ContinuousEffect, ContinuousEffects, LayerModification};
+use super::ordering::{OrderRecord, Scratch, run_layer};
+use super::registry::{
+    Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+};
 use crate::objects::Characteristics;
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
@@ -107,6 +110,26 @@ pub trait LayerEnvironment {
     fn eval_value(&self, expr: &ValueExpressionAST, object: ObjectId) -> Option<i64> {
         let _ = object;
         literal_of(expr)
+    }
+
+    /// Whether the static ability that generates `effect` still exists on its source.
+    /// Called only for `EffectOrigin::Static` effects whose `source` is `Some(source)`.
+    /// `source_view` is `Some(state so far)` only when `source` is the object being
+    /// evaluated; for any other source it is `None` (cross-object evaluation is #186).
+    /// Default: `true` (existence is not modelled).
+    ///
+    /// CR 613.8a, 611.3, 113.6: an effect of a static ability exists only while its generating
+    /// ability does, so an effect whose ability has been removed does not apply, and removing it
+    /// changes the effect's existence (a dependency). Effects from resolved spells and abilities
+    /// (CR 611.2) are never asked.
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        let _ = (effect, source, source_view);
+        true
     }
 }
 
@@ -212,13 +235,17 @@ pub fn pt_counter_delta(kind: &str) -> Option<(i64, i64)> {
 }
 
 /// One thing applied within a layer: an effect, or the counters of one kind.
-enum Step<'a> {
+pub(super) enum Step<'a> {
+    /// A continuous effect.
     Effect(EffectId, &'a ContinuousEffect),
+    /// The counters of one kind and their amount.
     Counter(&'a str, i64),
 }
 
-/// The order key of a step: timestamp, then effects before counters, then EffectId or kind.
-fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering {
+/// The order key of a step: timestamp, then effects before counters, then EffectId or kind
+/// (CR 613.7; the tie-break is docs/DECISIONS.md "#32 FP-031 - Ordering, tie-break and P/T
+/// presence").
+pub(super) fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering {
     a.0.cmp(&b.0).then_with(|| match (&a.1, &b.1) {
         (Step::Effect(x, _), Step::Effect(y, _)) => x.cmp(y),
         (Step::Effect(..), Step::Counter(..)) => Ordering::Less,
@@ -227,17 +254,96 @@ fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering 
     })
 }
 
+/// Whether `step` applies to `id` in `state`: an effect by its affected set ([`applies_to`])
+/// and the existence of its generating ability ([`generator_exists`]); counters always. Used
+/// both by the real application and by the dependency trial, so the two agree.
+pub(super) fn step_applies(
+    step: &Step<'_>,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    state: &Evaluated,
+) -> bool {
+    match step {
+        Step::Effect(eid, effect) => {
+            applies_to(effect, env, id, state) && generator_exists(*eid, effect, env, id, state)
+        }
+        Step::Counter(..) => true,
+    }
+}
+
+/// Whether the effect's generating ability still exists (CR 613.8a, 611.3, 113.6): asked of
+/// the environment ([`LayerEnvironment::generating_ability_exists`]) only for a static effect
+/// with a source, with the state so far when the source is the object `id` being evaluated.
+/// An effect of a resolved spell or ability exists independently of its source's abilities
+/// (CR 611.2); a static effect without a source is not checked.
+fn generator_exists(
+    eid: EffectId,
+    effect: &ContinuousEffect,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    state: &Evaluated,
+) -> bool {
+    match (&effect.origin, effect.source) {
+        (EffectOrigin::Static { .. }, Some(source)) => {
+            env.generating_ability_exists(eid, source, (source == id).then_some(state))
+        }
+        _ => true,
+    }
+}
+
+/// The power and toughness adjustment `step` declares when applied to `from`, in `i128`
+/// without saturation (CR 613.4c, 122.1a): a `ModifyPt` effect its two amounts, P/T counters
+/// the amount times the per-counter change. `None` when the step declares no numeric P/T
+/// adjustment: another modification, the object has no P/T pair, or P/T counters on a
+/// non-creature (which do nothing, [`apply_counter`]). Reads the modification generically,
+/// never card identity (R4); used by the dependency comparison so that saturation at the `i64`
+/// bounds is not mistaken for a change in what the step does (docs/DECISIONS.md "#33 FP-032 —
+/// Review round 1 dispositions").
+pub(super) fn declared_pt_adjustment(step: &Step<'_>, from: &Scratch) -> Option<(i128, i128)> {
+    from.pt?;
+    match step {
+        Step::Effect(_, effect) => match effect.modification {
+            LayerModification::ModifyPt { power, toughness } => {
+                Some((i128::from(power), i128::from(toughness)))
+            }
+            _ => None,
+        },
+        Step::Counter(kind, amount) => {
+            if !from.state.characteristics.card_types.contains("Creature") {
+                return None;
+            }
+            let (dp, dt) = pt_counter_delta(kind)?;
+            let n = i128::from(*amount);
+            Some((i128::from(dp) * n, i128::from(dt) * n))
+        }
+    }
+}
+
+/// Applies `step` to `scratch` (its affected set already checked).
+pub(super) fn apply_step(scratch: &mut Scratch, step: &Step<'_>) {
+    match step {
+        Step::Effect(_, effect) => {
+            apply_effect(&mut scratch.state, &mut scratch.pt, &effect.modification);
+        }
+        Step::Counter(kind, amount) => {
+            apply_counter(&mut scratch.state, &mut scratch.pt, kind, *amount);
+        }
+    }
+}
+
 /// Evaluates `id`: its base characteristics through layers 1a, 1b, 2, 3, 4, 5, 6, 7a, 7b, 7c and
-/// 7d (REQ-LAYER-001, CR 613.1). Pure: nothing is mutated, the base included.
+/// 7d (REQ-LAYER-001, CR 613.1). Pure: nothing is mutated, the base included. Equal to the
+/// [`Evaluated`] of [`evaluate_with_order`].
 ///
-/// Within a layer, steps apply in ascending timestamp (CR 613.2, 613.3, 613.4, 613.7); at equal
-/// timestamps effects come before counters, effects by ascending [`EffectId`], counters by
-/// ascending kind. Keyword counters, variants included ([`keyword_counter_keyword`]), apply in
-/// layer 6 (CR 122.1b, 613.1f), granting their full kind string as the keyword; P/T counters
-/// apply in layer 7c (CR 122.1a, 613.4c), and change power and toughness only when the object is
-/// a creature after layers 1-6 (a noncreature card with printed P/T off the battlefield keeps its
-/// printed values; effects of layer 7 still apply to it). Each counter kind applies at its
-/// counter timestamp. Layer 7 is the last layer.
+/// Within a layer, steps apply in the REQ-LAYER-002 order ([`evaluate_with_order`]): with no
+/// characteristic-defining effect and no dependency, ascending timestamp (CR 613.2, 613.3,
+/// 613.4, 613.7); at equal timestamps effects come before counters, effects by ascending
+/// [`EffectId`], counters by ascending kind. Keyword counters, variants included
+/// ([`keyword_counter_keyword`]), apply in layer 6 (CR 122.1b, 613.1f), granting their full kind
+/// string as the keyword; P/T counters apply in layer 7c (CR 122.1a, 613.4c), and change power
+/// and toughness only when the object is a creature after layers 1-6 (a noncreature card with
+/// printed P/T off the battlefield keeps its printed values; effects of layer 7 still apply to
+/// it). Each counter kind applies at its counter timestamp. Layer 7 is the last layer.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -246,21 +352,47 @@ pub fn evaluate(
     env: &dyn LayerEnvironment,
     id: ObjectId,
 ) -> Result<Evaluated, LayerError> {
+    evaluate_with_order(effects, env, id).map(|(evaluated, _)| evaluated)
+}
+
+/// [`evaluate`], also returning the order in which the steps were used (REQ-LAYER-002).
+///
+/// Within each layer or sublayer: in layers 2-6, effects from characteristic-defining abilities
+/// apply before all others (CR 613.3); then, repeatedly, the unapplied step that depends on no
+/// other unapplied step and has the earliest ordering key applies, dependency being found by
+/// trial application on a scratch copy (CR 613.8a, 613.8b); a dependency loop is applied in
+/// timestamp order, one member at a time; the relation is recomputed after every application
+/// (CR 613.8c). Counters are steps like effects, at their counter timestamp (CR 613.7c), and are
+/// never characteristic-defining.
+///
+/// # Errors
+/// [`LayerError::UnknownObject`] if the environment has no base for `id`.
+pub fn evaluate_with_order(
+    effects: &ContinuousEffects,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+) -> Result<(Evaluated, OrderRecord), LayerError> {
     // CR 613.1: start with the actual object.
     let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
     let on_battlefield = base.on_battlefield;
-    let mut state = Evaluated {
-        characteristics: base.characteristics,
-        controller: base.controller,
+    // `pt` is `None` until layer 7 starts or when the object has no power and toughness.
+    let mut scratch = Scratch {
+        state: Evaluated {
+            characteristics: base.characteristics,
+            controller: base.controller,
+        },
+        pt: None,
     };
     let counters = env.counters(id);
     let counter_ts =
         |kind: &str| -> Timestamp { env.counter_timestamp(id, kind).unwrap_or(Timestamp::new(0)) };
-    // `None` until layer 7 starts or when the object has no power and toughness.
-    let mut pt: Option<(i64, i64)> = None;
+    let mut record = OrderRecord {
+        object: id,
+        steps: Vec::new(),
+    };
     for &layer in Layer::ALL {
         if layer == Layer::L7a {
-            pt = start_layer_7(&mut state, env, id, on_battlefield);
+            scratch.pt = start_layer_7(&mut scratch.state, env, id, on_battlefield);
         }
         let mut steps: Vec<(Timestamp, Step<'_>)> = effects
             .iter()
@@ -276,23 +408,14 @@ pub fn evaluate(
                 _ => false,
             };
             if applies {
+                // CR 613.7c: counters apply at their counter timestamp.
                 steps.push((counter_ts(kind), Step::Counter(kind, amount)));
             }
         }
-        // CR 613.2, 613.3, 613.4, 613.7: timestamp order within the layer or sublayer.
-        steps.sort_by(step_order);
-        for (_, step) in steps {
-            match step {
-                Step::Effect(_, effect) => {
-                    if applies_to(effect, env, id, &state) {
-                        apply_effect(&mut state, &mut pt, &effect.modification);
-                    }
-                }
-                Step::Counter(kind, amount) => apply_counter(&mut state, &mut pt, kind, amount),
-            }
-        }
+        // CR 613.2, 613.3, 613.4, 613.7, 613.8: the order within the layer or sublayer.
+        run_layer(layer, steps, env, id, &mut scratch, &mut record.steps);
     }
-    Ok(state)
+    Ok((scratch.state, record))
 }
 
 /// Evaluates every object of `env.objects()`, in that order; equal to [`evaluate`] for each.
@@ -336,7 +459,7 @@ fn applies_to(
 
 /// The start of layer 7 (CR 613.4): whether the object has power and toughness after layers
 /// 1-6 (CR 208.3, 208.5), and if so their starting values, written back as literals.
-fn start_layer_7(
+pub(super) fn start_layer_7(
     state: &mut Evaluated,
     env: &dyn LayerEnvironment,
     id: ObjectId,
