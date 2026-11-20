@@ -132,6 +132,15 @@ cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
 FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec_ingest_vocab
                                      # the real-CR vocabulary test; with the variable set a missing
                                      # cr-cache/rules.txt fails it (without it, the test is skipped)
+cargo test --workspace --locked --features fineprint-core/full-recompute
+                                     # the whole suite with the layer cache bypassed (REQ-LAYER-005)
+rm -rf target/differential && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/cached" cargo test --locked -p fineprint-core --test spec_layers_cache_diff && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/full" cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff && \
+diff -r target/differential/cached target/differential/full
+                                     # layer-result digests of the differential scenarios, both modes; must be identical
+cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot
+                                     # 200-permanent layer recompute benchmark (criterion; REQ-NFR-009)
 cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
                                                    # cargo install cargo-llvm-cov --locked --version 0.9.1
 ```
@@ -178,8 +187,7 @@ Lands later:
 - `.pzl` runner `cargo run -p fineprint-cli -- pzl <file>` or an xtask equivalent (final syntax
   set by #51 FP-049).
 - Replay and golden-hash verification: lands with #83 FP-081 and #106 FP-104.
-- Layer cached vs full-recompute differential: lands with #36 FP-035.
-- Benchmarks: lands with #120 FP-118. Fuzzer: lands with #119 FP-117.
+- Benchmarks beyond the layer recompute benchmark (#36 FP-035): land with #120 FP-118. Fuzzer: lands with #119 FP-117.
 - Toolchain CLI `fineprint-ingest`: the binary and its `vocab` subcommand land with #15 FP-014;
   the card-database commands land with #100 FP-098.
 - C ABI header check (cbindgen): lands with #102 FP-100.
@@ -212,6 +220,8 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `test (macos-latest)` | `cargo test --workspace --locked` |
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
+| `differential (ubuntu-latest)` | `cargo test --workspace --locked --features fineprint-core/full-recompute`, then `spec_layers_cache_diff` in both modes with an absolute `FINEPRINT_DIFF_DIR` (`target/differential/cached` and `target/differential/full`), then a step that fails unless both directories hold the same files with identical bytes (REQ-LAYER-005; the cached-mode suite is the `test` job). Skips its steps on documentation-only pull requests like `test` |
+| `bench (ubuntu-latest)` | `cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`; Criterion writes to `$RUNNER_TEMP/criterion` (`CRITERION_HOME`, outside the cached `target`, so no earlier result is published); the summary step fails unless all four groups have results, writes their median table to the job summary, and that directory is uploaded as an artifact (actions/upload-artifact v4.6.2) for the trend (REQ-NFR-009). NOT a required status check |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 | `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed), then `cargo test --locked -p fineprint-ingest --test spec_ingest_vocab` with `FINEPRINT_REQUIRE_CR_CACHE=1` (step `env:`; the real-CR test fails instead of skipping when `cr-cache/rules.txt` is missing; also runs even if an earlier check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
