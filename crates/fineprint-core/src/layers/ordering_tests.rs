@@ -1494,6 +1494,8 @@ fn replay(
             match &s.item {
                 OrderItem::Effect(id) => {
                     let x = &list.iter().find(|(k, _)| e(*k) == *id).unwrap().1;
+                    // REQ-LAYER-002: the recorded layer label matches the effect's own layer.
+                    assert_eq!(s.layer, x.layer, "seed {seed}: {s:?}");
                     let expected = if let Affected::Selector(selector) = &x.affected {
                         let m = env.matches(
                             selector,
