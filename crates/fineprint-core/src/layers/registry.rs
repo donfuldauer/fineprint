@@ -49,13 +49,17 @@ pub enum ValueSource {
     CopyOfBackFaceOrMelded,
 }
 
-/// The provenance of an object's mana value through layer 1 (CR 202.3a-c, 613.2c): its
-/// [`ValueSource`] and whether a copy of it has mana value 0 (a [`ValueSource::Fixed`] value
-/// from a nonmodal back face or a melded permanent, CR 202.3b, 202.3c).
+/// The provenance of an object's mana value and colors through layer 1 (CR 202.3a-c, 613.2c,
+/// 707.9b): its [`ValueSource`], whether a copy of it has mana value 0 (a [`ValueSource::Fixed`]
+/// value from a nonmodal back face or a melded permanent, CR 202.3b, 202.3c), and whether its
+/// colors were set or kept by a copy exception ([`ManaValueProvenance::colors_pinned`]) rather
+/// than derived from its mana cost and color indicator.
 ///
 /// Built only from a [`crate::layers::CopiableValues`] ([`crate::layers::CopiableValues::provenance`])
 /// or as [`ManaValueProvenance::plain`], so the copy classification is always consistent with
-/// the source. Carried by [`LayerModification::CopyValuesWithProvenance`] and by
+/// the source; the evaluator only updates the colors pin
+/// ([`LayerModification::ApplyCopyExceptions`]). Carried by
+/// [`LayerModification::CopyValuesWithProvenance`] and by
 /// [`crate::layers::Evaluated::mana_value_provenance`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManaValueProvenance {
@@ -63,6 +67,10 @@ pub struct ManaValueProvenance {
     pub(super) source: ValueSource,
     /// `Fixed` from a nonmodal back face or melded permanent: a copy has mana value 0.
     pub(super) zero_when_copied: bool,
+    /// The colors were set or kept by a copy exception ([`CopyException::SetColors`],
+    /// [`CopyException::NotCopied`] of the colors): they are a copiable value of their own
+    /// (CR 707.9b) and a later [`CopyException::SetManaCost`] does not re-derive them.
+    pub(super) colors_pinned: bool,
 }
 
 impl ManaValueProvenance {
@@ -73,6 +81,7 @@ impl ManaValueProvenance {
         ManaValueProvenance {
             source: ValueSource::Plain,
             zero_when_copied: false,
+            colors_pinned: false,
         }
     }
 
@@ -80,6 +89,15 @@ impl ManaValueProvenance {
     #[must_use]
     pub fn source(&self) -> &ValueSource {
         &self.source
+    }
+
+    /// Whether the colors were set or kept by a copy exception ([`CopyException::SetColors`],
+    /// [`CopyException::NotCopied`] of the colors) rather than derived from the mana cost and
+    /// color indicator: such colors are part of the copiable values (CR 707.9b) and a later
+    /// [`CopyException::SetManaCost`] leaves them. `false` for [`ManaValueProvenance::plain`].
+    #[must_use]
+    pub fn colors_pinned(&self) -> bool {
+        self.colors_pinned
     }
 
     /// Whether a copy of an object with this provenance has mana value 0 (CR 202.3b, 202.3c):
@@ -94,7 +112,7 @@ impl ManaValueProvenance {
         }
     }
 
-    /// Whether this is [`ManaValueProvenance::plain`].
+    /// Whether this is [`ManaValueProvenance::plain`] (a pinned provenance is not plain).
     #[must_use]
     pub fn is_plain(&self) -> bool {
         *self == ManaValueProvenance::plain()
@@ -157,10 +175,12 @@ pub enum LayerModification {
     },
     /// Layer 1a (CR 613.2a, 707.2): a copiable modification that is not a copy (an "as ...
     /// enters" ability setting power and toughness): the exceptions, in order, applied to the
-    /// object's current characteristics, which are also the "own" values of
-    /// [`CopyException::NotCopied`] (so it changes nothing). Only the fields the exceptions set
-    /// change; no characteristic-defining ability is dropped; the mana-value provenance is
-    /// unchanged. Built by [`crate::layers::modification_effect`].
+    /// object's current characteristics. [`CopyException::NotCopied`] is ignored (it changes no
+    /// field and pins nothing). Only the fields the exceptions set change; no
+    /// characteristic-defining ability is dropped; the mana-value source and zero flag are
+    /// unchanged, and the colors pin of the provenance starts from the current one and is set
+    /// by a [`CopyException::SetColors`] ([`ManaValueProvenance::colors_pinned`]). Built by
+    /// [`crate::layers::modification_effect`].
     ApplyCopyExceptions(Vec<CopyException>),
     /// Layer 1b (CR 613.2b): replaces all characteristics with the given face-down values.
     FaceDown(Box<Characteristics>),

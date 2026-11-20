@@ -62,16 +62,24 @@ use crate::objects::{
 ///
 /// A private flag records whether a [`ValueSource::Fixed`] source is a back face of a nonmodal
 /// DFC or a melded permanent (a copy of it has mana value 0, CR 202.3b, 202.3c) or not (a
-/// merged permanent whose top component is an ordinary object); it is `false` for every other
-/// source.
+/// merged permanent whose top component is an ordinary object). It is meaningful only for a
+/// `Fixed` source: [`CopiableValues::provenance`] exports it as `false` for any other source,
+/// whatever its raw value (`==` still compares the raw flag).
+///
+/// A second private flag records whether the colors were set or kept by a copy exception
+/// (CR 707.9b; [`ManaValueProvenance::colors_pinned`]), so a later
+/// [`CopyException::SetManaCost`] leaves them; it is `false` for the constructors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CopiableValues {
     /// The characteristics (CR 707.2).
     pub characteristics: Characteristics,
     /// How the mana value is derived.
     pub source: ValueSource,
-    /// `Fixed` from a nonmodal back face or melded permanent: a copy has mana value 0.
+    /// `Fixed` from a nonmodal back face or melded permanent: a copy has mana value 0. Ignored
+    /// for any other source.
     zero_when_copied: bool,
+    /// The colors were set or kept by a copy exception (CR 707.9b).
+    colors_pinned: bool,
 }
 
 /// One "except ..." clause of a copy effect, applied in slice order (CR 707.9).
@@ -83,11 +91,14 @@ pub enum CopyException {
     /// CR 707.9b: the names become exactly these.
     SetNames(BTreeSet<String>),
     /// CR 707.9b: the mana cost becomes this. The colors are re-derived from the new cost and
-    /// the color indicator only if no earlier exception of the same effect set or kept the
-    /// colors ([`CopyException::SetColors`], [`CopyException::NotCopied`] of
-    /// [`CopiedCharacteristic::Colors`]) and they equalled that derivation of the old cost;
-    /// otherwise they are left (docs/DECISIONS.md "#38 FP-037 — SetManaCost and colors" and
-    /// "#38 FP-037 — CodeRabbit round 1: colors pinned by SetColors and NotCopied(Colors)").
+    /// the color indicator only if they are not pinned (set or kept by an earlier exception of
+    /// the same effect, [`CopyException::SetColors`] or [`CopyException::NotCopied`] of
+    /// [`CopiedCharacteristic::Colors`], or by an earlier copy or modification whose values
+    /// carry the pin, [`ManaValueProvenance::colors_pinned`]) and they equalled that derivation
+    /// of the old cost; otherwise they are left (docs/DECISIONS.md "#38 FP-037 — SetManaCost and
+    /// colors", "#38 FP-037 — CodeRabbit round 1: colors pinned by SetColors and
+    /// NotCopied(Colors)" and "#38 FP-037 — CodeRabbit round 2: explicit colors carried with the
+    /// copiable values").
     SetManaCost(Option<ManaCostDSL>),
     /// CR 707.9b, 707.9d: the colors become exactly these and the color indicator is not
     /// copied (cleared).
@@ -110,7 +121,9 @@ pub enum CopyException {
     /// CR 707.9b, 707.9d: the toughness becomes this expression (a copied CDA expression is
     /// replaced).
     SetToughness(ValueExpressionAST),
-    /// CR 707.9c: the characteristic is not copied; it keeps the copier's own value.
+    /// CR 707.9c: the characteristic is not copied; it keeps the copier's own value. Ignored
+    /// (no change, no pin) by a modification that is not a copy ([`CopiableValues::modified`],
+    /// [`modification_effect`]).
     NotCopied(CopiedCharacteristic),
 }
 
@@ -224,16 +237,22 @@ fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
     out
 }
 
-/// Applies `exceptions` in slice order to `c`; `own` is the copier's values for
-/// [`CopyException::NotCopied`] (CR 707.9a-d). Colors set or kept by an exception stay pinned
-/// for the rest of this call: a later [`CopyException::SetManaCost`] does not re-derive them.
+/// Applies `exceptions` in slice order to `c` (CR 707.9a-d) and returns the final colors pin.
+///
+/// `own` is the copier's values for [`CopyException::NotCopied`] (CR 707.9c) in a copy; `None`
+/// for a modification that is not a copy, where `NotCopied` is skipped (no field changes, no
+/// pin). `colors_pinned` is the pin of the values `c` holds: colors set or kept by an exception
+/// (here or in an earlier copy or modification) are a copiable value of their own (CR 707.9b),
+/// and a [`CopyException::SetManaCost`] does not re-derive them. `SetColors` and, in a copy,
+/// `NotCopied` of the colors set the pin; nothing clears it.
 pub(super) fn apply_exceptions(
     c: &mut Characteristics,
-    own: &Characteristics,
+    own: Option<&Characteristics>,
     exceptions: &[CopyException],
-) {
-    // CR 707.9b, 707.9c, 707.9d: colors an exception set or kept are final for this effect.
-    let mut colors_pinned = false;
+    colors_pinned: bool,
+) -> bool {
+    // CR 707.9b, 707.9c, 707.9d: colors an exception set or kept are final.
+    let mut colors_pinned = colors_pinned;
     for exception in exceptions {
         match exception {
             // CR 707.9a: the gained ability becomes part of the copiable values.
@@ -264,15 +283,19 @@ pub(super) fn apply_exceptions(
             // CR 707.9b, 707.9d: the expression replaces any copied CDA expression.
             CopyException::SetPower(v) => c.power = Some(v.clone()),
             CopyException::SetToughness(v) => c.toughness = Some(v.clone()),
-            // CR 707.9c: the copier keeps its original value.
+            // CR 707.9c: the copier keeps its original value; a modification that is not a
+            // copy has no original to keep and ignores it.
             CopyException::NotCopied(field) => {
-                keep_own(c, own, *field);
-                if *field == CopiedCharacteristic::Colors {
-                    colors_pinned = true;
+                if let Some(own) = own {
+                    keep_own(c, own, *field);
+                    if *field == CopiedCharacteristic::Colors {
+                        colors_pinned = true;
+                    }
                 }
             }
         }
     }
+    colors_pinned
 }
 
 /// CR 707.9c, 707.9d: `field` of `c` takes `own`'s value (colors with the color indicator).
@@ -308,6 +331,7 @@ impl CopiableValues {
             characteristics,
             source: ValueSource::Plain,
             zero_when_copied: false,
+            colors_pinned: false,
         }
     }
 
@@ -329,6 +353,7 @@ impl CopiableValues {
             characteristics,
             source: ValueSource::Fixed { mana_value: mv },
             zero_when_copied: true,
+            colors_pinned: false,
         }
     }
 
@@ -348,6 +373,7 @@ impl CopiableValues {
             characteristics,
             source: ValueSource::Fixed { mana_value: mv },
             zero_when_copied: true,
+            colors_pinned: false,
         })
     }
 
@@ -382,6 +408,7 @@ impl CopiableValues {
             characteristics,
             source: ValueSource::Fixed { mana_value: mv },
             zero_when_copied: back_face_top,
+            colors_pinned: false,
         })
     }
 
@@ -394,13 +421,18 @@ impl CopiableValues {
         self.provenance().mana_value(&self.characteristics, ctx)
     }
 
-    /// The provenance of the mana value: the source and whether a copy has mana value 0
-    /// (CR 202.3b, 202.3c).
+    /// The provenance of the mana value: the source, whether a copy has mana value 0
+    /// (CR 202.3b, 202.3c), and whether the colors are pinned (CR 707.9b). The zero flag is
+    /// exported only for a [`ValueSource::Fixed`] source and is `false` for any other, so values
+    /// whose `source` was reassigned export a consistent provenance.
     #[must_use]
     pub fn provenance(&self) -> ManaValueProvenance {
         ManaValueProvenance {
             source: self.source.clone(),
-            zero_when_copied: self.zero_when_copied,
+            // CR 202.3b, 202.3c: the flag only qualifies a fixed mana value.
+            zero_when_copied: matches!(self.source, ValueSource::Fixed { .. })
+                && self.zero_when_copied,
+            colors_pinned: self.colors_pinned,
         }
     }
 
@@ -416,6 +448,7 @@ impl CopiableValues {
             characteristics,
             source: provenance.source,
             zero_when_copied: provenance.zero_when_copied,
+            colors_pinned: provenance.colors_pinned,
         }
     }
 
@@ -431,7 +464,10 @@ impl CopiableValues {
     ///
     /// The result's source is [`ValueSource::CopyOfBackFaceOrMelded`] if this one is
     /// `CopyOfBackFaceOrMelded` or a `Fixed` from a nonmodal back face or melded permanent
-    /// (CR 202.3b, 202.3c), whatever the exceptions; otherwise [`ValueSource::Plain`].
+    /// (CR 202.3b, 202.3c), whatever the exceptions; otherwise [`ValueSource::Plain`]. The
+    /// result's colors are pinned (CR 707.9b) if this one's are or an exception sets or keeps
+    /// them ([`CopyException::SetColors`], [`CopyException::NotCopied`] of the colors); a
+    /// [`CopyException::SetManaCost`] re-derives only unpinned colors.
     #[must_use]
     pub fn copy_with(&self, own: &Characteristics, exceptions: &[CopyException]) -> CopiableValues {
         // CR 707.2: the copiable values only.
@@ -446,8 +482,8 @@ impl CopiableValues {
             c.abilities
                 .retain(|a| cda_targets(a).intersection(&dropped).next().is_none());
         }
-        // CR 707.9a-c: the exceptions, in order.
-        apply_exceptions(&mut c, own, exceptions);
+        // CR 707.9a-c: the exceptions, in order; CR 707.9b: pinned colors stay pinned.
+        let pinned = apply_exceptions(&mut c, Some(own), exceptions, self.colors_pinned);
         let zero = self.provenance().copies_as_zero();
         CopiableValues {
             characteristics: c,
@@ -458,25 +494,35 @@ impl CopiableValues {
                 ValueSource::Plain
             },
             zero_when_copied: false,
+            colors_pinned: self.colors_pinned || pinned,
         }
     }
 
     /// A copiable (layer 1a) modification that is not a copy ("as ... enters" setting power and
     /// toughness, CR 613.2a, 707.2): these values with the exceptions applied in order, source
-    /// unchanged. A [`CopyException::NotCopied`] keeps this object's own value (no change), and
-    /// no ability is dropped.
+    /// and zero flag unchanged. A [`CopyException::NotCopied`] is ignored (no change, no pin),
+    /// and no ability is dropped. The colors are pinned (CR 707.9b) if these are or a
+    /// [`CopyException::SetColors`] sets them.
     ///
     /// The result is a complete snapshot: [`copiable_effect`] of it replaces all characteristics,
     /// copied ones included. The layer-1a effect that carries only the fields the modification
     /// sets is [`modification_effect`].
+    ///
+    /// An "as ... enters" or "as ... is turned face up" power and toughness setting
+    /// (CR 208.2b; replacement effects, CR 614.1c, 614.1e) built from these values must be
+    /// registered with [`EffectOrigin::Resolved`]: once applied it lasts (CR 611.2a) and the
+    /// evaluator must not drop it when the permanent loses the ability, as it drops a
+    /// static-ability effect (CR 611.3b).
     #[must_use]
     pub fn modified(&self, exceptions: &[CopyException]) -> CopiableValues {
         let mut c = self.characteristics.clone();
-        apply_exceptions(&mut c, &self.characteristics, exceptions);
+        // CR 613.2a, 707.2: not a copy, so `NotCopied` has nothing to keep.
+        let pinned = apply_exceptions(&mut c, None, exceptions, self.colors_pinned);
         CopiableValues {
             characteristics: c,
             source: self.source.clone(),
             zero_when_copied: self.zero_when_copied,
+            colors_pinned: self.colors_pinned || pinned,
         }
     }
 }
@@ -507,9 +553,13 @@ pub fn copiable_characteristics(
 /// The copiable values of `id`: the characteristics of [`copiable_characteristics`] (the same
 /// layer 1a and 1b run, CR 613.2c, 707.2) with the mana-value provenance of that run
 /// ([`Evaluated::mana_value_provenance`]): plain for the base, set by each layer-1a effect that
-/// replaces all characteristics, kept by a [`modification_effect`], plain again after a
-/// face-down effect (CR 708.2, 202.3a). For any values `V`, registering [`copiable_effect`] of
-/// `V` on an object and reading `copiable_values` gives `V` back.
+/// replaces all characteristics, kept by a [`modification_effect`] (which may only pin the
+/// colors, CR 707.9b), plain again after a face-down effect (CR 708.2, 202.3a). For any values
+/// `V`, registering [`copiable_effect`] of `V` on an object and reading `copiable_values` gives
+/// `V`'s characteristics and provenance (colors pin included) back when no other applicable
+/// effect changes the characteristics or the provenance before the end of layer 1: a layer-1b
+/// `FaceDown` effect, a later layer-1a copy or modification, or an earlier one that is not
+/// replaced.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -557,11 +607,17 @@ fn layer_one(
 
 /// A layer-1a continuous effect (CR 613.2a) carrying these copiable values, with the given
 /// timestamp (CR 613.7b): [`Layer::L1a`], `is_cda` false, [`Affected::Objects`]`(objects)`.
-/// The modification is [`LayerModification::CopyValues`] when the values' mana value is plain,
+/// The modification is [`LayerModification::CopyValues`] when the values' provenance is plain,
 /// otherwise [`LayerModification::CopyValuesWithProvenance`], so the evaluated object and
-/// [`copiable_values`] keep a fixed or zero mana value (CR 202.3b, 202.3c). Either replaces all
-/// characteristics. The values are a snapshot (CR 707.2b, 707.2c); for a modification that
-/// changes only the fields it sets, use [`modification_effect`].
+/// [`copiable_values`] keep a fixed or zero mana value (CR 202.3b, 202.3c) and pinned colors
+/// (CR 707.9b). Either replaces all characteristics. The values are a snapshot (CR 707.2b,
+/// 707.2c); for a modification that changes only the fields it sets, use
+/// [`modification_effect`].
+///
+/// An "as ... enters" or "as ... is turned face up" power and toughness setting (CR 208.2b;
+/// replacement effects, CR 614.1c, 614.1e) must be registered with [`EffectOrigin::Resolved`]:
+/// once applied it lasts (CR 611.2a) and the evaluator must not drop it when the permanent loses
+/// the ability, as it drops a static-ability effect (CR 611.3b).
 #[must_use]
 pub fn copiable_effect(
     values: &CopiableValues,
@@ -604,8 +660,15 @@ fn copy_modification(values: &CopiableValues) -> LayerModification {
 /// timestamp ([`LayerModification::ApplyCopyExceptions`]). Only the fields the exceptions set
 /// change, so removing an earlier copy effect also removes what it copied while the set values
 /// stay; a later copy effect replaces all characteristics, these included (CR 613.2, timestamp
-/// order). A [`CopyException::NotCopied`] changes nothing; no ability is dropped; the mana-value
-/// provenance is kept. [`Layer::L1a`], `is_cda` false, [`Affected::Objects`]`(objects)`.
+/// order). A [`CopyException::NotCopied`] is ignored (no change, no pin); no ability is
+/// dropped; the mana-value source and zero flag are kept, and a [`CopyException::SetColors`]
+/// pins the colors (CR 707.9b, [`ManaValueProvenance::colors_pinned`]). [`Layer::L1a`],
+/// `is_cda` false, [`Affected::Objects`]`(objects)`.
+///
+/// An "as ... enters" or "as ... is turned face up" power and toughness setting (CR 208.2b;
+/// replacement effects, CR 614.1c, 614.1e) must be registered with [`EffectOrigin::Resolved`]:
+/// once applied it lasts (CR 611.2a) and the evaluator must not drop it when the permanent loses
+/// the ability, as it drops a static-ability effect (CR 611.3b).
 #[must_use]
 pub fn modification_effect(
     exceptions: &[CopyException],

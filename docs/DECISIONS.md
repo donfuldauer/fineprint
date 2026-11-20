@@ -6069,14 +6069,15 @@ FP-038 (see "#23 FP-022 — Face-down merged components deferred to layer 1b (#3
 
 ## #38 FP-037 — CodeRabbit round 1: colors pinned by SetColors and NotCopied(Colors)
 
-**Decision:** `apply_exceptions` keeps a local `colors_pinned` flag, false at the start of each
-call. `SetColors(_)` and `NotCopied(Colors)` set it (CR 707.9b, 707.9c, 707.9d); no other
+**Decision:** `apply_exceptions` keeps a `colors_pinned` flag (since round 2 it starts from the
+pin of the values it changes and is returned, see "#38 FP-037 — CodeRabbit round 2: explicit
+colors carried with the copiable values"). `SetColors(_)` and `NotCopied(Colors)` set it (CR 707.9b, 707.9c, 707.9d); no other
 exception changes it. `SetManaCost` re-derives the colors only when the flag is false and the
 colors still equal the derivation of the old cost and color indicator. So on a green `{2}{G}`
 source `[SetColors(GREEN), SetManaCost({1}{W})]` stays green, `[SetManaCost({1}{W})]` becomes
-white, `[SetManaCost({1}{W}), SetColors(GREEN)]` is green and two costs re-derive twice. The flag
-is per call (one copy effect, one `modified` call or one `ApplyCopyExceptions` effect); it is not
-carried to a later copy. This refines "#38 FP-037 — SetManaCost and colors".
+white, `[SetManaCost({1}{W}), SetColors(GREEN)]` is green and two costs re-derive twice. Since
+round 2 the final flag is carried with the copiable values to a later copy or modification
+(it was per call in round 1). This refines "#38 FP-037 — SetManaCost and colors".
 **Rationale:** The equality guard alone cannot tell colors derived from the cost from colors an
 exception set to the same value (CodeRabbit PR #197). The equality stays as the second guard for
 colors the source had that were not derived from its cost.
@@ -6099,7 +6100,8 @@ must survive equal numbers; otherwise a copy with a set cost `{5}` had mana valu
 
 **Decision:** `ValueSource` moves to `layers/registry.rs` (re-exported from `copy` and `layers`,
 so `fineprint_core::layers::ValueSource` is unchanged). A new public `ManaValueProvenance` holds a
-`ValueSource` and the copy-as-0 flag in crate-private fields; it is built only by
+`ValueSource` and the copy-as-0 flag (and, since round 2, the colors pin) in crate-private
+fields; it is built only by
 `ManaValueProvenance::plain()` (also `Default`) or `CopiableValues::provenance()`, so the flag
 stays consistent with the source and `CopiableValues`' own flag stays private. Accessors:
 `source()`, `copies_as_zero()`, `is_plain()`, `mana_value(&Characteristics, ctx)`.
@@ -6112,8 +6114,12 @@ plain (a face-down object has no mana cost, CR 708.2, 202.3a), the new variant s
 else changes it. `Evaluated::mana_value(ctx)` reads it exactly as `CopiableValues::mana_value`.
 `copiable_values(effects, env, id)` runs the same layer 1a and 1b as `copiable_characteristics`
 (kept, same signature) and returns `CopiableValues::with_provenance(characteristics,
-provenance)`; registering `copiable_effect(V)` and reading `copiable_values` gives `V` back.
-`evaluated_digest` encodes the provenance (variant tag, the `Fixed` number, the flag) and its tag
+provenance)`; registering `copiable_effect(V)` and reading `copiable_values` gives `V` back when
+no other applicable effect changes the characteristics or the provenance before the end of
+layer 1 (a layer-1b `FaceDown` effect, a later layer-1a copy or modification, or an earlier one
+that is not replaced; see "#38 FP-037 — CodeRabbit round 2: round-trip guarantee qualified").
+`evaluated_digest` encodes the provenance (variant tag, the `Fixed` number, the flag; since
+round 2 also the colors pin) and its tag
 becomes `fineprint.layers.evaluated.v2`; no golden digest constant exists (checked with grep).
 Limit: a base object that is itself a nonmodal back face or melded permanent starts with plain
 provenance in `ObjectBase`, because layouts supply its mana value outside the layer module; #183
@@ -6131,9 +6137,10 @@ special handling).
 ## #38 FP-037 — CodeRabbit round 1: P/T-only layer-1a modification
 
 **Decision:** `LayerModification::ApplyCopyExceptions(Vec<CopyException>)` is new, layer 1a
-only. Its apply arm runs `apply_exceptions` on the object's current characteristics with those
-characteristics as "own" (so `NotCopied` changes nothing), drops no characteristic-defining
-ability and keeps the mana-value provenance. `modification_effect(exceptions, source, controller,
+only. Its apply arm runs `apply_exceptions` on the object's current characteristics with no "own"
+values (since round 2 `NotCopied` is ignored, see "#38 FP-037 — CodeRabbit round 2: provenance
+export and NotCopied in non-copy modifications"), drops no characteristic-defining ability and
+keeps the mana-value source and copy-as-0 flag (round 2: it carries the colors pin). `modification_effect(exceptions, source, controller,
 origin, timestamp, objects)` builds it (layer 1a, not a CDA, `Affected::Objects`). It orders by
 timestamp like any layer-1a effect: an earlier copy is overridden only in the fields it sets and
 removing that copy restores the object's own values while the set power and toughness stay; a
@@ -6156,3 +6163,98 @@ targets are tracked in #198 (FP-151).
 **Rationale:** The layer-4 CHAR modification is `{"op": <free string>, ...}` with no op
 vocabulary, so the defined part cannot be read without inventing names (R4, R8).
 **Alternatives:** Reading op names now (rejected: would invent a vocabulary #198 owns).
+
+## #38 FP-037 — CodeRabbit round 2: explicit colors carried with the copiable values
+
+**Decision:** `ManaValueProvenance` gains a crate-private `colors_pinned: bool` (false in
+`plain()`) with the public accessor `colors_pinned()`; its docs now say it records how the mana
+value and the colors were derived (the type is not renamed). `CopiableValues` gains the same
+private flag (false in `plain`, `nonmodal_back_face`, `melded`, `merged`) and carries it through
+`provenance()` and `with_provenance`. `apply_exceptions(c, own, exceptions, colors_pinned) ->
+bool` starts from the pin of the values it changes and returns the final pin: `SetColors(_)` and,
+in a copy, `NotCopied(Colors)` set it; nothing clears it; `SetManaCost` re-derives the colors only
+when the pin is false and the colors equal the derivation of the old cost and indicator.
+`copy_with` and `modified` give the source's pin OR the exceptions' final pin. A pinned
+provenance is not plain, so `copiable_effect` builds `CopyValuesWithProvenance` for it and the
+pin survives `copiable_effect` -> `copiable_values` and `Evaluated::mana_value_provenance`. The
+evaluator's `ApplyCopyExceptions` arm starts from the evaluated provenance's pin and stores the
+final pin back (source and copy-as-0 flag unchanged); `CopyValues` and `FaceDown` reset the
+provenance to plain, pin included. `evaluated_digest` encodes the pin after the copy-as-0 flag;
+the tag stays `fineprint.layers.evaluated.v2` because v2 first appears in this PR and no earlier
+v2 encoding exists on `main`, so no persisted digest can disagree. On a green `{2}{G}` source,
+`copy_with(own, [SetColors(GREEN)])` then `copy_with(own, [SetManaCost({1}{W})])` is green with
+cost `{1}{W}`; without the first exception it is white. Limit: a base object's own colors and
+values built by the layout constructors start unpinned, because nothing in a printed object says
+its colors were set by a copy exception; the pin only arises from a copy or modification.
+**Rationale:** CodeRabbit PR #197 (round 2): a per-call flag lost the explicit-versus-derived
+distinction between copies, so a copy of a copy with explicit green and a white cost turned
+white, while CR 707.9b makes the set colors part of the copy's copiable values. Carrying the pin
+in the provenance reuses the round-1 path that already crosses `copiable_effect`, the evaluator,
+the cache and the digest; all existing values and spec equalities without an explicit-colors
+exception are unchanged.
+**Alternatives:** A per-characteristic "derived" bit in `Characteristics` (rejected: a shared
+type outside the owned paths); a separate `ColorProvenance` type on `Evaluated` (rejected: one
+more public field and payload for one bit); bumping the digest tag to v3 (rejected: v2 is not on
+`main` yet).
+
+## #38 FP-037 — CodeRabbit round 2: provenance export and NotCopied in non-copy modifications
+
+**Decision:** (1) `CopiableValues::provenance()` exports the copy-as-0 flag only when `source` is
+`ValueSource::Fixed { .. }`, and `false` for any other source. Back-face values whose public
+`source` is reassigned to `Plain` export a plain provenance, digest like plain values and copy as
+`Plain`; reassigned to `CopyOfBackFaceOrMelded` they still copy as 0 (that source does so
+itself). Genuine back-face and melded values keep the flag; a `Fixed` value without it is
+unchanged. `CopiableValues`' `==` still compares the raw private flag (equality is not
+normalised), so such a reassigned value is not `==` to `CopiableValues::plain` of the same
+characteristics although its provenance is. (2) `apply_exceptions` takes `own:
+Option<&Characteristics>`: `Some(own)` in `copy_with` (unchanged), `None` in
+`CopiableValues::modified` and in the evaluator's `ApplyCopyExceptions` arm, where
+`NotCopied(_)` is skipped completely (no field change, and `NotCopied(Colors)` sets no pin). On a
+3-power object `[SetPower(5), NotCopied(Power)]` and `[NotCopied(Power), SetPower(5)]` both give
+5; `[NotCopied(Colors), SetManaCost(..)]` behaves as the cost alone. The needless clone in the
+evaluator arm is gone.
+**Rationale:** CodeRabbit PR #197 (round 2). (1) `source` is a public field, so the export must
+keep the provenance consistent with it; the mana-value calculation already ignored the flag for
+non-`Fixed` sources. (2) A modification that is not a copy has no original values to keep
+(CR 707.9c concerns copy effects); using the current characteristics as "own" made `NotCopied`
+undo an earlier exception of the same effect. Round 1 already decided that `NotCopied` changes
+nothing in a non-copy modification.
+**Alternatives:** (1) Making `source` private with a setter (rejected: breaks the public field
+the spec tests read); normalising `==` too (rejected: changes existing equality behaviour).
+(2) Rejecting `NotCopied` in `modification_effect` (rejected: an error path for a harmless
+no-op, and `modified` returns no `Result`).
+
+## #38 FP-037 — CodeRabbit round 2: round-trip guarantee qualified
+
+**Decision:** The round trip "registering `copiable_effect(V)` and reading `copiable_values`
+gives `V` back" holds only when no other applicable effect changes the characteristics or the
+provenance before the end of layer 1: a layer-1b `FaceDown` effect (which replaces the
+characteristics and resets the provenance to plain), a later layer-1a copy or modification, or
+an earlier one that is not replaced. The `copiable_values` doc comment and the round-1 entry
+"#38 FP-037 — CodeRabbit round 1: mana-value provenance in layer 1a and Evaluated" say so. A
+unit test shows that with a `FaceDown` effect the read gives the face-down values and plain
+provenance, and without it gives `V` (both timestamp orders).
+**Rationale:** CodeRabbit PR #197 (round 2): the unqualified sentence was false whenever another
+layer-1 effect applies (CR 613.2b, 613.2c).
+**Alternatives:** Making `copiable_values` ignore other effects (rejected: it must report the
+actual copiable values, CR 613.2c).
+
+## #38 FP-037 — CodeRabbit round 2: as-enters P/T settings are Resolved-origin effects
+
+**Decision:** An "as ... enters" or "as ... is turned face up" power and toughness setting
+(CR 208.2b; replacement effects per CR 614.1c and 614.1e) is registered as a layer-1a effect with
+`EffectOrigin::Resolved` (built by `modification_effect`, or `copiable_effect` of
+`CopiableValues::modified`). Once applied it keeps applying after the permanent loses the ability
+that generated it: the evaluator consults `generating_ability_exists` only for `Static` origins.
+The docs of `modification_effect`, `copiable_effect` and `CopiableValues::modified` say so, and a
+unit test shows a `Resolved` setting whose ability is gone still applies (alone, over an earlier
+copy and after that copy is removed) while the same effect with a `Static` origin is dropped.
+Existing tests keep their origins.
+**Rationale:** Rules-researcher answer (CR baseline 2026-11-06): the characteristics chosen or
+determined this way affect the creature's copiable values (CR 208.2b, 707.2, 613.2a); a
+continuous effect from a resolution lasts as stated (CR 611.2a), unlike a static-ability effect
+that applies only while its generator exists (CR 611.3b). The review-body finding on
+`copy_tests.rs` noted that no test checked that the source ability can be lost.
+**Alternatives:** A dedicated origin variant for as-enters effects (rejected: `Resolved` already
+has the needed lifetime); keeping `Static` and having the caller re-register (rejected: the
+evaluator would drop the setting when the ability is lost).
