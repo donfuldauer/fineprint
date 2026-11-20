@@ -360,8 +360,11 @@ fn fd_dfc_base(face: FaceUp) -> Characteristics {
 
 /// REQ-OBJ-003, CR 712.12, 712.12a, 708.3: a double-faced card may enter the battlefield (or be
 /// cast) face down: building the effect directly is not refused and the object has the
-/// profile. Turned face up, it has its front face up (712.12a): the characteristics equal the
-/// layout's front-face base and not the back-face base.
+/// profile. Turning face up removes the layer-1b effect and restores the supplied base, which
+/// this test sets to the layout's front-face base (computed with `FaceUp::Front` and checked to
+/// differ from the back-face base), so the result is the front face and not the back face.
+/// Selecting the front face at the turn-up boundary (712.12a) is the caller's job, since
+/// `turn_face_up` does not choose a face; that selection is not exercised here.
 #[test]
 fn req_obj_003_712_12_dfc_entering_face_down_is_not_refused() {
     let front_base = fd_dfc_base(FaceUp::Front);
