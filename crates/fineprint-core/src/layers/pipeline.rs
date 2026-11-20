@@ -2,7 +2,7 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Per-object evaluation through layers 1a-7d (REQ-LAYER-001, CR 613.1-613.5).
+//! Per-object evaluation through layers 1a-7d (REQ-LAYER-001, REQ-LAYER-002, CR 613.1-613.5).
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -13,6 +13,7 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
+use super::ordering::{OrderRecord, Scratch, run_layer};
 use super::registry::{Affected, ContinuousEffect, ContinuousEffects, LayerModification};
 use crate::objects::Characteristics;
 
@@ -212,13 +213,17 @@ pub fn pt_counter_delta(kind: &str) -> Option<(i64, i64)> {
 }
 
 /// One thing applied within a layer: an effect, or the counters of one kind.
-enum Step<'a> {
+pub(super) enum Step<'a> {
+    /// A continuous effect.
     Effect(EffectId, &'a ContinuousEffect),
+    /// The counters of one kind and their amount.
     Counter(&'a str, i64),
 }
 
-/// The order key of a step: timestamp, then effects before counters, then EffectId or kind.
-fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering {
+/// The order key of a step: timestamp, then effects before counters, then EffectId or kind
+/// (CR 613.7; the tie-break is docs/DECISIONS.md "#32 FP-031 - Ordering, tie-break and P/T
+/// presence").
+pub(super) fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering {
     a.0.cmp(&b.0).then_with(|| match (&a.1, &b.1) {
         (Step::Effect(x, _), Step::Effect(y, _)) => x.cmp(y),
         (Step::Effect(..), Step::Counter(..)) => Ordering::Less,
@@ -227,17 +232,45 @@ fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering 
     })
 }
 
+/// Whether `step` applies to `id` in `state`: an effect by its affected set ([`applies_to`]);
+/// counters always.
+pub(super) fn step_applies(
+    step: &Step<'_>,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    state: &Evaluated,
+) -> bool {
+    match step {
+        Step::Effect(_, effect) => applies_to(effect, env, id, state),
+        Step::Counter(..) => true,
+    }
+}
+
+/// Applies `step` to `scratch` (its affected set already checked).
+pub(super) fn apply_step(scratch: &mut Scratch, step: &Step<'_>) {
+    match step {
+        Step::Effect(_, effect) => {
+            apply_effect(&mut scratch.state, &mut scratch.pt, &effect.modification);
+        }
+        Step::Counter(kind, amount) => {
+            apply_counter(&mut scratch.state, &mut scratch.pt, kind, *amount);
+        }
+    }
+}
+
 /// Evaluates `id`: its base characteristics through layers 1a, 1b, 2, 3, 4, 5, 6, 7a, 7b, 7c and
-/// 7d (REQ-LAYER-001, CR 613.1). Pure: nothing is mutated, the base included.
+/// 7d (REQ-LAYER-001, CR 613.1). Pure: nothing is mutated, the base included. Equal to the
+/// [`Evaluated`] of [`evaluate_with_order`].
 ///
-/// Within a layer, steps apply in ascending timestamp (CR 613.2, 613.3, 613.4, 613.7); at equal
-/// timestamps effects come before counters, effects by ascending [`EffectId`], counters by
-/// ascending kind. Keyword counters, variants included ([`keyword_counter_keyword`]), apply in
-/// layer 6 (CR 122.1b, 613.1f), granting their full kind string as the keyword; P/T counters
-/// apply in layer 7c (CR 122.1a, 613.4c), and change power and toughness only when the object is
-/// a creature after layers 1-6 (a noncreature card with printed P/T off the battlefield keeps its
-/// printed values; effects of layer 7 still apply to it). Each counter kind applies at its
-/// counter timestamp. Layer 7 is the last layer.
+/// Within a layer, steps apply in the REQ-LAYER-002 order ([`evaluate_with_order`]): with no
+/// characteristic-defining effect and no dependency, ascending timestamp (CR 613.2, 613.3,
+/// 613.4, 613.7); at equal timestamps effects come before counters, effects by ascending
+/// [`EffectId`], counters by ascending kind. Keyword counters, variants included
+/// ([`keyword_counter_keyword`]), apply in layer 6 (CR 122.1b, 613.1f), granting their full kind
+/// string as the keyword; P/T counters apply in layer 7c (CR 122.1a, 613.4c), and change power
+/// and toughness only when the object is a creature after layers 1-6 (a noncreature card with
+/// printed P/T off the battlefield keeps its printed values; effects of layer 7 still apply to
+/// it). Each counter kind applies at its counter timestamp. Layer 7 is the last layer.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -246,21 +279,47 @@ pub fn evaluate(
     env: &dyn LayerEnvironment,
     id: ObjectId,
 ) -> Result<Evaluated, LayerError> {
+    evaluate_with_order(effects, env, id).map(|(evaluated, _)| evaluated)
+}
+
+/// [`evaluate`], also returning the order in which the steps were used (REQ-LAYER-002).
+///
+/// Within each layer or sublayer: in layers 2-6, effects from characteristic-defining abilities
+/// apply before all others (CR 613.3); then, repeatedly, the unapplied step that depends on no
+/// other unapplied step and has the earliest ordering key applies, dependency being found by
+/// trial application on a scratch copy (CR 613.8a, 613.8b); a dependency loop is applied in
+/// timestamp order, one member at a time; the relation is recomputed after every application
+/// (CR 613.8c). Counters are steps like effects, at their counter timestamp (CR 613.7c), and are
+/// never characteristic-defining.
+///
+/// # Errors
+/// [`LayerError::UnknownObject`] if the environment has no base for `id`.
+pub fn evaluate_with_order(
+    effects: &ContinuousEffects,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+) -> Result<(Evaluated, OrderRecord), LayerError> {
     // CR 613.1: start with the actual object.
     let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
     let on_battlefield = base.on_battlefield;
-    let mut state = Evaluated {
-        characteristics: base.characteristics,
-        controller: base.controller,
+    // `pt` is `None` until layer 7 starts or when the object has no power and toughness.
+    let mut scratch = Scratch {
+        state: Evaluated {
+            characteristics: base.characteristics,
+            controller: base.controller,
+        },
+        pt: None,
     };
     let counters = env.counters(id);
     let counter_ts =
         |kind: &str| -> Timestamp { env.counter_timestamp(id, kind).unwrap_or(Timestamp::new(0)) };
-    // `None` until layer 7 starts or when the object has no power and toughness.
-    let mut pt: Option<(i64, i64)> = None;
+    let mut record = OrderRecord {
+        object: id,
+        steps: Vec::new(),
+    };
     for &layer in Layer::ALL {
         if layer == Layer::L7a {
-            pt = start_layer_7(&mut state, env, id, on_battlefield);
+            scratch.pt = start_layer_7(&mut scratch.state, env, id, on_battlefield);
         }
         let mut steps: Vec<(Timestamp, Step<'_>)> = effects
             .iter()
@@ -276,23 +335,14 @@ pub fn evaluate(
                 _ => false,
             };
             if applies {
+                // CR 613.7c: counters apply at their counter timestamp.
                 steps.push((counter_ts(kind), Step::Counter(kind, amount)));
             }
         }
-        // CR 613.2, 613.3, 613.4, 613.7: timestamp order within the layer or sublayer.
-        steps.sort_by(step_order);
-        for (_, step) in steps {
-            match step {
-                Step::Effect(_, effect) => {
-                    if applies_to(effect, env, id, &state) {
-                        apply_effect(&mut state, &mut pt, &effect.modification);
-                    }
-                }
-                Step::Counter(kind, amount) => apply_counter(&mut state, &mut pt, kind, amount),
-            }
-        }
+        // CR 613.2, 613.3, 613.4, 613.7, 613.8: the order within the layer or sublayer.
+        run_layer(layer, steps, env, id, &mut scratch, &mut record.steps);
     }
-    Ok(state)
+    Ok((scratch.state, record))
 }
 
 /// Evaluates every object of `env.objects()`, in that order; equal to [`evaluate`] for each.
