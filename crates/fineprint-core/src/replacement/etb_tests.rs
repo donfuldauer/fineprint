@@ -2198,3 +2198,372 @@ fn req_event_001_lookahead_state_cap() {
     assert_eq!(out.result, Err(ChoiceError::NotPending));
     assert_eq!(out.asked.len(), 1);
 }
+
+// ---------------------------------------------------------------------------------------------
+// PR #202 review round 2 (G1-G5)
+// ---------------------------------------------------------------------------------------------
+
+/// An environment whose selectors mean "artifacts the effect's controller controls" (matched
+/// through `MatchContext::effect_controller`); everything else is the inner [`Env`].
+#[derive(Clone, Debug)]
+struct YourArtifacts {
+    inner: Env,
+}
+
+impl LayerEnvironment for YourArtifacts {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.inner.objects()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.inner.base(id)
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.inner.counters(id)
+    }
+
+    fn matches(&self, _: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        ctx.candidate_view
+            .characteristics
+            .card_types
+            .contains("Artifact")
+            && ctx.candidate_view.controller == Some(ctx.effect_controller)
+    }
+}
+
+/// REQ-EVENT-001, CR 707.5 (G1, thread 4647215310): a copy model controlled by player 1
+/// declares the selector static "artifacts you control are creatures"; an entrant controlled by
+/// player 2 that enters as the copy has the static as its own, so it applies with the entrant's
+/// controller: the entrant projects as a creature and a creature-gated ETB effect applies. The
+/// same-controller case is unchanged.
+#[test]
+fn req_event_001_copied_static_takes_entrant_controller() {
+    let your_artifacts_are_creatures = ContinuousEffect {
+        affected: Affected::Selector(ObjectSelectorAST::Ref(
+            fineprint_dsl::expr::ReferenceAST::SelfRef,
+        )),
+        ..add_type(Some(o(77)), o(77), "Creature")
+    };
+    assert_eq!(your_artifacts_are_creatures.controller, p(1));
+    let mut fx = effects(vec![
+        copy_of(1, artifact("test.etb_model_artifact")),
+        creature_tapped(2),
+    ]);
+    fx.set_copy_abilities(
+        e(1),
+        CopyAbilities {
+            statics: vec![(e(400), your_artifacts_are_creatures)],
+            etb: Vec::new(),
+        },
+    )
+    .unwrap();
+    let continuous = ContinuousEffects::new();
+    for controller in [p(2), p(1)] {
+        let mut inner = Env::default().with(o(1), artifact("test.etb_card_a"));
+        inner.bases.get_mut(&o(1)).unwrap().controller = Some(controller);
+        let env = YourArtifacts { inner };
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        let en = entry(o(1), controller);
+        let after = project(&ctx, &en, &applied(&[1])).unwrap();
+        assert_eq!(
+            after.evaluated.characteristics.card_types,
+            set(["Artifact", "Creature"]),
+            "controller {controller:?}"
+        );
+        assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![e(2)]));
+        let out = drive(&ctx, std::slice::from_ref(&en), &no_limit(), &[]);
+        let r = &out.result.unwrap()[0];
+        assert_eq!(r.projected.applied.order, vec![e(1), e(2)]);
+        assert!(r.projected.tapped);
+    }
+}
+
+/// REQ-EVENT-001, CR 613.1d, CR 208.3 (G2, thread 4647215321): the layer-4 type addition of an
+/// applied `AddCardTypes` is not a static ability's effect, so the environment's
+/// generating-ability hook is never consulted for it: with a hook answering false for every
+/// effect, a printed-3/2 artifact still projects as a 3/2 artifact creature and a creature-gated
+/// effect applies; with the hook true, the same.
+#[test]
+fn req_event_001_added_type_ignores_generating_ability_hook() {
+    let env = Env::default().with(o(1), card("test.etb_artifact_3_2", "Artifact", 3, 2));
+    let fx = effects(vec![
+        EtbEffect::new(e(1), EtbAction::AddCardTypes(set(["Creature"]))),
+        creature_tapped(2),
+    ]);
+    let continuous = ContinuousEffects::new();
+    let never = Hooked {
+        inner: env.clone(),
+        exists: |_, _| false,
+    };
+    let always = Hooked {
+        inner: env,
+        exists: |_, _| true,
+    };
+    for layer_env in [&never as &dyn LayerEnvironment, &always] {
+        let ctx = EtbContext {
+            env: layer_env,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        let en = entry(o(1), p(1));
+        let c = project(&ctx, &en, &applied(&[1]))
+            .unwrap()
+            .evaluated
+            .characteristics;
+        assert_eq!(c.card_types, set(["Artifact", "Creature"]));
+        assert_eq!(c.power.as_ref().and_then(literal_of), Some(3));
+        assert_eq!(c.toughness.as_ref().and_then(literal_of), Some(2));
+        assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![e(2)]));
+        let out = drive(&ctx, std::slice::from_ref(&en), &no_limit(), &[]);
+        let r = &out.result.unwrap()[0];
+        assert_eq!(r.projected.applied.order, vec![e(1), e(2)]);
+        assert!(r.projected.tapped);
+    }
+}
+
+/// REQ-EVENT-001, CR 614.12b (G3, thread 4647215332): a `Choose` with no options is refused by
+/// `add` (`EmptyChoice`, the set unchanged), so a later entrant can no longer carry a choice that
+/// the lookahead would reserve nothing for; a single cost-0 option is accepted and payable with
+/// a zero budget (not asked).
+#[test]
+fn req_event_001_empty_choice_rejected() {
+    let mut fx = effects(vec![
+        EtbEffect::new(
+            e(1),
+            choose(
+                "a",
+                EtbChoiceKind::Color,
+                vec![opt("cheap_a", 1), opt("dear_a", 3)],
+            ),
+        )
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+    ]);
+    let before = fx.clone();
+    let empty = EtbEffect::new(e(2), choose("b", EtbChoiceKind::Color, Vec::new()))
+        .with_source(o(2))
+        .with_scope(EtbScope::ThisPermanent);
+    assert_eq!(fx.add(empty), Err(EtbError::EmptyChoice(e(2))));
+    assert_eq!(fx, before);
+    assert!(fx.get(e(2)).is_none());
+    assert!(!EtbError::EmptyChoice(e(2)).to_string().is_empty());
+
+    // A single cost-0 option is accepted and payable with nothing left.
+    fx.add(
+        EtbEffect::new(
+            e(3),
+            choose("c", EtbChoiceKind::Color, vec![opt("free_c", 0)]),
+        )
+        .with_source(o(2))
+        .with_scope(EtbScope::ThisPermanent),
+    )
+    .unwrap();
+    let env = Env::default()
+        .with(o(1), artifact("test.etb_card_a"))
+        .with(o(2), artifact("test.etb_card_b"));
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let entries = [entry(o(1), p(1)), entry(o(2), p(1))];
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 3)].into();
+    let out = drive(&ctx, &entries, &budget, &[text("dear_a")]);
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(out.asked[0].payload, texts(&["cheap_a", "dear_a"]));
+    let r = out.result.unwrap();
+    assert_eq!(
+        r[1].memory.choice("c"),
+        Some(&ChoiceValue::Color("free_c".to_owned()))
+    );
+}
+
+/// `k` chained type additions (effect `i` adds `T<i>` once the projection has `T<i-1>`; effect
+/// 1 always applies), then a mandatory cost-1 choice gated on `T<k>`. From the start, the
+/// reachable lookahead states of one entry are the `k + 1` prefixes of the chain plus the
+/// state after the choice: `k + 2`.
+fn type_chain(k: u64) -> EtbEffects {
+    let mut list: Vec<EtbEffect> = (1..=k)
+        .map(|i| {
+            let fx = EtbEffect::new(e(i), EtbAction::AddCardTypes(set_of(&format!("T{i}"))));
+            if i == 1 {
+                fx
+            } else {
+                fx.with_condition(EtbCondition::HasCardType(format!("T{}", i - 1)))
+            }
+        })
+        .collect();
+    list.push(
+        EtbEffect::new(
+            e(k + 1),
+            choose("end", EtbChoiceKind::Color, vec![opt("x", 1)]),
+        )
+        .with_condition(EtbCondition::HasCardType(format!("T{k}"))),
+    );
+    effects(list)
+}
+
+fn set_of(item: &str) -> BTreeSet<String> {
+    [item.to_owned()].into_iter().collect()
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, CR 614.12b (G4, thread 4647215338): states are charged when
+/// entered, so a deep chain is bounded too: 4094 chained additions plus the choice reach exactly
+/// 4096 states (resolves, the choice applied without a request), 4095 reach 4097 (the procedure
+/// error, no request, no stack overflow in the normal test thread).
+#[test]
+fn req_event_001_lookahead_deep_chain_bounded() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let continuous = ContinuousEffects::new();
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 1)].into();
+    let en = [entry(o(1), p(1))];
+
+    let fx = type_chain(4095);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert!(out.asked.is_empty());
+    let msg = procedure_message(out.result);
+    assert!(msg.contains("lookahead"), "{msg}");
+    assert!(msg.contains("exceeds 4096 states"), "{msg}");
+
+    let fx = type_chain(4094);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert!(out.asked.is_empty());
+    let r = out.result.unwrap();
+    assert_eq!(r[0].projected.applied.effects.len(), 4095);
+    assert_eq!(
+        r[0].memory.choice("end"),
+        Some(&ChoiceValue::Color("x".to_owned()))
+    );
+}
+
+/// `n` independent free type additions and one independent cost-1 choice: `2^(n+1)` states,
+/// each reachable through many orders.
+fn free_adds_and_choice(n: u64) -> EtbEffects {
+    let mut list: Vec<EtbEffect> = (1..=n)
+        .map(|i| EtbEffect::new(e(i), EtbAction::AddCardTypes(set_of(&format!("T{i}")))))
+        .collect();
+    list.push(EtbEffect::new(
+        e(n + 1),
+        choose("end", EtbChoiceKind::Color, vec![opt("x", 1)]),
+    ));
+    effects(list)
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, CR 614.12b, CR 616.1f (G4, thread 4647215338): memo hits are
+/// free: 11 independent free additions and one choice reach exactly 4096 states (2^12) through
+/// 1 + 12 * 2^11 = 24577 visits, and stay within the limit (the order request is issued); with
+/// one more addition (8192 states) the limit is exceeded.
+#[test]
+fn req_event_001_lookahead_memo_hits_free() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let continuous = ContinuousEffects::new();
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 1)].into();
+    let en = [entry(o(1), p(1))];
+    let fx = free_adds_and_choice(11);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert_eq!(out.result, Err(ChoiceError::NotPending));
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(
+        out.asked[0].choice_type,
+        ChoiceType::ChooseReplacementEffect
+    );
+    let fx = free_adds_and_choice(12);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert!(out.asked.is_empty());
+    let msg = procedure_message(out.result);
+    assert!(msg.contains("lookahead") && msg.contains("exceeds 4096 states"));
+}
+
+/// REQ-EVENT-001, CR 614.12a (G5, thread 4647215344): every entry's starting projection is
+/// checked before any reserve or request: an unknown second entrant, or one whose own static
+/// duplicates an id in force, fails the call before the first entry's choice of two free values
+/// is asked, with or without a budget (through a `ChoiceSession`: no request is ever pending).
+/// Valid entries are unchanged.
+#[test]
+fn req_event_001_every_start_validated_before_requests() {
+    let env = Env::default()
+        .with(o(1), artifact("test.etb_card_a"))
+        .with(o(2), artifact("test.etb_card_b"));
+    let fx = effects(vec![
+        EtbEffect::new(
+            e(1),
+            choose(
+                "a",
+                EtbChoiceKind::Color,
+                vec![opt("free_a", 0), opt("free_b", 0)],
+            ),
+        )
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+    ]);
+    let mut continuous = ContinuousEffects::new();
+    continuous
+        .register(e(500), add_subtype(o(2), "Golem"))
+        .unwrap();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let unknown = entry(o(9), p(1));
+    let duplicate = EtbEntry {
+        own_statics: vec![(e(500), add_subtype(o(2), "Wall"))],
+        ..entry(o(2), p(1))
+    };
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 5)].into();
+    for (second, expected) in [
+        (unknown, EtbError::Layer(LayerError::UnknownObject(o(9)))),
+        (
+            duplicate,
+            EtbError::Layer(LayerError::DuplicateEffect(e(500))),
+        ),
+    ] {
+        let entries = [entry(o(1), p(1)), second];
+        for payable in [&budget, &no_limit()] {
+            let out = drive(&ctx, &entries, payable, &[text("free_a")]);
+            assert!(out.asked.is_empty(), "{expected:?} {payable:?}");
+            assert_eq!(
+                out.result,
+                Err(ChoiceError::Procedure(expected.to_string()))
+            );
+        }
+    }
+    // Valid entries: the first choice is asked as before.
+    let entries = [entry(o(1), p(1)), entry(o(2), p(1))];
+    for payable in [&budget, &no_limit()] {
+        let out = drive(&ctx, &entries, payable, &[text("free_b")]);
+        assert_eq!(out.asked.len(), 1);
+        assert_eq!(out.asked[0].payload, texts(&["free_a", "free_b"]));
+        let r = out.result.unwrap();
+        assert_eq!(
+            r[0].memory.choice("a"),
+            Some(&ChoiceValue::Color("free_b".to_owned()))
+        );
+    }
+}
