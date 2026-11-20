@@ -5138,3 +5138,170 @@ touches every caller and test and is out of scope for this round.
 **Alternatives:** Counters inside `StateTriggers` keyed by (source, ability id) and a `turn`
 parameter (rejected for this round: a signature change to a public method; recommended as the
 first item of the integration unit); a P8 item (rejected: a design choice, not a human task).
+
+## #32 FP-031 — Layer pipeline API and modification set
+
+**Decision:** `fineprint_core::layers` evaluates a closed Rust enum `LayerModification` (layer
+1a `CopyValues`, 1b `FaceDown`, 2 `SetController`, 3 `SetText`, 4 `AddTypes`/`SetTypes`/
+`RemoveSubtypes`, 5 `SetColors`/`AddColors`, 6 `AddAbility`/`RemoveAllAbilities`/`RemoveKeyword`,
+7a and 7b `SetPt`, 7c `ModifyPt`, 7d `SwitchPt`), not DSL `Modification.op` strings; the table is
+`LayerModification::belongs_to` and `ContinuousEffects::register` enforces it
+(`LayerError::LayerMismatch`). The module is standalone: it is not wired into `GameState`, the
+Merkle layout or the state hash, and `state::EffectRegistry` is untouched. Besides the contract
+names it exports the helpers `KEYWORD_COUNTER_KINDS`, `keyword_counter_ability`, `literal`,
+`literal_of` and `pt_counter_delta`. The `IdGenerator<Timestamp>` parameters are named `ids`,
+because `gen` is a reserved keyword in edition 2024 (the types are exactly the contract's).
+
+**Rationale:** Decision "#13 FP-012" keeps `Modification.op` an open string with the layer-order
+checks in the toolchain, so the engine needs its own closed set; a Rust enum makes an op in the
+wrong layer unrepresentable after registration. The set is the minimum that covers each layer and
+sublayer (CR 613.1, 613.2, 613.4) with the brief's tests.
+
+**Alternatives:** Interpret DSL `Modification` values directly (rejected: open op strings, and
+compiling DSL to the enum belongs to the integration unit); wire into `GameState` now (rejected:
+out of scope for this issue).
+
+## #32 FP-031 — Placeholder DSL trees in `Characteristics`
+
+**Decision:** `Characteristics.abilities`, `power`, `toughness` and `rules_text` are the
+placeholder JSON wrappers of `fineprint_dsl::card` (`AbilityAST(Value)`,
+`ValueExpressionAST(Value)`), not the real `fineprint_dsl::ability::AbilityAST` and
+`fineprint_dsl::expr::ValueExpressionAST`. The brief's "`AbilityAST::Keyword` with `keyword` = kind
+and `base.ability_id` = `counter:<kind>`" is therefore the JSON object
+`{"kind":"KEYWORD","abilityId":"counter:<kind>","keyword":"<kind>"}` (the wire form of a
+keyword instance); `RemoveKeyword(k)` removes every ability whose JSON object has
+`"kind":"KEYWORD"` and `"keyword":k`. "`ValueExpressionAST::Literal(n)`" is the bare JSON integer
+`n` (the form the layouts and objects tests already use for printed P/T); `literal_of` also
+reads `{"LITERAL": n}`. `LayerEnvironment::eval_value` takes the placeholder type, since that is
+what a base value holds.
+
+**Rationale:** `Characteristics` belongs to the objects unit and may not change here; the
+placeholder wrappers are what an evaluated object can hold. The JSON shapes match the DSL wire
+format, so the later switch to real ASTs is mechanical.
+
+**Alternatives:** Change `Characteristics` to the real ASTs (rejected: another unit's file and a
+breaking change); a side list of keyword counters outside `abilities` (rejected: LKI and every
+consumer read `abilities`).
+
+## #32 FP-031 — Ordering, tie-break and P/T presence
+
+**Decision:** Layers apply in `Layer::ALL` order (1a, 1b, 2, 3, 4, 5, 6, 7a, 7b, 7c, 7d; there is
+nothing after 7d). Within a layer, steps sort by timestamp; at equal timestamps effects come
+before counters, effects by ascending `EffectId`, counters by ascending kind. `is_cda` is stored
+and ignored. A missing counter timestamp is `Timestamp::new(0)`; counters with amount below 1 are
+ignored. P/T presence is decided once at the start of layer 7 with `pt_applies(on_battlefield)`;
+when the object has no P/T the evaluated `power` and `toughness` are `None` (so a noncreature
+permanent with printed P/T evaluates to `None`, CR 208.3) and 7a-7d change nothing. When it has
+P/T, both are written back as literals after every step, so a later selector sees the current
+values. Arithmetic saturates instead of overflowing. P/T counters change power and toughness only
+when the object's card types after layers 1-6 include Creature (CR 122.1a), so a noncreature card
+with printed P/T off the battlefield keeps its printed values while layer-7 effects still apply
+to it (CodeRabbit round 1, comment 4637189743).
+
+**Rationale:** The tie-break is the classifier's (brief: "do not revisit"); CDA-first and 613.8
+are later units. Reading "otherwise they are left None" as "the evaluated values are None" keeps
+the result consistent with CR 208.3 for consumers that do not call `pt_applies` themselves.
+
+**Alternatives:** Keep the printed values on a noncreature permanent (rejected: a consumer would
+see P/T the object does not have); order equal timestamps by registration order (rejected:
+registration order must not change results, R3).
+
+## #32 FP-031 — `sameAsLayer` rejected
+
+**Decision:** `ContinuousEffects::register` rejects `Affected::SameAsLayer(_)` with
+`LayerError::Unsupported`; evaluation treats it as applying to nothing (unreachable through the
+API).
+
+**Rationale:** CR 613.6 lock-in is a later unit (SRS 6.3, decision "#14 FP-013"); silently
+treating it as a selector or as an empty set would give wrong results.
+
+**Alternatives:** Accept and ignore (rejected: silent wrong answers).
+
+## #32 FP-031 — Timestamp ledger behaviour
+
+**Decision:** Every ledger operation and helper that issues timestamps works on a clone of the
+generator (and of the ledger or registry) and commits only on success, so `IdExhausted` leaves
+the ledger, the registry and the generator unchanged, also when the generator runs out in the
+middle (an object stamped but its stickers not). `StampReason` does not change behaviour
+(CR 613.7d-j each give one new timestamp). In `stamp_objects_simultaneously` each object's
+stickers are stamped right after that object, before the next object (CR 613.7k with 613.7m).
+`restamp_static_effects` gives granted effects (`granted_at: Some(_)`) whose current timestamp is
+later than the old object timestamp new stamps from the generator in ascending (old timestamp, `EffectId`) order;
+it does not check that they exceed `new_object_ts` (true whenever the caller issued
+`new_object_ts` from the same generator first). `static_effect_timestamp` returns `object_ts` for
+`Resolved`. The current effect timestamp, not `granted_at` (which never changes), decides which
+granted effects followed the host and which follow the granting effect, so a second and third
+re-stamp keep the CR 613.7a relative order (CodeRabbit round 1, comment 4637189775).
+
+**Rationale:** All-or-nothing keeps the single monotonic counter and the ledger consistent
+(REQ-CORE-002). The brief fixes the rest.
+
+**Alternatives:** Let the generator advance on a failed operation (rejected: a gap is harmless
+but an unchanged state is easier to reason about and to test).
+
+## #32 FP-031 — Keyword counter variants
+
+**Decision:** `keyword_counter_keyword(kind)` is the one classifier for keyword counters used by
+both the layer-6 step selection and `apply_counter`: `Some(kind)` for one of the fifteen
+`KEYWORD_COUNTER_KINDS`, or for one of them followed by exactly one ASCII space and a non-empty
+parameter that does not itself start with a space ("hexproof from red"); `None` otherwise ("ward",
+"ward 2", "flyingx", "hexproofish", "hexproof ", "hexproof  from red", and any case variation).
+The granted ability keeps the full kind string as its keyword and in its ability id
+(CodeRabbit round 1, comment 4637189536).
+
+**Rationale:** CR 122.1b includes "any variants of those keywords"; the brief fixes the
+name-space-parameter shape. Rejecting an empty parameter and a doubled space keeps malformed
+kinds from becoming keywords no rule names. Matching is case-sensitive like the counter kinds
+themselves.
+
+**Alternatives:** Accept any suffix after the space, including empty or space-led (rejected:
+"hexproof " would grant a keyword that is neither hexproof nor a variant).
+
+## #32 FP-031 — Follow-up work for later units
+
+**Decision:** Left for later issues: (1) wire `ContinuousEffects` and `TimestampLedger` into
+`GameState`, its Merkle layout and the state hash, replacing the placeholder
+`state::EffectRegistry`; (2) switch the call sites that build a `CharacteristicsProvider` or read
+raw counters (events, triggers, replacement, zones, LKI capture) to `LayeredProvider` and the
+evaluated characteristics; (3) CR 613.8 dependency ordering; (4) characteristic-defining
+abilities first (CR 613.3, 613.4a) using the stored `is_cda`; (5) CR 613.6 lock-in
+(`sameAsLayer`); (6) the cached evaluation mode and the cached-versus-full-recompute differential
+check (REQ-LAYER-005); (7) the passes after the layers (CR 613.10, 613.11); (8) compiling DSL
+characteristic effects into `LayerModification` and word-level text changes (CR 612); (9) effect durations and
+expiry; (10) CDA-first ordering (CR 613.3, 613.4a) and CR 613.8 dependency recomputation,
+including recomputing dependencies as effects apply: #33 FP-032 (CodeRabbit comments 4637189551,
+4637189562); (11) multi-layer affected-set retention (CR 613.6), requiring `Affected::Objects`
+for `EffectOrigin::Resolved` effects that modify characteristics or control (CR 611.2c), and
+checking that a static effect's source still has the ability when the effect first applies
+(CR 613.6, 611.3b): #34 FP-033 (comments 4637189504, 4637189573, 4637189588); (12) passing the
+evaluated state (current controller, earlier-layer results of other objects) to non-literal CDA
+value expressions (`LayerEnvironment::eval_value`), which needs layer-major evaluation across
+objects after #33: #186 FP-146 (comment 4637189737); (13) exposing the evaluated controller
+through `LayeredProvider` before LKI capture reads it: #184 FP-145 (comment 4637189755); (14)
+sticker timestamps when an object becomes a component of a merged permanent (CR 613.7k, 123.5b;
+a merge operation taking both ids): the merged-permanent unit #65 FP-063 (comment 4637189771).
+
+**Rationale:** Out of scope per the brief; listed so the plan can pick them up.
+
+**Alternatives:** None.
+
+## #32 FP-031 — RemoveKeyword and hexproof variants
+
+**Decision:** `LayerModification::RemoveKeyword(k)` removes every keyword ability whose keyword
+is `k` exactly and, for `k` = "hexproof" only, every variant "hexproof from [quality]" (the
+name, one ASCII space, a non-empty parameter not starting with a space; the same `is_variant_of`
+helper the keyword-counter classifier uses). The list of such keywords is the private const
+`REMOVAL_REMOVES_VARIANTS = ["hexproof"]`. `RemoveKeyword("hexproof from red")` stays exact.
+Implemented in this unit (CodeRabbit round 2, outside-diff comment on `pipeline.rs`).
+
+**Rationale:** CR 702.11e states that an effect that makes an object lose hexproof makes it lose
+all "hexproof from [quality]" abilities; the baseline states removal-removes-variants for
+hexproof only, so protection, landwalk and the other keyword-counter keywords stay exact. The
+other two clauses of 702.11e (targeting a creature as though it didn't have hexproof, and an
+effect that looks for a card with hexproof) belong to target legality and DSL predicate
+evaluation, not the layer pipeline: they are left to #52 FP-050 (target legality) and #57
+FP-055 (predicate evaluation).
+
+**Alternatives:** Leave `RemoveKeyword` exact and defer 702.11e to DSL compilation (rejected:
+the classifier already exists and the review asked for it); remove variants of every keyword
+(rejected: no CR rule says so for other keywords).
