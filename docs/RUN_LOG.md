@@ -353,3 +353,10 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 04-layers | #34 (PR #188 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | workspace 3089 passed; fmt, clippy, guard clean | duplicate pass before layer pass; SameAsLayer only to first-layer anchor; unit order-record check; 2 DECISIONS entries |
 | 04-layers | #34 (PR #188 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | spec_layers_lockin 33 passed | F3 order-record assertions; F1/F2 black-box tests (j_*) |
 | 04-layers | #34 (PR #188 review round 1) | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy, guard clean; workspace 3089 passed 0 failed 0 ignored; core 98.88 %, lockin.rs 100 %; owned paths clean per commit; no test weakened vs e1e2cfd | head 490b296; threads 4638613299, 4638613308, 4638613318 replied and resolved |
+| 04-layers | #35 | work-classifier | Sonnet 5.5 | 1 | needs-rules | — | T2 planned; 6 CR questions (613.10, 613.11, 601.2f, 613.7/613.8, 101.2, hand size and land plays) |
+| 04-layers | #35 | rules-researcher | Sonnet 5.5 | 1 | answered | — | CR 2026-11-06 quotes; max hand size is 613.11; SRS §6.4 wording fix queued (P8) |
+| 04-layers | #35 | work-classifier | Sonnet 5.5 | 2 | routed | — | T2 Opus 5.5 Implementer + Independent Tester |
+| 04-layers | #35 | Implementer | Opus 5.5 | 1 | done | fmt, clippy, guard, cr check clean; core 98.89 % | post-layer passes A and B, RuleSet, 601.2f cost stages; 7 DECISIONS entries |
+| 04-layers | #35 | Independent Tester | Opus 5.5 | 1 | done | 46/47; F1 brief error on dependency loops | spec_layers_post_* (5 files) |
+| 04-layers | #35 | Fixer (tester) | Opus 5.5 | 1 | done | workspace 3156 passed 0 failed | F1: brief corrected per CR 613.8b (DECISIONS "#35 FP-034 - An effect that depends on a dependency loop waits for it") |
+| 04-layers | #35 | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy, guard, cr check clean; workspace 3156 passed 0 failed 0 ignored; core 98.89 %; owned paths clean per commit; F1 correction weakened nothing vs fc230cc | head ce027e2 |
