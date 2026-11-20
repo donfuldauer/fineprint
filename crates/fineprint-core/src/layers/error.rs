@@ -32,6 +32,9 @@ pub enum LayerError {
     DuplicateObject(ObjectId),
     /// The timestamp generator is exhausted (REQ-CORE-002).
     IdExhausted,
+    /// A `SameAsLayer` part of an effect group has no anchor: no other part of the named layer,
+    /// or that layer is not strictly earlier than the part's own (CR 613.6).
+    BadLink(EffectId),
 }
 
 impl fmt::Display for LayerError {
@@ -53,6 +56,11 @@ impl fmt::Display for LayerError {
                 write!(f, "object {} appears twice in the batch", id.get())
             }
             LayerError::IdExhausted => f.write_str("timestamp space exhausted"),
+            LayerError::BadLink(id) => write!(
+                f,
+                "effect {} links to no part of an earlier layer of its group",
+                id.get()
+            ),
         }
     }
 }
