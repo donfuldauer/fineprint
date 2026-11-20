@@ -766,7 +766,8 @@ fn lockin_survives_removal_of_generating_ability() {
 }
 
 // REQ-LAYER-003, CR 613.6: when the anchor does not apply (its generating ability is already
-// gone in layer 4), the linked part does not apply either.
+// gone in layer 4), the linked part does not apply either: the order record shows both the
+// anchor step and the linked layer-7b step as not applied.
 #[test]
 fn lockin_anchor_without_generator_links_nothing() {
     let mut env = Env::default().with(o(1), object("test.no_generator", &["Artifact"], None));
@@ -789,9 +790,18 @@ fn lockin_anchor_without_generator_links_nothing() {
         ]),
     )
     .unwrap();
-    let out = eval(&r, &env, o(1));
+    let (out, record) = evaluate_with_order(&r, &env, o(1)).unwrap();
     assert!(!out.characteristics.card_types.contains("Creature"));
     assert_eq!(pt_of(&out.characteristics), None);
+    let applied = |id: u64| {
+        record
+            .steps
+            .iter()
+            .find(|s| s.item == OrderItem::Effect(e(id)))
+            .map(|s| s.applied)
+    };
+    assert_eq!(applied(1), Some(false));
+    assert_eq!(applied(2), Some(false));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1390,6 +1400,184 @@ fn part_order_never_changes_result() {
             assert_eq!(view(3).colors, ColorBitmask::BLACK);
             assert_eq!(pt_of(view(3)), None);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Links follow only the first-layer anchor (CR 613.6, 611.2c; INFERENCE, docs/DECISIONS.md)
+// ---------------------------------------------------------------------------------------------
+
+/// o1 artifact creature 1/1 (set A), o2 land creature 2/2 (set B), o3 bystander creature 3/3,
+/// o9 the static source.
+fn chains_env() -> Env {
+    Env::default()
+        .with(
+            o(1),
+            object(
+                "test.artifact_creature_1_1",
+                &["Artifact", "Creature"],
+                Some((1, 1)),
+            ),
+        )
+        .with(
+            o(2),
+            object(
+                "test.land_creature_2_2",
+                &["Land", "Creature"],
+                Some((2, 2)),
+            ),
+        )
+        .with(
+            o(3),
+            object("test.creature_3_3", &["Creature"], Some((3, 3))),
+        )
+        .with(o(9), object("test.static_source", &["Enchantment"], None))
+}
+
+/// L4 Selector(artifacts) (the first layer), L5 independent Selector(lands), L7c +1/+1 linked
+/// to `linked_to`.
+fn chains_parts(make: Make, linked_to: Layer) -> Vec<(EffectId, ContinuousEffect)> {
+    group(vec![
+        (
+            1,
+            make(
+                Layer::L4,
+                1,
+                Affected::Selector(of_type("Artifact")),
+                add_types(&[], &["Synthkin"]),
+            ),
+        ),
+        (
+            2,
+            make(
+                Layer::L5,
+                1,
+                Affected::Selector(of_type("Land")),
+                LayerModification::SetColors(ColorBitmask::WHITE),
+            ),
+        ),
+        (3, make(Layer::L7c, 1, same(linked_to), modify(1, 1))),
+    ])
+}
+
+// REQ-LAYER-003, CR 613.6, 611.2c: a link to an independent part that is not in the group's
+// first layer is rejected with BadLink (static and resolved groups); the registry is unchanged.
+#[test]
+fn link_to_non_first_layer_is_rejected() {
+    let env = chains_env();
+    let mut r = ContinuousEffects::new();
+    r.register(e(100), res(Layer::L7c, 1, objects(&[o(3)]), modify(1, 1)))
+        .unwrap();
+    let before = r.clone();
+    for make in [static_of_o9 as Make, res] {
+        assert_eq!(
+            r.register_group(&env, chains_parts(make, Layer::L5)),
+            Err(LayerError::BadLink(e(3)))
+        );
+        assert_eq!(r, before);
+    }
+}
+
+// REQ-LAYER-003, CR 613.6, 611.2c: with the link on the first layer (L4), the L7c part applies
+// exactly to what the L4 part applied to; the independent L5 part keeps its own set (B only).
+#[test]
+fn link_to_first_layer_with_independent_middle_part() {
+    let env = chains_env();
+    let mut r = ContinuousEffects::new();
+    r.register_group(&env, chains_parts(static_of_o9, Layer::L4))
+        .unwrap();
+    for (id, l4, l5, pt, white) in [
+        (1, true, false, (2, 2), false),
+        (2, false, true, (2, 2), true),
+        (3, false, false, (3, 3), false),
+    ] {
+        let (out, record) = evaluate_with_order(&r, &env, o(id)).unwrap();
+        let applied = |eid: u64| {
+            record
+                .steps
+                .iter()
+                .find(|s| s.item == OrderItem::Effect(e(eid)))
+                .map(|s| s.applied)
+        };
+        assert_eq!(applied(1), Some(l4), "o{id} L4");
+        assert_eq!(applied(2), Some(l5), "o{id} L5");
+        // CR 613.6: the linked part follows the L4 anchor exactly.
+        assert_eq!(applied(3), Some(l4), "o{id} L7c");
+        assert_eq!(pt_of(&out.characteristics), Some(pt), "o{id}");
+        assert_eq!(out.characteristics.colors == ColorBitmask::WHITE, white);
+    }
+}
+
+// REQ-LAYER-003, CR 613.6: several linked parts (L6 and L7c) may follow the same first-layer
+// anchor, also with an independent part in between.
+#[test]
+fn several_links_to_first_layer() {
+    let env = chains_env();
+    let mut parts = chains_parts(static_of_o9, Layer::L4);
+    parts.push((
+        e(4),
+        static_of_o9(
+            Layer::L6,
+            1,
+            same(Layer::L4),
+            LayerModification::RemoveAllAbilities,
+        ),
+    ));
+    let mut r = ContinuousEffects::new();
+    r.register_group(&env, parts).unwrap();
+    let (out, record) = evaluate_with_order(&r, &env, o(1)).unwrap();
+    assert_eq!(pt_of(&out.characteristics), Some((2, 2)));
+    for id in [1, 3, 4] {
+        assert!(
+            record
+                .steps
+                .iter()
+                .any(|s| s.item == OrderItem::Effect(e(id)) && s.applied),
+            "e{id}"
+        );
+    }
+    let (_, record2) = evaluate_with_order(&r, &env, o(2)).unwrap();
+    for id in [1, 3, 4] {
+        assert!(
+            record2
+                .steps
+                .iter()
+                .all(|s| s.item != OrderItem::Effect(e(id)) || !s.applied),
+            "e{id}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Duplicate ids are reported before layer mismatches (REQ-CORE-001; docs/DECISIONS.md)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-LAYER-003, REQ-CORE-001, CR 613.6: two parts sharing an id, one valid and one with a
+// layer mismatch, give DuplicateEffect in both caller orders; a registry duplicate combined
+// with a mismatch on another (lower-id) part gives DuplicateEffect in both caller orders; the
+// registry is unchanged after each rejection.
+#[test]
+fn duplicate_reported_before_mismatch_in_any_order() {
+    let env = creature_env();
+    let mut r = ContinuousEffects::new();
+    r.register(e(5), res(Layer::L7c, 1, objects(&[o(1)]), modify(1, 1)))
+        .unwrap();
+    let before = r.clone();
+    let valid = res(Layer::L7c, 1, objects(&[o(1)]), modify(1, 1));
+    // set_pt belongs to layer 7b, not 7c.
+    let mismatch = res(Layer::L7c, 1, objects(&[o(1)]), set_pt(1, 1));
+    let cases = [
+        (vec![(1, valid.clone()), (1, mismatch.clone())], 1),
+        (vec![(1, mismatch.clone()), (1, valid.clone())], 1),
+        (vec![(1, mismatch.clone()), (5, valid.clone())], 5),
+        (vec![(5, valid), (1, mismatch)], 5),
+    ];
+    for (parts, dup) in cases {
+        assert_eq!(
+            r.register_group(&env, group(parts)),
+            Err(LayerError::DuplicateEffect(e(dup)))
+        );
+        assert_eq!(r, before);
     }
 }
 

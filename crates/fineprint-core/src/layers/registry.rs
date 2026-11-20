@@ -205,8 +205,9 @@ impl ContinuousEffects {
     ///
     /// A part with [`Affected::SameAsLayer`]`(l)` is linked to its anchor: the part of the group
     /// whose layer is `l` and whose affected set is not `SameAsLayer` (the lowest [`EffectId`]
-    /// if several); `l` must be strictly earlier than the part's own layer in [`Layer::ALL`]
-    /// order. The part then applies to an object exactly when the anchor applied to it earlier
+    /// if several); `l` must be the group's first layer (the earliest layer, in [`Layer::ALL`]
+    /// order, of the parts that are not `SameAsLayer`) and strictly earlier than the part's own
+    /// layer. The part then applies to an object exactly when the anchor applied to it earlier
     /// in the same evaluation, even if the generating ability has been removed in between
     /// (CR 613.6). Other parts are independent of each other (CR 611.2c). A part from a
     /// resolving spell or ability ([`EffectOrigin::Resolved`]) with a selector is stored with the
@@ -217,8 +218,9 @@ impl ContinuousEffects {
     /// # Errors
     /// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for an
     /// id given twice or already registered; [`LayerError::LayerMismatch`] for a modification
-    /// outside its part's layer; [`LayerError::BadLink`] for a `SameAsLayer` part without a
-    /// valid anchor; the first error of evaluating an object while locking a selector.
+    /// outside its part's layer (duplicates are reported before mismatches, each in ascending
+    /// id order); [`LayerError::BadLink`] for a `SameAsLayer` part without a valid anchor in the
+    /// group's first layer; the first error of evaluating an object while locking a selector.
     pub fn register_group(
         &mut self,
         env: &dyn LayerEnvironment,
