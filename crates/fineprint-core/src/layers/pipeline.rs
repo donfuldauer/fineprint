@@ -67,7 +67,8 @@ pub struct Evaluated {
     /// How the mana value is derived (CR 202.3a-c): plain (the characteristics' own) for the
     /// base; set by every layer-1 effect that replaces all characteristics
     /// ([`LayerModification::CopyValuesWithProvenance`] to its provenance,
-    /// [`LayerModification::CopyValues`] and [`LayerModification::FaceDown`] to plain); no
+    /// [`LayerModification::CopyValues`] and [`LayerModification::FaceDown`] to plain);
+    /// [`LayerModification::ApplyCopyExceptions`] may only set its colors pin (CR 707.9b); no
     /// other modification changes it. Read through [`Evaluated::mana_value`].
     pub mana_value_provenance: ManaValueProvenance,
 }
@@ -551,11 +552,12 @@ fn apply_effect(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, m: &LayerMod
             state.mana_value_provenance = provenance.clone();
         }
         // CR 613.2a, 707.2: a copiable modification that is not a copy changes only what its
-        // exceptions set; the object is its own "original" (CR 707.9c), no CDA is dropped and
-        // the mana-value provenance is kept.
+        // exceptions set; it copies nothing, so `NotCopied` is ignored; no CDA is dropped; the
+        // mana-value source and zero flag are kept and the colors pin is carried (CR 707.9b).
         LayerModification::ApplyCopyExceptions(exceptions) => {
-            let own = c.clone();
-            apply_exceptions(c, &own, exceptions);
+            let pinned = state.mana_value_provenance.colors_pinned;
+            state.mana_value_provenance.colors_pinned =
+                apply_exceptions(c, None, exceptions, pinned);
         }
         // CR 613.1b
         LayerModification::SetController(p) => state.controller = Some(*p),

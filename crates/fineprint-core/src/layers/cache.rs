@@ -284,7 +284,8 @@ impl LayerCache {
 /// the characteristics, the controller (`Option`) and the mana-value provenance
 /// ([`Evaluated::mana_value_provenance`]: a variant tag, 0 plain, 1 fixed followed by the mana
 /// value as `i64`, 2 a copy of a back face or melded permanent; then the flag that a fixed value
-/// comes from a back face or melded permanent, as `bool`). The characteristics are encoded field by
+/// comes from a back face or melded permanent, as `bool`; then the colors pin
+/// ([`ManaValueProvenance::colors_pinned`], CR 707.9b), as `bool`). The characteristics are encoded field by
 /// field in declaration order exactly as LKI records encode them (decision "#24 FP-023 —
 /// Characteristics encoding"): sets and integers through their canonical encoding, the mana
 /// cost as its canonical text, color masks as their bits, and the DSL trees (rules text,
@@ -307,7 +308,7 @@ pub fn evaluated_digest(map: &BTreeMap<ObjectId, Evaluated>) -> Digest {
 }
 
 /// Appends the encoding of a mana-value provenance: the source's variant tag (and its mana
-/// value for `Fixed`), then its back-face-or-melded flag.
+/// value for `Fixed`), then its back-face-or-melded flag, then its colors pin.
 fn encode_provenance(p: &ManaValueProvenance, out: &mut Vec<u8>) {
     match &p.source {
         ValueSource::Plain => put_variant(out, 0),
@@ -318,6 +319,7 @@ fn encode_provenance(p: &ManaValueProvenance, out: &mut Vec<u8>) {
         ValueSource::CopyOfBackFaceOrMelded => put_variant(out, 2),
     }
     p.zero_when_copied.encode_canonical(out);
+    p.colors_pinned.encode_canonical(out);
 }
 
 /// Appends a deterministic encoding of a serde value: tag 0 and its RFC 8785 canonical JSON;
