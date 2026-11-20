@@ -199,10 +199,8 @@ impl LayerCache {
     /// one invalidation and returns the new version (REQ-LAYER-005).
     pub fn invalidate(&mut self, cause: Invalidation) -> StateVersion {
         // Coarse by design: `cause` does not narrow what is dropped (module documentation).
+        // SCRATCH (#36 stale-cache demonstration, never merged): invalidation is a no-op.
         let _ = cause;
-        self.version = StateVersion(self.version.0 + 1);
-        self.entries.clear();
-        self.stats.invalidations += 1;
         self.version
     }
 
@@ -247,10 +245,8 @@ impl LayerCache {
     fn sync_registry(&mut self, effects: &ContinuousEffects) {
         match &self.snapshot {
             Some(snapshot) if snapshot == effects => {}
-            Some(_) => {
-                self.invalidate(Invalidation::EffectRegistration);
-                self.snapshot = Some(effects.clone());
-            }
+            // SCRATCH: registry changes are no longer detected.
+            Some(_) => {}
             None => self.snapshot = Some(effects.clone()),
         }
     }
