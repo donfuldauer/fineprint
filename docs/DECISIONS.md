@@ -5826,3 +5826,136 @@ unchanged and reported to the Orchestrator for a follow-up edit: the new jobs ar
 `cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`.
 **Rationale:** R1 (owned paths); the brief says to report, not edit.
 **Alternatives:** Editing DEVELOPMENT.md here (rejected: outside owned paths).
+
+## #37 FP-036 — Placeholder bridge
+
+**Decision:** `Characteristics.rules_text` is still the placeholder `card::TextTokenStream` (a list
+of JSON values). Layer 3 converts it to the real `fineprint_dsl::text::TextTokenStream` through
+MessagePack (`rmp_serde::to_vec` of the placeholder, `rmp_serde::from_slice` into the real stream,
+which runs the FP-011 validation; the reverse for encoding): `layers::decode_rules_text`,
+`layers::encode_rules_text`. A `REPLACE_TEXT_WORD` writes the text back only when a word changed,
+so unchanged text stays byte-identical. Text that is empty or does not decode (for example a
+placeholder element holding a plain string) makes the effect a no-op; evaluation never fails or
+panics on it. The shim is removed when #159 (FP-140) types `rules_text`.
+**Rationale:** fineprint-core has no `serde_json` dependency and the brief forbids adding one;
+`rmp_serde` is already a dependency and both types are serde-compatible. A no-op on undecodable
+text keeps evaluation total (R12) while the placeholder can still hold test values.
+**Alternatives:** Adding `serde_json` to fineprint-core (rejected: Cargo edits forbidden); an error
+from evaluation on undecodable text (rejected: the brief makes it a no-op, and existing tests use
+placeholder text); typing `rules_text` here (rejected: #159's work).
+
+## #37 FP-036 — Word replacement scope (CR 612)
+
+**Decision:** `LayerModification::ReplaceTextWord{category, from, to}` with category `CARD_NAME` is
+rejected at registration (`LayerError::Unsupported`) and `rewrite_text_words` returns
+`UnsupportedCategory` for it: CR 612.2 says a colour-word or subtype change can't change a card
+name, and the CR defines no word-for-word replacement of card names (name changes are 612.6-612.9,
+out of scope). `COLOR_WORD`, `BASIC_LAND_TYPE` and `CREATURE_TYPE` are accepted (612.2; a
+creature-type word that also names a token is a `CREATURE_TYPE` token, 612.2a). `NUMBER` is
+accepted as a design choice: no CR rule covers it, and only a card's own text could ask for it
+(612.1 "any words or symbols"). There is no category-compatibility check between `from` and `to`,
+and `from == to` is an ordinary replacement that changes nothing: the CR imposes neither. Name
+references (`SELF` and `OTHER`) are never rewritten (201.5, 612.2), nor are literal tokens or
+`CARD_NAME` words, whatever the effect's category. Abilities granted by effects are not text and are
+never rewritten: layer 3 never touches `Characteristics.abilities` (612.3). A copy does not keep text
+changes (707.2, 707.2b); copy is layer 1 and belongs to #38.
+**Rationale:** The rules researcher's conclusions for #37 against CR 2026-11-06; the CR wins over
+the SRS (P1).
+**Alternatives:** Accepting `CARD_NAME` as SRS §14.5 allows (rejected: no CR basis, and 612.2
+protects names); rejecting `NUMBER` (rejected: SRS §14.5 lists it and nothing in the CR forbids
+it); requiring `from` and `to` to belong to the same vocabulary (rejected: the CR has no such rule
+and the layers module has no vocabulary).
+
+## #37 FP-036 — SRS §14.5 versus the CR
+
+**Decision:** Where SRS §14.5 (REQ-DSL-012) and CR 2026-11-06 differ, this unit follows the CR and
+leaves the SRS unedited (a person edits it; HUMAN_QUEUE P8 line):
+(1) §14.5 lists `CARD_NAME` as a rewritable category and lets `REPLACE_TEXT_WORD` take any
+category; CR 612.2 forbids colour and subtype replacements from changing card names (612.2a's
+exception is creature-type words that also name tokens), the CR defines no word replacement of
+card-name words (name changes are 612.6-612.9), and no CR rule exists for `NUMBER`.
+(2) §14.5 cites "CR 201.5 family" for self-references; 201.5 is about name references ("this
+creature" and "~" are Oracle conventions; 201.5a/201.5b resolution of names in gained abilities is
+outside layer 3); `NameRef{OTHER}` is not addressed by the SRS (612.2 protects it).
+(3) §14.5 omits CR 612.3 (granted abilities are not rewritten), CR 613.8 dependency between
+text-changing effects, CR 612.4 (tokens' text can be changed) and CR 707.2 (text changes are not
+copied).
+**Rationale:** P1: the CR wins; SRS edits are a person's job (P8).
+**Alternatives:** Implementing the SRS as written (rejected: contradicts CR 612.2).
+
+## #37 FP-036 — Dependency between text effects
+
+**Decision:** Chained text-changing effects use the generic dependency trial (`ordering.rs`,
+CR 613.8a-c) plus one comparison specific to `REPLACE_TEXT_WORD`: when B is a word replacement
+with `from != to` and both A and B apply, B depends on A exactly when applying A changes the
+tokens B applies to (the word tokens of B's category and `from` value, by token position and id,
+CR 612.2), because B does the same thing (rewrite to `to`) to each of them (CR 613.8a (b)); a
+change A makes to any other token of the same `rules_text` creates no dependency. Every other
+case of the trial is unchanged (B does not apply in either state: independent; B's existence or
+affected set changes: dependent; A changes nothing: independent; the CDA / non-CDA exclusion;
+every B that is not a word replacement, `SetText` included, and a no-op `from == to`
+replacement keep the field-by-field comparison). On text with a Swamp word and no Island word,
+A = Swamp->Island and B = Island->Forest give Forest in both timestamp orders (B depends on A);
+A = Swamp->Island and B = Swamp->Forest depend on each other (a loop, applied in timestamp order,
+613.8b), so the earlier timestamp's `to` wins. Former gap G6 is fixed in PR #196 (review round 1,
+CodeRabbit finding 4640489029): the trial no longer compares the whole `rules_text` field for a
+`REPLACE_TEXT_WORD`, so on mixed Swamp+Island text A = Swamp->Island, B = Island->Forest gives
+Forest for both words in both orders (B depends on A, A independent of B), and A = Swamp->Island
+with B = Island->Swamp is a real mutual dependency (each changes the other's matching tokens)
+applied in timestamp order (CR 613.8b): A earlier gives [Swamp, Swamp], B earlier gives
+[Island, Island]. The Island/Swamp swap result is an engine derivation of 613.8a/b, not a CR
+worked example. `SetText` and `REPLACE_TEXT_WORD` on the same object: the replacement depends on
+the `SetText` under CR 613.8a (b) (applying the `SetText` changes the tokens the replacement
+applies to) and the `SetText` does not depend on the replacement, so per CR 613.8b the `SetText`
+applies first in both timestamp orders and the replacement rewrites the new text (derivation by
+the rules researcher, CR 2026-11-06; this supersedes the brief's original expectation that a
+later `SetText` wins unchanged). Unit test `set_text_applies_before_replace_in_both_orders`
+still passes under the per-token comparison. Review round 2 (CodeRabbit finding 4640922156):
+the per-token comparison applies only when A is also a `REPLACE_TEXT_WORD`; for a whole-text
+`SetText` A the trial keeps the field-by-field comparison of B's output. Under the round-1 rule
+a `SetText` that keeps B's matched word at the same position with the same id (base
+[Swamp w, "old"], `SetText` to [Swamp w, "new"], B = Swamp->Island) left B's token set
+unchanged, so neither effect depended on the other; with B earlier the `SetText` then overwrote
+B's result and gave [Swamp, "new"]. Now B depends on the `SetText` and both timestamp orders
+give [Island, "new"], `SetText` first (tests
+`set_text_keeping_matched_word_applies_before_replace_in_both_orders`,
+`set_text_keeping_matched_word_and_replace_both_orders`). Check of other A kinds: the only
+layer-3 modifications are `SetText` and `REPLACE_TEXT_WORD` (`LayerModification::belongs_to`
+in registry.rs; `apply_effect` in pipeline.rs writes `rules_text` in layer 3 only for these
+two); `CopyValues` and `FaceDown` also change `rules_text` but are layer 1 and are never
+compared with a layer-3 B (CR 613.8a (a)); counters are not text. A `REPLACE_TEXT_WORD` A cannot
+keep B's token set and still change B's outcome: it decodes, rewrites only the `value` of
+matching word tokens and re-encodes (ids, order and kinds kept, REQ-DSL-012), and B's outcome
+depends only on which tokens match B's category and `from` (each is rewritten to `to`), so its
+effect on B is fully captured by B's token set. No counterexample found.
+**Rationale:** CR 613.8a (b) asks whether applying A changes what B applies to or what it does
+to them; for a word replacement that is exactly its set of matching tokens. The original brief
+kept ordering.rs out of scope, so the first submission used the generic trial alone; the
+per-token comparison was adopted in review round 1 (it closes follow-up #194, FP-149). It reads
+only token data (REQ-DSL-013) and is a pure function of the two scratch states (REQ-CORE-001).
+**Alternatives:** The generic whole-field trial for word replacements too (rejected in review
+round 1: on mixed Swamp+Island text it reports a mutual dependency and gives [Island, Forest]);
+the per-token comparison was adopted for `REPLACE_TEXT_WORD` only, and the generic trial remains
+for every other modification. The per-token comparison for every A, `SetText` included
+(rejected in review round 2: a whole-text `SetText` that keeps the matched word's position and
+id was missed, so the `SetText` overwrote the replacement).
+
+## #37 FP-036 — Engine gaps for #37
+
+**Decision:** Recorded, not absorbed:
+G1 typed `rules_text` and typed abilities are #159 (FP-140) and #161 (FP-141); until then the
+placeholder bridge applies.
+G2 cross-object source view is #186 (FP-146) and wiring is #144; `MatchContext` gives only the
+candidate's view, so the resolution helpers (`resolve_word_ref`, `text_token_matches`,
+`resolve_predicate_words`, `resolve_selector_words`) take the source's evaluated table from the
+caller.
+G3 the compile step from the DSL `REPLACE_TEXT_WORD` effect to `LayerModification::ReplaceTextWord`
+(DECISIONS "#34 FP-033" item 8) is follow-up #195 (FP-150).
+G4 word references reachable only from a value expression outside predicates and selectors are not
+resolved by these helpers (also #195).
+G5 copy and text changes (CR 707.2) belong to #38.
+G6 whole-field dependency comparison of `rules_text` (entry above): fixed in PR #196 review round 1
+(follow-up #194 is closed by that PR; no longer a gap).
+**Rationale:** Each gap is owned by another issue or needs one; the brief scopes this unit to the
+layers module.
+**Alternatives:** Implementing them here (rejected: outside owned paths and scope).
