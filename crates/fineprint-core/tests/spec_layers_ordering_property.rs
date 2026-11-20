@@ -299,3 +299,57 @@ fn registration_order_never_changes_result_or_record() {
             .any(|s| s.item == OrderItem::Counter("+1/+1".to_owned()))
     );
 }
+
+/// REQ-LAYER-002, CR 613.7, 613.8a, 613.4c: fixed P/T modifiers on a locked set at the i64
+/// bounds are independent and ordered by timestamp; the evaluator's P/T arithmetic saturates.
+/// At MAX: +1 then -2 gives MAX-2; -2 then +1 gives MAX-1. At MIN: +2 then -1 gives MIN+1;
+/// -1 then +2 gives MIN+2. Power and toughness use different amounts in the mixed case. Every
+/// case also holds with the registration order shuffled.
+#[test]
+fn fixed_pt_modifiers_at_i64_bounds_follow_timestamp_order() {
+    const MAX: i64 = i64::MAX;
+    const MIN: i64 = i64::MIN;
+    // (base P/T, modifier at ts1, modifier at ts2, expected P/T)
+    type Pt = (i64, i64);
+    let cases: [(Pt, Pt, Pt, Pt); 5] = [
+        ((MAX, MAX), (1, 1), (-2, -2), (MAX - 2, MAX - 2)),
+        ((MAX, MAX), (-2, -2), (1, 1), (MAX - 1, MAX - 1)),
+        ((MIN, MIN), (2, 2), (-1, -1), (MIN + 1, MIN + 1)),
+        ((MIN, MIN), (-1, -1), (2, 2), (MIN + 2, MIN + 2)),
+        // Mixed: power at MAX (+1 then -2), toughness at MIN (-1 then +2).
+        ((MAX, MIN), (1, -1), (-2, 2), (MAX - 2, MIN + 2)),
+    ];
+    let mut rng = Rng::new(0x5EED_0032_00F1);
+    for (base, first, second, expected) in cases {
+        let env = Env::subject(creature(base.0, base.1));
+        let mut effects = vec![
+            (
+                1,
+                eff(Layer::L7c, 1, subject(), modify_pt(first.0, first.1)),
+            ),
+            (
+                2,
+                eff(Layer::L7c, 2, subject(), modify_pt(second.0, second.1)),
+            ),
+        ];
+        for round in 0..8 {
+            if round > 0 {
+                rng.shuffle(&mut effects);
+            }
+            let (ev, rec) = run(&registry(&effects), &env);
+            assert_eq!(
+                pt(&ev.characteristics),
+                Some(expected),
+                "base {base:?}, {first:?} then {second:?}, round {round}"
+            );
+            assert_eq!(
+                steps_in(&rec, Layer::L7c),
+                vec![
+                    fx(Layer::L7c, 1, Selection::Timestamp, true),
+                    fx(Layer::L7c, 2, Selection::Timestamp, true),
+                ],
+                "base {base:?}, {first:?} then {second:?}, round {round}"
+            );
+        }
+    }
+}
