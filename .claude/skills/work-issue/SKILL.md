@@ -242,8 +242,8 @@ scheduled task"). There is no depth limit: the chain runs until no issue is read
    "Self-chain: handoff failed (session <this session's ID>): <reason>; the next scheduled run
    picks up the chain." and say the same in the final message. A retry does not fire again
    after a failure.
-5. End the turn. Fire at most once per merge, and never chain from a session whose prompt did
-   not ask for it.
+5. End the turn. Fire once per merge, and again only to retry a pending marker (step 2). Never
+   chain from a session whose prompt did not ask for it.
 
 ## Never
 
