@@ -49,7 +49,8 @@ mod tests;
 pub use error::LayerError;
 pub use pipeline::{
     Evaluated, KEYWORD_COUNTER_KINDS, LayerEnvironment, MatchContext, ObjectBase, evaluate,
-    evaluate_all, keyword_counter_ability, literal, literal_of, pt_counter_delta,
+    evaluate_all, keyword_counter_ability, keyword_counter_keyword, literal, literal_of,
+    pt_counter_delta,
 };
 pub use provider::LayeredProvider;
 pub use registry::{

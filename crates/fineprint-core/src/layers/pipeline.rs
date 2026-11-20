@@ -17,6 +17,8 @@ use super::registry::{Affected, ContinuousEffect, ContinuousEffects, LayerModifi
 use crate::objects::Characteristics;
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
+/// Variants such as "hexproof from red" (CR 702.11d) are recognised by
+/// [`keyword_counter_keyword`].
 pub const KEYWORD_COUNTER_KINDS: [&str; 15] = [
     "flying",
     "first strike",
@@ -143,6 +145,25 @@ pub fn keyword_counter_ability(kind: &str) -> AbilityAST {
     )
 }
 
+/// The keyword a keyword counter of `kind` grants (CR 122.1b): `Some(kind)` when `kind` is one of
+/// [`KEYWORD_COUNTER_KINDS`] or a variant of one, that is the name followed by a single ASCII
+/// space and a parameter (CR 702.11d: "hexproof from red"); `None` otherwise. Ward is not a
+/// keyword counter, so "ward" and "ward 2" give `None`.
+#[must_use]
+pub fn keyword_counter_keyword(kind: &str) -> Option<&str> {
+    // CR 122.1b: the listed keywords "as well as any variants of those keywords".
+    KEYWORD_COUNTER_KINDS
+        .iter()
+        .any(|name| {
+            kind == *name
+                || kind
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .is_some_and(|param| !param.is_empty() && !param.starts_with(' '))
+        })
+        .then_some(kind)
+}
+
 /// Whether `ability` is a keyword ability with keyword `keyword`.
 fn is_keyword(ability: &AbilityAST, keyword: &str) -> bool {
     let Some(object) = ability.0.as_object() else {
@@ -194,8 +215,12 @@ fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -> Ordering 
 ///
 /// Within a layer, steps apply in ascending timestamp (CR 613.2, 613.3, 613.4, 613.7); at equal
 /// timestamps effects come before counters, effects by ascending [`EffectId`], counters by
-/// ascending kind. Keyword counters apply in layer 6 (CR 122.1b, 613.1f) and P/T counters in
-/// layer 7c (CR 122.1a, 613.4c), each at its counter timestamp. Layer 7 is the last layer.
+/// ascending kind. Keyword counters, variants included ([`keyword_counter_keyword`]), apply in
+/// layer 6 (CR 122.1b, 613.1f), granting their full kind string as the keyword; P/T counters
+/// apply in layer 7c (CR 122.1a, 613.4c), and change power and toughness only when the object is
+/// a creature after layers 1-6 (a noncreature card with printed P/T off the battlefield keeps its
+/// printed values; effects of layer 7 still apply to it). Each counter kind applies at its
+/// counter timestamp. Layer 7 is the last layer.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -228,7 +253,7 @@ pub fn evaluate(
         for (kind, &amount) in counters.iter().filter(|&(_, &n)| n >= 1) {
             let applies = match layer {
                 // CR 122.1b, 613.1f: keyword counters in layer 6.
-                Layer::L6 => KEYWORD_COUNTER_KINDS.contains(&kind.as_str()),
+                Layer::L6 => keyword_counter_keyword(kind).is_some(),
                 // CR 122.1a, 613.4c: P/T counters in layer 7c.
                 Layer::L7c => pt_counter_delta(kind).is_some(),
                 _ => false,
@@ -409,13 +434,17 @@ fn update_pt(state: &mut Evaluated, pt: Option<(i64, i64)>) {
 
 /// Applies the counters of one kind (CR 122.1a, 122.1b).
 fn apply_counter(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, kind: &str, amount: i64) {
-    if KEYWORD_COUNTER_KINDS.contains(&kind) {
+    if let Some(keyword) = keyword_counter_keyword(kind) {
         // CR 122.1b, 613.1f: the object gains the keyword, once whatever the amount.
         state
             .characteristics
             .abilities
-            .push(keyword_counter_ability(kind));
+            .push(keyword_counter_ability(keyword));
     } else if let Some((dp, dt)) = pt_counter_delta(kind) {
+        // CR 122.1a: a P/T counter modifies a creature or a creature card in another zone only.
+        if !state.characteristics.card_types.contains("Creature") {
+            return;
+        }
         // CR 122.1a, 613.4c: X and Y per counter.
         if let Some((p, t)) = pt.as_mut() {
             *p = p.saturating_add(dp.saturating_mul(amount));
