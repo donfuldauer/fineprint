@@ -541,12 +541,24 @@ fn the_request_allowed(req: &PendingChoiceRequest) -> Vec<String> {
     }
 }
 
-/// The exact `CHOOSE_REPLACEMENT_EFFECT` request of R-4.
+/// The exact `CHOOSE_REPLACEMENT_EFFECT` request of R-4 (default on timeout: index 0).
 fn replacement_request(
     id: u64,
     chooser: PlayerId,
     object: u64,
     descs: &[String],
+) -> PendingChoiceRequest {
+    replacement_request_default(id, chooser, object, descs, 0)
+}
+
+/// The exact `CHOOSE_REPLACEMENT_EFFECT` request of R-4 with `default_on_timeout` =
+/// `SelectReplacement { index: default }` (round 3, H3: the first payable candidate).
+fn replacement_request_default(
+    id: u64,
+    chooser: PlayerId,
+    object: u64,
+    descs: &[String],
+    default: u32,
 ) -> PendingChoiceRequest {
     PendingChoiceRequest {
         request_id: RequestId::new(id),
@@ -560,7 +572,7 @@ fn replacement_request(
         max: 1,
         hidden: false,
         reveal_to: Vec::new(),
-        default_on_timeout: ChoiceResponse::SelectReplacement { index: 0 },
+        default_on_timeout: ChoiceResponse::SelectReplacement { index: default },
         options: ChoiceOptions::Enumerated(
             (0..descs.len())
                 .map(|i| ChoiceOption::Number(i64::try_from(i).expect("small")))
@@ -964,7 +976,9 @@ fn req_event_001_acceptance_2_choose_color_before_entering() {
 #[test]
 fn req_event_001_acceptance_2_choose_creature_type_each_option() {
     for pick in [OPT_A, OPT_B, OPT_C] {
-        let env = env_n(1);
+        // The base is controlled by P2, the entry's controller (one controller per projection,
+        // CR 707.5: CodeRabbit round 3, H2).
+        let env = env_of(&[(1, body(1), P2)]);
         let cont = ContinuousEffects::new();
         let effects = effects_of(vec![fx(
             4,
@@ -4074,7 +4088,8 @@ fn req_event_001_f8_exact_sum_no_saturation() {
 // REQ-EVENT-001, CR 614.12b, CR 616.1e — the CHOOSE_REPLACEMENT_EFFECT candidates are never
 // filtered by payability: budget 1; a Choose {2} applicable only while the permanent lacks
 // test.type_x, and an effect adding test.type_x, in one tier. Both are offered; taking the type
-// first is payable (the Choose never applies), taking the Choose first is not.
+// first is payable (the Choose never applies), taking the Choose first is not. Round 3 (H3,
+// CR 614.12b): the default on timeout is the first payable candidate, index 1 (the type).
 #[test]
 fn req_event_001_payable_replacement_candidates_not_filtered() {
     let env = env_n(1);
@@ -4092,7 +4107,13 @@ fn req_event_001_payable_replacement_candidates_not_filtered() {
     let run = drive_ok(&ctx, &[entry(1, P1)], &budget(&[(P1, 1)]), &[Ans::Index(1)]);
     assert_eq!(
         run.requests,
-        vec![replacement_request(0, P1, 1, &[desc(1), desc(2)])]
+        vec![replacement_request_default(
+            0,
+            P1,
+            1,
+            &[desc(1), desc(2)],
+            1
+        )]
     );
     assert_eq!(run.out[0].projected.effects, ids(&[2]));
     assert_eq!(run.out[0].memory.choice(KEY_A), None);
@@ -4638,5 +4659,552 @@ fn req_event_001_g5_validate_every_entry_before_asking() {
         );
         assert_eq!(run.out[1].projected.effects, ids(&[]));
         assert_eq!(run.out[1].memory, Memory::new());
+    }
+}
+
+// =============================================================================================
+// FIX ROUND 3 (CodeRabbit H1-H3) — regression tests
+// =============================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// H1 — a Choose whose options repeat a text is rejected at registration (CR 614.12a)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-EVENT-001, CR 614.12a — finding H1 (comment 4648051968): the answer to a Choose is the
+// option's text, so two options with the same text cannot be told apart. `EtbEffects::add` of a
+// Choose with options [(x, 2), (x, 1)] (and with a repeat that is not adjacent) is
+// `Err(EtbError::DuplicateOptionText { effect, text: x })` with a non-empty Display, and leaves
+// the set unchanged. Fails at head d3c44f3 (the Choose was accepted; the variant did not exist).
+#[test]
+fn req_event_001_h1_duplicate_option_text_rejected() {
+    let cases: [(u64, Vec<(&str, u64)>); 3] = [
+        (2, vec![(OPT_A, 2), (OPT_A, 1)]),
+        (3, vec![(OPT_A, 1), (OPT_B, 1), (OPT_A, 3)]),
+        (4, vec![(OPT_B, 0), (OPT_C, 0), (OPT_C, 0)]),
+    ];
+    let mut set_ = effects_of(vec![fx(1, EtbAction::EntersTapped)]);
+    let before = effects_snapshot(&set_, &[1, 2, 3, 4]);
+    for (id, list) in &cases {
+        let repeated = if *id == 4 { OPT_C } else { OPT_A };
+        match set_.add(own_fx(*id, 1, choose(KEY_A, K::Color, list))) {
+            Err(EtbError::DuplicateOptionText { effect, text }) => {
+                assert_eq!(effect, eid(*id), "{list:?}");
+                assert_eq!(text, repeated, "{list:?}");
+            }
+            other => panic!("{list:?}: expected DuplicateOptionText, got {other:?}"),
+        }
+        assert_eq!(effects_snapshot(&set_, &[1, 2, 3, 4]), before, "{list:?}");
+        assert!(set_.get(eid(*id)).is_none(), "{list:?}");
+    }
+    let e = EtbError::DuplicateOptionText {
+        effect: eid(2),
+        text: OPT_A.to_owned(),
+    };
+    assert!(!e.to_string().is_empty());
+    let as_error: &dyn std::error::Error = &e;
+    assert!(!as_error.to_string().is_empty());
+    // The empty-options check still comes first (round 2, G3).
+    match set_.add(own_fx(5, 1, choose(KEY_A, K::Color, &[]))) {
+        Err(EtbError::EmptyChoice(id)) => assert_eq!(id, eid(5)),
+        other => panic!("expected EmptyChoice, got {other:?}"),
+    }
+    assert_eq!(effects_snapshot(&set_, &[1, 2, 3, 4]), before);
+}
+
+// REQ-EVENT-001, CR 614.12a, CR 614.12b — finding H1, accepted side: distinct texts, a single
+// free option, and distinct texts with equal costs are all accepted. The equal-cost pair is
+// asked with both texts (budget 1) and each answer is stored as given. A pinning test: it passes
+// at head d3c44f3.
+#[test]
+fn req_event_001_h1_distinct_option_texts_accepted() {
+    let mut set_ = effects_of(vec![fx(1, EtbAction::EntersTapped)]);
+    let accepted: [(u64, Vec<(&str, u64)>); 3] = [
+        (2, vec![(OPT_A, 2), (OPT_B, 1)]),
+        (3, vec![(OPT_A, 0)]),
+        (4, vec![(OPT_B, 1), (OPT_C, 1)]),
+    ];
+    for (i, (id, list)) in accepted.iter().enumerate() {
+        if let Err(err) = set_.add(own_fx(*id, 9, choose(KEY_A, K::Color, list))) {
+            panic!("{list:?}: expected the Choose to be accepted, got {err}");
+        }
+        assert_eq!(set_.len(), i + 2, "{list:?}");
+        assert!(set_.get(eid(*id)).is_some(), "{list:?}");
+    }
+
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![own_fx(
+        1,
+        1,
+        choose(KEY_A, K::Color, &[(OPT_B, 1), (OPT_C, 1)]),
+    )]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    for pick in [OPT_B, OPT_C] {
+        let run = drive_ok(
+            &ctx,
+            &[entry(1, P1)],
+            &budget(&[(P1, 1)]),
+            &[Ans::Text(pick.to_owned())],
+        );
+        assert_eq!(
+            run.requests,
+            vec![option_request(
+                0,
+                P1,
+                "CR 614.12a",
+                Some(oid(1)),
+                "COLOR",
+                &[OPT_B, OPT_C]
+            )]
+        );
+        assert_eq!(
+            run.out[0].memory.choice(KEY_A),
+            Some(&MemChoice::Color(pick.to_owned()))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// H2 — one controller per projection: a mismatch between the environment and the entry is
+// rejected (CR 707.5, CR 614.12)
+// ---------------------------------------------------------------------------------------------
+
+/// A selector slot private to this file: "artifacts, if the effect's controller is P2" (it reads
+/// only the effect's controller, so it tells which controller a copied static was given even
+/// when the entrant's base reports none).
+const SEL_ARTIFACTS_IF_P2: u32 = 61;
+
+/// One noncreature enchantment base (object 1, not on the battlefield) whose controller is
+/// `controller` (possibly none), with the selectors of `controlled_env` and
+/// `SEL_ARTIFACTS_IF_P2`; object 2 is the same, controlled by P1.
+fn h2_env(controller: Option<PlayerId>) -> TestEnv {
+    let mut env = controlled_env(&[(2, P1)]);
+    env.put_full(oid(1), enchantment("test.etb_h2_base_1"), controller, false);
+    env.add_selector(
+        sel(SEL_ARTIFACTS_IF_P2),
+        std::rc::Rc::new(|c: &MatchContext<'_>| {
+            c.candidate_view
+                .characteristics
+                .card_types
+                .contains(ARTIFACT)
+                && c.effect_controller == P2
+        }),
+    );
+    env
+}
+
+/// The H2 effects: with `copy`, the G1 copy (effect 1, an artifact model whose declared static
+/// "artifacts you control are creatures", or with `if_p2` "artifacts are creatures if you are
+/// P2", is controlled by P1) and "enters tapped if a creature" (effect 2); always a sourceless
+/// Choose between two free values (effect 3; it applies to every entrant, before and after a
+/// copy), so a valid run asks.
+fn h2_effects(copy: bool, if_p2: bool) -> EtbEffects {
+    let mut e = if copy {
+        g1_effects(1, 2, P1)
+    } else {
+        EtbEffects::new()
+    };
+    if if_p2 {
+        // Replaces the G1 declaration of copy 1 (round 1, F2: the last declaration counts).
+        let (id, st) = model_static(
+            500,
+            Affected::Selector(sel(SEL_ARTIFACTS_IF_P2)),
+            add_types_mod(&[CREATURE]),
+        );
+        declare(&mut e, 1, vec![(id, st)], &[]);
+    }
+    if let Err(err) = e.add(fx(3, choose(KEY_A, K::Color, &[(OPT_A, 0), (OPT_B, 0)]))) {
+        panic!("adding the Choose failed: {err}");
+    }
+    e
+}
+
+fn assert_mismatch<T: std::fmt::Debug>(r: Result<T, EtbError>, what: &str) {
+    match r {
+        Err(EtbError::ControllerMismatch {
+            object,
+            entry,
+            environment,
+        }) => {
+            assert_eq!(object, oid(1), "{what}");
+            assert_eq!(entry, P2, "{what}");
+            assert_eq!(environment, P1, "{what}");
+        }
+        other => panic!("{what}: expected ControllerMismatch, got {other:?}"),
+    }
+}
+
+// REQ-EVENT-001, CR 707.5, CR 614.12 — finding H2 (outside-diff, etb.rs:490): the environment
+// reports P1 as the base controller of object 1, the entry names P2. With and without a copied
+// controller-relative static ("artifacts you control are creatures"): `project` (before and
+// after the copy is applied) and `applicable` are `Err(EtbError::ControllerMismatch { object: 1,
+// entry: P2, environment: P1 })`; `resolve_entering` starts with the procedure error carrying
+// its Display (non-empty) and never a request, without a budget, with one for P2 and with one
+// for both players, alone and after a valid entry; nothing in force is changed. Fails at head
+// d3c44f3 (the mismatch was accepted: the copied statics took P2, the layers P1).
+#[test]
+fn req_event_001_h2_controller_mismatch_rejected() {
+    let env = h2_env(Some(P1));
+    let cont = ContinuousEffects::new();
+    let expected = EtbError::ControllerMismatch {
+        object: oid(1),
+        entry: P2,
+        environment: P1,
+    }
+    .to_string();
+    assert!(!expected.is_empty());
+    for copy in [false, true] {
+        let effects = h2_effects(copy, false);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let e = entry(1, P2);
+        let what = format!("copy {copy}");
+        assert_mismatch(project(&ctx, &e, &EtbApplied::default()), &what);
+        assert_mismatch(applicable(&ctx, &e, &EtbApplied::default()), &what);
+        if copy {
+            assert_mismatch(project(&ctx, &e, &applied_in_order(&[1])), &what);
+            assert_mismatch(applicable(&ctx, &e, &applied_in_order(&[1])), &what);
+        }
+        for payable in [no_budget(), budget(&[(P2, 5)]), budget(&[(P1, 5), (P2, 5)])] {
+            for entries in [
+                vec![e.clone()],
+                vec![entry(2, P1), e.clone()],
+                vec![e.clone(), entry(2, P1)],
+            ] {
+                let what = format!(
+                    "{what} {payable:?} {:?}",
+                    entries.iter().map(|x| x.object).collect::<Vec<_>>()
+                );
+                match first_status(&ctx, &entries, &payable) {
+                    Err(ChoiceError::Procedure(msg)) => {
+                        assert!(!msg.is_empty(), "{what}");
+                        assert!(msg.contains(expected.as_str()), "{what}: {msg}");
+                    }
+                    Err(other) => panic!("{what}: expected a procedure error, got {other:?}"),
+                    Ok(pending) => panic!("{what}: expected the error first, got {pending:?}"),
+                }
+            }
+        }
+        assert_eq!(cont, ContinuousEffects::new());
+    }
+}
+
+// REQ-EVENT-001, CR 707.5, CR 614.12 — finding H2: the mismatch is reported before the entry's
+// own statics are registered (a duplicate own-static id, twice in own_statics or clashing with
+// an effect in force, is not reported), while an unknown object keeps its
+// `LayerError::UnknownObject` error. Fails at head d3c44f3 (the duplicate id was reported).
+#[test]
+fn req_event_001_h2_mismatch_before_own_statics_unknown_object_kept() {
+    let env = h2_env(Some(P1));
+    let mut cont = ContinuousEffects::new();
+    cont.register(
+        eid(100),
+        in_force(1, 1, Layer::L4, add_types_mod(&[TYPE_Y])),
+    )
+    .expect("register");
+    let before = cont.clone();
+    let effects = h2_effects(false, false);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let twice = entry_with(
+        1,
+        P2,
+        vec![
+            own_static(101, 1, Layer::L4, add_types_mod(&[TYPE_X])),
+            own_static(101, 1, Layer::L4, add_types_mod(&[TYPE_Y])),
+        ],
+    );
+    let clash = entry_with(
+        1,
+        P2,
+        vec![own_static(100, 1, Layer::L4, add_types_mod(&[TYPE_X]))],
+    );
+    for e in [&twice, &clash] {
+        assert_mismatch(
+            project(&ctx, e, &EtbApplied::default()),
+            "duplicate own static",
+        );
+        assert_mismatch(
+            applicable(&ctx, e, &EtbApplied::default()),
+            "duplicate own static",
+        );
+    }
+    assert_eq!(cont, before);
+
+    match project(&ctx, &entry(42, P2), &EtbApplied::default()) {
+        Err(EtbError::Layer(LayerError::UnknownObject(o))) => assert_eq!(o, oid(42)),
+        Err(e) => panic!("expected Layer(UnknownObject), got {e}"),
+        Ok(_) => panic!("expected an error"),
+    }
+    let unknown = EtbError::Layer(LayerError::UnknownObject(oid(42))).to_string();
+    match first_status(&ctx, &[entry(42, P2)], &no_budget()) {
+        Err(ChoiceError::Procedure(msg)) => assert!(msg.contains(unknown.as_str()), "{msg}"),
+        Err(other) => panic!("expected a procedure error, got {other:?}"),
+        Ok(pending) => panic!("expected the error first, got {pending:?}"),
+    }
+}
+
+// REQ-EVENT-001, CR 707.5, CR 614.12 — finding H2, accepted side: equal controllers (P1 and P1)
+// are unchanged (the copied "artifacts you control" static makes the entrant an artifact
+// creature, which enters tapped; the projected controller is P1); a base reporting no controller
+// is accepted with any entry controller, the copied statics take the entry's controller (the
+// "if you are P2" static applies for an entry naming P2, not for P1), and the projected
+// controller stays none. A pinning test for the equal case; the `None` case passes at head
+// d3c44f3 as well.
+#[test]
+fn req_event_001_h2_same_or_unknown_controller_accepted() {
+    let cont = ContinuousEffects::new();
+
+    // Equal controllers.
+    let env = h2_env(Some(P1));
+    let effects = h2_effects(true, false);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let e = entry(1, P1);
+    let after = proj_ok(&ctx, &e, &applied_in_order(&[1]));
+    assert_eq!(types_of(&after), set(&[ARTIFACT, CREATURE]));
+    assert_eq!(after.evaluated.controller, Some(P1));
+    assert_eq!(appl_ok(&ctx, &e, &applied_in_order(&[1])), eids(&[2, 3]));
+    let out = drive_content(&ctx, std::slice::from_ref(&e), &budget(&[(P1, 5)]))
+        .unwrap_or_else(|err| panic!("equal controllers failed: {err}"));
+    assert_eq!(out[0].projected.effects, ids(&[1, 2, 3]));
+    assert!(out[0].projected.tapped);
+
+    // No controller known: the entry's controller is the only one.
+    let env = h2_env(None);
+    let effects = h2_effects(true, true);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    for (who, creature) in [(P2, true), (P1, false)] {
+        let what = format!("entry {who:?}");
+        let e = entry(1, who);
+        let before = proj_ok(&ctx, &e, &EtbApplied::default());
+        assert_eq!(before.evaluated.controller, None, "{what}");
+        let after = proj_ok(&ctx, &e, &applied_in_order(&[1]));
+        assert_eq!(after.evaluated.controller, None, "{what}");
+        let types = if creature {
+            set(&[ARTIFACT, CREATURE])
+        } else {
+            set(&[ARTIFACT])
+        };
+        assert_eq!(types_of(&after), types, "{what}");
+        let expected_applicable = if creature { eids(&[2, 3]) } else { eids(&[3]) };
+        assert_eq!(
+            appl_ok(&ctx, &e, &applied_in_order(&[1])),
+            expected_applicable,
+            "{what}"
+        );
+        let out = drive_content(&ctx, std::slice::from_ref(&e), &budget(&[(who, 5)]))
+            .unwrap_or_else(|err| panic!("{what}: resolve_entering failed: {err}"));
+        assert_eq!(out[0].projected.tapped, creature, "{what}");
+        assert_eq!(cont, ContinuousEffects::new());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// H3 — the default on timeout of CHOOSE_REPLACEMENT_EFFECT is the first payable candidate
+// (CR 616.1e, CR 614.12b)
+// ---------------------------------------------------------------------------------------------
+
+/// A printed noncreature artifact base for object 1, controlled by P1.
+fn h3_env() -> TestEnv {
+    env_of(&[(1, artifact("test.etb_h3_base"), P1)])
+}
+
+/// The paid Choose of H3: one option of cost 1, applicable only while the permanent lacks the
+/// creature type.
+fn h3_paid(id: u64, key: &str) -> EtbEffect {
+    fx(id, choose(key, K::Color, &[(OPT_A, 1)]))
+        .with_condition(EtbCondition::LacksCardType(CREATURE.to_owned()))
+}
+
+/// The free effect of H3: adds the creature type.
+fn h3_free(id: u64) -> EtbEffect {
+    fx(id, add_card_types(&[CREATURE]))
+}
+
+/// A `ChoiceSession` over `resolve_entering`, answered with `submit_default` until done (the
+/// caller's timeout path, REQ-NET-003): the requests seen and the observations of the output.
+fn drive_defaults(
+    ctx: &EtbContext<'_>,
+    entries: &[EtbEntry],
+    payable: &BTreeMap<PlayerId, u64>,
+) -> Result<(Vec<PendingChoiceRequest>, Vec<Obs>), ChoiceError> {
+    let procedure =
+        |_: &mut Nil, cx: &mut ChoiceContext<'_>| resolve_entering(ctx, entries, payable, cx);
+    let mut session = ChoiceSession::start(Nil, procedure)?;
+    let mut requests = Vec::new();
+    while let Some(req) = session.pending().cloned() {
+        assert!(
+            requests.len() < MAX_REQUESTS,
+            "resolve_entering did not terminate within {MAX_REQUESTS} requests"
+        );
+        session.submit_default(req.request_id)?;
+        requests.push(req);
+    }
+    match session.status() {
+        Status::Done { output, .. } => Ok((requests, output.iter().map(obs).collect())),
+        Status::Pending(_) => unreachable!("loop exits only when done"),
+    }
+}
+
+/// Asserts the completed H3 entry: the free effect `free` alone applied, a creature, no choice.
+fn assert_h3_free_only(o: &Obs, free: u64, what: &str) {
+    assert_eq!(o.projected.effects, ids(&[free]), "{what}");
+    assert_eq!(o.projected.order, eids(&[free]), "{what}");
+    assert_eq!(
+        o.projected.evaluated.characteristics.card_types,
+        set(&[ARTIFACT, CREATURE]),
+        "{what}"
+    );
+    assert!(o.projected.chosen.is_empty(), "{what}");
+    assert_eq!(o.memory.choice(KEY_A), None, "{what}");
+    assert_eq!(o.memory.choice(KEY_B), None, "{what}");
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 614.12b — finding H3 (outside-diff, etb.rs:1135): budget 0, one
+// tier; effect 1 = a Choose {cost 1} applicable while the artifact entrant lacks the creature
+// type, effect 2 = add the creature type (free). The request lists both candidates (Number(0),
+// Number(1); descriptions in ascending id order; "CR 616.1"; min = max = 1) and defaults to
+// index 1, the first payable one. Answering index 1, and the session's default on timeout, both
+// complete the entry as a creature with no choice made; answering index 0 is "not payable".
+// Fails at head d3c44f3 (the default was index 0, the unpayable Choose).
+#[test]
+fn req_event_001_h3_default_is_first_payable_candidate() {
+    let env = h3_env();
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![h3_paid(1, KEY_A), h3_free(2)]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let entries = [entry(1, P1)];
+    let payable = budget(&[(P1, 0)]);
+    let expected = replacement_request_default(0, P1, 1, &[desc(1), desc(2)], 1);
+
+    assert_eq!(
+        first_status(&ctx, &entries, &payable).unwrap_or_else(|e| panic!("start failed: {e}")),
+        Some(expected.clone())
+    );
+
+    let run = drive_ok(&ctx, &entries, &payable, &[Ans::Index(1)]);
+    assert_eq!(run.requests, vec![expected.clone()]);
+    assert_h3_free_only(&run.out[0], 2, "answered index 1");
+
+    let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+        .unwrap_or_else(|e| panic!("the default on timeout failed: {e}"));
+    assert_eq!(requests, vec![expected]);
+    assert_h3_free_only(&out[0], 2, "default on timeout");
+    assert_eq!(out, run.out);
+
+    let e = drive_err(&ctx, &entries, &payable, &[Ans::Index(0)]);
+    assert_not_payable(&e, "the unpayable Choose answered manually");
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 614.12b — finding H3, the default stays index 0: with an
+// unlimited chooser (no budget at all, or a budget only for another player), with both
+// candidates unpayable (two cost-1 Choose effects under budget 0), and when candidate 0 is the
+// payable one (the ids swapped: the free effect is 1, the paid Choose 2). Every other field of
+// the request is unchanged. A pinning test: it passes at head d3c44f3.
+#[test]
+fn req_event_001_h3_default_stays_first_otherwise() {
+    let env = h3_env();
+    let cont = ContinuousEffects::new();
+    let entries = [entry(1, P1)];
+    let descs = [desc(1), desc(2)];
+
+    let effects = effects_of(vec![h3_paid(1, KEY_A), h3_free(2)]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    for payable in [no_budget(), budget(&[(P2, 0)])] {
+        assert_eq!(
+            first_status(&ctx, &entries, &payable)
+                .unwrap_or_else(|e| panic!("{payable:?}: start failed: {e}")),
+            Some(replacement_request(0, P1, 1, &descs)),
+            "{payable:?}"
+        );
+    }
+
+    let both_paid = effects_of(vec![h3_paid(1, KEY_A), h3_paid(2, KEY_B)]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &both_paid,
+    };
+    assert_eq!(
+        first_status(&ctx, &entries, &budget(&[(P1, 0)]))
+            .unwrap_or_else(|e| panic!("both unpayable: start failed: {e}")),
+        Some(replacement_request(0, P1, 1, &descs))
+    );
+
+    let swapped = effects_of(vec![h3_free(1), h3_paid(2, KEY_A)]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &swapped,
+    };
+    let payable = budget(&[(P1, 0)]);
+    assert_eq!(
+        first_status(&ctx, &entries, &payable)
+            .unwrap_or_else(|e| panic!("swapped: start failed: {e}")),
+        Some(replacement_request(0, P1, 1, &descs))
+    );
+    let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+        .unwrap_or_else(|e| panic!("swapped: the default on timeout failed: {e}"));
+    assert_eq!(requests, vec![replacement_request(0, P1, 1, &descs)]);
+    assert_h3_free_only(&out[0], 1, "swapped, default on timeout");
+    let e = drive_err(&ctx, &entries, &payable, &[Ans::Index(1)]);
+    assert_not_payable(&e, "swapped: the unpayable Choose answered manually");
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 614.12b — finding H3 with three candidates (budget 0, one tier):
+// effects 1 and 3 are cost-1 Choose effects applicable while the entrant lacks the creature
+// type, effect 2 adds it. Only the second candidate is payable: the request lists all three and
+// defaults to index 1; the session's default on timeout completes the entry with effect 2 alone
+// and no choice. Fails at head d3c44f3 (the default was index 0).
+#[test]
+fn req_event_001_h3_three_candidates_only_second_payable() {
+    let env = h3_env();
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![h3_paid(1, KEY_A), h3_free(2), h3_paid(3, KEY_B)]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let entries = [entry(1, P1)];
+    let payable = budget(&[(P1, 0)]);
+    let expected = replacement_request_default(0, P1, 1, &[desc(1), desc(2), desc(3)], 1);
+    assert_eq!(
+        first_status(&ctx, &entries, &payable).unwrap_or_else(|e| panic!("start failed: {e}")),
+        Some(expected.clone())
+    );
+    let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+        .unwrap_or_else(|e| panic!("the default on timeout failed: {e}"));
+    assert_eq!(requests, vec![expected]);
+    assert_h3_free_only(&out[0], 2, "three candidates, default on timeout");
+    for unpayable in [0u32, 2] {
+        let e = drive_err(&ctx, &entries, &payable, &[Ans::Index(unpayable)]);
+        assert_not_payable(&e, &format!("index {unpayable} answered manually"));
     }
 }
