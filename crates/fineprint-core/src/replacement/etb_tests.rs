@@ -175,6 +175,7 @@ fn applied(ids: &[u64]) -> EtbApplied {
     EtbApplied {
         effects: ids.iter().map(|&n| e(n)).collect(),
         chosen: BTreeMap::new(),
+        ..Default::default()
     }
 }
 
@@ -1375,4 +1376,825 @@ fn req_event_001_projection_forwards_environment() {
         Ok(vec![e(1)])
     );
     assert_eq!(env.objects(), vec![o(1)]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR #202 review round 1 (F1-F8)
+// ---------------------------------------------------------------------------------------------
+
+/// An environment whose `generating_ability_exists` hook is `exists`; everything else is the
+/// inner [`Env`].
+#[derive(Clone, Debug)]
+struct Hooked {
+    inner: Env,
+    exists: fn(EffectId, ObjectId) -> bool,
+}
+
+impl LayerEnvironment for Hooked {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.inner.objects()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.inner.base(id)
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.inner.counters(id)
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        self.inner.matches(selector, ctx)
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        _source_view: Option<&crate::layers::Evaluated>,
+    ) -> bool {
+        (self.exists)(effect, source)
+    }
+}
+
+/// `applied` with the explicit application `order`.
+fn in_order(order: &[u64]) -> EtbApplied {
+    EtbApplied {
+        effects: order.iter().map(|&n| e(n)).collect(),
+        order: order.iter().map(|&n| e(n)).collect(),
+        ..Default::default()
+    }
+}
+
+/// A copy effect into `model`, tier CopyEtb.
+fn copy_of(id: u64, model: Characteristics) -> EtbEffect {
+    EtbEffect::new(e(id), EtbAction::EntersAsCopyOf(Box::new(model))).with_tier(Tier::CopyEtb)
+}
+
+fn creature_tapped(id: u64) -> EtbEffect {
+    EtbEffect::new(e(id), EtbAction::EntersTapped)
+        .with_condition(EtbCondition::HasCardType("Creature".to_owned()))
+}
+
+fn names(p: &ProjectedPermanent) -> BTreeSet<String> {
+    p.evaluated.characteristics.names.clone()
+}
+
+/// F1 fixture: e1 copies a creature, e2 an artifact (both CopyEtb); e3 taps a creature.
+fn copy_order_fixture() -> (Env, EtbEffects) {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = effects(vec![
+        copy_of(1, card("test.etb_model_creature", "Creature", 2, 2)),
+        copy_of(2, artifact("test.etb_model_artifact")),
+        creature_tapped(3),
+    ]);
+    (env, fx)
+}
+
+/// REQ-EVENT-001, CR 616.1f, CR 707.2 (F1): `sequence` is `order` without unknown or repeated
+/// ids, then the rest ascending; an empty `order` is ascending.
+#[test]
+fn req_event_001_applied_sequence() {
+    let mut a = applied(&[7, 1, 5, 3]);
+    assert_eq!(a.sequence(), vec![e(1), e(3), e(5), e(7)]);
+    a.order = vec![e(5), e(9), e(5), e(1)];
+    assert_eq!(a.sequence(), vec![e(5), e(1), e(3), e(7)]);
+    assert_eq!(EtbApplied::default().sequence(), Vec::<EffectId>::new());
+}
+
+/// REQ-EVENT-001, CR 616.1f, CR 707.2 (F1): the LAST applied copy supplies the base, in the
+/// application order: e2 then e1 projects the creature (e3 applies), e1 then e2 the artifact;
+/// an empty order is ascending id (the artifact).
+#[test]
+fn req_event_001_copy_order_project() {
+    let (env, fx) = copy_order_fixture();
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = entry(o(1), p(1));
+    let creature_last = project(&ctx, &en, &in_order(&[2, 1])).unwrap();
+    assert_eq!(names(&creature_last), set(["test.etb_model_creature"]));
+    assert_eq!(applicable(&ctx, &en, &in_order(&[2, 1])), Ok(vec![e(3)]));
+    let artifact_last = project(&ctx, &en, &in_order(&[1, 2])).unwrap();
+    assert_eq!(names(&artifact_last), set(["test.etb_model_artifact"]));
+    assert_eq!(applicable(&ctx, &en, &in_order(&[1, 2])), Ok(vec![]));
+    let ascending = project(&ctx, &en, &applied(&[1, 2])).unwrap();
+    assert_eq!(names(&ascending), set(["test.etb_model_artifact"]));
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 616.1f, CR 707.2 (F1): through `resolve_entering`, choosing e2
+/// first makes the creature copy last (tapped); choosing e1 first leaves the artifact
+/// (untapped). `order` records the real order.
+#[test]
+fn req_event_001_copy_order_resolve() {
+    let (env, fx) = copy_order_fixture();
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let out = drive(&ctx, &en, &no_limit(), &[pick(1)]);
+    assert_eq!(out.asked.len(), 1);
+    let r = &out.result.unwrap()[0];
+    assert!(r.projected.tapped);
+    assert_eq!(names(&r.projected), set(["test.etb_model_creature"]));
+    assert_eq!(r.projected.applied.order, vec![e(2), e(1), e(3)]);
+    assert_eq!(r.projected.applied.effects, [e(1), e(2), e(3)].into());
+    let out = drive(&ctx, &en, &no_limit(), &[pick(0)]);
+    let r = &out.result.unwrap()[0];
+    assert!(!r.projected.tapped);
+    assert_eq!(names(&r.projected), set(["test.etb_model_artifact"]));
+    assert_eq!(r.projected.applied.order, vec![e(1), e(2)]);
+}
+
+/// F2 fixture: o(1) an artifact with its own ThisPermanent counter effect e4; e1 copies an
+/// artifact model o(77) whose declared static (id 400, locked on o(77), source o(77)) adds
+/// Creature and whose declared ETB effect e3 (ThisPermanent of o(77)) taps; e2 taps a creature.
+fn copy_abilities_fixture(declare: bool) -> (Env, EtbEffects) {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![
+        copy_of(1, artifact("test.etb_model_artifact")),
+        creature_tapped(2).with_description("creature tapped"),
+        EtbEffect::new(e(3), counters(5))
+            .with_source(o(77))
+            .with_scope(EtbScope::ThisPermanent),
+        EtbEffect::new(e(4), counters(1))
+            .with_source(o(1))
+            .with_scope(EtbScope::ThisPermanent),
+    ]);
+    if declare {
+        fx.set_copy_abilities(
+            e(1),
+            CopyAbilities {
+                statics: vec![(e(400), add_type(Some(o(77)), o(77), "Creature"))],
+                etb: vec![e(3)],
+            },
+        )
+        .unwrap();
+    }
+    (env, fx)
+}
+
+/// REQ-EVENT-001, CR 614.12, CR 707.5 (F2): the last copy's declared static, rebound to the
+/// entrant (its locked set and its source), makes a creature-gated effect applicable; its
+/// declared ETB effect applies; the original's own ThisPermanent effect does not.
+#[test]
+fn req_event_001_copy_abilities_apply() {
+    for declare in [false, true] {
+        let (env, fx) = copy_abilities_fixture(declare);
+        // The hook keeps effect 400 only when its source is the entrant: the source is rebound.
+        let hooked = Hooked {
+            inner: env,
+            exists: |effect, source| effect != e(400) || source == o(1),
+        };
+        let continuous = ContinuousEffects::new();
+        let ctx = EtbContext {
+            env: &hooked,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        let en = entry(o(1), p(1));
+        // Before the copy: the original's own effect applies, the declaration does nothing.
+        assert_eq!(
+            applicable(&ctx, &en, &EtbApplied::default()),
+            Ok(vec![e(1), e(4)])
+        );
+        let before = project(&ctx, &en, &EtbApplied::default()).unwrap();
+        assert!(
+            !before
+                .evaluated
+                .characteristics
+                .card_types
+                .contains("Creature")
+        );
+        let after = project(&ctx, &en, &applied(&[1])).unwrap();
+        let types = &after.evaluated.characteristics.card_types;
+        if declare {
+            assert_eq!(*types, set(["Artifact", "Creature"]));
+            assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![e(2), e(3)]));
+        } else {
+            assert_eq!(*types, set(["Artifact"]));
+            assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![]));
+        }
+        let out = drive(&ctx, std::slice::from_ref(&en), &no_limit(), &[pick(0)]);
+        let r = &out.result.unwrap()[0];
+        assert_eq!(r.projected.tapped, declare);
+        assert_eq!(
+            r.projected.counters.get("charge").copied(),
+            declare.then_some(5)
+        );
+        // The caller's registry never holds the declared static.
+        assert!(continuous.is_empty());
+    }
+}
+
+/// REQ-EVENT-001, CR 707.5, CR 707.2, CR 616.1f (F2): with two copies, only the last applied
+/// copy's declaration counts.
+#[test]
+fn req_event_001_copy_abilities_only_last_copy() {
+    let (env, mut fx) = copy_abilities_fixture(true);
+    fx.add(copy_of(5, artifact("test.etb_model_other")))
+        .unwrap();
+    fx.add(
+        EtbEffect::new(e(6), counters(2))
+            .with_source(o(78))
+            .with_scope(EtbScope::ThisPermanent),
+    )
+    .unwrap();
+    fx.set_copy_abilities(
+        e(5),
+        CopyAbilities {
+            statics: Vec::new(),
+            etb: vec![e(6)],
+        },
+    )
+    .unwrap();
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = entry(o(1), p(1));
+    // e5 last: e6 applies, not e3; no Creature from e1's static.
+    assert_eq!(applicable(&ctx, &en, &in_order(&[1, 5])), Ok(vec![e(6)]));
+    // e1 last: e3 and the creature-gated e2 apply, not e6.
+    assert_eq!(
+        applicable(&ctx, &en, &in_order(&[5, 1])),
+        Ok(vec![e(2), e(3)])
+    );
+}
+
+/// REQ-EVENT-001, CR 707.5 (F2): `set_copy_abilities` refuses an unknown or non-copy id;
+/// `remove(copy)` drops the declaration; a re-declaration replaces the earlier one.
+#[test]
+fn req_event_001_copy_abilities_registry() {
+    let (env, mut fx) = copy_abilities_fixture(true);
+    assert_eq!(
+        fx.set_copy_abilities(e(99), CopyAbilities::default()),
+        Err(EtbError::NotACopyEffect(e(99)))
+    );
+    assert_eq!(
+        fx.set_copy_abilities(e(3), CopyAbilities::default()),
+        Err(EtbError::NotACopyEffect(e(3)))
+    );
+    assert!(!EtbError::NotACopyEffect(e(3)).to_string().is_empty());
+    let continuous = ContinuousEffects::new();
+    let en = entry(o(1), p(1));
+    {
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![e(2), e(3)]));
+    }
+    // Re-declaring replaces.
+    let mut redeclared = fx.clone();
+    redeclared
+        .set_copy_abilities(e(1), CopyAbilities::default())
+        .unwrap();
+    {
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &continuous,
+            effects: &redeclared,
+        };
+        assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![]));
+    }
+    // Removing the copy drops its declaration: re-adding it brings no abilities.
+    let removed = fx.remove(e(1)).unwrap();
+    fx.add(removed).unwrap();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    assert_eq!(applicable(&ctx, &en, &applied(&[1])), Ok(vec![]));
+}
+
+/// REQ-EVENT-001, CR 707.5 (F2): a declared static with a selector keeps it (bound to the
+/// entrant as source); a declared static whose id is already in force is a layer error.
+#[test]
+fn req_event_001_copy_abilities_selector_and_duplicate() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![copy_of(
+        1,
+        card("test.etb_model_creature", "Creature", 2, 2),
+    )]);
+    let golem = ContinuousEffect {
+        affected: Affected::Selector(ObjectSelectorAST::Ref(
+            fineprint_dsl::expr::ReferenceAST::SelfRef,
+        )),
+        source: Some(o(77)),
+        origin: EffectOrigin::Static { granted_at: None },
+        ..add_subtype(o(77), "Golem")
+    };
+    fx.set_copy_abilities(
+        e(1),
+        CopyAbilities {
+            statics: vec![(e(400), golem)],
+            etb: Vec::new(),
+        },
+    )
+    .unwrap();
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let projected = project(&ctx, &entry(o(1), p(1)), &applied(&[1])).unwrap();
+    assert!(
+        projected
+            .evaluated
+            .characteristics
+            .subtypes
+            .contains("Golem")
+    );
+    let mut in_force = ContinuousEffects::new();
+    in_force
+        .register(e(400), add_subtype(o(1), "Wall"))
+        .unwrap();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &in_force,
+        effects: &fx,
+    };
+    assert_eq!(
+        project(&ctx, &entry(o(1), p(1)), &applied(&[1])),
+        Err(EtbError::Layer(LayerError::DuplicateEffect(e(400))))
+    );
+}
+
+/// A layer-7c effect giving +1/+1 to every creature (the test `Env` matches only creatures).
+fn creatures_get_plus_one() -> ContinuousEffect {
+    ContinuousEffect {
+        layer: Layer::L7c,
+        affected: Affected::Selector(ObjectSelectorAST::Ref(
+            fineprint_dsl::expr::ReferenceAST::SelfRef,
+        )),
+        modification: LayerModification::ModifyPt {
+            power: 1,
+            toughness: 1,
+        },
+        ..add_type(None, o(1), "Creature")
+    }
+}
+
+/// REQ-EVENT-001, CR 613.1d, CR 208.3, CR 205.1b (F3): a printed-3/2 noncreature artifact with
+/// an applied `AddCardTypes{Creature}` projects as an artifact creature 3/2, and a layer-7
+/// effect for creatures sees it (4/3); without the addition it has no P/T. The caller's
+/// registry is unchanged.
+#[test]
+fn req_event_001_added_type_is_layer_four() {
+    let env = Env::default().with(o(1), card("test.etb_artifact_3_2", "Artifact", 3, 2));
+    let fx = effects(vec![EtbEffect::new(
+        e(1),
+        EtbAction::AddCardTypes(set(["Creature"])),
+    )]);
+    let empty = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &empty,
+        effects: &fx,
+    };
+    let en = entry(o(1), p(1));
+    let added = project(&ctx, &en, &applied(&[1])).unwrap();
+    let c = &added.evaluated.characteristics;
+    assert_eq!(c.card_types, set(["Artifact", "Creature"]));
+    assert_eq!(c.power.as_ref().and_then(literal_of), Some(3));
+    assert_eq!(c.toughness.as_ref().and_then(literal_of), Some(2));
+    let plain = project(&ctx, &en, &EtbApplied::default()).unwrap();
+    assert_eq!(plain.evaluated.characteristics.power, None);
+    assert_eq!(plain.evaluated.characteristics.toughness, None);
+    assert!(empty.is_empty());
+    // A layer-7c effect for creatures, in force (selector) sees the added type.
+    let mut continuous = ContinuousEffects::new();
+    continuous
+        .register(e(300), creatures_get_plus_one())
+        .unwrap();
+    let before = continuous.clone();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let c = project(&ctx, &en, &applied(&[1]))
+        .unwrap()
+        .evaluated
+        .characteristics;
+    assert_eq!(c.power.as_ref().and_then(literal_of), Some(4));
+    assert_eq!(c.toughness.as_ref().and_then(literal_of), Some(3));
+    let c = project(&ctx, &en, &EtbApplied::default())
+        .unwrap()
+        .evaluated
+        .characteristics;
+    assert_eq!(c.power, None);
+    assert_eq!(continuous, before);
+}
+
+/// REQ-EVENT-001, CR 613.7, CR 205.1b (F3): the added type comes after an in-force type-setting
+/// effect (it keeps the added type) and survives an applied copy.
+#[test]
+fn req_event_001_added_type_after_set_types_and_copy() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut continuous = ContinuousEffects::new();
+    continuous
+        .register(
+            e(200),
+            ContinuousEffect {
+                timestamp: Timestamp::new(50),
+                modification: LayerModification::SetTypes {
+                    supertypes: None,
+                    card_types: Some(set(["Enchantment"])),
+                    subtypes: None,
+                },
+                ..add_type(None, o(1), "Creature")
+            },
+        )
+        .unwrap();
+    let fx = effects(vec![
+        EtbEffect::new(e(1), EtbAction::AddCardTypes(set(["Creature"]))),
+        copy_of(2, artifact("test.etb_model_artifact")),
+    ]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = entry(o(1), p(1));
+    let c = project(&ctx, &en, &applied(&[1])).unwrap();
+    assert_eq!(
+        c.evaluated.characteristics.card_types,
+        set(["Enchantment", "Creature"])
+    );
+    let c = project(&ctx, &en, &in_order(&[1, 2])).unwrap();
+    assert_eq!(
+        c.evaluated.characteristics.card_types,
+        set(["Enchantment", "Creature"])
+    );
+}
+
+/// REQ-EVENT-001, CR 613.7 (F3): no id or timestamp above the registry's is a layer error, not
+/// a panic.
+#[test]
+fn req_event_001_added_type_id_overflow() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = effects(vec![EtbEffect::new(
+        e(1),
+        EtbAction::AddCardTypes(set(["Creature"])),
+    )]);
+    let mut max_id = ContinuousEffects::new();
+    max_id
+        .register(e(u64::MAX), add_subtype(o(1), "Golem"))
+        .unwrap();
+    let mut max_ts = ContinuousEffects::new();
+    max_ts
+        .register(
+            e(5),
+            ContinuousEffect {
+                timestamp: Timestamp::new(u64::MAX),
+                ..add_subtype(o(1), "Golem")
+            },
+        )
+        .unwrap();
+    for continuous in [max_id, max_ts] {
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        assert_eq!(
+            project(&ctx, &entry(o(1), p(1)), &applied(&[1])),
+            Err(EtbError::Layer(LayerError::IdExhausted))
+        );
+    }
+}
+
+/// REQ-EVENT-001, CR 614.12, CR 603.6d (F4): with a layer-6 "loses all abilities" in force, the
+/// entrant's own "enters tapped" applies only if the environment says its generating ability
+/// still exists on the projected permanent; the default hook (true) keeps it.
+#[test]
+fn req_event_001_this_permanent_needs_its_ability() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut continuous = ContinuousEffects::new();
+    continuous
+        .register(
+            e(200),
+            ContinuousEffect {
+                layer: Layer::L6,
+                modification: LayerModification::RemoveAllAbilities,
+                ..add_type(None, o(1), "Creature")
+            },
+        )
+        .unwrap();
+    let fx = effects(vec![
+        EtbEffect::new(e(1), EtbAction::EntersTapped)
+            .with_source(o(1))
+            .with_scope(EtbScope::ThisPermanent),
+    ]);
+    let gone = Hooked {
+        inner: env.clone(),
+        exists: |effect, _| effect != e(1),
+    };
+    let present = Hooked {
+        inner: env.clone(),
+        exists: |_, _| true,
+    };
+    let en = [entry(o(1), p(1))];
+    for (layer_env, tapped) in [
+        (&gone as &dyn LayerEnvironment, false),
+        (&present, true),
+        (&env, true),
+    ] {
+        let ctx = EtbContext {
+            env: layer_env,
+            continuous: &continuous,
+            effects: &fx,
+        };
+        let out = drive(&ctx, &en, &no_limit(), &[]);
+        assert_eq!(out.result.unwrap()[0].projected.tapped, tapped);
+    }
+}
+
+/// REQ-EVENT-001, CR 614.12b, CR 616.2 (F5): budget 2; entry 1 chooses {two: 2, one: 1}; entry 2
+/// copies itself into a creature, whereupon a creature-gated choice costing 1 applies. Only
+/// `one` is allowed (applied without a request).
+#[test]
+fn req_event_001_payable_newly_applicable_later_entry() {
+    let env = Env::default()
+        .with(o(1), artifact("test.etb_card_a"))
+        .with(o(2), artifact("test.etb_card_b"));
+    let fx = effects(vec![
+        EtbEffect::new(
+            e(1),
+            choose(
+                "k1",
+                EtbChoiceKind::Color,
+                vec![opt("two", 2), opt("one", 1)],
+            ),
+        )
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+        copy_of(2, card("test.etb_model_creature", "Creature", 2, 2))
+            .with_source(o(2))
+            .with_scope(EtbScope::ThisPermanent),
+        EtbEffect::new(e(3), choose("k2", EtbChoiceKind::Color, vec![opt("c", 1)]))
+            .with_condition(EtbCondition::HasCardType("Creature".to_owned())),
+    ]);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 2)].into();
+    let out = drive(&ctx, &[entry(o(1), p(1)), entry(o(2), p(1))], &budget, &[]);
+    assert!(out.asked.is_empty());
+    let r = out.result.unwrap();
+    assert_eq!(
+        r[0].memory.choice("k1"),
+        Some(&ChoiceValue::Color("one".to_owned()))
+    );
+    assert_eq!(
+        r[1].memory.choice("k2"),
+        Some(&ChoiceValue::Color("c".to_owned()))
+    );
+}
+
+/// REQ-EVENT-001, CR 614.12b, CR 616.1c, CR 707.5 (F6): budget 2; entry 1 chooses {2}; entry 2's
+/// own choice costing 1 is removed by a mandatory higher-tier copy into an artifact: the total
+/// is 2, payable. Without the copy the 1 is reserved and entry 1 is not payable.
+#[test]
+fn req_event_001_payable_removed_by_mandatory_copy() {
+    let env = Env::default()
+        .with(o(1), artifact("test.etb_card_a"))
+        .with(o(2), card("test.etb_creature_2_2", "Creature", 2, 2));
+    let base = vec![
+        EtbEffect::new(
+            e(1),
+            choose("k1", EtbChoiceKind::Color, vec![opt("big", 2)]),
+        )
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+        EtbEffect::new(e(2), choose("k2", EtbChoiceKind::Color, vec![opt("x", 1)]))
+            .with_source(o(2))
+            .with_scope(EtbScope::ThisPermanent),
+    ];
+    let mut with_copy = base.clone();
+    with_copy.push(
+        copy_of(3, artifact("test.etb_model_artifact"))
+            .with_source(o(9))
+            .with_condition(EtbCondition::HasCardType("Creature".to_owned())),
+    );
+    let continuous = ContinuousEffects::new();
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 2)].into();
+    let entries = [entry(o(1), p(1)), entry(o(2), p(1))];
+    let fx = effects(with_copy);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &entries, &budget, &[]);
+    let r = out.result.unwrap();
+    assert_eq!(
+        r[0].memory.choice("k1"),
+        Some(&ChoiceValue::Color("big".to_owned()))
+    );
+    assert_eq!(r[1].memory.choice("k2"), None);
+    assert_eq!(r[1].projected.applied.effects, [e(3)].into());
+    let fx = effects(base);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &entries, &budget, &[]);
+    assert_eq!(
+        procedure_message(out.result),
+        EtbError::Unpayable {
+            chooser: p(1),
+            key: "k1".to_owned()
+        }
+        .to_string()
+    );
+}
+
+/// REQ-EVENT-001, CR 614.12b, CR 616.2 (F7): budget 3; entry 1 chooses {one: 1, two: 2}
+/// (self-replacement tier), then a mandatory copy enables a choice costing 1; entry 2 needs 1.
+/// Only `one` is allowed.
+#[test]
+fn req_event_001_payable_newly_applicable_same_entry() {
+    let env = Env::default()
+        .with(o(1), artifact("test.etb_card_a"))
+        .with(o(2), artifact("test.etb_card_b"));
+    let fx = effects(vec![
+        EtbEffect::new(
+            e(1),
+            choose(
+                "k1",
+                EtbChoiceKind::Color,
+                vec![opt("one", 1), opt("two", 2)],
+            ),
+        )
+        .with_tier(Tier::SelfReplacement)
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+        copy_of(2, card("test.etb_model_creature", "Creature", 2, 2))
+            .with_source(o(1))
+            .with_scope(EtbScope::ThisPermanent),
+        EtbEffect::new(e(3), choose("k3", EtbChoiceKind::Color, vec![opt("c", 1)]))
+            .with_condition(EtbCondition::HasCardType("Creature".to_owned())),
+        EtbEffect::new(e(4), choose("k4", EtbChoiceKind::Color, vec![opt("d", 1)]))
+            .with_source(o(2))
+            .with_scope(EtbScope::ThisPermanent),
+    ]);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 3)].into();
+    let out = drive(&ctx, &[entry(o(1), p(1)), entry(o(2), p(1))], &budget, &[]);
+    assert!(out.asked.is_empty());
+    let r = out.result.unwrap();
+    assert_eq!(
+        r[0].memory.choice("k1"),
+        Some(&ChoiceValue::Color("one".to_owned()))
+    );
+    assert_eq!(
+        r[0].memory.choice("k3"),
+        Some(&ChoiceValue::Color("c".to_owned()))
+    );
+    assert_eq!(
+        r[1].memory.choice("k4"),
+        Some(&ChoiceValue::Color("d".to_owned()))
+    );
+}
+
+/// REQ-EVENT-001, CR 614.12b (F8): a budget of u64::MAX with options {u64::MAX, u64::MAX-1} and a
+/// later cost of 1 allows only u64::MAX-1 (no saturation).
+#[test]
+fn req_event_001_payable_no_saturation() {
+    let (env, _) = payable_fixture();
+    let fx = effects(vec![
+        EtbEffect::new(
+            e(1),
+            choose(
+                "a",
+                EtbChoiceKind::Color,
+                vec![opt("max", u64::MAX), opt("almost", u64::MAX - 1)],
+            ),
+        )
+        .with_source(o(1))
+        .with_scope(EtbScope::ThisPermanent),
+        EtbEffect::new(e(2), choose("b", EtbChoiceKind::Color, vec![opt("one", 1)]))
+            .with_source(o(2))
+            .with_scope(EtbScope::ThisPermanent),
+    ]);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), u64::MAX)].into();
+    let out = drive(&ctx, &[entry(o(1), p(1)), entry(o(2), p(1))], &budget, &[]);
+    assert!(out.asked.is_empty());
+    let r = out.result.unwrap();
+    assert_eq!(
+        r[0].memory.choice("a"),
+        Some(&ChoiceValue::Color("almost".to_owned()))
+    );
+    assert_eq!(
+        r[1].memory.choice("b"),
+        Some(&ChoiceValue::Color("one".to_owned()))
+    );
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b: the `CHOOSE_REPLACEMENT_EFFECT` candidates are not
+/// filtered by payability: an unpayable choice is still offered, and picking it is not payable.
+#[test]
+fn req_event_001_order_choice_not_filtered() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let fx = effects(vec![
+        EtbEffect::new(e(1), choose("a", EtbChoiceKind::Color, vec![opt("x", 2)]))
+            .with_description("dear"),
+        EtbEffect::new(e(2), choose("b", EtbChoiceKind::Color, vec![opt("y", 1)]))
+            .with_description("cheap"),
+    ]);
+    let continuous = ContinuousEffects::new();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 1)].into();
+    let out = drive(&ctx, &[entry(o(1), p(1))], &budget, &[pick(0)]);
+    assert_eq!(
+        out.asked[0].payload,
+        ChoicePayload::ChooseReplacementEffect {
+            event: "ZONE_CHANGE".to_owned(),
+            effects: vec!["dear".to_owned(), "cheap".to_owned()],
+        }
+    );
+    assert!(procedure_message(out.result).contains("not payable"));
+}
+
+/// `n` independent `Other`-tier choices of cost 1 for any entering permanent.
+fn many_choices(n: u64) -> EtbEffects {
+    effects(
+        (1..=n)
+            .map(|i| {
+                EtbEffect::new(
+                    e(i),
+                    choose(&format!("k{i}"), EtbChoiceKind::Color, vec![opt("x", 1)]),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, CR 614.12b (F5-F8): the lookahead visits at most
+/// `MAX_LOOKAHEAD_STATES` (4096) states per entry: 13 independent choices (8192 states) are a
+/// procedure error for a budgeted chooser, 12 (4096 subsets, the full set not memoised) are
+/// not; an unlimited chooser runs no lookahead.
+#[test]
+fn req_event_001_lookahead_state_cap() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let continuous = ContinuousEffects::new();
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 100)].into();
+    let en = [entry(o(1), p(1))];
+    let fx = many_choices(13);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert!(out.asked.is_empty());
+    assert!(procedure_message(out.result).contains("4096"));
+    let out = drive(&ctx, &en, &no_limit(), &[]);
+    assert_eq!(out.result, Err(ChoiceError::NotPending));
+    assert_eq!(
+        out.asked[0].choice_type,
+        ChoiceType::ChooseReplacementEffect
+    );
+    let fx = many_choices(12);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let out = drive(&ctx, &en, &budget, &[]);
+    assert_eq!(out.result, Err(ChoiceError::NotPending));
+    assert_eq!(out.asked.len(), 1);
 }

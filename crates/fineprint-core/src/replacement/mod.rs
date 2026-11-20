@@ -84,9 +84,9 @@ pub use bus::{
     BusReport, MAX_BUS_EVENTS, MAX_CHILD_DEPTH, MAX_REPEATS, process_batch, process_event,
 };
 pub use etb::{
-    EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext, EtbEffect, EtbEffects,
-    EtbEntry, EtbError, EtbOption, EtbResolved, EtbScope, ProjectedPermanent, applicable, project,
-    resolve_entering,
+    CopyAbilities, EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext, EtbEffect,
+    EtbEffects, EtbEntry, EtbError, EtbOption, EtbResolved, EtbScope, ProjectedPermanent,
+    applicable, project, resolve_entering,
 };
 pub use types::{
     Action, AmountOp, BusError, BusEventKind, BusInterrupt, EventMatcher, Modification,
