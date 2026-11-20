@@ -2,8 +2,9 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Trigger detection (REQ-EVENT-002, SRS 8.2): which triggered abilities trigger on one batch
-//! of simultaneous events, and the queue they wait in until they are put on the stack.
+//! Triggers (REQ-EVENT-002, SRS 8.2): which triggered abilities trigger on one batch of
+//! simultaneous events, the queue they wait in, state, delayed, reflexive and sourceless
+//! triggers, and putting them on the stack.
 //!
 //! **Events.** [`events_from_batch`] normalises an executed batch (read from the executed-event
 //! log) into [`TriggerEvent`]s: one or more per executed event that a trigger can match (damage
@@ -26,27 +27,58 @@
 //! still counts). It returns [`WaitingTrigger`]s, which
 //! a [`WaitingTriggers`] queue holds in creation order.
 //!
-//! **Out of scope** (later units): putting triggers on the stack and their APNAP ordering
-//! (CR 603.3b), the resolution-time intervening-if check, state triggers, phase/step
-//! triggers, delayed and reflexive triggers, and cost-payment LKI for crew, saddle and station.
+//! **To the stack.** [`StateTriggers`] checks state triggers (CR 603.8) and keeps an instance
+//! from triggering again until it has left the stack. [`DelayedTriggers`] holds delayed
+//! triggered abilities with the bindings captured when they were created (CR 603.7), and
+//! [`reflexive_triggers`] creates reflexive ones (CR 603.12). [`SourcelessTriggers`] holds the
+//! player-scoped inherent abilities with no source (the monarch, the initiative, rad counters
+//! and speed; an exception to CR 113.8). Every origin becomes a [`PendingTrigger`];
+//! [`place_triggers`] puts them on the stack in the two-part APNAP process of CR 603.3b with
+//! the choice protocol (`ORDER_SIMULTANEOUS_TRIGGERS`, `CHOOSE_MODES`, `CHOOSE_TARGETS`) and
+//! removes a trigger with no legal choice (CR 603.3c-d); [`ask_optional_trigger`] asks
+//! `CHOOSE_OPTIONAL_TRIGGER` when an optional trigger resolves (CR 603.5).
 //!
-//! **Determinism.** Only `Vec` and `BTreeMap`; registrations are sorted by (source, ability id)
-//! and output is ordered by (first event index, source, ability id) (REQ-CORE-001).
+//! **Out of scope** (later units): the implementations of [`TriggerEnv`] and [`PlacementEnv`]
+//! on the real game state (the state has no stack or ability registry yet; the game-loop
+//! integration unit owns them, docs/DECISIONS.md "#31 FP-030 — Real-state environments belong
+//! to the integration unit"), emitting `TriggerPutOnStackEvent` and `TriggerRemovedEvent`, the
+//! state-based-action loop of CR 603.3b, the resolution-time intervening-if check, phase/step
+//! triggers, and cost-payment LKI for crew, saddle and station.
+//!
+//! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet` (REQ-CORE-001). Detection sorts its
+//! registrations by (source, ability id) and its output by (first event index, source, ability
+//! id). That order is detection's alone: [`place_triggers`] does not keep it. Placement stacks in
+//! the two-part APNAP order of CR 603.3b (part 1, then part 2, players in APNAP order) and,
+//! within a player's part, in the order the controller chooses with
+//! `ORDER_SIMULTANEOUS_TRIGGERS` (CR 101.4c). It asks nothing for a single trigger.
 
+mod delayed;
 mod detect;
 mod event;
 mod lookback;
+mod place;
 mod queue;
+mod sourceless;
+mod state;
 
+#[cfg(test)]
+mod stack_tests;
 #[cfg(test)]
 mod tests;
 
+pub use delayed::{DelayedTriggerId, DelayedTriggers, reflexive_triggers};
 pub use detect::{
     TriggerEnv, TriggerRegistration, WaitingTrigger, detect, detect_with_pre_event_memory,
 };
 pub use event::{EventField, TriggerEvent, events_from_batch, events_from_batch_with_lki};
 pub use lookback::{LookBackKind, StateView, look_back_kind};
+pub use place::{
+    PendingTrigger, PlacementEnv, RemovedReason, RemovedTrigger, StackedTrigger, TriggerOrigin,
+    TriggerPlacement, ask_optional_trigger, place_triggers,
+};
 pub use queue::WaitingTriggers;
+pub use sourceless::{SourcelessAbility, SourcelessKind, SourcelessTriggers};
+pub use state::StateTriggers;
 
 #[cfg(doc)]
 use fineprint_dsl::ability::{EventKind, EventMatcher};
