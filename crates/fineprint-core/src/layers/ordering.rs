@@ -190,12 +190,15 @@ pub(super) fn run_layer(
 /// what it applies to) or what B does to it, and (c) both or neither are from
 /// characteristic-defining abilities. The real state is never touched.
 ///
-/// What B does is compared field by field ([`same_output`]), except for a `REPLACE_TEXT_WORD`
-/// B with `from != to`: it applies to its matching word tokens and does the same thing (rewrite
-/// to `to`) to each, so it depends on A exactly when applying A changes that set of tokens
-/// (position and id, [`super::text::replace_targets`]). A change A makes to any other token of
-/// the same rules text creates no dependency (docs/DECISIONS.md "#37 FP-036 — Dependency between
-/// text effects").
+/// What B does is compared field by field ([`same_output`]), except when both A and B are
+/// `REPLACE_TEXT_WORD` effects (B with `from != to`): B applies to its matching word tokens and
+/// does the same thing (rewrite to `to`) to each, and A rewrites only the values of word tokens,
+/// so B depends on A exactly when applying A changes that set of tokens (position and id,
+/// [`super::text::replace_targets`]); a change A makes to any other token of the same rules text
+/// creates no dependency. When A is a whole-text `SetText`, it replaces the field B rewrites, so
+/// it is judged by the whole output: B depends on it whenever the outputs differ, even if the
+/// SetText keeps B's matched word at the same position with the same id (docs/DECISIONS.md
+/// "#37 FP-036 — Dependency between text effects").
 fn dependencies(
     steps: &[Keyed<'_>],
     remaining: &[usize],
@@ -236,9 +239,10 @@ fn dependencies(
                 (None, None) => false,
                 (Some(out0), Some(out1)) => match replaced_word(step_b) {
                     // CR 613.8a (b), CR 612.2: a word replacement applies to its matching
-                    // tokens and does the same thing to each, so applying A changes what it
-                    // applies to, or what it does, exactly when that set of tokens changes.
-                    Some((category, from)) => {
+                    // tokens and does the same thing to each, and a word replacement A rewrites
+                    // only word values, so applying A changes what B applies to, or what it
+                    // does, exactly when that set of tokens changes.
+                    Some((category, from)) if is_word_replacement(step_a) => {
                         replace_targets(&scratch.state.characteristics.rules_text, category, from)
                             != replace_targets(
                                 &after_a.state.characteristics.rules_text,
@@ -246,8 +250,9 @@ fn dependencies(
                                 from,
                             )
                     }
-                    // CR 613.8a (b): its output differs.
-                    None => !same_output(
+                    // CR 613.8a (b): its output differs. This includes a word replacement B
+                    // after a whole-text SetText A, which changes the text B rewrites.
+                    _ => !same_output(
                         (&scratch.state, &out0.state, &after_a.state, &out1.state),
                         declared_pt_adjustment(step_b, scratch),
                         declared_pt_adjustment(step_b, &after_a),
@@ -276,6 +281,23 @@ fn replaced_word<'s>(step: &Step<'s>) -> Option<(RewritableCategory, &'s str)> {
         ) if from != to => Some((*category, from.as_str())),
         _ => None,
     }
+}
+
+/// Whether `step` is a `REPLACE_TEXT_WORD` effect, which rewrites only the values of word tokens
+/// (CR 612.2), so its effect on a word replacement B is fully captured by B's matching tokens
+/// (CR 613.8a (b)). A no-op replacement never reaches the comparison: it changes nothing. Reads
+/// only the modification kind, never a card name or id (REQ-DSL-013).
+fn is_word_replacement(step: &Step<'_>) -> bool {
+    matches!(
+        step,
+        Step::Effect(
+            _,
+            ContinuousEffect {
+                modification: LayerModification::ReplaceTextWord { .. },
+                ..
+            },
+        )
+    )
 }
 
 /// `step` applied to a clone of `from`, or `None` if it does not apply to the object there.

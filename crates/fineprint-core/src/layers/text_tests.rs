@@ -1228,6 +1228,66 @@ fn set_text_applies_before_replace_in_both_orders() {
     assert_eq!(value_of(&text_of(&r, &env, o(1)), "x1"), "Island");
 }
 
+// REQ-LAYER-002, REQ-DSL-012; CR 613.8a, 613.8b, 613.1c (U1, review round 2, CodeRabbit finding
+// 4640922156): a whole-text SetText that keeps the replaced Swamp word at the same position with
+// the same id, and changes only another token, still changes the text the word replacement
+// rewrites, so the replacement depends on it (CR 613.8a (b)) and the SetText does not depend on
+// the replacement. In BOTH timestamp orders the SetText applies first (CR 613.8b) and the
+// replacement rewrites the new text; with the SetText later, it is released by dependency.
+#[test]
+fn set_text_keeping_matched_word_applies_before_replace_in_both_orders() {
+    // (base text, SetText text, expected result)
+    let cases = [
+        // Variant 1: [Swamp w, literal] -> the literal changes.
+        (
+            vec![word("w", BLT, "Swamp"), lit("n", "n0")],
+            vec![word("w", BLT, "Swamp"), lit("n", "n1")],
+            vec![word("w", BLT, "Island"), lit("n", "n1")],
+        ),
+        // Variant 2: [literal, Swamp w, Plains x] -> only the other word token changes.
+        (
+            vec![
+                lit("l", "n0"),
+                word("w", BLT, "Swamp"),
+                word("x", BLT, "Plains"),
+            ],
+            vec![
+                lit("l", "n0"),
+                word("w", BLT, "Swamp"),
+                word("x", BLT, "Forest"),
+            ],
+            vec![
+                lit("l", "n0"),
+                word("w", BLT, "Island"),
+                word("x", BLT, "Forest"),
+            ],
+        ),
+    ];
+    for (variant, (base, set, want)) in cases.into_iter().enumerate() {
+        for (t_set, t_rep) in [(1, 2), (2, 1)] {
+            let ctx = format!("variant {variant}, SetText at {t_set}, replace at {t_rep}");
+            let (text, order) = run_two(
+                encode_rules_text(&stream(base.clone())),
+                (
+                    t_set,
+                    LayerModification::SetText(encode_rules_text(&stream(set.clone()))),
+                ),
+                (t_rep, replace(BLT, "Swamp", "Island")),
+            );
+            assert_eq!(text.tokens(), want.as_slice(), "{ctx}");
+            assert_eq!(
+                items(&order),
+                vec![OrderItem::Effect(e(1)), OrderItem::Effect(e(2))],
+                "{ctx}"
+            );
+            if t_set > t_rep {
+                // CR 613.8b: the later SetText is released first by dependency.
+                assert_eq!(order[0].1, Selection::Dependency, "{ctx}");
+            }
+        }
+    }
+}
+
 // REQ-LAYER-002, REQ-DSL-012; CR 613.8a, 612.2 (U1): the tokens a replacement applies to are
 // the (position, id) of the words of its category and exact value only; a same-valued word of
 // another category, a CARD_NAME word, literal text and SELF / OTHER references are not; empty
