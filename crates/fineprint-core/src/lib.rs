@@ -12,6 +12,8 @@ pub mod choice;
 pub mod events;
 /// Who knows what, shuffle knowledge and the redacted per-player zones view (REQ-CORE-004).
 pub mod knowledge;
+/// The layer system: continuous-effect registry, evaluation through layers 1a-7d and timestamps (REQ-LAYER-001, REQ-CORE-002).
+pub mod layers;
 /// Base characteristics per card layout and zone, and mana value per layout (REQ-OBJ-002).
 pub mod layouts;
 /// Last known information, per-object Memory and the Linked Store (REQ-CORE-003, REQ-CORE-007).
