@@ -1089,6 +1089,61 @@ fn set_text_and_replace_both_orders() {
     }
 }
 
+/// REQ-DSL-012, REQ-LAYER-002, REQ-LAYER-005; CR 613.8a, 613.8b, 613.8c (review round 2,
+/// CodeRabbit finding 4640922156): a whole-text SetText to [Swamp w, "new"] keeps the base's
+/// Swamp word at the same position with the same id, yet it still replaces the text the
+/// Swamp->Island replacement rewrites, so the replacement depends on it (CR 613.8a (b)) and the
+/// SetText never depends on the replacement. In BOTH timestamp orders the text is
+/// [Island w, "new"], the SetText applies first (released by dependency when it is later, CR
+/// 613.8b), and a cached evaluation equals the uncached one.
+#[test]
+fn set_text_keeping_matched_word_and_replace_both_orders() {
+    use fineprint_core::layers::Selection;
+    const SET: u64 = 1;
+    const REP: u64 = 2;
+    let base = vec![word("w", BasicLandType, "Swamp"), lit_t("n", "old")];
+    let replacement = vec![word("w", BasicLandType, "Swamp"), lit_t("n", "new")];
+    let want = stream(vec![word("w", BasicLandType, "Island"), lit_t("n", "new")]);
+    for (t_set, t_rep) in [(5, 6), (6, 5)] {
+        let mut env = TestEnv::new();
+        let a = env.put(oid(A), with_text("test.text_keep", base.clone()));
+        let r = registry(&[
+            (
+                SET,
+                eff(
+                    Layer::L3,
+                    t_set,
+                    objs(&[a]),
+                    LayerModification::SetText(enc(replacement.clone())),
+                ),
+            ),
+            (REP, text_eff(t_rep, &[a], BasicLandType, "Swamp", "Island")),
+        ]);
+        let (e, rec) = evaluate_with_order(&r, &env, a).expect("evaluate");
+        let ctx = format!("SetText ts {t_set}, replace ts {t_rep}");
+        assert_eq!(dec(&e.characteristics.rules_text), want, "{ctx}");
+        assert_eq!(e, evaluate(&r, &env, a).expect("evaluate"), "{ctx}");
+        let mut cache = LayerCache::new();
+        assert_eq!(cache.evaluate(&r, &env, a).expect("cached"), e, "{ctx}");
+        assert_eq!(
+            cache.evaluate(&r, &env, a).expect("cached again"),
+            e,
+            "{ctx}"
+        );
+        let l3: Vec<_> = rec.steps.iter().filter(|s| s.layer == Layer::L3).collect();
+        assert_eq!(
+            l3.iter().map(|s| s.item.clone()).collect::<Vec<_>>(),
+            vec![OrderItem::Effect(eid(SET)), OrderItem::Effect(eid(REP))],
+            "{ctx}"
+        );
+        assert!(l3.iter().all(|s| s.applied), "{ctx}");
+        if t_set > t_rep {
+            // CR 613.8b: the later SetText is released first by dependency.
+            assert_eq!(l3[0].selection, Selection::Dependency, "{ctx}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // 11. no-op rules
 // ---------------------------------------------------------------------------------------------
