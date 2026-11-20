@@ -24,7 +24,11 @@ threads.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
    - Claim it with step 4. If the claim loses, pick the next candidate.
-   - If none qualifies, tell the user why and stop.
+   - If none qualifies, first finish the unblocking of the latest merge: the merge that started
+     this session can do so before the merging session reaches §7 step 3. Find the most
+     recently closed `work-unit` issue (`gh api 'repos/donfuldauer/fineprint/issues?labels=work-unit&state=closed&sort=updated&direction=desc&per_page=5'`,
+     the latest `closed_at`), run §7 step 3 for it, and list ready issues again. If still none
+     qualifies, tell the user why and stop.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
    `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
@@ -194,7 +198,8 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 3. **Unblock dependents.** For each issue this one blocks
    (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
    closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
-   its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)".
+   its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)". Skip an issue
+   that no longer carries `blocked`: the next session may already have unblocked it (§1 step 0).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
    and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
