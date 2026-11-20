@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar; add 'and self-chain' to have it start a fresh session for the next issue after merging."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar; add 'and self-chain' to have the backstop scheduled task start a fresh session for the next issue after merging."
 ---
 
 # work-issue
@@ -61,8 +61,12 @@ threads.
    never an issue's latest claim. This relies on GitHub comment IDs being allocated in creation
    order and listed as soon as they are created: observed behaviour that GitHub does not document
    (DECISIONS.md "Self-chaining — claim ordering").
-   1. Post the claim comment: work has started, with the branch name and this session's ID
-      (`get_session` with no argument returns it).
+   1. Post the claim comment: work has started, with the branch name and this session's ID.
+      Read the ID from the environment, not from `get_session`:
+      `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"`. Only if that variable is unset,
+      call `get_session` with no argument. Call `get_session` on another session only to check
+      whether a claim that isn't yours is live (DECISIONS.md "Self-chaining — handoff through the
+      backstop scheduled task").
    2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
       delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
@@ -209,28 +213,26 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
 now ready; say why in the final message instead.
 
-1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: starting
-   successor" or "Self-chained to session" comment from this session already exists, a successor
-   was or may have been created: find it with `list_sessions` by the tag
-   `fineprint-chain-<marker comment ID>` (step 3), never by time alone, so another chain's
-   session is never mistaken for this one's. If one exists, post step 4's comment if it is missing and end the turn;
-   never create another. If the marker exists but no successor session is found, create none and
-   say so in the final message: the backstop scheduled task restarts the chain.
-2. **Depth limit.** Otherwise call `get_session` with no argument and read `lineage.depth` and
-   `lineage.limit`. A successor would sit at `depth + 1`. If `depth + 1 >= limit`, create no
-   successor and post no marker: comment on the merged issue "Self-chain stopped: session depth
-   limit reached (depth <d> of <limit>); the backstop scheduled task restarts the chain.", say
-   the same in the final message, and end the turn. (`>=` is deliberate: it may stop one
-   generation early, but never attempts a create that the limit would refuse.)
-3. Otherwise post the marker comment "Self-chain: starting successor" on the merged issue, then
-   start one new session with `create_session`: `source_url`
-   `https://github.com/donfuldauer/fineprint`, tags `fineprint-chain` and
-   `fineprint-chain-<marker comment ID>` (the ID of the marker just posted), a title naming the
-   next issue, and the prompt `Start work on the next ready issue and self-chain.` Leave the
-   environment and model to be inherited.
-4. Comment on the merged issue: "Self-chained to session <id>."
-5. End the turn. Never start more than one session per merge, and never chain from a session
-   whose prompt did not ask for it.
+The successor is always started by the backstop scheduled task, never by this session: fire the
+task, and it starts a fresh session. Never call `create_session` to chain. A session started by
+another session asks a person to approve every remote-session tool call, while a session started
+by the scheduled task does not (DECISIONS.md "Self-chaining — handoff through the backstop
+scheduled task"). There is no depth limit: the chain runs until no issue is ready.
+
+1. **Check for an earlier attempt.** Read the merged issue's comments. If a "Self-chain: handed
+   off" comment from this session already exists, the handoff was already made: fire nothing
+   more, and end the turn.
+2. **Find the task.** Call `list_triggers` and take the enabled task named
+   `Fine Print: next ready issue (backstop)`. If none exists or it is disabled, post no marker,
+   say so in the final message (a person must restore it), and end the turn.
+3. Post the marker comment on the merged issue: "Self-chain: handed off to the backstop scheduled
+   task by session <this session's ID>." Then call `fire_trigger` with the task's ID and the text
+   `Handoff: session <this session's ID> merged #<N> and fired this run. In step 1, ignore that
+   session.`
+4. If `fire_trigger` fails, edit the marker comment to add "Firing failed: <reason>; the next
+   scheduled run picks up the chain." and say the same in the final message.
+5. End the turn. Fire at most once per merge, and never chain from a session whose prompt did
+   not ask for it.
 
 ## Never
 
