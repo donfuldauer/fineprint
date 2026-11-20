@@ -23,7 +23,8 @@
 //! permanent that is already face down (CR 708.2b), a double-faced permanent (CR 712.13) and a
 //! face-up merged permanent with a double-faced component (CR 731.2j); otherwise it stamps the
 //! object (CR 613.7f) and registers the effect. [`turn_face_up`] removes the effect so the
-//! copiable values revert (CR 708.8), stamping the object again (CR 613.7f); it refuses an
+//! copiable values revert (CR 708.8) (a shared effect is narrowed in place, keeping its links),
+//! stamping the object again (CR 613.7f); it refuses an
 //! instant or sorcery (CR 701.40g, 701.58g, 731.2g). Everything else registered on the object
 //! stays (CR 708.8, 708.10).
 //!
@@ -211,8 +212,10 @@ pub fn turn_face_down(
 /// values if it became a copy while face down (CR 708.10). Every other effect stays, since it is
 /// the same object (CR 708.8). The object receives a new timestamp (CR 613.7f), returned.
 ///
-/// If the effect's locked set holds other objects too, only `object` is taken out of it; the
-/// others stay face down.
+/// If the effect's locked set holds other objects too, only `object` is taken out of it, in
+/// place ([`ContinuousEffects::narrow_objects`]): the effect keeps its id and timestamp, and the
+/// links of its same-as-layer parts are kept, so the others stay face down (CR 613.6, 708.8).
+/// An effect left with no object is removed together with its links.
 ///
 /// # Errors
 /// [`FaceUpRefusal::NotFaceDown`] if `effect_id` is unknown, is not a
@@ -242,10 +245,6 @@ pub fn turn_face_up(
     if instant_or_sorcery {
         return Err(FaceUpRefusal::InstantOrSorcery);
     }
-    let narrowed = (!remaining.is_empty()).then(|| ContinuousEffect {
-        affected: Affected::Objects(remaining),
-        ..effect.clone()
-    });
     let mut next_ledger = ledger.clone();
     let mut next_ids = ids.clone();
     // CR 613.7f: a permanent receives a new timestamp each time it turns face up.
@@ -253,18 +252,16 @@ pub fn turn_face_up(
         .stamp_object(&mut next_ids, object, StampReason::TurnedFaceUpOrDown)
         .map_err(FaceUpRefusal::Layer)?;
     // CR 708.8: the face-down characteristics end; the copiable values revert.
-    match narrowed {
-        None => {
-            effects.remove(effect_id);
-        }
-        Some(narrowed) => {
-            let mut next_effects = effects.clone();
-            next_effects.remove(effect_id);
-            next_effects
-                .register(effect_id, narrowed)
-                .map_err(FaceUpRefusal::Layer)?;
-            *effects = next_effects;
-        }
+    if remaining.is_empty() {
+        effects.remove(effect_id);
+    } else {
+        // CR 613.6, 708.8: narrow the anchor in place so the other objects stay face down and
+        // every same-as-layer link to the anchor keeps applying to them.
+        let mut next_effects = effects.clone();
+        next_effects
+            .narrow_objects(effect_id, remaining)
+            .map_err(FaceUpRefusal::Layer)?;
+        *effects = next_effects;
     }
     *ledger = next_ledger;
     *ids = next_ids;

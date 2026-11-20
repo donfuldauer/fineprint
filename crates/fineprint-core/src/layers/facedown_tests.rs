@@ -4,7 +4,7 @@
 
 // Unit tests of layer 1b (facedown.rs): REQ-OBJ-003 (face-down spells and permanents),
 // REQ-OBJ-002 (copiable values), REQ-LAYER-001 and REQ-LAYER-002 (layer order), REQ-CORE-004
-// (redaction), REQ-CORE-006 (determinism). Synthetic ids, characteristics and definitions only
+// (redaction), REQ-LAYER-005 (cache agrees with full evaluation), REQ-CORE-006 (determinism). Synthetic ids, characteristics and definitions only
 // (R5).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -927,6 +927,121 @@ fn req_obj_003_turn_face_up_narrows_shared_effect() {
     assert_eq!(left.timestamp, shared.timestamp);
 }
 
+/// A shared face-down group: the layer-1b anchor (effect 1) on `{o(1), o(2)}` and a layer-7c
+/// `SameAsLayer(L1b)` part (effect 2) adding +1/+1 (CR 613.6).
+fn shared_group(r: &mut ContinuousEffects, env: &Env) {
+    let mut anchor = fd(&FaceDownProfile::default_2_2(), o(1), 3);
+    anchor.affected = Affected::Objects(objs(&[o(1), o(2)]));
+    let mut part = plain(
+        Layer::L7c,
+        3,
+        o(1),
+        LayerModification::ModifyPt {
+            power: 1,
+            toughness: 1,
+        },
+    );
+    part.affected = Affected::SameAsLayer(Layer::L1b);
+    r.register_group(env, vec![(e(1), anchor), (e(2), part)])
+        .unwrap();
+}
+
+// REQ-OBJ-003, REQ-LAYER-001, REQ-LAYER-002; CR 613.6, 708.8: turning one object of a shared
+// face-down effect up keeps the links of the group's other parts, so the object that stays face
+// down still gets the linked +1/+1 part; the object turned up gets neither.
+#[test]
+fn req_obj_003_613_6_turn_up_one_of_shared_effect_keeps_group_links() {
+    let env = Env::default()
+        .with(o(1), card("one"))
+        .with(o(2), card("two"));
+    let mut r = ContinuousEffects::new();
+    shared_group(&mut r, &env);
+    assert_eq!(pt(&eval(&r, &env, o(1))), Some((3, 3)));
+    assert_eq!(pt(&eval(&r, &env, o(2))), Some((3, 3)));
+    let links_before = r.links().clone();
+    assert_eq!(links_before.get(&e(2)), Some(&e(1)));
+    let (mut l, mut g) = clock(3);
+    let t_up = turn_face_up(&mut r, e(1), o(1), false, &mut l, &mut g).unwrap();
+    assert!(t_up > ts(3));
+    assert_eq!(l.object_timestamp(o(1)), Some(t_up));
+    assert_eq!(r.links(), &links_before);
+    // A is face up and outside the anchor: its base values, no linked part.
+    assert_eq!(eval(&r, &env, o(1)), card("one"));
+    // B stays face down with the linked part still applying.
+    let b = eval(&r, &env, o(2));
+    assert_eq!(pt(&b), Some((3, 3)));
+    assert_eq!(
+        b.names,
+        FaceDownProfile::default_2_2().characteristics().names
+    );
+    // Turning B up removes the anchor and its links; B is at its base values.
+    turn_face_up(&mut r, e(1), o(2), false, &mut l, &mut g).unwrap();
+    assert!(r.get(e(1)).is_none());
+    assert!(r.links().is_empty());
+    assert_eq!(eval(&r, &env, o(2)), card("two"));
+}
+
+// REQ-OBJ-003; CR 613.6, 708.8: `narrow_objects` on an unknown id is an error and changes
+// nothing.
+#[test]
+fn req_obj_003_narrow_objects_unknown_effect() {
+    let env = Env::default()
+        .with(o(1), card("one"))
+        .with(o(2), card("two"));
+    let mut r = ContinuousEffects::new();
+    shared_group(&mut r, &env);
+    let before = r.clone();
+    assert_eq!(
+        r.narrow_objects(e(9), objs(&[o(1)])),
+        Err(LayerError::UnknownEffect(e(9)))
+    );
+    assert_eq!(r, before);
+}
+
+// REQ-OBJ-003; CR 613.6: `narrow_objects` refuses an effect that is not a locked object set (a
+// `SameAsLayer` part) and changes nothing.
+#[test]
+fn req_obj_003_narrow_objects_needs_objects() {
+    let env = Env::default()
+        .with(o(1), card("one"))
+        .with(o(2), card("two"));
+    let mut r = ContinuousEffects::new();
+    shared_group(&mut r, &env);
+    let before = r.clone();
+    assert_eq!(
+        r.narrow_objects(e(2), objs(&[o(1)])),
+        Err(LayerError::Unsupported(
+            "narrow_objects needs an Affected::Objects effect"
+        ))
+    );
+    assert_eq!(r, before);
+}
+
+// REQ-OBJ-003; CR 613.6, 708.8: `narrow_objects` replaces only the object set; id, timestamp,
+// every other field and the links stay.
+#[test]
+fn req_obj_003_narrow_objects_keeps_everything_else() {
+    let env = Env::default()
+        .with(o(1), card("one"))
+        .with(o(2), card("two"));
+    let mut r = ContinuousEffects::new();
+    shared_group(&mut r, &env);
+    let before = r.get(e(1)).unwrap().clone();
+    let links = r.links().clone();
+    r.narrow_objects(e(1), objs(&[o(2)])).unwrap();
+    let after = r.get(e(1)).unwrap();
+    assert_eq!(after.affected, Affected::Objects(objs(&[o(2)])));
+    assert_eq!(
+        after,
+        &ContinuousEffect {
+            affected: Affected::Objects(objs(&[o(2)])),
+            ..before
+        }
+    );
+    assert_eq!(r.links(), &links);
+    assert_eq!(r.len(), 2);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Redaction and LKI (REQ-CORE-004, CR 708.5, 603.10)
 // ---------------------------------------------------------------------------------------------
@@ -1032,8 +1147,9 @@ fn scenario() -> (ContinuousEffects, Env) {
     (r, env)
 }
 
-// REQ-OBJ-003, REQ-CORE-006: the same operations twice give the same digest; the cache (or
-// full recompute under the feature) agrees with plain evaluation.
+// REQ-OBJ-003, REQ-LAYER-005, REQ-CORE-006: the same operations twice give the same digest; the
+// cache (or full recompute under the feature) agrees with plain evaluation, including a cache
+// warmed on the face-up state and reused after turning face down and face up.
 #[test]
 fn req_core_006_face_down_deterministic_and_cache_agrees() {
     let (r1, env1) = scenario();
@@ -1050,6 +1166,32 @@ fn req_core_006_face_down_deterministic_and_cache_agrees() {
         a[&o(2)].characteristics,
         profile_chars(&FaceDownProfile::default_2_2())
     );
+
+    // A cache warmed face up, then reused across turn_face_down and turn_face_up (CR 708.8).
+    let env = Env::default()
+        .with(o(1), card("a"))
+        .with(o(2), other("b"))
+        .counter(o(1), "+1/+1", 2);
+    let mut r = ContinuousEffects::new();
+    let (mut l, mut g) = clock(0);
+    let mut cache = LayerCache::new();
+    let warm = cache.evaluate_all(&r, &env).unwrap();
+    assert_eq!(warm, evaluate_all(&r, &env).unwrap());
+    down(&mut r, 1, FaceDownTarget::default(), o(1), &mut l, &mut g).unwrap();
+    let cached = cache.evaluate_all(&r, &env).unwrap();
+    let fresh = evaluate_all(&r, &env).unwrap();
+    assert_eq!(cached, fresh);
+    assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+    assert_eq!(
+        fresh[&o(1)].characteristics.names,
+        FaceDownProfile::default_2_2().characteristics().names
+    );
+    turn_face_up(&mut r, e(1), o(1), false, &mut l, &mut g).unwrap();
+    let cached = cache.evaluate_all(&r, &env).unwrap();
+    let fresh = evaluate_all(&r, &env).unwrap();
+    assert_eq!(cached, fresh);
+    assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+    assert_eq!(fresh[&o(1)].characteristics.names, card("a").names);
 }
 
 /// A deterministic generator (the property style of the layers tests).

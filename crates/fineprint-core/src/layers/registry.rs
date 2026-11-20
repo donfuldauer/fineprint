@@ -448,6 +448,35 @@ impl ContinuousEffects {
         Ok(())
     }
 
+    /// Replaces the locked object set of the effect `id` with `objects`, keeping its id, its
+    /// timestamp, and every `SameAsLayer` link to it (CR 613.6). Used when one object of a
+    /// shared face-down effect turns face up while the others stay face down (CR 708.8). It
+    /// does not check that `objects` is a subset of the old set; the caller decides.
+    ///
+    /// # Errors
+    /// [`LayerError::UnknownEffect`] if `id` is not registered; [`LayerError::Unsupported`] if
+    /// its affected set is not [`Affected::Objects`] (a selector or `SameAsLayer` is left
+    /// unchanged).
+    pub fn narrow_objects(
+        &mut self,
+        id: EffectId,
+        objects: BTreeSet<ObjectId>,
+    ) -> Result<(), LayerError> {
+        let effect = self
+            .effects
+            .get_mut(&id)
+            .ok_or(LayerError::UnknownEffect(id))?;
+        match &mut effect.affected {
+            Affected::Objects(set) => {
+                *set = objects;
+                Ok(())
+            }
+            _ => Err(LayerError::Unsupported(
+                "narrow_objects needs an Affected::Objects effect",
+            )),
+        }
+    }
+
     /// The number of registered effects.
     #[must_use]
     pub fn len(&self) -> usize {
