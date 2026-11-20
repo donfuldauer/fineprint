@@ -12,6 +12,8 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
+use super::lockin::{ForAsLongAsWindow, PreparedGroup, prepare_group};
+use super::pipeline::LayerEnvironment;
 use crate::objects::Characteristics;
 
 /// Where a continuous effect comes from; decides its timestamp (CR 613.7a, 613.7b).
@@ -36,8 +38,11 @@ pub enum Affected {
     /// A selector matched again at every evaluation against the object as evaluated so far
     /// (CR 611.3a, CR 613.5).
     Selector(ObjectSelectorAST),
-    /// The set of the same effect in another layer (CR 613.6 lock-in); registration rejects it
-    /// with [`LayerError::Unsupported`] in this unit.
+    /// The set of the same effect in an earlier layer or sublayer (CR 613.6 lock-in; the DSL's
+    /// `sameAsLayer`): the part applies to an object exactly when its anchor, the part of the
+    /// same group in that layer, applied to it earlier in the same evaluation. Only
+    /// [`ContinuousEffects::register_group`] accepts it; [`ContinuousEffects::register`] rejects
+    /// it with [`LayerError::Unsupported`], because a link needs a group.
     SameAsLayer(Layer),
 }
 
@@ -158,6 +163,8 @@ pub struct ContinuousEffect {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ContinuousEffects {
     effects: BTreeMap<EffectId, ContinuousEffect>,
+    /// Each `SameAsLayer` part of a registered group to its anchor (CR 613.6).
+    links: BTreeMap<EffectId, EffectId>,
 }
 
 impl ContinuousEffects {
@@ -172,8 +179,9 @@ impl ContinuousEffects {
     /// # Errors
     /// [`LayerError::DuplicateEffect`] if `id` is registered; [`LayerError::LayerMismatch`] if
     /// the modification does not belong to the effect's layer; [`LayerError::Unsupported`] if
-    /// the affected set is [`Affected::SameAsLayer`] (CR 613.6 lock-in is a later unit). The
-    /// registry is then unchanged.
+    /// the affected set is [`Affected::SameAsLayer`] (a link needs a group:
+    /// [`ContinuousEffects::register_group`]). The registry is then unchanged. A selector is
+    /// stored as given, never locked.
     pub fn register(&mut self, id: EffectId, effect: ContinuousEffect) -> Result<(), LayerError> {
         if self.effects.contains_key(&id) {
             return Err(LayerError::DuplicateEffect(id));
@@ -192,8 +200,76 @@ impl ContinuousEffects {
         Ok(())
     }
 
-    /// Removes the effect `id`; whether it was registered.
+    /// Registers one multi-layer effect (CR 613.6) whose `parts` are one [`ContinuousEffect`]
+    /// per layer or sublayer. All or nothing: on any error the registry is unchanged.
+    ///
+    /// A part with [`Affected::SameAsLayer`]`(l)` is linked to its anchor: the part of the group
+    /// whose layer is `l` and whose affected set is not `SameAsLayer` (the lowest [`EffectId`]
+    /// if several); `l` must be strictly earlier than the part's own layer in [`Layer::ALL`]
+    /// order. The part then applies to an object exactly when the anchor applied to it earlier
+    /// in the same evaluation, even if the generating ability has been removed in between
+    /// (CR 613.6). Other parts are independent of each other (CR 611.2c). A part from a
+    /// resolving spell or ability ([`EffectOrigin::Resolved`]) with a selector is stored with the
+    /// concrete set [`crate::layers::resolve_affected_set`] gives against the registry as it is
+    /// before this call (CR 611.2c); a static part keeps its selector (CR 611.3a); a locked set
+    /// stays as given.
+    ///
+    /// # Errors
+    /// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for an
+    /// id given twice or already registered; [`LayerError::LayerMismatch`] for a modification
+    /// outside its part's layer; [`LayerError::BadLink`] for a `SameAsLayer` part without a
+    /// valid anchor; the first error of evaluating an object while locking a selector.
+    pub fn register_group(
+        &mut self,
+        env: &dyn LayerEnvironment,
+        parts: Vec<(EffectId, ContinuousEffect)>,
+    ) -> Result<(), LayerError> {
+        let group = prepare_group(self, env, parts)?;
+        self.store(group);
+        Ok(())
+    }
+
+    /// [`ContinuousEffects::register_group`] for an effect with a "for as long as" duration
+    /// (CR 611.2b). The group is validated (and its resolved selectors locked) exactly as by
+    /// `register_group`, with the same errors and nothing registered on error. Then, if the
+    /// effect does nothing ([`ForAsLongAsWindow::effect_does_something`] is `false`), nothing
+    /// is registered and the result is `Ok(false)`; otherwise the group is registered and the
+    /// result is `Ok(true)`.
+    ///
+    /// # Errors
+    /// As [`ContinuousEffects::register_group`].
+    pub fn register_group_for_as_long_as(
+        &mut self,
+        env: &dyn LayerEnvironment,
+        window: ForAsLongAsWindow,
+        parts: Vec<(EffectId, ContinuousEffect)>,
+    ) -> Result<bool, LayerError> {
+        let group = prepare_group(self, env, parts)?;
+        // CR 611.2b: a duration that never starts, or ends before the first application without
+        // beginning again, makes the effect do nothing.
+        if !window.effect_does_something() {
+            return Ok(false);
+        }
+        self.store(group);
+        Ok(true)
+    }
+
+    /// Stores a validated group.
+    fn store(&mut self, group: PreparedGroup) {
+        self.effects.extend(group.parts);
+        self.links.extend(group.links);
+    }
+
+    /// The links of `SameAsLayer` parts to their anchors (CR 613.6).
+    pub(super) fn links(&self) -> &BTreeMap<EffectId, EffectId> {
+        &self.links
+    }
+
+    /// Removes the effect `id`; whether it was registered. Removing an anchor leaves its linked
+    /// parts registered but applying to nothing; removing a linked part removes its link.
     pub fn remove(&mut self, id: EffectId) -> bool {
+        self.links.remove(&id);
+        self.links.retain(|_, anchor| *anchor != id);
         self.effects.remove(&id).is_some()
     }
 
