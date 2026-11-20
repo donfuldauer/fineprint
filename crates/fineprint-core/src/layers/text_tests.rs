@@ -1228,6 +1228,183 @@ fn set_text_applies_before_replace_in_both_orders() {
     assert_eq!(value_of(&text_of(&r, &env, o(1)), "x1"), "Island");
 }
 
+// REQ-LAYER-002, REQ-DSL-012; CR 613.8a, 612.2 (U1): the tokens a replacement applies to are
+// the (position, id) of the words of its category and exact value only; a same-valued word of
+// another category, a CARD_NAME word, literal text and SELF / OTHER references are not; empty
+// and undecodable text, and category CARD_NAME, give the empty set.
+#[test]
+fn replace_targets_lists_matching_words_only() {
+    let text = encode_rules_text(&stream(vec![
+        lit("l0", "Swamp"),
+        word("a", BLT, "Swamp"),
+        word("b", RewritableCategory::ColorWord, "Swamp"),
+        word("c", RewritableCategory::CardName, "Swamp"),
+        self_ref("d"),
+        other_ref("e", "Swamp"),
+        word("f", BLT, "swamp"),
+        word("g", BLT, "Swamp"),
+        word("h", BLT, "Island"),
+    ]));
+    assert_eq!(
+        super::text::replace_targets(&text, BLT, "Swamp"),
+        vec![(1, "a".to_owned()), (7, "g".to_owned())]
+    );
+    assert_eq!(
+        super::text::replace_targets(&text, BLT, "Island"),
+        vec![(8, "h".to_owned())]
+    );
+    assert_eq!(
+        super::text::replace_targets(&text, RewritableCategory::ColorWord, "Swamp"),
+        vec![(2, "b".to_owned())]
+    );
+    assert!(super::text::replace_targets(&text, BLT, "Forest").is_empty());
+    assert!(super::text::replace_targets(&text, RewritableCategory::CardName, "Swamp").is_empty());
+    assert!(
+        super::text::replace_targets(&card::TextTokenStream(Vec::new()), BLT, "Swamp").is_empty()
+    );
+    let garbage = card::TextTokenStream(vec![element(&[("kind", "WORD")])]);
+    assert!(decode_rules_text(&garbage).is_err());
+    assert!(super::text::replace_targets(&garbage, BLT, "Swamp").is_empty());
+}
+
+/// Rules text [literal, Swamp word m1, Island word m2] (former gap G6).
+fn mixed_land_text() -> card::TextTokenStream {
+    encode_rules_text(&stream(vec![
+        lit("m0", "Choose "),
+        word("m1", BLT, "Swamp"),
+        word("m2", BLT, "Island"),
+    ]))
+}
+
+/// The evaluated text and the layer-3 order of `mixed_land_text()` under effect 1 = `a` at
+/// `ta` and effect 2 = `b` at `tb`; the cache and `evaluate` must agree (REQ-LAYER-005).
+fn run_two(
+    text: card::TextTokenStream,
+    (ta, a): (u64, LayerModification),
+    (tb, b): (u64, LayerModification),
+) -> (TextTokenStream, Vec<(OrderItem, Selection)>) {
+    let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], text));
+    let r = registry(vec![(1, l3(ta, only(&[1]), a)), (2, l3(tb, only(&[1]), b))]);
+    let (out, rec) = evaluate_with_order(&r, &env, o(1)).unwrap();
+    assert_eq!(evaluate(&r, &env, o(1)).unwrap(), out);
+    assert_eq!(LayerCache::new().evaluate(&r, &env, o(1)).unwrap(), out);
+    let order = rec
+        .steps
+        .iter()
+        .filter(|s| s.layer == Layer::L3)
+        .map(|s| (s.item.clone(), s.selection))
+        .collect();
+    (
+        decode_rules_text(&out.characteristics.rules_text).unwrap(),
+        order,
+    )
+}
+
+fn items(order: &[(OrderItem, Selection)]) -> Vec<OrderItem> {
+    order.iter().map(|(i, _)| i.clone()).collect()
+}
+
+// REQ-LAYER-002, REQ-DSL-012; CR 613.8a, 613.8b, 613.8c (U2, CodeRabbit finding 4640489029):
+// on [literal, Swamp, Island], A = Swamp->Island applies to the Swamp word only, which
+// B = Island->Forest never changes, so A is independent of B; applying A creates an Island
+// word, so B depends on A. Every timestamp order gives all Forest, A then B.
+#[test]
+fn mixed_text_chain_gives_all_forest_in_every_order() {
+    for (ta, tb) in [(5, 6), (6, 5), (20, 10), (10, 20)] {
+        let (text, order) = run_two(
+            mixed_land_text(),
+            (ta, replace(BLT, "Swamp", "Island")),
+            (tb, replace(BLT, "Island", "Forest")),
+        );
+        assert_eq!(value_of(&text, "m1"), "Forest", "A at {ta}, B at {tb}");
+        assert_eq!(value_of(&text, "m2"), "Forest", "A at {ta}, B at {tb}");
+        assert_eq!(
+            items(&order),
+            vec![OrderItem::Effect(e(1)), OrderItem::Effect(e(2))],
+            "A at {ta}, B at {tb}"
+        );
+        // A is a candidate from the start: never chosen out of a loop.
+        assert!(
+            order.iter().all(|(_, s)| *s != Selection::Loop),
+            "A at {ta}, B at {tb}"
+        );
+    }
+}
+
+// REQ-LAYER-002; CR 613.8a, 613.8b (U3): on [Swamp, Island], A = Swamp->Island and
+// B = Island->Swamp each change what the other applies to: a loop applied in timestamp order
+// (A earlier gives [Swamp, Swamp], B earlier gives [Island, Island]).
+#[test]
+fn mixed_text_swap_is_a_loop_in_timestamp_order() {
+    for (ta, tb, want, first, second) in [(5, 6, "Swamp", 1, 2), (6, 5, "Island", 2, 1)] {
+        let (text, order) = run_two(
+            mixed_land_text(),
+            (ta, replace(BLT, "Swamp", "Island")),
+            (tb, replace(BLT, "Island", "Swamp")),
+        );
+        assert_eq!(value_of(&text, "m1"), want, "A at {ta}");
+        assert_eq!(value_of(&text, "m2"), want, "A at {ta}");
+        assert_eq!(
+            items(&order),
+            vec![OrderItem::Effect(e(first)), OrderItem::Effect(e(second))]
+        );
+        assert_eq!(order[0].1, Selection::Loop, "A at {ta}");
+    }
+}
+
+// REQ-LAYER-002; CR 613.8a (U4): a from == to replacement does nothing, so it neither depends
+// on A = Swamp->Island nor is depended on; plain timestamp order and the result of A alone.
+#[test]
+fn no_op_replacement_creates_no_dependency() {
+    for (ta, tb) in [(5, 6), (6, 5)] {
+        let (text, order) = run_two(
+            mixed_land_text(),
+            (ta, replace(BLT, "Swamp", "Island")),
+            (tb, replace(BLT, "Island", "Island")),
+        );
+        assert_eq!(value_of(&text, "m1"), "Island");
+        assert_eq!(value_of(&text, "m2"), "Island");
+        let expected = if ta < tb { [1, 2] } else { [2, 1] };
+        assert_eq!(
+            order,
+            vec![
+                (OrderItem::Effect(e(expected[0])), Selection::Timestamp),
+                (OrderItem::Effect(e(expected[1])), Selection::Timestamp),
+            ],
+            "A at {ta}"
+        );
+    }
+}
+
+// REQ-LAYER-002; CR 613.8a (b) (U5): A = Red->Blue (COLOR_WORD) changes a token of the same
+// rules text that B = Swamp->Island (BASIC_LAND_TYPE) does not apply to, and the reverse: no
+// dependency either way, plain timestamp selection in both orders, both words rewritten.
+#[test]
+fn change_outside_matching_tokens_creates_no_dependency() {
+    let text = encode_rules_text(&stream(vec![
+        word("c1", RewritableCategory::ColorWord, "Red"),
+        word("c2", BLT, "Swamp"),
+    ]));
+    for (ta, tb) in [(5, 6), (6, 5)] {
+        let (out, order) = run_two(
+            text.clone(),
+            (ta, replace(RewritableCategory::ColorWord, "Red", "Blue")),
+            (tb, replace(BLT, "Swamp", "Island")),
+        );
+        assert_eq!(value_of(&out, "c1"), "Blue");
+        assert_eq!(value_of(&out, "c2"), "Island");
+        let expected = if ta < tb { [1, 2] } else { [2, 1] };
+        assert_eq!(
+            order,
+            vec![
+                (OrderItem::Effect(e(expected[0])), Selection::Timestamp),
+                (OrderItem::Effect(e(expected[1])), Selection::Timestamp),
+            ],
+            "A at {ta}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Acceptance: a dependent ability applies to different objects after a text change
 // ---------------------------------------------------------------------------------------------

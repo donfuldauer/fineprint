@@ -10,8 +10,9 @@
 //! "synthetic text-change scenario changes what a dependent ability applies to".
 //!
 //! Black-box: written from the FP-036 brief only. Synthetic objects named `test.*`; word values
-//! are rules vocabulary only (R5). The text mixing a Swamp word and an Island word (known gap
-//! G6) is deliberately not tested.
+//! are rules vocabulary only (R5). The text mixing a Swamp word and an Island word (former gap
+//! G6, fixed in PR #196 review round 1) is tested in section 7 by the tokens each replacement
+//! applies to (CR 613.8a).
 
 #[path = "spec_layers_support.rs"]
 mod support;
@@ -570,8 +571,8 @@ fn disjoint_effects_commute() {
 // 7. chained effects (dependency)
 // ---------------------------------------------------------------------------------------------
 
-/// Text with a single BASIC_LAND_TYPE "Swamp" word and no Island word (the G6 case is not
-/// tested).
+/// Text with a single BASIC_LAND_TYPE "Swamp" word and no Island word (the mixed Swamp+Island
+/// text of former gap G6 is [`swamp_island`]).
 fn swamp_only() -> Vec<TextToken> {
     vec![lit_t("l0", "test.text"), word("w", BasicLandType, "Swamp")]
 }
@@ -635,6 +636,104 @@ fn chained_effects_loop_timestamp_order() {
             ],
             "ts(A)={ta} ts(B)={tb}"
         );
+    }
+}
+
+/// Text with a BASIC_LAND_TYPE "Swamp" word `w1` and a BASIC_LAND_TYPE "Island" word `w2`
+/// (former gap G6).
+fn swamp_island() -> Vec<TextToken> {
+    vec![
+        lit_t("l0", "test.text"),
+        word("w1", BasicLandType, "Swamp"),
+        word("w2", BasicLandType, "Island"),
+    ]
+}
+
+/// The evaluated text, the layer-3 order and the cached evaluation of `swamp_island()` under
+/// A = Swamp->`a_to` at `ta` and B = `b_from`->`b_to` at `tb`; asserts that `evaluate` and a
+/// `LayerCache` (twice) give exactly the `evaluate_with_order` result (REQ-LAYER-005).
+fn run_mixed(ta: u64, tb: u64, a_to: &str, b_from: &str, b_to: &str) -> (Stream, Vec<OrderItem>) {
+    let mut env = TestEnv::new();
+    let x = env.put(oid(A), with_text("test.mixed", swamp_island()));
+    let r = registry(&[
+        (EFF_A, text_eff(ta, &[x], BasicLandType, "Swamp", a_to)),
+        (EFF_B, text_eff(tb, &[x], BasicLandType, b_from, b_to)),
+    ]);
+    let (e, rec) = evaluate_with_order(&r, &env, x).expect("evaluate");
+    assert_eq!(evaluate(&r, &env, x).expect("evaluate"), e);
+    let mut cache = LayerCache::new();
+    assert_eq!(cache.evaluate(&r, &env, x).expect("cached"), e);
+    assert_eq!(cache.evaluate(&r, &env, x).expect("cached again"), e);
+    let all = evaluate_all(&r, &env).expect("evaluate_all");
+    let cached_all = cache.evaluate_all(&r, &env).expect("cached all");
+    assert_eq!(cached_all, all);
+    assert_eq!(evaluated_digest(&cached_all), evaluated_digest(&all));
+    (dec(&e.characteristics.rules_text), l3_steps(&rec))
+}
+
+/// REQ-DSL-012, REQ-LAYER-002; CR 613.8a, 613.8b, 613.8c (B1, former gap G6, CodeRabbit
+/// finding 4640489029): on text [Swamp w1, Island w2], A = Swamp->Island applies only to
+/// Swamp words, which B = Island->Forest never changes, so A is independent of B; applying A
+/// creates an Island word, so B depends on A. Both words end as Forest in every timestamp
+/// order, and the order record lists A then B in layer 3.
+#[test]
+fn mixed_text_chain_dependency_all_orders() {
+    for (ta, tb) in [(5, 6), (6, 5), (20, 10), (10, 20)] {
+        let (text, order) = run_mixed(ta, tb, "Island", "Island", "Forest");
+        assert_eq!(token_value(&text, "w1"), "Forest", "ts(A)={ta} ts(B)={tb}");
+        assert_eq!(token_value(&text, "w2"), "Forest", "ts(A)={ta} ts(B)={tb}");
+        assert_eq!(
+            text.find("l0"),
+            Some(&lit_t("l0", "test.text")),
+            "ts(A)={ta} ts(B)={tb}"
+        );
+        assert_eq!(
+            order,
+            vec![OrderItem::Effect(eid(EFF_A)), OrderItem::Effect(eid(EFF_B))],
+            "ts(A)={ta} ts(B)={tb}"
+        );
+    }
+}
+
+/// REQ-DSL-012, REQ-LAYER-002; CR 613.8a, 613.8b (B2): on text [Swamp w1, Island w2],
+/// A = Swamp->Island and B = Island->Swamp each change what the other applies to, so they form
+/// a dependency loop applied in timestamp order: A earlier gives [Swamp, Swamp], B earlier
+/// gives [Island, Island]; the order record lists the earlier effect first.
+#[test]
+fn mixed_text_swap_loop_timestamp_order() {
+    for (ta, tb, want, first, second) in [
+        (5, 6, "Swamp", EFF_A, EFF_B),
+        (6, 5, "Island", EFF_B, EFF_A),
+        (10, 20, "Swamp", EFF_A, EFF_B),
+        (20, 10, "Island", EFF_B, EFF_A),
+    ] {
+        let (text, order) = run_mixed(ta, tb, "Island", "Island", "Swamp");
+        assert_eq!(token_value(&text, "w1"), want, "ts(A)={ta} ts(B)={tb}");
+        assert_eq!(token_value(&text, "w2"), want, "ts(A)={ta} ts(B)={tb}");
+        assert_eq!(
+            order,
+            vec![
+                OrderItem::Effect(eid(first)),
+                OrderItem::Effect(eid(second))
+            ],
+            "ts(A)={ta} ts(B)={tb}"
+        );
+    }
+}
+
+/// REQ-LAYER-005, REQ-CORE-001 (B3): for the B1 and B2 inputs, a `LayerCache` gives exactly
+/// the uncached evaluation, repeatedly, and two independent runs agree.
+#[test]
+fn mixed_text_cache_equals_uncached() {
+    for (ta, tb) in [(5, 6), (6, 5)] {
+        for b_to in ["Forest", "Swamp"] {
+            // run_mixed asserts cached == uncached; a second run must be identical.
+            assert_eq!(
+                run_mixed(ta, tb, "Island", "Island", b_to),
+                run_mixed(ta, tb, "Island", "Island", b_to),
+                "ts(A)={ta} ts(B)={tb} B->{b_to}"
+            );
+        }
     }
 }
 
