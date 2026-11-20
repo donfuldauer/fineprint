@@ -3645,6 +3645,8 @@ enum Hook {
     Deny(BTreeSet<EffectId>),
     /// True iff the source's view (when given) still has an ability.
     AbilitiesPresent,
+    /// False for every effect id.
+    DenyAll,
 }
 
 /// A `TestEnv` with an overridable ability hook that records every call as
@@ -3707,6 +3709,7 @@ impl LayerEnvironment for HookEnv {
         ));
         match &self.hook {
             Hook::Deny(ids) => !ids.contains(&effect),
+            Hook::DenyAll => false,
             Hook::AbilitiesPresent => {
                 source_view.is_none_or(|v| !v.characteristics.abilities.is_empty())
             }
@@ -4110,9 +4113,36 @@ fn wide_choices(others: u64) -> EtbEffects {
     effects_of(list)
 }
 
+/// Asserts that `e` is the lookahead state-limit procedure error (R3): a
+/// `ChoiceError::Procedure` whose message names the lookahead and the 4096-state bound.
+fn assert_lookahead_limit(e: &ChoiceError, what: &str) {
+    match e {
+        ChoiceError::Procedure(msg) => {
+            assert!(msg.contains("lookahead"), "{what}: {msg}");
+            assert!(msg.contains("exceeds 4096 states"), "{what}: {msg}");
+        }
+        other => panic!("{what}: expected Procedure(lookahead limit), got {other:?}"),
+    }
+}
+
+/// Drives `resolve_entering` answering every request with `content_answer`; the observations
+/// of the output, or the procedure error.
+fn drive_content(
+    ctx: &EtbContext<'_>,
+    entries: &[EtbEntry],
+    payable: &BTreeMap<PlayerId, u64>,
+) -> Result<Vec<Obs>, ChoiceError> {
+    drive_inspect(ctx, entries, payable, content_answer, |o| {
+        o.iter().map(obs).collect::<Vec<_>>()
+    })
+    .map(|(out, _, _)| out)
+}
+
 // REQ-EVENT-001, CR 614.12b (R3) — the lookahead is bounded: 13 further Choose effects of one
-// tier give 2^13 states, beyond the bound, which is a procedure error, never a silent
-// truncation; 7 of them (2^7 states) are within it and resolve.
+// tier give 2^13 states, beyond the bound, which is the lookahead-limit procedure error (the
+// message names the lookahead and "exceeds 4096 states"), never a silent truncation and never
+// another error; 7 of them (2^7 states) are within it and resolve through the same helper.
+// (CodeRabbit round 2, G6: any nonempty procedure error used to pass.)
 #[test]
 fn req_event_001_payable_lookahead_bounded() {
     let env = env_n(1);
@@ -4124,10 +4154,9 @@ fn req_event_001_payable_lookahead_bounded() {
         continuous: &cont,
         effects: &effects,
     };
-    match drive(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)]), &[]) {
-        Err(ChoiceError::Procedure(msg)) => assert!(!msg.is_empty()),
-        Err(other) => panic!("expected a procedure error, got {other:?}"),
-        Ok(r) => panic!("expected a procedure error, got {:?}", r.out),
+    match drive_content(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)])) {
+        Err(e) => assert_lookahead_limit(&e, "13 further Choose effects"),
+        Ok(out) => panic!("expected the lookahead-limit error, got {out:?}"),
     }
 
     let effects = wide_choices(7);
@@ -4136,15 +4165,478 @@ fn req_event_001_payable_lookahead_bounded() {
         continuous: &cont,
         effects: &effects,
     };
-    let (out, _, _) = match drive_inspect(
-        &ctx,
-        &[entry(1, P1)],
-        &budget(&[(P1, 1000)]),
-        content_answer,
-        |o| o.iter().map(obs).collect::<Vec<_>>(),
-    ) {
-        Ok(r) => r,
+    let out = match drive_content(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)])) {
+        Ok(out) => out,
         Err(e) => panic!("resolve_entering failed: {e}"),
     };
     assert_eq!(out[0].projected.effects, ids(&[1, 2, 3, 4, 5, 6, 7, 8]));
+}
+
+// =============================================================================================
+// FIX ROUND 2 (CodeRabbit G1-G5) — regression tests
+// =============================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// G1 — copied statics take the entrant's controller (CR 707.5)
+// ---------------------------------------------------------------------------------------------
+
+/// A selector slot private to this file: "artifacts you control", relative to the effect's
+/// controller (`MatchContext::effect_controller`) and the candidate's controller.
+const SEL_ARTIFACTS_YOU_CONTROL: u32 = 60;
+
+/// An environment of noncreature enchantment bases with the controller-relative selector.
+fn controlled_env(objs: &[(u64, PlayerId)]) -> TestEnv {
+    let mut env = enchantment_env(objs);
+    env.add_selector(
+        sel(SEL_ARTIFACTS_YOU_CONTROL),
+        std::rc::Rc::new(|c: &MatchContext<'_>| {
+            c.candidate_view
+                .characteristics
+                .card_types
+                .contains(ARTIFACT)
+                && c.candidate_view.controller == Some(c.effect_controller)
+        }),
+    );
+    env
+}
+
+/// `copy` copies an artifact model whose declared static (controlled by `model_controller`)
+/// says "artifacts you control are creatures"; `h` "enters tapped" if the permanent is a
+/// creature. `copy` is sourceless, so it applies to every entrant.
+fn g1_effects(copy: u64, h: u64, model_controller: PlayerId) -> EtbEffects {
+    let mut e = effects_of(vec![
+        fx(copy, copy_of(artifact("test.etb_g1_model"))).with_tier(Tier::CopyEtb),
+        fx(h, EtbAction::EntersTapped)
+            .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+    ]);
+    let (id, mut st) = model_static(
+        500,
+        Affected::Selector(sel(SEL_ARTIFACTS_YOU_CONTROL)),
+        add_types_mod(&[CREATURE]),
+    );
+    st.controller = model_controller;
+    declare(&mut e, copy, vec![(id, st)], &[]);
+    e
+}
+
+// REQ-EVENT-001, CR 707.5 — finding G1: a copy model's declared static "artifacts you control
+// are creatures" is controlled, once rebound to the entrant, by the entrant's controller. For
+// every model controller and entrant controller (different and equal) and both id orders: the
+// entrant projects as an artifact creature after the copy, the creature-only effect becomes
+// applicable and applies (tapped). Fails at head 30f1b2c when the controllers differ (the
+// static kept the model's controller, so the selector did not match the entrant).
+#[test]
+fn req_event_001_g1_copied_static_uses_entrant_controller() {
+    for p in permutations(&[1, 2]) {
+        let (k, h) = (p[0], p[1]);
+        for model_controller in [P1, P2] {
+            for entrant_controller in [P1, P2] {
+                let what =
+                    format!("{p:?} model {model_controller:?} entrant {entrant_controller:?}");
+                let env = controlled_env(&[(1, entrant_controller)]);
+                let cont = ContinuousEffects::new();
+                let effects = g1_effects(k, h, model_controller);
+                let ctx = EtbContext {
+                    env: &env,
+                    continuous: &cont,
+                    effects: &effects,
+                };
+                let e = entry(1, entrant_controller);
+                let after = applied_in_order(&[k]);
+                assert_eq!(
+                    types_of(&proj_ok(&ctx, &e, &after)),
+                    set(&[ARTIFACT, CREATURE]),
+                    "{what}"
+                );
+                assert_eq!(appl_ok(&ctx, &e, &after), vec![eid(h)], "{what}");
+                let run = drive_ok(&ctx, std::slice::from_ref(&e), &no_budget(), &[]);
+                assert!(run.requests.is_empty(), "{what}");
+                let r = &run.out[0].projected;
+                assert_eq!(r.effects, ids(&[k, h]), "{what}");
+                assert_eq!(r.order, eids(&[k, h]), "{what}");
+                assert!(r.tapped, "{what}");
+                assert_eq!(
+                    r.evaluated.characteristics.card_types,
+                    set(&[ARTIFACT, CREATURE]),
+                    "{what}"
+                );
+                assert_eq!(cont, ContinuousEffects::new());
+            }
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 707.5 — finding G1, two entrants with different controllers (P1 and P2)
+// entering together, both slice orders, model controlled by P1 and by P2: each entrant's copy of
+// the static is controlled by that entrant's controller, so both are artifact creatures and both
+// enter tapped. Fails at head 30f1b2c (the entrant whose controller differs from the model's
+// stayed a noncreature artifact, untapped).
+#[test]
+fn req_event_001_g1_two_entrants_different_controllers() {
+    let (k, h) = (1, 2);
+    for model_controller in [P1, P2] {
+        let env = controlled_env(&[(1, P1), (2, P2)]);
+        let cont = ContinuousEffects::new();
+        let effects = g1_effects(k, h, model_controller);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        for entries in [
+            vec![entry(1, P1), entry(2, P2)],
+            vec![entry(2, P2), entry(1, P1)],
+        ] {
+            let what = format!(
+                "model {model_controller:?} order {:?}",
+                entries.iter().map(|e| e.object).collect::<Vec<_>>()
+            );
+            let run = drive_ok(&ctx, &entries, &no_budget(), &[]);
+            assert!(run.requests.is_empty(), "{what}");
+            assert_eq!(run.out.len(), 2, "{what}");
+            for (r, e) in run.out.iter().zip(entries.iter()) {
+                assert_eq!(r.object, e.object, "{what}");
+                assert_eq!(r.projected.effects, ids(&[k, h]), "{what} {:?}", e.object);
+                assert!(r.projected.tapped, "{what} {:?}", e.object);
+                assert_eq!(
+                    r.projected.evaluated.characteristics.card_types,
+                    set(&[ARTIFACT, CREATURE]),
+                    "{what} {:?}",
+                    e.object
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// G2 — the synthetic layer-4 effect of AddCardTypes is not gated by the ability hook
+// (CR 613.1d)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-EVENT-001, CR 613.1d, CR 208.3 — finding G2: with an environment hook answering false for
+// EVERY effect id, an applied AddCardTypes{Creature} on a printed 3/2 artifact still makes it a
+// 3/2 artifact creature (the type change is a layer-4 effect, not a static ability that could
+// stop existing), and the creature-only effect applies; with a hook answering true the result
+// is identical. A ThisPermanent effect of the entrant still needs its generating ability
+// (round-1 F4): denied, it does not apply; allowed, it does. Both id orders. Fails at head
+// 30f1b2c (the synthetic effect was asked about and dropped: no creature, no P/T, untapped).
+#[test]
+fn req_event_001_g2_added_type_ignores_ability_hook() {
+    for p in permutations(&[1, 2]) {
+        let (a, b) = (p[0], p[1]);
+        let mut results = Vec::new();
+        for hook in [Hook::DenyAll, Hook::Deny(BTreeSet::new())] {
+            let what = format!("{p:?} {hook:?}");
+            let env = HookEnv::new(env_of(&[(1, printed_pt_artifact(), P1)]), hook);
+            let cont = ContinuousEffects::new();
+            let effects = effects_of(vec![
+                fx(a, add_card_types(&[CREATURE])).with_tier(Tier::SelfReplacement),
+                fx(b, EtbAction::EntersTapped)
+                    .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+            ]);
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &effects,
+            };
+            let e = entry(1, P1);
+            let added = proj_ok(&ctx, &e, &applied_of(&[a]));
+            assert_eq!(types_of(&added), set(&[ARTIFACT, CREATURE]), "{what}");
+            assert_eq!(pt(&added.evaluated), spt(3, 2), "{what}");
+            assert_eq!(appl_ok(&ctx, &e, &applied_of(&[a])), vec![eid(b)], "{what}");
+            let run = drive_ok(&ctx, &[entry(1, P1)], &no_budget(), &[]);
+            assert!(run.requests.is_empty(), "{what}");
+            let r = &run.out[0].projected;
+            assert_eq!(r.effects, ids(&[a, b]), "{what}");
+            assert!(r.tapped, "{what}");
+            assert_eq!(pt(&r.evaluated), spt(3, 2), "{what}");
+            assert_eq!(cont, ContinuousEffects::new());
+            results.push(run.out);
+        }
+        assert_eq!(results[0], results[1], "{p:?}: the hook changes nothing");
+    }
+
+    // Round-1 F4 stays: a ThisPermanent effect needs its generating ability.
+    let c = 3;
+    for (hook, applies) in [(Hook::DenyAll, false), (Hook::Deny(BTreeSet::new()), true)] {
+        let what = format!("{hook:?}");
+        let env = HookEnv::new(env_of(&[(1, printed_pt_artifact(), P1)]), hook);
+        let cont = ContinuousEffects::new();
+        let effects = effects_of(vec![
+            fx(1, add_card_types(&[CREATURE])).with_tier(Tier::SelfReplacement),
+            fx(2, EtbAction::EntersTapped)
+                .with_condition(EtbCondition::HasCardType(CREATURE.to_owned())),
+            own_fx(c, 1, counters(CTR_A, 1)),
+        ]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let run = drive_content(&ctx, &[entry(1, P1)], &no_budget())
+            .unwrap_or_else(|e| panic!("{what}: resolve_entering failed: {e}"));
+        let r = &run[0].projected;
+        assert!(r.tapped, "{what}");
+        assert_eq!(pt(&r.evaluated), spt(3, 2), "{what}");
+        if applies {
+            assert_eq!(r.effects, ids(&[1, 2, c]), "{what}");
+            assert_eq!(
+                r.counters,
+                BTreeMap::from([(CTR_A.to_owned(), 1)]),
+                "{what}"
+            );
+        } else {
+            assert_eq!(r.effects, ids(&[1, 2]), "{what}");
+            assert!(r.counters.is_empty(), "{what}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// G3 — a Choose without options is rejected at registration (CR 614.12b)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-EVENT-001, CR 614.12b — finding G3: `EtbEffects::add` of a Choose whose options list is
+// empty is `Err(EtbError::EmptyChoice(id))`, with a non-empty Display, and leaves the set
+// unchanged; a Choose with a single cost-0 option is accepted and is payable with budget 0
+// (applied without a request). Fails at head 30f1b2c (the empty Choose was accepted).
+#[test]
+fn req_event_001_g3_empty_choose_rejected() {
+    let mut set_ = effects_of(vec![fx(1, EtbAction::EntersTapped)]);
+    let before = effects_snapshot(&set_, &[1, 2]);
+    match set_.add(own_fx(2, 1, choose(KEY_A, K::Color, &[]))) {
+        Err(EtbError::EmptyChoice(id)) => assert_eq!(id, eid(2)),
+        other => panic!("expected EmptyChoice, got {other:?}"),
+    }
+    assert_eq!(effects_snapshot(&set_, &[1, 2]), before);
+    assert!(set_.get(eid(2)).is_none());
+    assert!(!EtbError::EmptyChoice(eid(2)).to_string().is_empty());
+
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![own_fx(1, 1, choose(KEY_A, K::Color, &[(OPT_A, 0)]))]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let run = drive_ok(&ctx, &[entry(1, P1)], &budget(&[(P1, 0)]), &[]);
+    assert!(run.requests.is_empty());
+    assert_eq!(run.out[0].projected.effects, ids(&[1]));
+    assert_eq!(
+        run.out[0].memory.choice(KEY_A),
+        Some(&MemChoice::Color(OPT_A.to_owned()))
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// G4 — lookahead states are counted before descending (R3, CR 614.12b)
+// ---------------------------------------------------------------------------------------------
+
+fn chain_type(i: u64) -> String {
+    format!("test.chain_type_{i}")
+}
+
+/// The deep chain of finding G4 for one entry (object 1): effects 1..=k, effect i adding
+/// `test.chain_type_i` if the permanent has `test.chain_type_(i-1)` (effect 1: always), then
+/// effect k+1, a mandatory single-option Choose {cost 1} if it has `test.chain_type_k`.
+///
+/// Counted from the scenario: the entry's reachable states from its empty applied set are {}
+/// (the starting state, the first), {1}, {1,2}, ..., {1..k} (k more; exactly one effect is
+/// applicable in each, so every state is reached once, by one path), then {1..k+1} with the one
+/// chosen value (one more): k + 2 states in all.
+fn deep_chain(k: u64) -> EtbEffects {
+    let mut list = Vec::new();
+    for i in 1..=k {
+        let cond = if i == 1 {
+            EtbCondition::Always
+        } else {
+            EtbCondition::HasCardType(chain_type(i - 1))
+        };
+        list.push(fx(i, add_card_types(&[&chain_type(i)])).with_condition(cond));
+    }
+    list.push(
+        fx(k + 1, choose(KEY_B, K::Color, &[(OPT_C, 1)]))
+            .with_condition(EtbCondition::HasCardType(chain_type(k))),
+    );
+    effects_of(list)
+}
+
+// REQ-EVENT-001, CR 614.12b, R3 — finding G4, exactness (passing side): k = 4094 gives exactly
+// 4096 reachable states (k + 2, see `deep_chain`) for a budgeted chooser: within the bound, so
+// it resolves; the entry ends with the whole chain and its choice, without a request. (At head
+// 30f1b2c this overflowed the test thread's stack: the recursion descended before counting.)
+#[test]
+fn req_event_001_g4_deep_chain_4096_states_resolve() {
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let k = 4094;
+    let effects = deep_chain(k);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let run = drive_ok(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)]), &[]);
+    assert!(run.requests.is_empty());
+    let all: Vec<u64> = (1..=k + 1).collect();
+    assert_eq!(run.out[0].projected.effects, ids(&all));
+    assert_eq!(
+        run.out[0].memory.choice(KEY_B),
+        Some(&MemChoice::Color(OPT_C.to_owned()))
+    );
+}
+
+// REQ-EVENT-001, CR 614.12b, R3 — finding G4, exactness (failing side): k = 4095 gives 4097
+// reachable states: the lookahead-limit procedure error (the message names the lookahead and
+// "exceeds 4096 states"), never a crash or stack overflow. Fails at head 30f1b2c (stack
+// overflow on the deep recursion; with a large stack, 4097 states resolved without the error).
+#[test]
+fn req_event_001_g4_deep_chain_4097_states_error() {
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let effects = deep_chain(4095);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    match drive_content(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)])) {
+        Err(e) => assert_lookahead_limit(&e, "4097 states"),
+        Ok(out) => panic!("4097 states must be the lookahead-limit error, got {out:?}"),
+    }
+}
+
+// REQ-EVENT-001, CR 614.12b, R3 — finding G4: memo hits cost nothing. One entry with 10
+// independent "enters with a counter" effects and a mandatory single-option Choose {cost 1},
+// all applicable at once in one tier: 11! application orders, but only 2^11 = 2048 distinct
+// states (the subsets of applied effects), within the bound, so it resolves for a budgeted
+// chooser (every order request answered with the last offered effect). A pinning test: it
+// passes at head 30f1b2c.
+#[test]
+fn req_event_001_g4_wide_redundant_orders_within_bound() {
+    let env = env_n(1);
+    let cont = ContinuousEffects::new();
+    let mut list = Vec::new();
+    for i in 1..=10 {
+        list.push(fx(i, counters(CTR_A, 1)));
+    }
+    list.push(fx(11, choose(KEY_B, K::Color, &[(OPT_C, 1)])));
+    let effects = effects_of(list);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let out = drive_content(&ctx, &[entry(1, P1)], &budget(&[(P1, 1000)]))
+        .unwrap_or_else(|e| panic!("2048 distinct states must resolve: {e}"));
+    let all: Vec<u64> = (1..=11).collect();
+    assert_eq!(out[0].projected.effects, ids(&all));
+    assert_eq!(
+        out[0].projected.counters,
+        BTreeMap::from([(CTR_A.to_owned(), 10)])
+    );
+    assert_eq!(
+        out[0].memory.choice(KEY_B),
+        Some(&MemChoice::Color(OPT_C.to_owned()))
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// G5 — every entry is validated before anything is asked (CR 614.12a)
+// ---------------------------------------------------------------------------------------------
+
+/// The first status of a session over `resolve_entering`: the procedure error, or the first
+/// pending request (`None` when done without one).
+fn first_status(
+    ctx: &EtbContext<'_>,
+    entries: &[EtbEntry],
+    payable: &BTreeMap<PlayerId, u64>,
+) -> Result<Option<PendingChoiceRequest>, ChoiceError> {
+    let procedure =
+        |_: &mut Nil, cx: &mut ChoiceContext<'_>| resolve_entering(ctx, entries, payable, cx);
+    ChoiceSession::start(Nil, procedure).map(|s| s.pending().cloned())
+}
+
+// REQ-EVENT-001, CR 614.12a — finding G5: entry A (object 1) has a Choose between two free
+// values; entry B is invalid (an unknown object, or a duplicate own-static id). In both slice
+// orders, with a budget for A's chooser and with none, the first status of the session is the
+// procedure error carrying B's error (no request for A first). Valid inputs still ask A and
+// resolve as before. Fails at head 30f1b2c for the order [A, B] (A was asked first).
+#[test]
+fn req_event_001_g5_validate_every_entry_before_asking() {
+    let env = env_n(2);
+    let cont = ContinuousEffects::new();
+    let effects = effects_of(vec![own_fx(
+        1,
+        1,
+        choose(KEY_A, K::Color, &[(OPT_A, 0), (OPT_B, 0)]),
+    )]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let a = entry(1, P1);
+    let invalid: Vec<(EtbEntry, String)> = vec![
+        (
+            entry(42, P1),
+            EtbError::Layer(LayerError::UnknownObject(oid(42))).to_string(),
+        ),
+        (
+            entry_with(
+                2,
+                P1,
+                vec![
+                    own_static(101, 2, Layer::L4, add_types_mod(&[TYPE_X])),
+                    own_static(101, 2, Layer::L4, add_types_mod(&[TYPE_Y])),
+                ],
+            ),
+            EtbError::Layer(LayerError::DuplicateEffect(eid(101))).to_string(),
+        ),
+    ];
+    for (b, expected) in &invalid {
+        for payable in [no_budget(), budget(&[(P1, 5)])] {
+            for entries in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+                let what = format!(
+                    "{expected} {payable:?} {:?}",
+                    entries.iter().map(|e| e.object).collect::<Vec<_>>()
+                );
+                match first_status(&ctx, &entries, &payable) {
+                    Err(ChoiceError::Procedure(msg)) => {
+                        assert!(msg.contains(expected.as_str()), "{what}: {msg}");
+                    }
+                    Err(other) => panic!("{what}: expected a procedure error, got {other:?}"),
+                    Ok(pending) => panic!("{what}: expected the error first, got {pending:?}"),
+                }
+            }
+        }
+    }
+
+    // Valid inputs: A is asked (both free values), B resolves plainly.
+    for payable in [no_budget(), budget(&[(P1, 5)])] {
+        let entries = [a.clone(), entry(2, P1)];
+        let first = first_status(&ctx, &entries, &payable)
+            .unwrap_or_else(|e| panic!("valid inputs failed: {e}"));
+        assert_eq!(
+            first,
+            Some(option_request(
+                0,
+                P1,
+                "CR 614.12a",
+                Some(oid(1)),
+                "COLOR",
+                &[OPT_A, OPT_B]
+            ))
+        );
+        let run = drive_ok(&ctx, &entries, &payable, &[Ans::Text(OPT_B.to_owned())]);
+        assert_eq!(run.requests.len(), 1);
+        assert_eq!(
+            run.out[0].memory.choice(KEY_A),
+            Some(&MemChoice::Color(OPT_B.to_owned()))
+        );
+        assert_eq!(run.out[1].projected.effects, ids(&[]));
+        assert_eq!(run.out[1].memory, Memory::new());
+    }
 }
