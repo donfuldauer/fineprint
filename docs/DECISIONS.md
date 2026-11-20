@@ -5767,6 +5767,7 @@ scenario.
 **Alternatives:** Comparing in one process with both modes (impossible: the mode is a compile-time
 feature). Extending `state_hash` (rejected: #183). A relative path with `cd` in the comparison step
 (rejected: an absolute path is clearer and robust).
+**Follow-up:** the state-hash comparison that #36's deliverable names is #193 FP-148 (depends on #183 FP-144); #36's issue text records this scope.
 
 ## #36 FP-035 — Stale-cache demonstration plan
 
