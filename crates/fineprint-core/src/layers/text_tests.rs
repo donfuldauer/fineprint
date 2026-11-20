@@ -1169,13 +1169,13 @@ fn mutually_dependent_effects_apply_in_timestamp_order() {
     }
 }
 
-// REQ-DSL-012, REQ-LAYER-002; CR 613.7, 613.1c: SetText earlier then ReplaceTextWord rewrites
-// the new text; ReplaceTextWord earlier then SetText (whose text has no Swamp word) leaves the
-// SetText text exactly, although the replacement changed the base's Swamp word. (A later
-// SetText whose text holds the replaced word is a dependency question, CR 613.8a: see
-// docs/DECISIONS.md "#37 FP-036 — Dependency between text effects".)
+// REQ-DSL-012, REQ-LAYER-002; CR 613.8a, 613.8b, 613.1c: a ReplaceTextWord depends on a
+// SetText on the same object (applying the SetText changes what the replacement does) and not
+// the reverse, so the SetText applies first in BOTH timestamp orders and the replacement
+// rewrites its new text (derivation by the rules researcher, CR 2026-11-06). A SetText whose
+// text lacks the replaced word is left exactly as set.
 #[test]
-fn set_text_and_replace_follow_timestamps() {
+fn set_text_applies_before_replace_in_both_orders() {
     let env = Env::default().with(
         o(1),
         object(
@@ -1193,7 +1193,21 @@ fn set_text_and_replace_follow_timestamps() {
     let mut expected = swamp_text().tokens().to_vec();
     expected[1] = word("t2", BLT, "Island");
     assert_eq!(text_of(&r, &env, o(1)).tokens(), expected.as_slice());
-    // Replacement at 1, SetText at 2: the SetText text wins.
+    // Replacement at 1, SetText at 2: the SetText still applies first (CR 613.8b), and the
+    // replacement rewrites its text.
+    let r = registry(vec![
+        (1, l3(1, only(&[1]), replace(BLT, "Swamp", "Island"))),
+        (
+            2,
+            l3(
+                2,
+                only(&[1]),
+                LayerModification::SetText(encode_rules_text(&swamp_text())),
+            ),
+        ),
+    ]);
+    assert_eq!(text_of(&r, &env, o(1)).tokens(), expected.as_slice());
+    // Replacement at 1, SetText at 2 with no Swamp word: the SetText text is left unchanged.
     let forest = encode_rules_text(&stream(vec![word("t2", BLT, "Forest")]));
     let r = registry(vec![
         (1, l3(1, only(&[1]), replace(BLT, "Swamp", "Island"))),
