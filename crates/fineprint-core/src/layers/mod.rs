@@ -2,9 +2,9 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! The layer system (REQ-LAYER-001, REQ-LAYER-002, REQ-CORE-002, SRS 6.1, 6.2): the
-//! continuous-effect registry, per-object evaluation through layers 1a-7d, the ordering within
-//! each layer, timestamps and the LKI hook.
+//! The layer system (REQ-LAYER-001, REQ-LAYER-002, REQ-LAYER-003, REQ-CORE-002, SRS 6.1-6.3):
+//! the continuous-effect registry, per-object evaluation through layers 1a-7d, the ordering
+//! within each layer, lock-in of affected sets, timestamps and the LKI hook.
 //!
 //! **Registry.** [`ContinuousEffects`] holds every continuous effect under its [`EffectId`]
 //! (fineprint_base) with its source, controller, timestamp, layer, origin, affected objects and
@@ -32,6 +32,20 @@
 //! recomputed after every application (CR 613.8b, 613.8c). [`evaluate_with_order`] also returns
 //! the [`OrderRecord`] of the order used, ready for a rules-trace event.
 //!
+//! **Lock-in** (REQ-LAYER-003, SRS 6.3). A multi-layer effect is registered as a group of
+//! parts, one per layer or sublayer ([`ContinuousEffects::register_group`]). A part whose
+//! affected set is [`Affected::SameAsLayer`] follows its anchor, the part of the group's first
+//! layer (the earliest layer of its parts that are not `SameAsLayer`): within one evaluation of an object it applies exactly when the anchor applied to that
+//! object, even if the object stopped matching the selector or the generating ability was
+//! removed in between (CR 613.6). An anchor that applied to nothing locks its parts to nothing.
+//! A resolved part with a selector is locked to the concrete set
+//! [`resolve_affected_set`] gives at registration, each part independently (CR 611.2c); a static
+//! selector is matched again on every evaluation, so a static group's lock holds within one
+//! evaluation only (CR 611.3a). The record lives in the single per-object evaluation: there is
+//! no cache and no cross-object state. [`ContinuousEffects::register_group_for_as_long_as`]
+//! registers nothing when its [`ForAsLongAsWindow`] makes the effect do nothing (CR 611.2b).
+//! [`ContinuousEffects::register`] never locks a selector and rejects `SameAsLayer`.
+//!
 //! **Timestamps.** [`TimestampLedger`] and the free functions assign timestamps per
 //! CR 613.7a-n from the caller's single monotonic `IdGenerator<Timestamp>`.
 //!
@@ -40,17 +54,19 @@
 //!
 //! **Scope.** This module is standalone: it is not wired into the game state, its Merkle layout
 //! or the state hash (the placeholder `state::EffectRegistry` stays). **Out of scope** (later
-//! units): lock-in of an effect's set across layers (CR 613.6, #34; `SameAsLayer` is rejected as
-//! unsupported); the cached versus full-recompute mode; the passes after the layers (CR 613.10,
+//! units): the cached versus full-recompute mode; the passes after the layers (CR 613.10,
 //! 613.11); wiring into the game state and the state hash (#183 FP-144); switching the call
 //! sites in events, triggers, replacement and zones; layer-major evaluation across objects
 //! (#186 FP-146; dependency is judged on the object under evaluation only); effect expiry and
-//! durations (the caller removes ended effects).
+//! durations (the caller removes ended effects; a "for as long as" window is judged by the
+//! caller); locking the rules-modifying parts of a resolved effect (CR 611.2c, passes 613.10 and
+//! 613.11, REQ-LAYER-004).
 //!
 //! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet`; no floats, clock or I/O; the order
 //! of registration never changes a result (REQ-CORE-001).
 
 mod error;
+mod lockin;
 mod ordering;
 mod pipeline;
 mod provider;
@@ -58,11 +74,14 @@ mod registry;
 mod timestamps;
 
 #[cfg(test)]
+mod lockin_tests;
+#[cfg(test)]
 mod ordering_tests;
 #[cfg(test)]
 mod tests;
 
 pub use error::LayerError;
+pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
 pub use ordering::{OrderItem, OrderRecord, OrderStep, Selection};
 pub use pipeline::{
     Evaluated, KEYWORD_COUNTER_KINDS, LayerEnvironment, MatchContext, ObjectBase, evaluate,
