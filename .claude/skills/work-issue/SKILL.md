@@ -226,10 +226,12 @@ scheduled task"). There is no depth limit: the chain runs until no issue is read
    session (step 3).
    - "Self-chain: handed off" or "Self-chain: handoff failed" (final): fire nothing more; end
      the turn.
-   - "Self-chain: handing off" (pending): an earlier attempt stopped before confirming. If the
-     task's `last_run.fired_at` is later than the marker's `created_at`, a run started after it:
-     edit the marker to the confirmed text (step 4) and end the turn without firing. Otherwise
-     fire as in step 3, reusing this marker instead of posting a new one.
+   - "Self-chain: handing off" (pending): an earlier attempt stopped before confirming, so it
+     may or may not have fired. Fire again as in step 3, reusing this marker instead of posting
+     a new one. Firing twice is safe: if the first run started a session, the second run finds
+     it as a live chain in its step 1 and stops. Don't infer the earlier outcome from the task's
+     `last_run`: a scheduled run is indistinguishable from a fired one, and a scheduled run may
+     have stopped because this session was still live.
    - No marker: go on to step 3.
 3. Post the pending marker on the merged issue: "Self-chain: handing off to the backstop
    scheduled task (session <this session's ID>)." Then call `fire_trigger` with the task's ID and
