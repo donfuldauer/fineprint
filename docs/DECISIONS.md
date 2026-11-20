@@ -6565,7 +6565,17 @@ Choices made in it:
    (`source` the entrant; `controller` the entrant's `EtbEntry::controller`, so a
    controller-relative selector such as "artifacts you control" reads the entrant's controller
    through `MatchContext::effect_controller`, CR 707.5: the copied abilities are the entrant's;
-   an `Affected::Objects` set becomes `{entrant}`, a selector is kept) and its `etb` ids apply to the entrant as `ThisPermanent` effects of the entrant. Only the
+   an `Affected::Objects` set becomes `{entrant}`, a selector is kept) and its `etb` ids apply
+   to the entrant as `ThisPermanent` effects of the entrant. One controller per projection
+   (CR 614.12, CR 707.5): `project` (so `applicable` and `resolve_entering`, which reports it as
+   a procedure error before any request) refuses an entry whose environment base reports
+   `controller: Some(c)` with `c != EtbEntry::controller`, with
+   `EtbError::ControllerMismatch { object, entry, environment }`, before any layer is evaluated
+   or copied static registered (an unknown object stays `LayerError::UnknownObject`); a base with
+   `controller: None` is accepted and the entry's controller is then the only one (copied
+   statics and the added-types effect use it). Otherwise a copied "artifacts you control" static
+   bound to the entry's controller would not match its own entrant evaluated under the
+   environment's controller. Only the
    last applied copy's declaration counts, never an earlier copy's (in the spirit of CR 707.9e:
    a later copy effect overrides what an earlier one gave). Without a declaration a copy brings
    no statics and no ETB effects. Every `ThisPermanent` effect also needs
@@ -6600,14 +6610,25 @@ Choices made in it:
    option is `EtbError::Unpayable` (reported as a procedure error whose text contains "not
    payable"). A chooser absent from `payable` has no limit and runs no lookahead. The CR 616.1
    order choice (`CHOOSE_REPLACEMENT_EFFECT`, CR 616.1e) is never filtered by payability: CR
-   614.12b restricts only the choices the effects require. Applying the reserve across the
+   614.12b restricts only the choices the effects require. Every candidate is offered, but the
+   request's `default_on_timeout` is `SelectReplacement { index: k }` with k the smallest
+   candidate index (ascending effect id) whose continuation is payable under the same exact
+   lookahead, `cheapest(c) + mincost(state + c) + later <= remaining` (u128), so a timeout never
+   picks an unpayable order when a payable one exists; k = 0 when candidate 0 is payable, when
+   no candidate is, or when the chooser has no budget (no lookahead runs). A manual answer of an
+   unpayable candidate is still the "not payable" error. Applying the reserve across the
    SEVERAL effects of one entry goes beyond the CR's literal text (which speaks of multiple
    permanents); it is kept on purpose, as the original brief required (requirement 7). A
    `Choose` with an empty `options` list is refused by `EtbEffects::add` with
    `EtbError::EmptyChoice(id)` (the set unchanged): it has no feasible continuation, and
    counting it as cost 0 would let an earlier choice spend the budget before the impossible
    choice fails (CR 614.12b). A `Choose` with at least one option, a single cost-0 option
-   included, is accepted and always payable. `set_copy_abilities` is unaffected.
+   included, is accepted and always payable. A `Choose` whose options repeat a text is refused
+   by `add` with `EtbError::DuplicateOptionText { effect, text }` (the set unchanged; checked
+   after the empty-options check): the answer is `Text(x)`, which cannot tell two options of one
+   text (and two costs) apart, so the cheaper one could never be chosen (CR 614.12a,
+   CR 614.12b). Distinct texts, of equal costs or not, stay accepted. `set_copy_abilities` is
+   unaffected.
    Before any reserve is computed and before any request, `resolve_entering` projects EVERY
    entry from its empty `EtbApplied`, whether or not its chooser has a budget, and fails with
    the first projection error (an unknown object, a duplicate own-static id, ...) as a
@@ -6642,7 +6663,11 @@ lookahead was chosen first and replaced by the exact memoised lookahead in PR #2
 because it missed newly applicable choices and counted removed ones); unioning added types
 after the layers (withdrawn in PR #202 review: P/T and later layers must see the type);
 setting the projected controller to `EtbEntry::controller` (rejected: the brief defines the
-projection from the environment's base; no `ControlEtb` action exists yet).
+projection from the environment's base, and no `ControlEtb` action exists yet; a mismatch
+between the two is refused instead, item 4, PR #202 review round 3 H2); a dedicated
+`ChoiceError` variant for the lookahead-limit error (declined in PR #202 review round 3: it
+needs a change in `choice/`, the FP-027 choice-protocol contract, R1/R2; the procedure error
+keeps the text "the CR 614.12b lookahead of object N exceeds 4096 states").
 
 Amended in PR #202 review round 1 (F1-F8).
 
@@ -6651,3 +6676,8 @@ the synthetic type effect is `Resolved` and never consults the generating-abilit
 empty `Choose` options are refused at `add` (G3); lookahead states are charged when entered,
 memo hits free, iterative search (G4); every starting projection is validated before any
 reserve or request (G5).
+
+Amended in PR #202 review round 3 (H1-H3): duplicate option texts refused at `add` (H1, item 5);
+a controller mismatch between the environment base and the entry refused, `None` accepted (H2,
+item 4); the `CHOOSE_REPLACEMENT_EFFECT` default is the first candidate with a payable
+continuation, else 0, every candidate still offered (H3, item 5).
