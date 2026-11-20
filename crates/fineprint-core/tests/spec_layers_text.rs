@@ -940,17 +940,29 @@ fn registration_multi_part_group_applies() {
     );
 }
 
-/// REQ-DSL-012; CR 613.1c, 613.7: SetText then ReplaceTextWord: the replacement text is
-/// rewritten; ReplaceTextWord then SetText: the SetText text wins unchanged.
+/// REQ-DSL-012, REQ-LAYER-002; CR 613.1c, 613.7, 613.8a, 613.8b: the word replacement depends
+/// on the whole-text SetText (applying the SetText changes what the replacement applies to,
+/// CR 613.8a) and the SetText does not depend on the replacement, so the SetText applies first
+/// in BOTH timestamp orders (CR 613.8b) and its new text has the land-type word rewritten.
+/// Orchestrator correction of the FP-036 brief (requirement 10), backed by a rules-researcher
+/// answer: the brief line "ReplaceTextWord earlier and SetText later, the SetText text wins
+/// unchanged" is superseded.
 #[test]
 fn set_text_and_replace_both_orders() {
+    use fineprint_core::layers::Selection;
+    const SET: u64 = 1;
+    const REP: u64 = 2;
     let replacement = vec![lit_t("r0", "test.new"), word("r1", BasicLandType, "Swamp")];
-    for (t_set, t_rep, want) in [(5, 6, "Island"), (6, 5, "Swamp")] {
+    let want = stream(vec![
+        lit_t("r0", "test.new"),
+        word("r1", BasicLandType, "Island"),
+    ]);
+    for (t_set, t_rep) in [(5, 6), (6, 5)] {
         let mut env = TestEnv::new();
         let a = env.put(oid(A), with_text("test.text_a", req1_tokens()));
         let r = registry(&[
             (
-                1,
+                SET,
                 eff(
                     Layer::L3,
                     t_set,
@@ -958,19 +970,22 @@ fn set_text_and_replace_both_orders() {
                     LayerModification::SetText(enc(replacement.clone())),
                 ),
             ),
-            (2, text_eff(t_rep, &[a], BasicLandType, "Swamp", "Island")),
+            (REP, text_eff(t_rep, &[a], BasicLandType, "Swamp", "Island")),
         ]);
-        let got = eval_text(&r, &env, a);
-        assert_eq!(got.len(), 2, "SetText ts {t_set}, replace ts {t_rep}");
-        assert_eq!(got.find("r0"), Some(&lit_t("r0", "test.new")));
+        let (e, rec) = evaluate_with_order(&r, &env, a).expect("evaluate");
+        let ctx = format!("SetText ts {t_set}, replace ts {t_rep}");
+        assert_eq!(dec(&e.characteristics.rules_text), want, "{ctx}");
+        assert_eq!(e, evaluate(&r, &env, a).expect("evaluate"), "{ctx}");
+        let l3: Vec<_> = rec.steps.iter().filter(|s| s.layer == Layer::L3).collect();
         assert_eq!(
-            token_value(&got, "r1"),
-            want,
-            "SetText ts {t_set}, replace ts {t_rep}"
+            l3.iter().map(|s| s.item.clone()).collect::<Vec<_>>(),
+            vec![OrderItem::Effect(eid(SET)), OrderItem::Effect(eid(REP))],
+            "{ctx}"
         );
-        if want == "Swamp" {
-            let e = evaluate(&r, &env, a).expect("evaluate");
-            assert_eq!(e.characteristics.rules_text, enc(replacement.clone()));
+        assert!(l3.iter().all(|s| s.applied), "{ctx}");
+        if t_set > t_rep {
+            // CR 613.8b: the later SetText is released first by dependency.
+            assert_eq!(l3[0].selection, Selection::Dependency, "{ctx}");
         }
     }
 }
