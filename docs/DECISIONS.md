@@ -5703,3 +5703,119 @@ remaining effect is itself in a loop, which was the brief's stated precondition.
 **Alternatives:** Apply the earliest-key remaining effect even if it is outside the loop (the
 brief's literal wording). Rejected because an effect would then apply before an effect it
 depends on, which contradicts 613.8b.
+
+## #36 FP-035 — Coarse invalidation and the (stateVersion, ObjectId) key
+
+**Decision:** `LayerCache` stores finished `Evaluated` values keyed by `(StateVersion, ObjectId)`.
+Every invalidation, whatever its `Invalidation` cause, bumps the version by exactly 1 and drops
+every entry. The cause is recorded for readability and counting only; it never narrows what is
+dropped. Registry changes are detected by the cache itself: it keeps a clone of the
+`ContinuousEffects` it last evaluated against and, when the registry passed in compares unequal,
+invalidates with `EffectRegistration` before evaluating (never on the first call). Errors are
+returned, counted as misses and never stored. `evaluate_all` compares the registry once per call
+and keeps the entries computed before a first error.
+**Rationale:** SRS 6.5 asks for the `(stateVersion, ObjectId)` key and invalidation on anything that
+can affect an effect's existence, selector or output. One object's evaluation can depend on other
+objects (selector matching, CDA value expressions, the dependency trial), and #186 FP-146 makes
+that dependence stronger, so dropping only the changed object's entry is not sound in general.
+A full drop is always sound and costs one recompute of the board. Comparing the registry snapshot
+costs `O(effects)` per call and makes registry soundness independent of which instance the caller
+passes.
+**Alternatives:** Per-object or per-cause invalidation (rejected: unsound under cross-object
+dependence, and #186 would have to undo it). A registry generation counter inside
+`ContinuousEffects` (rejected: `registry.rs` is outside this unit and a counter does not catch a
+replaced registry instance). Storing errors (rejected: an error is not a characteristic value and
+the brief forbids it).
+
+## #36 FP-035 — Scope against #183 FP-144 and #186 FP-146
+
+**Decision:** The cache is standalone, like the rest of `layers`. It owns its own `StateVersion`
+counter (starting at 0), detects registry changes by snapshot, and takes every environment change
+(zone, control, counters, expiry, timestamps, designations, attachment, status, player values) as
+an explicit `invalidate(cause)` from the caller. Nothing is wired into `state/`, `GameState` or
+`state_hash`; `evaluate`, `evaluate_all`, `ContinuousEffects` and `LayerEnvironment` are unchanged.
+**Rationale:** `GameState` has no state version yet and the layers module is not wired into it;
+that wiring, timestamps in the state and the layer state in the Merkle hash are #183 FP-144, which
+will call `invalidate` from the real mutation points and may extend the differential to
+`GameState::state_hash` and golden replays. #186 FP-146 changes how objects are evaluated relative
+to each other; coarse invalidation stays sound under it.
+**Alternatives:** Deriving the version from a game-state counter now (rejected: none exists and
+wiring is #183's scope).
+
+## #36 FP-035 — Differential design
+
+**Decision:** The differential compares digests of `evaluate_all` results, not `state_hash`.
+`evaluated_digest` is SHA-256 over a canonical encoding (tag `fineprint.layers.evaluated.v1`, entry
+count, then per object in ascending `ObjectId` order the id, the characteristics in the layout of
+"#24 FP-023 — Characteristics encoding", and the controller). The encoding of the characteristics
+is a private copy in `layers/cache.rs` because the LKI encoder in `memory/lki.rs` is private and
+outside this unit. CI job `differential (ubuntu-latest)` runs (1) the whole workspace suite with
+`--features fineprint-core/full-recompute`, (2) and (3) the Independent Tester's
+`spec_layers_cache_diff` in both modes with `FINEPRINT_DIFF_DIR` set, each scenario writing
+`<scenario>.digest` (lowercase hex plus newline), and (4) a bash comparison that requires at least
+5 digest files, identical file names and byte-identical files. `FINEPRINT_DIFF_DIR` is read only
+by that test code, never by rules code (R3). In CI the variable is set to
+`${{ github.workspace }}/target/differential/<mode>` (absolute), because cargo runs a test binary
+with its package directory as the working directory; the brief's relative
+`target/differential/<mode>` would land in `crates/fineprint-core/target/...` and the comparison
+step, which runs at the workspace root, would find nothing.
+**Rationale:** The layers are not in `GameState` yet (see the scope entry), so `state_hash` cannot
+see them; the digest of the evaluated board is the closest observable equivalent. The whole suite
+also runs in full-recompute mode because SRS 6.5 requires the full regression suite in both modes
+(the cached mode is the existing `test` job). Digest files make a disagreement visible per
+scenario.
+**Alternatives:** Comparing in one process with both modes (impossible: the mode is a compile-time
+feature). Extending `state_hash` (rejected: #183). A relative path with `cd` in the comparison step
+(rejected: an absolute path is clearer and robust).
+
+## #36 FP-035 — Stale-cache demonstration plan
+
+**Decision:** No sabotage switch ships in the code. The acceptance criterion "a deliberately stale
+cache in a scratch commit fails it" is demonstrated by the Orchestrator on a scratch branch (for
+example, making `invalidate` keep the entries); the spec tests' comparator check (cached results
+against `layers::evaluate_all`) and the digest comparison then fail. The unit test
+`environment_changes_need_a_declared_invalidation` also shows, in cached mode, that an undeclared
+change keeps serving the old version's value.
+**Rationale:** A feature or flag that makes the cache stale would be dead weight and a risk in
+production code; the scratch commit proves the gate without shipping it.
+**Alternatives:** A `stale-cache` test feature (rejected for the reason above).
+
+## #36 FP-035 — upload-artifact pin
+
+**Decision:** The `bench` job uploads `target/criterion` with `actions/upload-artifact@v4.6.2`
+(first-party, exact tag, verified with `git ls-remote --tags` because `gh api` had no repository
+access in the session: tag `v4.6.2` is commit `ea165f8d65b6e75b540449e92b4886f43607fa02`), artifact
+`criterion-layers-recompute-<sha>`, `if-no-files-found: error`, 90 days retention. The ci.yml
+header now lists it with checkout and cache.
+**Rationale:** REQ-NFR-009 asks for benchmark results tracked as a trend; the artifact is the data
+the phase gate compares. Exact first-party tags match the existing pinning policy.
+**Alternatives:** Committing results to the repository (rejected: noise in history); a third-party
+benchmark action (rejected: not first-party).
+
+## #36 FP-035 — criterion pin and manifest edits
+
+**Decision:** `fineprint-core` gets the dev-dependency `criterion = { version = "=0.8.2",
+default-features = false }` (newest release on crates.io at the time of writing, 2026-02-04; its
+`rust-version` is 1.86, below the pinned 1.97.0), a `[[bench]] name = "layers_recompute",
+harness = false`, and `[features] full-recompute = []` (not default). The `cargo_bench_support`
+feature is not enabled: in 0.8.2 it is empty and unused. `Cargo.lock` gains only the packages the
+dev-dependency pulls in (32 entries: criterion, criterion-plot, clap, regex, ciborium, half,
+itertools, tinytemplate, walkdir and their dependencies, including a second `syn` 2.0.119 next to
+the existing 3.x, which makes two existing references read `syn 3.0.10`); no existing version
+changed. Dev-dependencies never reach the rules crates' runtime.
+**Rationale:** Criterion is the standard harness with median estimates and `estimates.json` output
+the CI summary reads; default features would add plotters and rayon (threads), not needed.
+**Alternatives:** criterion 0.5.1 (rejected: older, no `rust-version`); a hand-written timing loop
+(rejected: no statistics, reinvents the harness); `divan` (rejected: no `estimates.json` contract
+for the summary step).
+
+## #36 FP-035 — Stale docs/DEVELOPMENT.md lines left for the Orchestrator
+
+**Decision:** `docs/DEVELOPMENT.md` is outside this unit's owned paths, so its "Lands later" lines
+for the differential and the benchmark, and its CI table (which lists the required jobs), are left
+unchanged and reported to the Orchestrator for a follow-up edit: the new jobs are
+`differential (ubuntu-latest)` and `bench (ubuntu-latest)` (not required), the commands are
+`cargo test --workspace --locked --features fineprint-core/full-recompute` and
+`cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`.
+**Rationale:** R1 (owned paths); the brief says to report, not edit.
+**Alternatives:** Editing DEVELOPMENT.md here (rejected: outside owned paths).
