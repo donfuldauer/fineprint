@@ -226,6 +226,14 @@ impl Env {
         self
     }
 
+    /// Moves `id` off the battlefield (a card in another zone).
+    fn off_battlefield(mut self, id: ObjectId) -> Env {
+        if let Some(base) = self.bases.get_mut(&id) {
+            base.on_battlefield = false;
+        }
+        self
+    }
+
     fn counter(mut self, id: ObjectId, kind: &str, amount: i64, t: u64) -> Env {
         self.counters
             .entry(id)
@@ -889,14 +897,14 @@ fn layer_7b_timestamp_order_both_ways() {
     }
 }
 
-/// A humility-like enchantment (6: creatures lose all abilities; 7b: creatures are 1/1), an
-/// opalescence-like one (4: enchantments are creatures; 7b: enchantments are 4/4) and a 3/3
-/// flier.
-fn humility_opalescence(h_ts: u64, o_ts: u64) -> (ContinuousEffects, Env) {
-    let mut h = noncreature("test.global_humility_like", "Enchantment");
-    h.abilities = vec![ability("humility_like")];
-    let mut op = noncreature("test.opalescence_like", "Enchantment");
-    op.abilities = vec![ability("opalescence_like")];
+/// An ability-suppressing enchantment (6: creatures lose all abilities; 7b: creatures are 1/1),
+/// an enchantment-animating one (4: enchantments are creatures; 7b: enchantments are 4/4) and a
+/// 3/3 flier.
+fn ability_suppressor_and_animator(h_ts: u64, o_ts: u64) -> (ContinuousEffects, Env) {
+    let mut h = noncreature("test.global_ability_suppressor", "Enchantment");
+    h.abilities = vec![ability("ability_suppressor")];
+    let mut op = noncreature("test.enchantment_animator", "Enchantment");
+    op.abilities = vec![ability("enchantment_animator")];
     let mut bear = creature("test.flier_3_3", 3, 3);
     bear.abilities = vec![keyword("flying", "a1")];
     let env = Env::default().with(o(1), h).with(o(2), op).with(o(3), bear);
@@ -950,13 +958,14 @@ fn humility_opalescence(h_ts: u64, o_ts: u64) -> (ContinuousEffects, Env) {
     (r, env)
 }
 
-// REQ-LAYER-001; CR 613.1, 613.5, 613.7: humility-like and opalescence-like in both timestamp
-// orders. The layer-4 type change is visible to the layer-6 and 7b selectors; in 7b the later
-// timestamp wins for the enchantments; every creature loses its abilities either way.
+// REQ-LAYER-001; CR 613.1, 613.5, 613.7: the ability suppressor and the enchantment animator in
+// both timestamp orders. The layer-4 type change is visible to the layer-6 and 7b selectors; in
+// 7b the later timestamp wins for the enchantments; every creature loses its abilities either
+// way.
 #[test]
-fn humility_opalescence_both_orders() {
+fn ability_suppressor_and_animator_both_orders() {
     for (h_ts, o_ts, ench_pt) in [(1, 2, (4, 4)), (2, 1, (1, 1))] {
-        let (r, env) = humility_opalescence(h_ts, o_ts);
+        let (r, env) = ability_suppressor_and_animator(h_ts, o_ts);
         let all = evaluate_all(&r, &env).unwrap();
         for id in [o(1), o(2)] {
             let c = &all[&id].characteristics;
@@ -1224,7 +1233,7 @@ fn literal_forms() {
 
 /// A mixed scene with effects in every layer and counters.
 fn scene() -> (Vec<(u64, ContinuousEffect)>, Env) {
-    let (r, env) = humility_opalescence(4, 6);
+    let (r, env) = ability_suppressor_and_animator(4, 6);
     let mut list: Vec<(u64, ContinuousEffect)> =
         r.iter().map(|(id, x)| (id.get(), x.clone())).collect();
     let env = env
@@ -1653,40 +1662,41 @@ fn static_before_simultaneous_resolved() {
     assert_eq!((s, r), (ts(8), ts(9)));
 }
 
-// REQ-CORE-002; CR 613.7a (second sentence), 613.7e: an equipment-like object with a printed
-// effect and an effect granted later by an aura-like object becomes attached: both effects get
-// new timestamps, the granted one still after the printed one; a granted ability older than
-// the object follows the object; resolved effects and other objects' effects are untouched.
+// REQ-CORE-002; CR 613.7a (second sentence), 613.7e: an Equipment with a printed effect and
+// an effect granted later by an Aura granting the Equipment a static ability becomes attached:
+// both effects get new timestamps, the granted one still after the printed one; a granted
+// ability older than the object follows the object; resolved effects and other objects'
+// effects are untouched.
 #[test]
 fn restamp_static_effects_keeps_relative_order() {
     let mut g = IdGenerator::new();
     let mut l = TimestampLedger::new();
-    let hammer = o(1);
+    let equipment = o(1);
     let old = l
-        .stamp_object(&mut g, hammer, StampReason::EntersZone)
+        .stamp_object(&mut g, equipment, StampReason::EntersZone)
         .unwrap();
-    let rune = l.stamp_object(&mut g, o(2), StampReason::Attached).unwrap();
+    let aura_ts = l.stamp_object(&mut g, o(2), StampReason::Attached).unwrap();
     let granted_origin = EffectOrigin::Static {
-        granted_at: Some(rune),
+        granted_at: Some(aura_ts),
     };
     let mut r = registry(vec![
         // Printed: "equipped creature loses flying".
         (
             1,
             stat(
-                hammer,
+                equipment,
                 Layer::L6,
                 old.get(),
                 none(),
                 LayerModification::RemoveKeyword("flying".to_owned()),
             ),
         ),
-        // Granted by the aura-like object: "equipped creature has flying".
+        // Granted by the Aura: "equipped creature has flying".
         (
             2,
             granted_stat(
-                hammer,
-                rune.get(),
+                equipment,
+                aura_ts.get(),
                 Layer::L6,
                 static_effect_timestamp(old, &granted_origin).get(),
                 LayerModification::AddAbility(keyword("flying", "g")),
@@ -1694,12 +1704,12 @@ fn restamp_static_effects_keeps_relative_order() {
         ),
         (
             3,
-            granted_stat(hammer, 0, Layer::L7c, old.get(), modify(1, 1)),
+            granted_stat(equipment, 0, Layer::L7c, old.get(), modify(1, 1)),
         ),
         (
             4,
             ContinuousEffect {
-                source: Some(hammer),
+                source: Some(equipment),
                 ..eff(Layer::L7c, 2, none(), modify(1, 1))
             },
         ),
@@ -1714,11 +1724,11 @@ fn restamp_static_effects_keeps_relative_order() {
             ),
         ),
     ]);
-    assert_eq!(r.get(e(2)).unwrap().timestamp, rune);
+    assert_eq!(r.get(e(2)).unwrap().timestamp, aura_ts);
     let new = l
-        .stamp_object(&mut g, hammer, StampReason::Attached)
+        .stamp_object(&mut g, equipment, StampReason::Attached)
         .unwrap();
-    restamp_static_effects(&mut r, &mut g, hammer, old, new).unwrap();
+    restamp_static_effects(&mut r, &mut g, equipment, old, new).unwrap();
     let t = |id| r.get(e(id)).unwrap().timestamp;
     assert_eq!(t(1), new);
     assert_eq!(t(3), new);
@@ -1828,4 +1838,215 @@ fn error_display() {
         LayerError::from(fineprint_base::ids::IdExhausted),
         LayerError::IdExhausted
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 1 regressions
+// ---------------------------------------------------------------------------------------------
+
+// REQ-LAYER-001; CR 122.1b, 702.11d: the keyword-counter classifier accepts the fifteen names and
+// their variants (name, one space, a parameter); ward and near-misses are not keyword counters.
+#[test]
+fn keyword_counter_keyword_classifier() {
+    for kind in KEYWORD_COUNTER_KINDS {
+        assert_eq!(keyword_counter_keyword(kind), Some(kind));
+    }
+    for kind in [
+        "hexproof from red",
+        "hexproof from artifacts",
+        "first strike from test",
+    ] {
+        assert_eq!(keyword_counter_keyword(kind), Some(kind));
+    }
+    for kind in [
+        "ward",
+        "ward 2",
+        "flyingx",
+        "hexproofish",
+        "hexproof ",
+        "hexproof  from red",
+        "Hexproof",
+        "+1/+1",
+        "charge",
+        "",
+    ] {
+        assert_eq!(keyword_counter_keyword(kind), None, "{kind:?}");
+    }
+}
+
+// REQ-LAYER-001; CR 122.1b, 702.11d, 613.1f: a variant keyword counter grants one ability with
+// the full kind string as its keyword, whatever the amount; amount 0 grants nothing.
+#[test]
+fn variant_keyword_counter_grants_full_keyword() {
+    let env = Env::default()
+        .with(o(1), creature("test.bear", 2, 2))
+        .counter(o(1), "hexproof from red", 3, 1)
+        .with(o(2), creature("test.bear", 2, 2))
+        .counter(o(2), "hexproof from red", 0, 1);
+    let c = eval(&ContinuousEffects::new(), &env, o(1)).characteristics;
+    assert_eq!(
+        c.abilities,
+        vec![keyword_counter_ability("hexproof from red")]
+    );
+    assert!(has_keyword(&c, "hexproof from red"));
+    assert_eq!(
+        c.abilities[0].0.get("abilityId").and_then(|v| v.as_str()),
+        Some("counter:hexproof from red")
+    );
+    let c = eval(&ContinuousEffects::new(), &env, o(2)).characteristics;
+    assert!(c.abilities.is_empty());
+}
+
+// REQ-LAYER-001; CR 122.1b, 613.1f, 613.7: a variant keyword counter applies in layer 6 at its
+// counter timestamp: a later RemoveAllAbilities removes it, an earlier one does not.
+#[test]
+fn variant_keyword_counter_in_layer_6_timestamp_order() {
+    for (remove_ts, has) in [(5, false), (1, true)] {
+        let env = Env::default()
+            .with(o(1), creature("test.bear", 2, 2))
+            .counter(o(1), "hexproof from red", 1, 3);
+        let r = registry(vec![(
+            1,
+            eff(
+                Layer::L6,
+                remove_ts,
+                objects([o(1)]),
+                LayerModification::RemoveAllAbilities,
+            ),
+        )]);
+        let c = eval(&r, &env, o(1)).characteristics;
+        assert_eq!(has_keyword(&c, "hexproof from red"), has, "{remove_ts}");
+    }
+}
+
+// REQ-LAYER-001; CR 122.1b: ward is not a keyword counter, with or without a parameter.
+#[test]
+fn ward_counters_grant_nothing() {
+    let env = Env::default()
+        .with(o(1), creature("test.bear", 2, 2))
+        .counter(o(1), "ward", 1, 1)
+        .counter(o(1), "ward 2", 1, 2);
+    let c = eval(&ContinuousEffects::new(), &env, o(1)).characteristics;
+    assert!(c.abilities.is_empty());
+}
+
+// REQ-LAYER-001; CR 122.1a, 208.3, 613.4c: a noncreature card off the battlefield with printed
+// 2/1 keeps 2/1 with a +1/+1 counter (counters modify creatures only); a layer-7c effect still
+// applies to its printed P/T.
+#[test]
+fn noncreature_off_battlefield_with_printed_pt_ignores_counters() {
+    let mut artifact = noncreature("test.artifact_2_1", "Artifact");
+    artifact.power = Some(literal(2));
+    artifact.toughness = Some(literal(1));
+    let env = Env::default()
+        .with(o(1), artifact)
+        .off_battlefield(o(1))
+        .counter(o(1), "+1/+1", 1, 1);
+    assert_eq!(eval_pt(&ContinuousEffects::new(), &env, o(1)), Some((2, 1)));
+    let r = registry(vec![(1, eff(Layer::L7c, 2, objects([o(1)]), modify(1, 0)))]);
+    assert_eq!(eval_pt(&r, &env, o(1)), Some((3, 1)));
+}
+
+// REQ-LAYER-001; CR 122.1a, 613.1d, 613.4c: an artifact animated in layer 4 is a creature at
+// layer 7c, so its +1/+1 counter applies (0/0 + 1/1).
+#[test]
+fn animated_artifact_gets_pt_counters() {
+    let env = Env::default()
+        .with(o(1), noncreature("test.artifact", "Artifact"))
+        .counter(o(1), "+1/+1", 1, 1);
+    assert_eq!(eval_pt(&ContinuousEffects::new(), &env, o(1)), None);
+    let r = registry(vec![(
+        1,
+        eff(
+            Layer::L4,
+            2,
+            objects([o(1)]),
+            LayerModification::AddTypes {
+                supertypes: BTreeSet::new(),
+                card_types: set(["Creature"]),
+                subtypes: BTreeSet::new(),
+            },
+        ),
+    )]);
+    assert_eq!(eval_pt(&r, &env, o(1)), Some((1, 1)));
+}
+
+// REQ-LAYER-001; CR 122.1a: a creature card in a zone other than the battlefield gets its P/T
+// counters.
+#[test]
+fn creature_card_off_battlefield_gets_pt_counters() {
+    let env = Env::default()
+        .with(o(1), creature("test.bear", 2, 2))
+        .off_battlefield(o(1))
+        .counter(o(1), "+1/+1", 2, 1);
+    assert_eq!(eval_pt(&ContinuousEffects::new(), &env, o(1)), Some((4, 4)));
+}
+
+// REQ-CORE-002, REQ-LAYER-001; CR 613.7a (second sentence), 613.1f: an Equipment has a printed
+// "equipped creature loses flying" (timestamp 1) and, from an Aura granting it a static ability,
+// "equipped creature has flying" (timestamp 2) whose EffectId is LOWER than the removal's. It is
+// reattached three times; after each, the removal stays before the grant, the creature has
+// flying, and `granted_at` is unchanged.
+#[test]
+fn repeated_reattachment_keeps_grant_after_removal() {
+    let mut g = IdGenerator::new();
+    let mut l = TimestampLedger::new();
+    let equipment = o(1);
+    let creature_id = o(3);
+    let mut object_ts = l
+        .stamp_object(&mut g, equipment, StampReason::EntersZone)
+        .unwrap();
+    let aura_ts = l.stamp_object(&mut g, o(2), StampReason::Attached).unwrap();
+    assert_eq!((object_ts, aura_ts), (ts(1), ts(2)));
+    let origin = EffectOrigin::Static {
+        granted_at: Some(aura_ts),
+    };
+    let mut r = registry(vec![
+        // The grant, lower EffectId.
+        (
+            1,
+            ContinuousEffect {
+                affected: objects([creature_id]),
+                ..granted_stat(
+                    equipment,
+                    aura_ts.get(),
+                    Layer::L6,
+                    static_effect_timestamp(object_ts, &origin).get(),
+                    LayerModification::AddAbility(keyword("flying", "g")),
+                )
+            },
+        ),
+        // The printed removal, higher EffectId.
+        (
+            2,
+            stat(
+                equipment,
+                Layer::L6,
+                object_ts.get(),
+                objects([creature_id]),
+                LayerModification::RemoveKeyword("flying".to_owned()),
+            ),
+        ),
+    ]);
+    let env = Env::default().with(creature_id, creature("test.bear", 2, 2));
+    assert!(has_keyword(
+        &eval(&r, &env, creature_id).characteristics,
+        "flying"
+    ));
+    for _ in 0..3 {
+        let new = l
+            .stamp_object(&mut g, equipment, StampReason::Attached)
+            .unwrap();
+        restamp_static_effects(&mut r, &mut g, equipment, object_ts, new).unwrap();
+        object_ts = new;
+        let grant = r.get(e(1)).unwrap();
+        let removal = r.get(e(2)).unwrap();
+        assert_eq!(removal.timestamp, new);
+        assert!(removal.timestamp < grant.timestamp);
+        assert_eq!(grant.origin, origin);
+        assert!(has_keyword(
+            &eval(&r, &env, creature_id).characteristics,
+            "flying"
+        ));
+    }
 }

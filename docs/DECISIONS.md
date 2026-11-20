@@ -5193,7 +5193,10 @@ ignored. P/T presence is decided once at the start of layer 7 with `pt_applies(o
 when the object has no P/T the evaluated `power` and `toughness` are `None` (so a noncreature
 permanent with printed P/T evaluates to `None`, CR 208.3) and 7a-7d change nothing. When it has
 P/T, both are written back as literals after every step, so a later selector sees the current
-values. Arithmetic saturates instead of overflowing.
+values. Arithmetic saturates instead of overflowing. P/T counters change power and toughness only
+when the object's card types after layers 1-6 include Creature (CR 122.1a), so a noncreature card
+with printed P/T off the battlefield keeps its printed values while layer-7 effects still apply
+to it (CodeRabbit round 1, comment 4637189743).
 
 **Rationale:** The tie-break is the classifier's (brief: "do not revisit"); CDA-first and 613.8
 are later units. Reading "otherwise they are left None" as "the evaluated values are None" keeps
@@ -5222,17 +5225,37 @@ the ledger, the registry and the generator unchanged, also when the generator ru
 middle (an object stamped but its stickers not). `StampReason` does not change behaviour
 (CR 613.7d-j each give one new timestamp). In `stamp_objects_simultaneously` each object's
 stickers are stamped right after that object, before the next object (CR 613.7k with 613.7m).
-`restamp_static_effects` gives granted effects whose granting timestamp is later than the old
-object timestamp new stamps from the generator in ascending (old timestamp, `EffectId`) order;
+`restamp_static_effects` gives granted effects (`granted_at: Some(_)`) whose current timestamp is
+later than the old object timestamp new stamps from the generator in ascending (old timestamp, `EffectId`) order;
 it does not check that they exceed `new_object_ts` (true whenever the caller issued
 `new_object_ts` from the same generator first). `static_effect_timestamp` returns `object_ts` for
-`Resolved`.
+`Resolved`. The current effect timestamp, not `granted_at` (which never changes), decides which
+granted effects followed the host and which follow the granting effect, so a second and third
+re-stamp keep the CR 613.7a relative order (CodeRabbit round 1, comment 4637189775).
 
 **Rationale:** All-or-nothing keeps the single monotonic counter and the ledger consistent
 (REQ-CORE-002). The brief fixes the rest.
 
 **Alternatives:** Let the generator advance on a failed operation (rejected: a gap is harmless
 but an unchanged state is easier to reason about and to test).
+
+## #32 FP-031 — Keyword counter variants
+
+**Decision:** `keyword_counter_keyword(kind)` is the one classifier for keyword counters used by
+both the layer-6 step selection and `apply_counter`: `Some(kind)` for one of the fifteen
+`KEYWORD_COUNTER_KINDS`, or for one of them followed by exactly one ASCII space and a non-empty
+parameter that does not itself start with a space ("hexproof from red"); `None` otherwise ("ward",
+"ward 2", "flyingx", "hexproofish", "hexproof ", "hexproof  from red", and any case variation).
+The granted ability keeps the full kind string as its keyword and in its ability id
+(CodeRabbit round 1, comment 4637189536).
+
+**Rationale:** CR 122.1b includes "any variants of those keywords"; the brief fixes the
+name-space-parameter shape. Rejecting an empty parameter and a doubled space keeps malformed
+kinds from becoming keywords no rule names. Matching is case-sensitive like the counter kinds
+themselves.
+
+**Alternatives:** Accept any suffix after the space, including empty or space-led (rejected:
+"hexproof " would grant a keyword that is neither hexproof nor a variant).
 
 ## #32 FP-031 — Follow-up work for later units
 
@@ -5244,8 +5267,21 @@ evaluated characteristics; (3) CR 613.8 dependency ordering; (4) characteristic-
 abilities first (CR 613.3, 613.4a) using the stored `is_cda`; (5) CR 613.6 lock-in
 (`sameAsLayer`); (6) the cached evaluation mode and the cached-versus-full-recompute differential
 check (REQ-LAYER-005); (7) the passes after the layers (CR 613.10, 613.11); (8) compiling DSL
-characteristic effects into `LayerModification`, word-level text changes (CR 612), keyword
-counter variants such as "hexproof from"; (9) effect durations and expiry.
+characteristic effects into `LayerModification`, word-level text changes (CR 612), and with it
+CR 702.11e (an effect that removes hexproof also removes every "hexproof from [quality]"
+ability; `RemoveKeyword` still matches the keyword string exactly); (9) effect durations and
+expiry; (10) CDA-first ordering (CR 613.3, 613.4a) and CR 613.8 dependency recomputation,
+including recomputing dependencies as effects apply: #33 FP-032 (CodeRabbit comments 4637189551,
+4637189562); (11) multi-layer affected-set retention (CR 613.6), requiring `Affected::Objects`
+for `EffectOrigin::Resolved` effects that modify characteristics or control (CR 611.2c), and
+checking that a static effect's source still has the ability when the effect first applies
+(CR 613.6, 611.3b): #34 FP-033 (comments 4637189504, 4637189573, 4637189588); (12) passing the
+evaluated state (current controller, earlier-layer results of other objects) to non-literal CDA
+value expressions (`LayerEnvironment::eval_value`), which needs layer-major evaluation across
+objects after #33: #186 FP-146 (comment 4637189737); (13) exposing the evaluated controller
+through `LayeredProvider` before LKI capture reads it: #184 FP-145 (comment 4637189755); (14)
+sticker timestamps when an object becomes a component of a merged permanent (CR 613.7k, 123.5b;
+a merge operation taking both ids): the merged-permanent unit #65 FP-063 (comment 4637189771).
 
 **Rationale:** Out of scope per the brief; listed so the plan can pick them up.
 
