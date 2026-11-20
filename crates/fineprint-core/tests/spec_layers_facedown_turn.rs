@@ -369,7 +369,8 @@ fn fd_dfc_base(face: FaceUp) -> Characteristics {
 fn req_obj_003_712_12_dfc_entering_face_down_is_not_refused() {
     let front_base = fd_dfc_base(FaceUp::Front);
     let back_base = fd_dfc_base(FaceUp::Back);
-    // The two faces differ in every field checked below, so a wrong face selection fails.
+    // The two faces differ in every field checked below, so the restored base is told apart
+    // from the back face (the layout API supplied the front face; turn-up does not select it).
     assert_ne!(front_base.names, back_base.names);
     assert_ne!(front_base.power, back_base.power);
     assert_ne!(front_base.subtypes, back_base.subtypes);
@@ -380,7 +381,7 @@ fn req_obj_003_712_12_dfc_entering_face_down_is_not_refused() {
         let t = w.next_ts();
         w.reg(eid(1), fd_eff_at(&p, t, oid(X)));
         assert_eq!(w.chars(oid(X)), want);
-        // And it turns face up front face up (712.12a): the base again.
+        // Turning face up removes the layer-1b effect and restores the supplied front-face base.
         let t2 = ok_ts(up(&mut w, eid(1), oid(X), false), "turn up");
         assert!(t2 > t);
         let got = w.chars(oid(X));
