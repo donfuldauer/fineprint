@@ -18,6 +18,7 @@ use super::ordering::{OrderRecord, Scratch, run_layer};
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
 };
+use super::text::replace_in_rules_text;
 use crate::objects::Characteristics;
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
@@ -521,6 +522,13 @@ fn apply_effect(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, m: &LayerMod
         LayerModification::SetController(p) => state.controller = Some(*p),
         // CR 613.1c
         LayerModification::SetText(t) => c.rules_text = t.clone(),
+        // CR 612.1, 612.2, 613.1c: rewrite the words of the object's own text, written back only
+        // if a word changed; abilities are never touched (CR 612.3).
+        LayerModification::ReplaceTextWord { category, from, to } => {
+            if let Some(text) = replace_in_rules_text(&c.rules_text, *category, from, to) {
+                c.rules_text = text;
+            }
+        }
         // CR 613.1d
         LayerModification::AddTypes {
             supertypes,

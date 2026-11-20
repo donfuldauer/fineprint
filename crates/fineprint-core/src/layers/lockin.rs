@@ -23,6 +23,7 @@ use fineprint_dsl::expr::ObjectSelectorAST;
 use super::error::LayerError;
 use super::pipeline::{LayerEnvironment, MatchContext, evaluate};
 use super::registry::{Affected, ContinuousEffect, ContinuousEffects, EffectOrigin};
+use super::text::validate_modification;
 
 /// The set of objects a selector picks now, for an effect of `source` controlled by
 /// `controller` (CR 611.2c: the set is determined when the effect begins).
@@ -109,7 +110,8 @@ pub(super) struct PreparedGroup {
 /// 611.2c). Nothing is modified; every part locks against the registry as it is now.
 ///
 /// The parts are sorted by ascending [`EffectId`], then checked in passes, each pass walking the
-/// parts in that order: (1) duplicate ids, (2) layer mismatches, (3) links, (4) selector locking.
+/// parts in that order: (1) duplicate ids, (2) layer mismatches, (2b) invalid text-changing
+/// modifications (CR 612.2), (3) links, (4) selector locking.
 /// A group with a duplicate id is therefore always reported as [`LayerError::DuplicateEffect`],
 /// whatever else is wrong with it, and the order the caller lists the parts in never changes a
 /// result or the reported error (REQ-CORE-001).
@@ -121,7 +123,8 @@ pub(super) struct PreparedGroup {
 /// # Errors
 /// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for the
 /// lowest id used twice in the group or already registered; [`LayerError::LayerMismatch`] for
-/// the lowest-id part whose modification is outside its layer; [`LayerError::BadLink`] for a
+/// the lowest-id part whose modification is outside its layer; [`LayerError::Unsupported`] for
+/// the lowest-id part with an invalid `ReplaceTextWord` (CR 612.2); [`LayerError::BadLink`] for a
 /// `SameAsLayer` part that does not name the group's first layer or whose own layer is not
 /// strictly later; the first error of [`resolve_affected_set`].
 pub(super) fn prepare_group(
@@ -147,6 +150,10 @@ pub(super) fn prepare_group(
         if !part.modification.belongs_to(part.layer) {
             return Err(LayerError::LayerMismatch { layer: part.layer });
         }
+    }
+    // Pass 2b: invalid text-changing modifications (CR 612.2), as `register` rejects them.
+    for (_, part) in &parts {
+        validate_modification(&part.modification)?;
     }
     // CR 613.6: an effect that "starts to apply in one layer" continues to apply to "the same
     // set of objects" in each later layer; SRS 6.3: the set chosen "in the first layer where it
