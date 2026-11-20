@@ -97,7 +97,9 @@ impl StateVersion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Invalidation {
     /// An object entered or left the battlefield or another zone: a change to
-    /// `ObjectBase::on_battlefield`, to an object's base, or to the list `objects()` returns.
+    /// `ObjectBase::on_battlefield`, to an object's base (its base mana-value provenance,
+    /// `LayerEnvironment::base_mana_value_provenance`, included), or to the list `objects()`
+    /// returns.
     ZoneChange,
     /// An object's controller before layer 2 changed (`ObjectBase::controller`).
     ControlChange,
