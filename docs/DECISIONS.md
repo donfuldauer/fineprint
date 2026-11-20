@@ -5959,3 +5959,110 @@ G6 whole-field dependency comparison of `rules_text` (entry above): fixed in PR 
 **Rationale:** Each gap is owned by another issue or needs one; the brief scopes this unit to the
 layers module.
 **Alternatives:** Implementing them here (rejected: outside owned paths and scope).
+
+## #38 FP-037 tester — Independent Tester judgement calls
+
+**Decision:** (1) `CopyException::SetManaCost` is tested on the mana cost only; the spec tests do
+not assert whether the copy's colors follow the new cost, because the brief pins only the
+replaced field. (2) `NotCopied(ColorIndicator)` keeps only the copier's color indicator and copies
+the colors; `NotCopied(Colors)` keeps both (brief: "that field takes `own`'s value; NotCopied(Colors)
+also takes own.color_indicator"). (3) A gained ability (707.9a) is asserted to be appended after
+the copied abilities, as the brief says "abilities gets it appended". (4) The face-down input of
+the copy tests is a layer-1b `FaceDown` effect the tests register themselves (a colorless 2/2
+creature with no name, cost, subtypes, text or abilities); no face-down transition is tested
+(#39). (5) The spec tests reuse the layer-test environment by including
+`tests/spec_layers_support.rs` read-only with `#[path]` (as `spec_layouts_composite_support.rs`
+does for the layout helpers) and build their own synthetic definitions; no existing test file is
+edited.
+**Rationale:** Each choice asserts exactly what the brief pins and no more (R10), and follows the
+#23 precedent for tester entries.
+**Alternatives:** Assert that `SetManaCost` recomputes colors from the cost (not specified;
+CR 707.9b says only the modified characteristic changes); copy the support code (duplicates
+several hundred lines without changing what is tested).
+
+## #38 FP-037 — Copy of a merged or mutated permanent
+
+**Decision:** The copy gets the merged permanent's copiable values as produced by layer 1a,
+i.e. the topmost component's characteristics PLUS all abilities of every component. 702.140e is
+the "otherwise specified by the effect that caused them to merge" of 731.2a, so it is part of
+the 1a merge effect and hence of the copiable values. `CopiableValues::merged` and
+`merge_effect` therefore carry `MergedPermanent::base_characteristics` (top component, plus
+every component's abilities top to bottom when mutated), and `copiable_characteristics` of the
+merged object returns the same (test `copy_of_mutated_permanent`).
+**Rationale:** CR 731.2a says the merge (including its specifications) is a copiable effect;
+CR 613.2c makes layer-1 results the copiable values. Orchestrator decision (R8), recorded here
+by the Implementer. Judgement call: the CR is silent.
+**Alternatives:** Top component only (the rules-researcher's tentative inference: 702.140e is not
+stated as a layer-1 effect); rejected by the Orchestrator for the reason above.
+
+## #38 FP-037 — Copiable values API and the `ValueSource` design
+
+**Decision:** `CopiableValues { characteristics, source }` with `ValueSource::{Plain,
+Fixed { mana_value }, CopyOfBackFaceOrMelded}` as pinned by the brief, plus one private flag
+(`zero_when_copied`) that tells a `Fixed` from a nonmodal back face or a melded permanent (its
+copy has mana value 0, CR 202.3b, 202.3c) from a `Fixed` merged permanent whose top is an
+ordinary object (its copy is `Plain`). The flag is `false` for every other source; `modified`
+keeps it. A merged permanent's value is `Fixed` only when the top component's mana value differs
+from the characteristics' own off the stack; it is flagged when the top component is a nonmodal
+DFC with its back face up or copying a back face (its copy has mana value 0, CR 202.3b). A copy
+of a back face or melded permanent has mana value 0 even when an exception sets a mana cost
+(CR 202.3b "the mana value of the copy is 0"). A `Fixed` value is the stored number in every
+context (the front cost is taken with X = 0, CR 202.3e).
+`copiable_characteristics` runs layers 1a and 1b with the evaluator's own per-layer procedure
+(`run_layer`, same ordering, lock-in and generating-ability checks), not `evaluate` through an
+environment adapter as the brief's guidance suggested: `evaluate` always starts layer 7, which
+writes power and toughness back as evaluated literals and removes them from noncreatures
+(CR 208.3), so a CDA expression would have been copied as a number. No existing file changed.
+`merge_effect` has no source (`None`): the merge is not an ability of the object.
+**Rationale:** The pinned API must stay as given; the flag is the minimum extra state that keeps
+the copy rule for merged values distinguishable. Running only layer 1 keeps the copiable values
+exactly as CR 613.2c defines them (the characteristics after layer 1, P/T as printed or set).
+**Alternatives:** An extra `ValueSource` variant (rejected: the enum is pinned); `evaluate` with
+a counter-free adapter (rejected: CDA P/T flattened to literals, noncreature P/T dropped);
+a merged value always `Fixed` (rejected: the pinned rule is `Plain` when equal).
+
+## #38 FP-037 — SetManaCost and colors
+
+**Decision:** `CopyException::SetManaCost` changes the mana cost; the colors are re-derived with
+`base_colors(new cost, color indicator, CdaColors::None)` only if the running colors equalled
+`base_colors(old cost, color indicator, CdaColors::None)`; otherwise they are left as they are.
+**Rationale:** Colors come from the cost (CR 105.2, 202.2) unless something else set them; when
+the copied colors are not the cost's derivation (a set color, a CDA), changing the cost must not
+overwrite them. As directed by the brief.
+**Alternatives:** Never touch colors (rejected: a copy "except its mana cost is ..." would keep
+stale cost colors); always re-derive (rejected: would erase set colors).
+
+## #38 FP-037 — CDA abilities and CR 707.9d
+
+**Decision:** A characteristic-defining ability is recognisable in the placeholder ability JSON:
+a `"STATIC"` ability whose `effects` contain a `"CHAR"` effect with `"isCDA": true`
+(fineprint_dsl `CharacteristicEffect.is_cda`). Its `layer` names what it defines: `"4"` types,
+`"5"` colors, `"7a"` power and toughness. `copy_with` drops a copied ability that defines a
+characteristic the copy effect sets (`SetColors`, `Set*Types`, `SetPower`, `SetToughness`) or
+does not copy (`NotCopied` of colors, a type part, power or toughness), before applying the
+exceptions, so gained abilities are never dropped. `Add*Types` keep type CDAs (707.9d last
+sentence). Any type exception drops any layer-4 CDA (the layer does not say which part of the
+type line it defines); a power or toughness exception drops a layer-7a CDA (which defines both).
+`modified` (not a copy) drops nothing. Only ability data is read, never card identity (R4).
+**Rationale:** CR 707.9d; the marker exists in the DSL, so the brief's "if yes" branch applies.
+**Alternatives:** Dropping nothing (rejected: the marker exists); inspecting the modification op
+to tell type-line parts apart (rejected: ops are free strings in the placeholder DSL).
+
+## #38 FP-037 — Not implemented in layer 1a
+
+**Decision:** Not implemented: the exceptions of CR 707.9e, 707.9f and 707.9g (replacement-effect
+and conditional exceptions); copies of spells (CR 707.10); tokens that copy double-faced objects
+(CR 707.8a, 707.10g); the face-down status itself (no `FaceDown` effect is created: a copy is
+never face down). Stated in the module documentation of `layers/copy.rs`.
+**Rationale:** Out of the brief's scope; each needs machinery (replacement effects, the stack,
+token creation, layer 1b semantics) owned by other units.
+**Alternatives:** Partial support here (rejected: outside owned paths and scope).
+
+## #38 FP-037 — Face-down merged components deferred to layer 1b (#39)
+
+**Decision:** `merge_effect` and `CopiableValues::merged` use
+`MergedPermanent::base_characteristics`, which returns pre-layer-1b values whatever a component's
+`face_up` says; face-down merged components are not modelled or tested here and remain with #39
+FP-038 (see "#23 FP-022 — Face-down merged components deferred to layer 1b (#39)").
+**Rationale:** Layer 1b semantics and turning face up are #39's scope.
+**Alternatives:** Modelling them here (rejected: outside scope).
