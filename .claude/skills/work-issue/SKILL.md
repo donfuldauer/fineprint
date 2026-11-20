@@ -16,11 +16,13 @@ threads.
 ## 1. Load and check the issue
 
 0. **No issue number** ("the next ready issue"):
-   - **Finish recent unblocking first.** A merge starts this session (§8), sometimes before the
-     merging session reaches §7 step 3, and a session can end before finishing it. List the
-     `work-unit` issues closed in the last 24 hours, every page
-     (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit&state=closed&since=<now minus 24h, ISO 8601>'`,
-     keeping those whose `closed_at` falls in the window), and run §7 step 3 for each.
+   - **Finish unblocking first.** A merge starts this session (§8), sometimes before the
+     merging session reaches §7 step 3, and a session can end before finishing it. List every
+     open `work-unit` issue labelled `blocked`, every page
+     (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open'`).
+     For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
+     §7 step 3's rule, replace `blocked` with `ready` and comment "Unblocked by #<N> (PR #<P>)",
+     naming the blocker that closed last.
    - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
