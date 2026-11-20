@@ -15,7 +15,8 @@ use std::rc::Rc;
 use fineprint_base::ids::{ObjectId, PlayerId};
 
 use fineprint_core::layers::{
-    Affected, ContinuousEffects, LayerError, LayerModification, evaluate, evaluate_all,
+    Affected, ContinuousEffect, ContinuousEffects, LayerError, LayerModification, evaluate,
+    evaluate_all,
 };
 use fineprint_core::objects::Characteristics;
 use support::*;
@@ -477,11 +478,11 @@ fn layer_7a_7b_set_pt_some_and_none() {
     let mut env = TestEnv::new();
     let a = env.put(oid(1), creature("test.vanilla_2_3", 2, 3));
     for layer in [Layer::L7a, Layer::L7b] {
-        let r = registry(&[(1, eff(layer, 1, objs(&[a]), set_pt(Some(5), None)))]);
+        let r = registry(&[(1, mk(layer, 1, objs(&[a]), set_pt(Some(5), None)))]);
         assert_eq!(pt(&evaluate(&r, &env, a).unwrap()), spt(5, 3), "{layer:?}");
-        let r = registry(&[(1, eff(layer, 1, objs(&[a]), set_pt(None, Some(7))))]);
+        let r = registry(&[(1, mk(layer, 1, objs(&[a]), set_pt(None, Some(7))))]);
         assert_eq!(pt(&evaluate(&r, &env, a).unwrap()), spt(2, 7), "{layer:?}");
-        let r = registry(&[(1, eff(layer, 1, objs(&[a]), set_pt(None, None)))]);
+        let r = registry(&[(1, mk(layer, 1, objs(&[a]), set_pt(None, None)))]);
         assert_eq!(pt(&evaluate(&r, &env, a).unwrap()), spt(2, 3), "{layer:?}");
     }
 }
@@ -495,7 +496,7 @@ fn layer_7b_applies_after_7a_in_both_timestamp_orders() {
         let r = registry(&[
             (
                 1,
-                eff(Layer::L7a, t7a, objs(&[a]), set_pt(Some(4), Some(4))),
+                cda_eff(Layer::L7a, t7a, objs(&[a]), set_pt(Some(4), Some(4))),
             ),
             (2, eff(Layer::L7b, t7b, objs(&[a]), set_pt(None, Some(1)))),
         ]);
@@ -669,6 +670,15 @@ fn selector_sees_layer_2_result_and_context_fields() {
 // item 7: registry, errors and base immutability
 // ---------------------------------------------------------------------------------------------
 
+/// An effect for layer `l`: a static CDA in layer 7a (CR 613.4a), a resolved effect elsewhere.
+fn mk(l: Layer, t: u64, affected: Affected, m: LayerModification) -> ContinuousEffect {
+    if l == Layer::L7a {
+        cda_eff(l, t, affected, m)
+    } else {
+        eff(l, t, affected, m)
+    }
+}
+
 /// One valid modification per layer.
 fn valid_for(l: Layer) -> LayerModification {
     match l {
@@ -738,7 +748,7 @@ fn register_rejects_every_wrong_layer_modification_pair() {
     for (m, ok_layers) in all_modifications() {
         for l in ALL_LAYERS {
             let mut r = ContinuousEffects::new();
-            let res = r.register(eid(next), eff(l, 1, objs(&[oid(1)]), m.clone()));
+            let res = r.register(eid(next), mk(l, 1, objs(&[oid(1)]), m.clone()));
             next += 1;
             if ok_layers.contains(&l) {
                 assert_eq!(res, Ok(()), "{m:?} in {l:?}");
@@ -1003,8 +1013,9 @@ fn base_definitions_are_never_mutated() {
     assert_eq!(effects, effects_before);
 }
 
-// REQ-LAYER-001: with zero effects (and no counters) evaluation returns the base
-// characteristics and controller unchanged (P/T already literal, or absent).
+// REQ-LAYER-001, CR 613.1: with zero effects (and no counters) evaluation returns the base
+// characteristics and controller unchanged: the values of an object's characteristics start
+// from the actual object (P/T already literal, or absent).
 #[test]
 fn zero_effects_return_the_base() {
     let mut env = sample_env();
@@ -1013,7 +1024,7 @@ fn zero_effects_return_the_base() {
     let effects = ContinuousEffects::new();
     for (id, b) in &env.bases {
         if *id == oid(6) {
-            continue; // a creature without P/T values gains literal 0/0 (CR 208.5)
+            continue; // excluded fixture: a creature without P/T values gains literal 0/0 (CR 208.5)
         }
         let e = evaluate(&effects, &env, *id).unwrap();
         assert_eq!(norm(&e.characteristics), b.characteristics, "{id:?}");
@@ -1034,7 +1045,9 @@ fn pt_presence_and_missing_values() {
     assert_eq!(pt(&evaluate(&effects, &env, oid(4)).unwrap()), spt(4, 4));
 }
 
-// REQ-LAYER-001: evaluate_all evaluates env.objects() and equals evaluate per object.
+// REQ-LAYER-001, CR 613.1: evaluate_all evaluates env.objects() and equals evaluate per
+// object. Spot checks: control change (CR 613.1b, layer 2), ability changes (CR 613.1f,
+// layer 6) and P/T (CR 613.4, layer 7 sublayers, counters per CR 122.1a, 613.4c).
 #[test]
 fn evaluate_all_equals_per_object_evaluate() {
     let env = sample_env();
@@ -1047,17 +1060,19 @@ fn evaluate_all_equals_per_object_evaluate() {
     for (id, e) in &all {
         assert_eq!(*e, evaluate(&effects, &env, *id).unwrap());
     }
-    // a spot check of the sample: the enchantment became a P2-controlled red 3/2 creature.
+    // a spot check of the sample: the enchantment became a P2-controlled red 3/2 creature
+    // (control: CR 613.1b; P/T: CR 613.4).
     let e2 = &all[&oid(2)];
     assert_eq!(e2.controller, Some(P2));
     assert!(e2.characteristics.card_types.contains("Creature"));
     assert_eq!(e2.characteristics.colors, mask(8));
     assert_eq!(pt(e2), spt(3, 2));
-    // the white creature lost its printed flying; its counters still count.
+    // the white creature lost its printed flying (CR 613.1f); its counters still count
+    // (CR 122.1a, 613.4c).
     let e1 = &all[&oid(1)];
     assert!(!has_kw(&e1.characteristics, "flying"));
     assert_eq!(pt(e1), spt(5, 4));
-    // the land keeps the flying from its counter (counter at 4, a removal only hits creatures).
+    // the land keeps the flying from its counter (CR 122.1b, 613.1f; counter at 4, a removal only hits creatures).
     assert!(has_kw(&all[&oid(3)].characteristics, "flying"));
 }
 
@@ -1067,10 +1082,7 @@ fn one_valid_modification_per_layer_registers() {
     for (i, l) in ALL_LAYERS.iter().enumerate() {
         let mut r = ContinuousEffects::new();
         assert_eq!(
-            r.register(
-                eid(i as u64 + 1),
-                eff(*l, 1, objs(&[oid(1)]), valid_for(*l))
-            ),
+            r.register(eid(i as u64 + 1), mk(*l, 1, objs(&[oid(1)]), valid_for(*l))),
             Ok(())
         );
     }

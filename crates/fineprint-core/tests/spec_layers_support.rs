@@ -403,12 +403,14 @@ impl TestEnv {
         self.counter_ts.insert((id, kind.to_string()), ts(t));
     }
 
-    /// Sets `amount` counters of `kind` on `id` without a counter timestamp.
+    /// Sets `amount` counters of `kind` on `id` without a counter timestamp (any earlier
+    /// timestamp for `(id, kind)` is dropped, so the timestamp-zero fallback applies).
     pub fn counter_no_ts(&mut self, id: ObjectId, kind: &str, amount: i64) {
         self.counters
             .entry(id)
             .or_default()
             .insert(kind.to_string(), amount);
+        self.counter_ts.remove(&(id, kind.to_string()));
     }
 
     pub fn add_selector(&mut self, s: ObjectSelectorAST, m: Matcher) {
@@ -477,6 +479,21 @@ pub fn eff(layer: Layer, t: u64, affected: Affected, m: LayerModification) -> Co
         layer,
         is_cda: false,
         origin: EffectOrigin::Resolved,
+        affected,
+        modification: m,
+    }
+}
+
+/// A static characteristic-defining ability (CR 613.4a, 604.3): a static effect with
+/// `is_cda: true`, no source, intended for layer 7a with a `SetPt` modification.
+pub fn cda_eff(layer: Layer, t: u64, affected: Affected, m: LayerModification) -> ContinuousEffect {
+    ContinuousEffect {
+        source: None,
+        controller: P1,
+        timestamp: ts(t),
+        layer,
+        is_cda: true,
+        origin: EffectOrigin::Static { granted_at: None },
         affected,
         modification: m,
     }
