@@ -134,8 +134,9 @@ FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec
                                      # cr-cache/rules.txt fails it (without it, the test is skipped)
 cargo test --workspace --locked --features fineprint-core/full-recompute
                                      # the whole suite with the layer cache bypassed (REQ-LAYER-005)
-FINEPRINT_DIFF_DIR="$PWD/target/differential/cached" cargo test --locked -p fineprint-core --test spec_layers_cache_diff
-FINEPRINT_DIFF_DIR="$PWD/target/differential/full" cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff
+rm -rf target/differential && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/cached" cargo test --locked -p fineprint-core --test spec_layers_cache_diff && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/full" cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff && \
 diff -r target/differential/cached target/differential/full
                                      # layer-result digests of the differential scenarios, both modes; must be identical
 cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot
@@ -220,7 +221,7 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
 | `differential (ubuntu-latest)` | `cargo test --workspace --locked --features fineprint-core/full-recompute`, then `spec_layers_cache_diff` in both modes with an absolute `FINEPRINT_DIFF_DIR` (`target/differential/cached` and `target/differential/full`), then a step that fails unless both directories hold the same files with identical bytes (REQ-LAYER-005; the cached-mode suite is the `test` job). Skips its steps on documentation-only pull requests like `test` |
-| `bench (ubuntu-latest)` | `cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`; writes a median table to the job summary and uploads `target/criterion` as an artifact (actions/upload-artifact v4.6.2) for the trend (REQ-NFR-009). NOT a required status check |
+| `bench (ubuntu-latest)` | `cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`; Criterion writes to `$RUNNER_TEMP/criterion` (`CRITERION_HOME`, outside the cached `target`, so no earlier result is published); the summary step fails unless all four groups have results, writes their median table to the job summary, and that directory is uploaded as an artifact (actions/upload-artifact v4.6.2) for the trend (REQ-NFR-009). NOT a required status check |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 | `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed), then `cargo test --locked -p fineprint-ingest --test spec_ingest_vocab` with `FINEPRINT_REQUIRE_CR_CACHE=1` (step `env:`; the real-CR test fails instead of skipping when `cr-cache/rules.txt` is missing; also runs even if an earlier check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |
 
