@@ -42,8 +42,9 @@
 //! A resolved part with a selector is locked to the concrete set
 //! [`resolve_affected_set`] gives at registration, each part independently (CR 611.2c); a static
 //! selector is matched again on every evaluation, so a static group's lock holds within one
-//! evaluation only (CR 611.3a). The record lives in the single per-object evaluation: there is
-//! no cache and no cross-object state. [`ContinuousEffects::register_group_for_as_long_as`]
+//! evaluation only (CR 611.3a). The record lives in the single per-object evaluation and is
+//! never cached or shared across objects; the [`LayerCache`] stores only finished [`Evaluated`]
+//! values. [`ContinuousEffects::register_group_for_as_long_as`]
 //! registers nothing when its [`ForAsLongAsWindow`] makes the effect do nothing (CR 611.2b).
 //! [`ContinuousEffects::register`] never locks a selector and rejects `SameAsLayer`.
 //!
@@ -66,9 +67,16 @@
 //! players; a rule effect is never locked and applies to whatever matches when the rule set is
 //! built (CR 611.2c).
 //!
+//! **Cache** (REQ-LAYER-005, SRS 6.5). [`LayerCache`] caches [`Evaluated`] values keyed by
+//! `(`[`StateVersion`]`, ObjectId)`; it detects registry changes itself and takes every other
+//! change as an explicit [`LayerCache::invalidate`] with an [`Invalidation`] cause, which drops
+//! every entry. The cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI
+//! compares both modes through [`evaluated_digest`].
+//!
 //! **Scope.** This module is standalone: it is not wired into the game state, its Merkle layout
-//! or the state hash (the placeholder `state::EffectRegistry` stays). **Out of scope** (later
-//! units): the cached versus full-recompute mode; wiring into the game state and the state hash
+//! or the state hash (the placeholder `state::EffectRegistry` stays), and the cache keeps its
+//! own [`StateVersion`] counter. **Out of scope** (later units): wiring into the game state, the
+//! state hash and calling [`LayerCache::invalidate`] from the real mutation points
 //! (#183 FP-144); switching the call sites in events, triggers, replacement and zones;
 //! layer-major evaluation across objects (#186 FP-146; dependency is judged on the object under
 //! evaluation only); effect expiry and durations (the caller removes ended effects; a "for as
@@ -78,6 +86,7 @@
 //! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet`; no floats, clock or I/O; the order
 //! of registration never changes a result (REQ-CORE-001).
 
+mod cache;
 mod error;
 mod lockin;
 mod ordering;
@@ -88,12 +97,17 @@ mod registry;
 mod timestamps;
 
 #[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
 mod lockin_tests;
 #[cfg(test)]
 mod ordering_tests;
 #[cfg(test)]
 mod tests;
 
+pub use cache::{
+    CacheStats, FULL_RECOMPUTE, Invalidation, LayerCache, StateVersion, evaluated_digest,
+};
 pub use error::LayerError;
 pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
 pub use ordering::{OrderItem, OrderRecord, OrderStep, Selection};
