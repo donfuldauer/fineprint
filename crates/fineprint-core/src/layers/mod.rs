@@ -4,7 +4,8 @@
 
 //! The layer system (REQ-LAYER-001, REQ-LAYER-002, REQ-LAYER-003, REQ-CORE-002, SRS 6.1-6.3):
 //! the continuous-effect registry, per-object evaluation through layers 1a-7d, the ordering
-//! within each layer, lock-in of affected sets, timestamps and the LKI hook.
+//! within each layer, lock-in of affected sets, timestamps and the LKI hook; and the passes after
+//! the layers (REQ-LAYER-004, SRS 6.4).
 //!
 //! **Registry.** [`ContinuousEffects`] holds every continuous effect under its [`EffectId`]
 //! (fineprint_base) with its source, controller, timestamp, layer, origin, affected objects and
@@ -52,15 +53,27 @@
 //! **LKI.** [`LayeredProvider`] implements [`crate::memory::CharacteristicsProvider`] with the
 //! evaluated characteristics (SRS 2.3).
 //!
+//! **Passes after the layers** (REQ-LAYER-004, SRS 6.4). [`PostLayerEffects`] holds the effects
+//! that affect players and those that modify the rules of the game. Pass A
+//! ([`compute_player_properties`]) applies the player effects after the determination of
+//! objects' characteristics (CR 613.10); pass B ([`build_rule_set`]) builds the [`RuleSet`], the
+//! rule modifications grouped by kind, after all other continuous effects (CR 613.11). Both use
+//! timestamp order, then ascending [`EffectId`] (CR 613.7), with an optional dependency hook
+//! ([`PostLayerEnvironment::depends_on`], CR 613.8b). In the rule set prohibitions are evaluated
+//! last, so an applicable "can't" beats any "can" ([`RuleSet::query`], CR 101.2); it gives the
+//! maximum hand size (CR 402.2), the number of land plays (CR 305.2) and the cost effects in the
+//! stages of CR 601.2f ([`CostStages`]). A resolved player effect applies to a fixed set of
+//! players; a rule effect is never locked and applies to whatever matches when the rule set is
+//! built (CR 611.2c).
+//!
 //! **Scope.** This module is standalone: it is not wired into the game state, its Merkle layout
 //! or the state hash (the placeholder `state::EffectRegistry` stays). **Out of scope** (later
-//! units): the cached versus full-recompute mode; the passes after the layers (CR 613.10,
-//! 613.11); wiring into the game state and the state hash (#183 FP-144); switching the call
-//! sites in events, triggers, replacement and zones; layer-major evaluation across objects
-//! (#186 FP-146; dependency is judged on the object under evaluation only); effect expiry and
-//! durations (the caller removes ended effects; a "for as long as" window is judged by the
-//! caller); locking the rules-modifying parts of a resolved effect (CR 611.2c, passes 613.10 and
-//! 613.11, REQ-LAYER-004).
+//! units): the cached versus full-recompute mode; wiring into the game state and the state hash
+//! (#183 FP-144); switching the call sites in events, triggers, replacement and zones;
+//! layer-major evaluation across objects (#186 FP-146; dependency is judged on the object under
+//! evaluation only); effect expiry and durations (the caller removes ended effects; a "for as
+//! long as" window is judged by the caller); typed player properties derived from pass A and the
+//! cost calculation itself (the casting procedure).
 //!
 //! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet`; no floats, clock or I/O; the order
 //! of registration never changes a result (REQ-CORE-001).
@@ -69,6 +82,7 @@ mod error;
 mod lockin;
 mod ordering;
 mod pipeline;
+mod post;
 mod provider;
 mod registry;
 mod timestamps;
@@ -87,6 +101,11 @@ pub use pipeline::{
     Evaluated, KEYWORD_COUNTER_KINDS, LayerEnvironment, MatchContext, ObjectBase, evaluate,
     evaluate_all, evaluate_with_order, keyword_counter_ability, keyword_counter_keyword, literal,
     literal_of, pt_counter_delta,
+};
+pub use post::{
+    AppliedPlayerEffect, CostStages, DEFAULT_LAND_PLAYS, DEFAULT_MAX_HAND_SIZE, PlayerAffected,
+    PlayerPassEffect, PlayerProperties, PostLayerEffects, PostLayerEnvironment, RuleEffect,
+    RuleEntry, RuleSet, Verdict, build_rule_set, compute_player_properties,
 };
 pub use provider::LayeredProvider;
 pub use registry::{
