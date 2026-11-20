@@ -21,10 +21,9 @@ threads.
      open `work-unit` issue labelled `blocked`, every page
      (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open'`).
      For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
-     §7 step 3's rule, unblock it as §7 step 3 does, naming the blocker that closed last. Leave `blocked` alone on an issue with no blockers
-     or one that also carries `status:blocked-failure`: there a person set the hold (the plan
-     sets `blocked` only from dependencies; other holds use `status:blocked-failure`, PROCESS.md
-     P7).
+     §7 step 3's rule, unblock it as §7 step 3 does (including its exceptions), naming the
+     blocker that closed last. Also leave `blocked` alone on an issue with no blockers: a person
+     set that hold.
    - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
@@ -206,7 +205,9 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    its `blocked` label with `ready`: add `ready` first, then remove `blocked`, so the issue is
    never without both. Comment "Unblocked by #<N> (PR #<P>)" unless an "Unblocked by" comment is
    already there. Skip an issue that no longer carries `blocked`: the next session may already
-   have unblocked it (§1 step 0).
+   have unblocked it (§1 step 0). Skip one that also carries `status:blocked-failure`: a person
+   must clear that hold (the plan sets `blocked` only from dependencies; other holds use
+   `status:blocked-failure`, PROCESS.md P7).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
    and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
