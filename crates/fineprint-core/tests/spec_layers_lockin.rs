@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_core::layers::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, Evaluated, ForAsLongAsWindow,
-    LayerEnvironment, LayerError, LayerModification, MatchContext, ObjectBase, evaluate,
-    evaluate_all, resolve_affected_set,
+    LayerEnvironment, LayerError, LayerModification, MatchContext, ObjectBase, OrderItem, evaluate,
+    evaluate_all, evaluate_with_order, resolve_affected_set,
 };
 use fineprint_core::objects::Characteristics;
 use fineprint_dsl::expr::{ObjectSelectorAST, ReferenceAST};
@@ -1135,6 +1135,18 @@ fn req_layer_003_cr_613_6_e_anchor_never_applied_so_link_does_not_apply() {
     assert!(!is_creature(&s), "the anchor did not apply");
     assert_ne!(pt(&s), spt(3, 3));
     assert_eq!(s, ev(&reference, &env, oid(E_SRC)), "neither part applied");
+    // The order record must show the linked 7c part (id 3) and the anchor (id 1) as not applied.
+    let (_, record) = evaluate_with_order(&r, &env, oid(E_SRC)).expect("evaluate_with_order");
+    let step_of = |id: u64| {
+        record
+            .steps
+            .iter()
+            .find(|st| st.item == OrderItem::Effect(eid(id)))
+    };
+    let linked = step_of(3).expect("the linked 7c part is listed in the order record");
+    assert!(!linked.applied, "the linked part must not be applied");
+    let anchor = step_of(1).expect("the anchor is listed in the order record");
+    assert!(!anchor.applied, "the anchor must not be applied");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1753,4 +1765,230 @@ fn req_layer_003_cr_613_6_i_order_independence_and_determinism() {
     // white creature: +1/+0 (7c, t3) and +1/+1 (7c, t7) = 4/3, then switched (7d) = 3/4
     assert_eq!(pt(&all[&oid(5)]), spt(3, 4));
     assert_eq!(all[&oid(4)].characteristics.colors, mask(1 | 2));
+}
+
+// ---------------------------------------------------------------------------------------------
+// J. group validation: duplicate before mismatch (F1) and link target (F2)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-LAYER-003, CR 613.6: a duplicate id is reported before any layer mismatch, whatever the
+/// order the caller lists the parts in; the registry is unchanged after each rejection.
+#[test]
+fn req_layer_003_cr_613_6_j_duplicate_is_reported_before_layer_mismatch() {
+    let env = env_f();
+    let valid = (
+        eid(5),
+        res(Layer::L4, 1, by_sel(SEL_ALL), add_card_types(&["Creature"])),
+    );
+    let mismatch_same_id = (eid(5), res(Layer::L2, 1, objs(&[oid(1)]), modify_pt(1, 1)));
+    let other_mismatch = (eid(6), res(Layer::L2, 1, objs(&[oid(1)]), modify_pt(1, 1)));
+    let registered_dup = (
+        eid(100),
+        res(Layer::L4, 1, by_sel(SEL_ALL), add_card_types(&["Creature"])),
+    );
+    let cases: Vec<(&str, Vec<Part>, EffectId)> = vec![
+        (
+            "repeated in the group",
+            vec![valid.clone(), mismatch_same_id.clone()],
+            eid(5),
+        ),
+        (
+            "repeated in the group, reversed",
+            vec![mismatch_same_id, valid],
+            eid(5),
+        ),
+        (
+            "already registered, mismatch listed second",
+            vec![registered_dup.clone(), other_mismatch.clone()],
+            eid(100),
+        ),
+        (
+            "already registered, mismatch listed first",
+            vec![other_mismatch, registered_dup],
+            eid(100),
+        ),
+    ];
+    for (what, parts, dup) in cases {
+        let mut r = pre_registered();
+        let before = snapshot(&r);
+        let before_eval = ev(&r, &env, oid(2));
+        assert_eq!(
+            r.register_group(&env, parts.clone()),
+            Err(LayerError::DuplicateEffect(dup)),
+            "{what}"
+        );
+        assert_eq!(snapshot(&r), before, "{what}: registry unchanged");
+        assert_eq!(
+            ev(&r, &env, oid(2)),
+            before_eval,
+            "{what}: evaluates as before"
+        );
+        for (id, _) in &parts {
+            if *id != eid(100) {
+                assert!(r.get(*id).is_none(), "{what}: {id:?} not registered");
+            }
+        }
+    }
+}
+
+const J_A: u64 = 1;
+const J_B: u64 = 2;
+const J_C: u64 = 3;
+
+fn j_with_pt(c: Characteristics) -> Characteristics {
+    Characteristics {
+        power: Some(lit(1)),
+        toughness: Some(lit(1)),
+        abilities: vec![static_ability("test.marker")],
+        ..c
+    }
+}
+
+/// A: noncreature artifact, B: enchantment creature, C: land creature bystander; all 1/1 with one ability.
+fn env_j() -> LockEnv {
+    let mut env = LockEnv::new();
+    env.put(oid(J_A), j_with_pt(artifact("test.trinket")));
+    env.put(
+        oid(J_B),
+        j_with_pt(blank("test.charm_creature", &["Enchantment", "Creature"])),
+    );
+    env.put(
+        oid(J_C),
+        j_with_pt(blank("test.land_creature", &["Land", "Creature"])),
+    );
+    env
+}
+
+fn j_group(static_origin: bool, l7c_link: Layer) -> Vec<Part> {
+    vec![
+        (
+            eid(1),
+            with_origin(
+                res(
+                    Layer::L4,
+                    1,
+                    by_sel(SEL_NC_ARTIFACT),
+                    add_card_types(&["Creature"]),
+                ),
+                static_origin,
+            ),
+        ),
+        (
+            eid(2),
+            with_origin(
+                res(
+                    Layer::L5,
+                    1,
+                    by_sel(SEL_ENCHANTMENT),
+                    LayerModification::AddColors(mask(1)),
+                ),
+                static_origin,
+            ),
+        ),
+        (
+            eid(3),
+            with_origin(
+                res(Layer::L7c, 1, same(l7c_link), modify_pt(3, 3)),
+                static_origin,
+            ),
+        ),
+    ]
+}
+
+/// REQ-LAYER-003, CR 613.6: a link to a layer that is not the group's first layer (here an
+/// independent layer-5 part) is a BadLink naming the linked part; the registry is unchanged.
+#[test]
+fn req_layer_003_cr_613_6_j_link_to_non_first_layer_is_bad_link() {
+    let env = env_j();
+    for static_origin in [false, true] {
+        let parts = j_group(static_origin, Layer::L5);
+        let mut r = pre_registered();
+        let before = snapshot(&r);
+        assert_eq!(
+            r.register_group(&env, parts.clone()),
+            Err(LayerError::BadLink(eid(3))),
+            "static: {static_origin}"
+        );
+        assert_eq!(snapshot(&r), before, "static: {static_origin}: unchanged");
+        let mut reversed = parts;
+        reversed.reverse();
+        assert_eq!(
+            r.register_group(&env, reversed),
+            Err(LayerError::BadLink(eid(3))),
+            "static: {static_origin}, reversed"
+        );
+        assert_eq!(snapshot(&r), before);
+    }
+}
+
+/// REQ-LAYER-003, CR 613.6, 611.2c: with the link pointing at the first layer, the group
+/// registers; the linked 7c part applies exactly to the layer-4 set (A), the independent layer-5
+/// part keeps its own set (B), and the bystander is untouched.
+#[test]
+fn req_layer_003_cr_613_6_j_link_to_first_layer_follows_that_set_only() {
+    let env = env_j();
+    for static_origin in [false, true] {
+        let r = group(j_group(static_origin, Layer::L4), &env);
+        let white = |e: &Evaluated| e.characteristics.colors.bits() & 1 == 1;
+        let a = ev(&r, &env, oid(J_A));
+        assert!(is_creature(&a) && !white(&a), "A, static: {static_origin}");
+        assert_eq!(pt(&a), spt(4, 4), "A gets the linked +3/+3");
+        let b = ev(&r, &env, oid(J_B));
+        assert!(white(&b), "B, static: {static_origin}");
+        assert_eq!(pt(&b), spt(1, 1), "B is not in the L4 set");
+        let c = ev(&r, &env, oid(J_C));
+        assert!(!white(&c));
+        assert_eq!(pt(&c), spt(1, 1), "bystander untouched");
+    }
+}
+
+/// REQ-LAYER-003, CR 613.6: two linked parts (layers 6 and 7c) that both point at the first
+/// layer both follow the layer-4 set.
+#[test]
+fn req_layer_003_cr_613_6_j_two_links_to_the_first_layer_both_follow_it() {
+    let env = env_j();
+    for static_origin in [false, true] {
+        let parts = vec![
+            (
+                eid(1),
+                with_origin(
+                    res(
+                        Layer::L4,
+                        1,
+                        by_sel(SEL_NC_ARTIFACT),
+                        add_card_types(&["Creature"]),
+                    ),
+                    static_origin,
+                ),
+            ),
+            (
+                eid(2),
+                with_origin(
+                    res(
+                        Layer::L6,
+                        1,
+                        same(Layer::L4),
+                        LayerModification::RemoveAllAbilities,
+                    ),
+                    static_origin,
+                ),
+            ),
+            (
+                eid(3),
+                with_origin(
+                    res(Layer::L7c, 1, same(Layer::L4), modify_pt(3, 3)),
+                    static_origin,
+                ),
+            ),
+        ];
+        let r = group(parts, &env);
+        let a = ev(&r, &env, oid(J_A));
+        assert!(a.characteristics.abilities.is_empty(), "A lost abilities");
+        assert_eq!(pt(&a), spt(4, 4));
+        for id in [J_B, J_C] {
+            let o = ev(&r, &env, oid(id));
+            assert_eq!(o.characteristics.abilities.len(), 1, "{id} keeps abilities");
+            assert_eq!(pt(&o), spt(1, 1), "{id} untouched");
+        }
+    }
 }
