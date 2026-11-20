@@ -12,14 +12,16 @@ use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
+use super::copy::apply_exceptions;
 use super::error::LayerError;
 use super::lockin::LockRecord;
 use super::ordering::{OrderRecord, Scratch, run_layer};
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+    ManaValueProvenance,
 };
 use super::text::replace_in_rules_text;
-use crate::objects::Characteristics;
+use crate::objects::{Characteristics, ManaValueContext};
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
 /// Variants such as "hexproof from red" (CR 702.11d) are recognised by
@@ -54,13 +56,31 @@ pub struct ObjectBase {
     pub on_battlefield: bool,
 }
 
-/// An object's characteristics and controller after the layers applied so far.
+/// An object's characteristics and controller after the layers applied so far, with the
+/// provenance of its mana value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evaluated {
     /// The characteristics.
     pub characteristics: Characteristics,
     /// The controller (set in layer 2, CR 613.1b).
     pub controller: Option<PlayerId>,
+    /// How the mana value is derived (CR 202.3a-c): plain (the characteristics' own) for the
+    /// base; set by every layer-1 effect that replaces all characteristics
+    /// ([`LayerModification::CopyValuesWithProvenance`] to its provenance,
+    /// [`LayerModification::CopyValues`] and [`LayerModification::FaceDown`] to plain); no
+    /// other modification changes it. Read through [`Evaluated::mana_value`].
+    pub mana_value_provenance: ManaValueProvenance,
+}
+
+impl Evaluated {
+    /// The mana value (CR 202.3), exactly as [`crate::layers::CopiableValues::mana_value`]:
+    /// plain provenance the characteristics' own in `ctx` (CR 202.3e); `Fixed` the stored value;
+    /// a copy of a nonmodal back face or of a melded permanent 0 (CR 202.3b, 202.3c).
+    #[must_use]
+    pub fn mana_value(&self, ctx: ManaValueContext) -> i64 {
+        self.mana_value_provenance
+            .mana_value(&self.characteristics, ctx)
+    }
 }
 
 /// What [`LayerEnvironment::matches`] sees when a selector effect is about to apply.
@@ -391,6 +411,7 @@ pub fn evaluate_with_order(
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
+            mana_value_provenance: ManaValueProvenance::plain(),
         },
         pt: None,
     };
@@ -514,9 +535,27 @@ fn write_pt(state: &mut Evaluated, (p, t): (i64, i64)) {
 fn apply_effect(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, m: &LayerModification) {
     let c = &mut state.characteristics;
     match m {
-        // CR 613.2a, 613.2b: layer 1 replaces the characteristics (CR 613.2c: copiable values).
+        // CR 613.2a, 613.2b: layer 1 replaces the characteristics (CR 613.2c: copiable values);
+        // the mana value is the new characteristics' own (a face-down object has no mana cost,
+        // CR 708.2, 202.3a).
         LayerModification::CopyValues(v) | LayerModification::FaceDown(v) => {
             *c = (**v).clone();
+            state.mana_value_provenance = ManaValueProvenance::plain();
+        }
+        // CR 613.2a, 202.3b, 202.3c: a copy that also fixes how the mana value is derived.
+        LayerModification::CopyValuesWithProvenance {
+            characteristics,
+            provenance,
+        } => {
+            *c = (**characteristics).clone();
+            state.mana_value_provenance = provenance.clone();
+        }
+        // CR 613.2a, 707.2: a copiable modification that is not a copy changes only what its
+        // exceptions set; the object is its own "original" (CR 707.9c), no CDA is dropped and
+        // the mana-value provenance is kept.
+        LayerModification::ApplyCopyExceptions(exceptions) => {
+            let own = c.clone();
+            apply_exceptions(c, &own, exceptions);
         }
         // CR 613.1b
         LayerModification::SetController(p) => state.controller = Some(*p),

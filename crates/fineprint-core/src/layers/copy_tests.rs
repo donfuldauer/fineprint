@@ -1437,6 +1437,10 @@ fn registration_order_is_irrelevant() {
             ),
         ),
         (6, copy_eff(&CopiableValues::plain(other("test.d")), z, 9)),
+        // The provenance-carrying copy and the P/T-only modification (CodeRabbit round 1).
+        (7, copy_eff(&back_face_copy_costed(), y, 6)),
+        (8, pt_mod(x, 6, 4, 5)),
+        (9, pt_mod(y, 6, 2, 3)),
     ];
     let reference = registry(list.clone());
     let want_eval = evaluate_all(&reference, &env).unwrap();
@@ -1444,6 +1448,11 @@ fn registration_order_is_irrelevant() {
         .iter()
         .map(|&id| copiable_characteristics(&reference, &env, id).unwrap())
         .collect();
+    let want_values: Vec<CopiableValues> = [x, y, z]
+        .iter()
+        .map(|&id| copiable_values(&reference, &env, id).unwrap())
+        .collect();
+    assert_eq!(want_eval[&y].mana_value(OFF), 0);
     let mut rng = Lcg(0x5eed);
     for _ in 0..200 {
         let mut shuffled = list.clone();
@@ -1455,5 +1464,654 @@ fn registration_order_is_irrelevant() {
             .map(|&id| copiable_characteristics(&r, &env, id).unwrap())
             .collect();
         assert_eq!(got, want_copiable);
+        let got: Vec<CopiableValues> = [x, y, z]
+            .iter()
+            .map(|&id| copiable_values(&r, &env, id).unwrap())
+            .collect();
+        assert_eq!(got, want_values);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 1 (PR #197): pinned colors, back-face merged tops, mana-value provenance in
+// layer 1a and `Evaluated`, P/T-only layer-1a modifications
+// ---------------------------------------------------------------------------------------------
+
+/// A copy of a green `{2}{G}` 3/3 by `own` with `exceptions`.
+fn copy_n(own: &Characteristics, exceptions: &[CopyException]) -> Characteristics {
+    CopiableValues::plain(creature("test.orig", 3, 3))
+        .copy_with(own, exceptions)
+        .characteristics
+}
+
+fn colors(a: ColorBitmask, b: ColorBitmask) -> ColorBitmask {
+    ColorBitmask::new(a.bits() | b.bits()).unwrap()
+}
+
+// REQ-OBJ-002; CR 707.9b, 707.9c, 707.9d, docs/DECISIONS.md "#38 FP-037 — CodeRabbit round 1:
+// colors pinned by SetColors and NotCopied(Colors)": colors an exception set or kept are not
+// re-derived by a later SetManaCost of the same effect; a cost-only exception still re-derives
+// cost-derived colors.
+#[test]
+fn exception_set_mana_cost_respects_pinned_colors() {
+    let own = other("test.own");
+    let set_w = CopyException::SetManaCost(Some(cost("{1}{W}")));
+    // Explicit green, then a white cost: green stays.
+    let c = copy_n(
+        &own,
+        &[CopyException::SetColors(ColorBitmask::GREEN), set_w.clone()],
+    );
+    assert_eq!(c.colors, ColorBitmask::GREEN);
+    assert_eq!(c.mana_cost, Some(cost("{1}{W}")));
+    // Cost only: the cost-derived colors follow it.
+    let c = copy_n(&own, std::slice::from_ref(&set_w));
+    assert_eq!(c.colors, ColorBitmask::WHITE);
+    let c = copy_n(&own, &[CopyException::SetManaCost(None)]);
+    assert_eq!(c.colors, ColorBitmask::NONE);
+    // Cost then explicit colors: the explicit colors win.
+    let c = copy_n(
+        &own,
+        &[set_w.clone(), CopyException::SetColors(ColorBitmask::GREEN)],
+    );
+    assert_eq!(c.colors, ColorBitmask::GREEN);
+    assert_eq!(c.mana_cost, Some(cost("{1}{W}")));
+    // Two costs: each re-derives.
+    let c = copy_n(
+        &own,
+        &[
+            set_w.clone(),
+            CopyException::SetManaCost(Some(cost("{1}{B}"))),
+        ],
+    );
+    assert_eq!(c.colors, ColorBitmask::BLACK);
+    assert_eq!(c.mana_cost, Some(cost("{1}{B}")));
+    // Kept own colors (green, equal to the copied cost's derivation) are pinned.
+    let mut green_own = other("test.green_own");
+    green_own.colors = ColorBitmask::GREEN;
+    green_own.color_indicator = None;
+    let not_colors = CopyException::NotCopied(CopiedCharacteristic::Colors);
+    let c = copy_n(&green_own, &[not_colors.clone(), set_w.clone()]);
+    assert_eq!(c.colors, ColorBitmask::GREEN);
+    assert_eq!(c.color_indicator, None);
+    assert_eq!(c.mana_cost, Some(cost("{1}{W}")));
+    // Kept own colors that are not white (blue and red with a red indicator) stay too.
+    let c = copy_n(&own, &[not_colors, set_w.clone()]);
+    assert_eq!(c.colors, own.colors);
+    assert_eq!(c.color_indicator, own.color_indicator);
+    // A color indicator: the derivation includes it, as before.
+    let mut orig = creature("test.orig", 3, 3);
+    orig.color_indicator = Some(ColorBitmask::BLUE);
+    orig.colors = colors(ColorBitmask::BLUE, ColorBitmask::GREEN);
+    let c = CopiableValues::plain(orig)
+        .copy_with(&own, std::slice::from_ref(&set_w))
+        .characteristics;
+    assert_eq!(c.colors, colors(ColorBitmask::BLUE, ColorBitmask::WHITE));
+    assert_eq!(c.color_indicator, Some(ColorBitmask::BLUE));
+}
+
+/// A nonmodal DFC whose front costs `{0}` and whose back has no mana cost.
+fn nonmodal_dfc_zero_front() -> CardDefinitionDSL {
+    def(
+        "test.dfc_zero",
+        LayoutBehavior::DfcNonmodal,
+        vec![
+            face(FaceKind::Main, "dfc0_front", Some("{0}"), Some((1, 1))),
+            face(FaceKind::Back, "dfc0_back", None, Some((2, 2))),
+        ],
+    )
+}
+
+// REQ-OBJ-002; CR 731.2a, 202.3a, 202.3b, docs/DECISIONS.md "#38 FP-037 — CodeRabbit round 1:
+// a back-face top of a merged permanent is always Fixed": a back-face-up top whose front costs
+// {0} is Fixed { 0 } even though the numbers match, and its copy has mana value 0 even with a
+// set cost; an ordinary {0} top and a front-face top stay Plain.
+#[test]
+fn mana_value_merged_back_face_top_zero_cost() {
+    let dfc = nonmodal_dfc_zero_front();
+    let bottom_d = normal("bottom", "{1}{B}", (1, 1));
+    let five = [CopyException::SetManaCost(Some(cost("{5}")))];
+    let back_top = MergedComponent {
+        query: back_up(),
+        ..component(&dfc)
+    };
+    let merged = MergedPermanent::new(vec![back_top, component(&bottom_d)], false).unwrap();
+    let v = CopiableValues::merged(&merged, vocab()).unwrap();
+    assert_eq!(v.source, ValueSource::Fixed { mana_value: 0 });
+    assert_eq!(v.mana_value(OFF), 0);
+    let copy = v.copy_with(&other("test.c"), &five);
+    assert_eq!(copy.source, ValueSource::CopyOfBackFaceOrMelded);
+    assert_eq!(copy.characteristics.mana_cost, Some(cost("{5}")));
+    assert_eq!(copy.mana_value(OFF), 0);
+    // An ordinary {0} top component: Plain, and its copy takes the set cost.
+    let zero_d = normal("zero", "{0}", (1, 1));
+    let merged =
+        MergedPermanent::new(vec![component(&zero_d), component(&bottom_d)], false).unwrap();
+    let v = CopiableValues::merged(&merged, vocab()).unwrap();
+    assert_eq!(v.source, ValueSource::Plain);
+    let copy = v.copy_with(&other("test.c"), &five);
+    assert_eq!(copy.source, ValueSource::Plain);
+    assert_eq!(copy.mana_value(OFF), 5);
+    // The same DFC front face up: values match, Plain.
+    let merged = MergedPermanent::new(vec![component(&dfc), component(&bottom_d)], false).unwrap();
+    let v = CopiableValues::merged(&merged, vocab()).unwrap();
+    assert_eq!(v.source, ValueSource::Plain);
+    assert_eq!(v.copy_with(&other("test.c"), &five).mana_value(OFF), 5);
+}
+
+/// The back face of [`nonmodal_dfc`] (front `{3}{R}`) as copiable values: `Fixed { 4 }`.
+fn back_face_values() -> CopiableValues {
+    let back = base_characteristics(&nonmodal_dfc(), &back_up(), vocab()).unwrap();
+    CopiableValues::nonmodal_back_face(back, Some(cost("{3}{R}")))
+}
+
+/// A copy of [`back_face_values`] with `SetManaCost({5})`: cost {5}, mana value 0.
+fn back_face_copy_costed() -> CopiableValues {
+    back_face_values().copy_with(
+        &other("test.copier"),
+        &[CopyException::SetManaCost(Some(cost("{5}")))],
+    )
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 202.3b: (i) a back-face copy with a set cost {5},
+// registered through copiable_effect, evaluates to cost {5} and mana value 0; the effect is
+// the provenance-carrying layer-1a variant; plain values still build CopyValues.
+#[test]
+fn evaluate_reports_back_face_copy_mana_value() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let costed = back_face_copy_costed();
+    assert_eq!(costed.source, ValueSource::CopyOfBackFaceOrMelded);
+    let eff = copy_eff(&costed, y, 1);
+    assert_eq!(
+        eff.modification,
+        LayerModification::CopyValuesWithProvenance {
+            characteristics: Box::new(costed.characteristics.clone()),
+            provenance: costed.provenance(),
+        }
+    );
+    assert!(eff.modification.belongs_to(Layer::L1a));
+    assert!(!eff.modification.belongs_to(Layer::L1b));
+    let r = registry(vec![(1, eff)]);
+    let ev = evaluate(&r, &env, y).unwrap();
+    assert_eq!(ev.characteristics.mana_cost, Some(cost("{5}")));
+    assert_eq!(ev.mana_value(OFF), 0);
+    assert_eq!(ev.mana_value(on_stack(3)), 0);
+    assert_eq!(
+        ev.mana_value_provenance.source(),
+        &ValueSource::CopyOfBackFaceOrMelded
+    );
+    assert!(ev.mana_value_provenance.copies_as_zero());
+    // Plain values: CopyValues, plain provenance.
+    let plain = CopiableValues::plain(creature("test.p", 1, 1));
+    assert_eq!(
+        copy_eff(&plain, y, 1).modification,
+        LayerModification::CopyValues(Box::new(plain.characteristics.clone()))
+    );
+    assert!(plain.provenance().is_plain());
+    assert_eq!(ManaValueProvenance::default(), ManaValueProvenance::plain());
+    assert_eq!(ManaValueProvenance::plain().source(), &ValueSource::Plain);
+    assert!(!ManaValueProvenance::plain().copies_as_zero());
+}
+
+// REQ-OBJ-002; CR 613.2c, 707.2, 202.3b: (ii) copiable_values returns exactly the registered
+// values, mana value 0; copiable_characteristics returns their characteristics.
+#[test]
+fn copiable_values_round_trips_back_face_copy() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let costed = back_face_copy_costed();
+    let r = registry(vec![(1, copy_eff(&costed, y, 1))]);
+    let got = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(got, costed);
+    assert_eq!(got.mana_value(OFF), 0);
+    assert_eq!(
+        copiable_characteristics(&r, &env, y).unwrap(),
+        costed.characteristics
+    );
+    assert_eq!(
+        copiable_values(&r, &env, o(99)),
+        Err(LayerError::UnknownObject(o(99)))
+    );
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 202.3b, 707.2, 613.2c: (iii) the reviewer's workflow. A
+// back-face copy with SetManaCost({5}) goes through copiable_effect, evaluate, copiable_values
+// and copy_with: a copy of the copy, and a further copy with another set cost, still have mana
+// value 0. The characteristics-only path (plain of copiable_characteristics) gives 5: it
+// carries characteristics only, as documented.
+#[test]
+fn regression_back_face_copy_set_mana_cost_copy_of_copy() {
+    let (y, z) = (o(2), o(3));
+    let env = Env::default()
+        .with(y, other("test.copier"))
+        .with(z, creature("test.z", 1, 1));
+    let costed = back_face_copy_costed();
+    let mut r = registry(vec![(1, copy_eff(&costed, y, 1))]);
+    assert_eq!(evaluate(&r, &env, y).unwrap().mana_value(OFF), 0);
+    let read = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(read.mana_value(OFF), 0);
+    let copy2 = read.copy_with(&creature("test.z", 1, 1), &[]);
+    assert_eq!(copy2.source, ValueSource::CopyOfBackFaceOrMelded);
+    assert_eq!(copy2.mana_value(OFF), 0);
+    r.register(e(2), copy_eff(&copy2, z, 2)).unwrap();
+    let ev = evaluate(&r, &env, z).unwrap();
+    assert_eq!(ev.mana_value(OFF), 0);
+    assert_eq!(ev.characteristics.mana_cost, Some(cost("{5}")));
+    let copy3 = copiable_values(&r, &env, z).unwrap().copy_with(
+        &other("test.c3"),
+        &[CopyException::SetManaCost(Some(cost("{7}")))],
+    );
+    assert_eq!(copy3.characteristics.mana_cost, Some(cost("{7}")));
+    assert_eq!(copy3.mana_value(OFF), 0);
+    // The characteristics-only path loses the provenance.
+    let chars_only = CopiableValues::plain(copiable_characteristics(&r, &env, y).unwrap());
+    assert_eq!(chars_only.mana_value(OFF), 5);
+}
+
+// REQ-OBJ-002; CR 202.3c, 713.5c, 731.2a, 202.3b: (iv) a melded value and a merged
+// back-face-top value round-trip with their fixed numbers (7 and 4) and copy to 0.
+#[test]
+fn fixed_values_round_trip_through_layer_one() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.base"));
+    let (a, b) = (meld_a(), meld_b());
+    let pair = MeldedPair::new(&a, &b).unwrap();
+    let melded = CopiableValues::melded(&pair, vocab()).unwrap();
+    let r = registry(vec![(1, copy_eff(&melded, y, 1))]);
+    let ev = evaluate(&r, &env, y).unwrap();
+    assert_eq!(ev.mana_value(OFF), 7);
+    assert_eq!(ev.mana_value(on_stack(4)), 7);
+    let read = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(read, melded);
+    assert_eq!(read.mana_value(OFF), 7);
+    assert_eq!(read.copy_with(&other("test.c"), &[]).mana_value(OFF), 0);
+    // A merged permanent with a nonmodal back face on top, through merge_effect.
+    let dfc = nonmodal_dfc();
+    let bottom_d = normal("bottom", "{1}{B}", (1, 1));
+    let back_top = MergedComponent {
+        query: back_up(),
+        ..component(&dfc)
+    };
+    let merged = MergedPermanent::new(vec![back_top, component(&bottom_d)], true).unwrap();
+    let r = registry(vec![(
+        1,
+        merge_effect(&merged, vocab(), y, p(1), ts(5)).unwrap(),
+    )]);
+    let ev = evaluate(&r, &env, y).unwrap();
+    assert_eq!(ev.mana_value(OFF), 4);
+    let read = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(read, CopiableValues::merged(&merged, vocab()).unwrap());
+    assert_eq!(read.source, ValueSource::Fixed { mana_value: 4 });
+    assert_eq!(read.copy_with(&other("test.c"), &[]).mana_value(OFF), 0);
+}
+
+// REQ-OBJ-002; CR 202.3e: (v) a plain value's mana value is its own cost's: X is 0 off the
+// stack and the chosen number on it; the base object is plain too.
+#[test]
+fn plain_provenance_mana_value_from_own_cost() {
+    let (x, y) = (o(1), o(2));
+    let mut c = creature("test.x", 1, 1);
+    c.mana_cost = Some(cost("{X}{X}{G}"));
+    let env = Env::default()
+        .with(x, c.clone())
+        .with(y, other("test.copier"));
+    let copy = CopiableValues::plain(c).copy_with(&other("test.copier"), &[]);
+    let r = registry(vec![(1, copy_eff(&copy, y, 1))]);
+    for id in [x, y] {
+        let ev = evaluate(&r, &env, id).unwrap();
+        assert!(ev.mana_value_provenance.is_plain());
+        assert_eq!(ev.mana_value(OFF), 1);
+        assert_eq!(ev.mana_value(on_stack(3)), 7);
+        assert_eq!(
+            copiable_values(&r, &env, id)
+                .unwrap()
+                .mana_value(on_stack(3)),
+            7
+        );
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2, 613.7, 202.3b: (vi) a later plain CopyValues effect
+// resets the provenance to plain; an earlier one does not. Both timestamp orders and both
+// EffectId assignments.
+#[test]
+fn later_plain_copy_resets_provenance() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let costed = back_face_copy_costed();
+    let plain = CopiableValues::plain(creature("test.p", 2, 2));
+    for (zero_ts, plain_ts) in [(1, 2), (2, 1)] {
+        for (zero_id, plain_id) in [(1, 2), (2, 1)] {
+            let r = registry(vec![
+                (zero_id, copy_eff(&costed, y, zero_ts)),
+                (plain_id, copy_eff(&plain, y, plain_ts)),
+            ]);
+            let ev = evaluate(&r, &env, y).unwrap();
+            let read = copiable_values(&r, &env, y).unwrap();
+            if plain_ts > zero_ts {
+                assert!(ev.mana_value_provenance.is_plain());
+                assert_eq!(ev.mana_value(OFF), 3);
+                assert_eq!(read, plain);
+            } else {
+                assert_eq!(ev.mana_value(OFF), 0);
+                assert_eq!(read, costed);
+            }
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2b, 708.2, 202.3a: (vii) a layer-1b face-down effect over
+// a zero-provenance copy gives plain provenance and mana value 0, whatever the timestamps.
+#[test]
+fn face_down_over_zero_copy_is_plain() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    for (copy_ts, down_ts) in [(1, 2), (2, 1)] {
+        let r = registry(vec![
+            (1, copy_eff(&back_face_copy_costed(), y, copy_ts)),
+            (
+                2,
+                plain_eff(
+                    Layer::L1b,
+                    down_ts,
+                    y,
+                    LayerModification::FaceDown(Box::new(face_down())),
+                ),
+            ),
+        ]);
+        let ev = evaluate(&r, &env, y).unwrap();
+        assert!(ev.mana_value_provenance.is_plain());
+        assert_eq!(ev.mana_value(OFF), 0);
+        assert_eq!(
+            copiable_values(&r, &env, y).unwrap(),
+            CopiableValues::plain(face_down())
+        );
+    }
+}
+
+/// Every kind of mana-value provenance over `c`: Plain, Fixed copying as 0, Fixed copying as
+/// itself, a copy of a back face.
+fn provenance_kinds(c: &Characteristics) -> Vec<CopiableValues> {
+    vec![
+        CopiableValues::plain(c.clone()),
+        CopiableValues::nonmodal_back_face(c.clone(), Some(cost("{2}{R}"))),
+        CopiableValues::with_provenance(
+            c.clone(),
+            ManaValueProvenance {
+                source: ValueSource::Fixed { mana_value: 2 },
+                zero_when_copied: false,
+            },
+        ),
+        CopiableValues::nonmodal_back_face(c.clone(), None).copy_with(&other("test.k"), &[]),
+    ]
+}
+
+// REQ-OBJ-002, REQ-CORE-001; CR 613.2c, 707.2, 202.3b, 202.3c: round-trip property over 200
+// random cases and every provenance kind: registering copiable_effect(V) on an object with any
+// other base and reading copiable_values gives V; evaluate reports V's mana value; a copy of the
+// read value has the same source as a copy of V.
+#[test]
+fn property_copiable_values_round_trip() {
+    let mut rng = Lcg(0x197);
+    let y = o(2);
+    for n in 0..200 {
+        let orig = random_chars(&mut rng, n);
+        let base = random_chars(&mut rng, n + 1000);
+        let env = Env::default().with(y, base.clone());
+        let kinds = provenance_kinds(&orig);
+        let v = &kinds[rng.below(kinds.len())];
+        let r = registry(vec![(1, copy_eff(v, y, 1 + rng.below(5) as u64))]);
+        let read = copiable_values(&r, &env, y).unwrap();
+        assert_eq!(&read, v);
+        assert_eq!(read.provenance(), v.provenance());
+        let ev = evaluate(&r, &env, y).unwrap();
+        assert_eq!(ev.mana_value_provenance, v.provenance());
+        for ctx in [OFF, on_stack(2)] {
+            assert_eq!(ev.mana_value(ctx), v.mana_value(ctx));
+            assert_eq!(read.mana_value(ctx), v.mana_value(ctx));
+        }
+        assert_eq!(
+            read.copy_with(&base, &[]).source,
+            v.copy_with(&base, &[]).source
+        );
+    }
+}
+
+// REQ-LAYER-005, REQ-CORE-001: the digest covers the provenance: equal inputs give equal
+// digests, and maps that differ only in the provenance (each kind, including Fixed with and
+// without the copy-as-0 flag at the same number) give different ones.
+#[test]
+fn digest_covers_mana_value_provenance() {
+    let c = creature("test.d", 1, 1);
+    let mut kinds = provenance_kinds(&c);
+    kinds.push(CopiableValues::with_provenance(
+        c.clone(),
+        ManaValueProvenance {
+            source: ValueSource::Fixed { mana_value: 2 },
+            zero_when_copied: true,
+        },
+    ));
+    let maps: Vec<BTreeMap<ObjectId, Evaluated>> = kinds
+        .iter()
+        .map(|v| {
+            BTreeMap::from([(
+                o(1),
+                Evaluated {
+                    characteristics: c.clone(),
+                    controller: Some(p(1)),
+                    mana_value_provenance: v.provenance(),
+                },
+            )])
+        })
+        .collect();
+    for (i, a) in maps.iter().enumerate() {
+        assert_eq!(evaluated_digest(a), evaluated_digest(&a.clone()));
+        for b in &maps[i + 1..] {
+            assert_ne!(evaluated_digest(a), evaluated_digest(b));
+        }
+    }
+}
+
+// REQ-LAYER-005, REQ-CORE-001: the cache stores and returns non-plain provenance: cached and
+// uncached evaluation agree (also under the full-recompute feature) for zero, fixed and plain
+// provenance, before and after a registry change.
+#[test]
+fn cache_agrees_on_non_plain_provenance() {
+    let (x, y, z) = (o(1), o(2), o(3));
+    let env = Env::default()
+        .with(x, creature("test.x", 1, 1))
+        .with(y, other("test.y"))
+        .with(z, creature("test.z", 2, 2));
+    let (a, b) = (meld_a(), meld_b());
+    let pair = MeldedPair::new(&a, &b).unwrap();
+    let mut r = registry(vec![
+        (1, copy_eff(&back_face_copy_costed(), x, 1)),
+        (
+            2,
+            copy_eff(&CopiableValues::melded(&pair, vocab()).unwrap(), y, 2),
+        ),
+        (
+            3,
+            modification_effect(
+                &[CopyException::SetPower(literal(6))],
+                None,
+                p(1),
+                EffectOrigin::Resolved,
+                ts(3),
+                objs(&[x]),
+            ),
+        ),
+    ]);
+    let mut cache = LayerCache::new();
+    for _ in 0..2 {
+        let cached = cache.evaluate_all(&r, &env).unwrap();
+        let fresh = evaluate_all(&r, &env).unwrap();
+        assert_eq!(cached, fresh);
+        assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+        assert_eq!(cached[&x].mana_value(OFF), 0);
+        assert_eq!(cached[&y].mana_value(OFF), 7);
+        assert!(cached[&z].mana_value_provenance.is_plain());
+    }
+    // A later plain copy on x: the cache sees the registry change.
+    r.register(
+        e(4),
+        copy_eff(&CopiableValues::plain(creature("test.p", 1, 1)), x, 9),
+    )
+    .unwrap();
+    let cached = cache.evaluate_all(&r, &env).unwrap();
+    assert_eq!(cached, evaluate_all(&r, &env).unwrap());
+    assert!(cached[&x].mana_value_provenance.is_plain());
+    assert_eq!(cached[&x].mana_value(OFF), 3);
+}
+
+/// An "as enters" style P/T-only modification of `target` at `t`.
+fn pt_mod(target: ObjectId, t: u64, power: i64, toughness: i64) -> ContinuousEffect {
+    modification_effect(
+        &[
+            CopyException::SetPower(literal(power)),
+            CopyException::SetToughness(literal(toughness)),
+        ],
+        Some(target),
+        p(1),
+        EffectOrigin::Static { granted_at: None },
+        ts(t),
+        objs(&[target]),
+    )
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2a, 707.2, docs/DECISIONS.md "#38 FP-037 — CodeRabbit
+// round 1: P/T-only layer-1a modification": a P/T-only modification over a copy changes only
+// power and toughness; removing the copy restores the original name and abilities and keeps
+// the set power and toughness. Both EffectId assignments.
+#[test]
+fn modification_effect_sets_only_its_fields() {
+    let x = o(1);
+    let base = creature("test.x0", 1, 1);
+    let env = Env::default().with(x, base.clone());
+    let copied = CopiableValues::plain(other("test.y1")).copy_with(&base, &[]);
+    for (copy_id, mod_id) in [(1, 2), (2, 1)] {
+        let mut r = registry(vec![
+            (copy_id, copy_eff(&copied, x, 1)),
+            (mod_id, pt_mod(x, 2, 4, 5)),
+        ]);
+        let got = eval(&r, &env, x);
+        assert_eq!(got.names, set(&["test.y1"]));
+        assert_eq!(got.abilities, vec![ability("test.y1")]);
+        assert_eq!(got.mana_cost, Some(cost("{U}")));
+        assert_eq!(
+            (got.power, got.toughness),
+            (Some(literal(4)), Some(literal(5)))
+        );
+        assert!(r.remove(e(copy_id)));
+        let got = eval(&r, &env, x);
+        let mut want = base.clone();
+        want.power = Some(literal(4));
+        want.toughness = Some(literal(5));
+        assert_eq!(got, want);
+        assert_eq!(got.names, set(&["test.x0"]));
+        assert_eq!(got.abilities, vec![ability("test.x0")]);
+    }
+    // NotCopied is a no-op; a CDA ability is not dropped by a set power.
+    let mut with_cda = base.clone();
+    with_cda.abilities.push(char_static("7a", true));
+    let env = Env::default().with(x, with_cda.clone());
+    let r = registry(vec![(
+        1,
+        modification_effect(
+            &[CopyException::NotCopied(CopiedCharacteristic::Names)],
+            None,
+            p(1),
+            EffectOrigin::Resolved,
+            ts(1),
+            objs(&[x]),
+        ),
+    )]);
+    assert_eq!(copiable_characteristics(&r, &env, x).unwrap(), with_cda);
+    let r = registry(vec![(1, pt_mod(x, 1, 4, 5))]);
+    assert_eq!(
+        copiable_characteristics(&r, &env, x).unwrap().abilities,
+        with_cda.abilities
+    );
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2, 613.7: a modification before a copy is replaced by the
+// copy; two modifications apply in timestamp order. Both timestamp orders and both EffectId
+// assignments.
+#[test]
+fn modification_effect_orders_by_timestamp() {
+    let x = o(1);
+    let env = Env::default().with(x, creature("test.x0", 1, 1));
+    let copied = CopiableValues::plain(other("test.y1")).copy_with(&creature("test.x0", 1, 1), &[]);
+    for (copy_id, mod_id) in [(1, 2), (2, 1)] {
+        // Modification at 0, copy at 1: the copy replaces everything.
+        let r = registry(vec![
+            (copy_id, copy_eff(&copied, x, 1)),
+            (mod_id, pt_mod(x, 0, 4, 5)),
+        ]);
+        assert_eq!(eval(&r, &env, x), copied.characteristics);
+    }
+    for ((ta, tb), want) in [((2, 3), (6, 6)), ((3, 2), (4, 5))] {
+        for (ida, idb) in [(1, 2), (2, 1)] {
+            let r = registry(vec![(ida, pt_mod(x, ta, 4, 5)), (idb, pt_mod(x, tb, 6, 6))]);
+            let got = eval(&r, &env, x);
+            assert_eq!(
+                (got.power, got.toughness),
+                (Some(literal(want.0)), Some(literal(want.1)))
+            );
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 613.2a, 613.2c, 707.2, 202.3b: copiable_values after a modification reflect
+// it and keep the copy's mana-value provenance; a later copy through copy_with sees the set
+// power and toughness and the zero mana value.
+#[test]
+fn modification_effect_in_copiable_values_and_later_copy() {
+    let (x, z) = (o(1), o(3));
+    let env = Env::default()
+        .with(x, other("test.x"))
+        .with(z, creature("test.z", 1, 1));
+    for (values, want_mv) in [(back_face_copy_costed(), 0), (back_face_values(), 4)] {
+        let mut r = registry(vec![(1, copy_eff(&values, x, 1)), (2, pt_mod(x, 2, 4, 5))]);
+        let read = copiable_values(&r, &env, x).unwrap();
+        assert_eq!(read.source, values.source);
+        assert_eq!(read.mana_value(OFF), want_mv);
+        assert_eq!(read.characteristics.power, Some(literal(4)));
+        assert_eq!(read.characteristics.toughness, Some(literal(5)));
+        assert_eq!(evaluate(&r, &env, x).unwrap().mana_value(OFF), want_mv);
+        let copy = read.copy_with(&creature("test.z", 1, 1), &[]);
+        r.register(e(3), copy_eff(&copy, z, 3)).unwrap();
+        let ev = evaluate(&r, &env, z).unwrap();
+        assert_eq!(ev.characteristics.power, Some(literal(4)));
+        assert_eq!(ev.characteristics.toughness, Some(literal(5)));
+        assert_eq!(ev.mana_value(OFF), 0);
+    }
+}
+
+// REQ-OBJ-002; CR 707.9b, 707.9d: inside one modification effect, SetColors then SetManaCost
+// keeps the set colors; SetManaCost alone re-derives cost-derived colors.
+#[test]
+fn modification_effect_pinned_colors() {
+    let x = o(1);
+    let env = Env::default().with(x, creature("test.x0", 1, 1));
+    let run = |exceptions: &[CopyException]| {
+        let r = registry(vec![(
+            1,
+            modification_effect(
+                exceptions,
+                None,
+                p(1),
+                EffectOrigin::Resolved,
+                ts(1),
+                objs(&[x]),
+            ),
+        )]);
+        eval(&r, &env, x)
+    };
+    let set_w = CopyException::SetManaCost(Some(cost("{1}{W}")));
+    let got = run(&[CopyException::SetColors(ColorBitmask::GREEN), set_w.clone()]);
+    assert_eq!(got.colors, ColorBitmask::GREEN);
+    assert_eq!(got.mana_cost, Some(cost("{1}{W}")));
+    let got = run(&[set_w]);
+    assert_eq!(got.colors, ColorBitmask::WHITE);
 }

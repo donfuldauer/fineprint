@@ -858,6 +858,7 @@ fn digest_encodes_values_outside_canonical_json() {
             Evaluated {
                 characteristics: c,
                 controller: Some(p(1)),
+                mana_value_provenance: ManaValueProvenance::plain(),
             },
         )])
     };
