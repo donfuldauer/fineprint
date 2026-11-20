@@ -185,12 +185,14 @@ fn plain_eff(layer: Layer, t: u64, target: ObjectId, m: LayerModification) -> Co
 
 /// A synthetic environment: bases on the battlefield, counters, and the value 5 for every
 /// non-literal expression. The generating ability of every effect exists except those in
-/// `lost` (its source lost the ability).
+/// `lost` (its source lost the ability). The base mana-value provenance is plain except for
+/// the objects in `base_provenance` (round 3).
 #[derive(Default, Clone)]
 struct Env {
     bases: BTreeMap<ObjectId, ObjectBase>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
     lost: BTreeSet<EffectId>,
+    base_provenance: BTreeMap<ObjectId, ManaValueProvenance>,
 }
 
 impl Env {
@@ -204,6 +206,12 @@ impl Env {
             },
         );
         self
+    }
+
+    /// The base of `id` is `values`: its characteristics and its base mana-value provenance.
+    fn with_values(mut self, id: ObjectId, values: &CopiableValues) -> Env {
+        self.base_provenance.insert(id, values.provenance());
+        self.with(id, values.characteristics.clone())
     }
 
     fn counter(mut self, id: ObjectId, kind: &str, n: i64) -> Env {
@@ -222,6 +230,10 @@ impl LayerEnvironment for Env {
 
     fn base(&self, id: ObjectId) -> Option<ObjectBase> {
         self.bases.get(&id).cloned()
+    }
+
+    fn base_mana_value_provenance(&self, id: ObjectId) -> ManaValueProvenance {
+        self.base_provenance.get(&id).cloned().unwrap_or_default()
     }
 
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
@@ -1904,8 +1916,8 @@ fn provenance_kinds(c: &Characteristics) -> Vec<CopiableValues> {
 
 // REQ-OBJ-002, REQ-CORE-001; CR 613.2c, 707.2, 202.3b, 202.3c: round-trip property over 200
 // random cases and every provenance kind: registering copiable_effect(V) on an object with any
-// other base and reading copiable_values gives V; evaluate reports V's mana value; a copy of the
-// read value has the same source as a copy of V.
+// other base (and any base provenance) and reading copiable_values gives V; evaluate reports
+// V's mana value; a copy of the read value has the same source as a copy of V.
 #[test]
 fn property_copiable_values_round_trip() {
     let mut rng = Lcg(0x197);
@@ -1913,7 +1925,9 @@ fn property_copiable_values_round_trip() {
     for n in 0..200 {
         let orig = random_chars(&mut rng, n);
         let base = random_chars(&mut rng, n + 1000);
-        let env = Env::default().with(y, base.clone());
+        // Round 3: the base has a random provenance too; the copy replaces it.
+        let base_kinds = provenance_kinds(&base);
+        let env = Env::default().with_values(y, &base_kinds[rng.below(base_kinds.len())]);
         let kinds = provenance_kinds(&orig);
         let v = &kinds[rng.below(kinds.len())];
         let r = registry(vec![(1, copy_eff(v, y, 1 + rng.below(5) as u64))]);
@@ -2725,5 +2739,353 @@ fn round2_as_enters_pt_survives_lost_ability() {
             as_enters(EffectOrigin::Static { granted_at: None }, 2),
         )]);
         assert_eq!(eval(&r, &env, x), base);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 3
+// ---------------------------------------------------------------------------------------------
+
+/// A layer-1a copy effect of `values` on `target` at `t` from a static ability of `target`.
+fn static_copy_eff(values: &CopiableValues, target: ObjectId, t: u64) -> ContinuousEffect {
+    copiable_effect(
+        values,
+        Some(target),
+        p(1),
+        EffectOrigin::Static { granted_at: None },
+        ts(t),
+        objs(&[target]),
+    )
+}
+
+/// Asserts that `read` has `want`'s characteristics and exported provenance.
+fn assert_same_values(read: &CopiableValues, want: &CopiableValues) {
+    assert_eq!(read.characteristics, want.characteristics);
+    assert_eq!(read.provenance(), want.provenance());
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2c, 707.2, docs/DECISIONS.md "#38 FP-037 — CodeRabbit
+// round 3: round-trip guarantee requires an applying effect and preserves characteristics and
+// provenance": the round trip needs the copy effect to apply. A Static-origin copiable_effect(V)
+// whose generating ability is absent is skipped, so copiable_values gives the base (or the other
+// effect); the same effect with a Resolved origin, or with the ability present, gives V's
+// characteristics and provenance. With a second (earlier) copy effect, both EffectId orders.
+#[test]
+fn round3_round_trip_requires_applying_effect() {
+    let y = o(2);
+    let base = other("test.copier");
+    let earlier = CopiableValues::plain(creature("test.earlier", 2, 2));
+    for v in [back_face_values(), back_face_copy_costed(), green_source()] {
+        // Alone.
+        let mut env = Env::default().with(y, base.clone());
+        env.lost.insert(e(1));
+        let r = registry(vec![(1, static_copy_eff(&v, y, 1))]);
+        assert_eq!(
+            copiable_values(&r, &env, y).unwrap(),
+            CopiableValues::plain(base.clone())
+        );
+        let r = registry(vec![(1, copy_eff(&v, y, 1))]);
+        assert_same_values(&copiable_values(&r, &env, y).unwrap(), &v);
+        let present = Env::default().with(y, base.clone());
+        let r = registry(vec![(1, static_copy_eff(&v, y, 1))]);
+        assert_same_values(&copiable_values(&r, &present, y).unwrap(), &v);
+        // Over an earlier copy, both EffectId orders.
+        for (v_id, earlier_id) in [(1, 2), (2, 1)] {
+            let mut env = Env::default().with(y, base.clone());
+            env.lost.insert(e(v_id));
+            let r = registry(vec![
+                (earlier_id, copy_eff(&earlier, y, 1)),
+                (v_id, static_copy_eff(&v, y, 2)),
+            ]);
+            assert_same_values(&copiable_values(&r, &env, y).unwrap(), &earlier);
+            assert_same_values(&copiable_values(&r, &present, y).unwrap(), &v);
+            let r = registry(vec![
+                (earlier_id, copy_eff(&earlier, y, 1)),
+                (v_id, copy_eff(&v, y, 2)),
+            ]);
+            assert_same_values(&copiable_values(&r, &env, y).unwrap(), &v);
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 202.3b, 613.2c, docs/DECISIONS.md "#38 FP-037 — CodeRabbit round 3:
+// round-trip guarantee requires an applying effect and preserves characteristics and
+// provenance": what the round trip preserves is the characteristics and the exported provenance,
+// not CopiableValues equality. A back-face value whose public source is reassigned to Plain reads
+// back with equal characteristics and equal provenance() but is not == to the original, because
+// == compares the raw private flag.
+#[test]
+fn round3_round_trip_preserves_characteristics_and_provenance() {
+    let y = o(2);
+    let env = Env::default().with(y, other("test.copier"));
+    let mut v = back_face_values();
+    v.source = ValueSource::Plain;
+    let r = registry(vec![(1, copy_eff(&v, y, 1))]);
+    let read = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(read.characteristics, v.characteristics);
+    assert_eq!(read.provenance(), v.provenance());
+    assert!(read.provenance().is_plain());
+    // Documented: == still compares the raw flag, so the read is not == to V.
+    assert_ne!(read, v);
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2c, 707.2, docs/DECISIONS.md "#38 FP-037 — CodeRabbit
+// round 3: as-enters P/T settings use modification_effect": an as-enters P/T setting built by
+// modification_effect with EffectOrigin::Resolved while an earlier copy C is active keeps only
+// the P/T it sets when C is removed: the object's own name, cost and abilities come back. The
+// snapshot route (copiable_effect of CopiableValues::modified of the values read while C is
+// active) would keep C's name, cost and abilities. Both timestamp orders, both EffectId orders,
+// with the setting's ability lost.
+#[test]
+fn round3_as_enters_pt_with_modification_effect_after_copy_expires() {
+    let x = o(1);
+    let base = creature("test.x0", 1, 1);
+    let mut c_values = other("test.c");
+    c_values.abilities.push(ability("test.c_extra"));
+    let c = CopiableValues::plain(c_values.clone());
+    let set_pt = [
+        CopyException::SetPower(literal(4)),
+        CopyException::SetToughness(literal(5)),
+    ];
+    let pt = |ch: &Characteristics| (ch.power.clone(), ch.toughness.clone());
+    let want = (Some(literal(4)), Some(literal(5)));
+    for (c_ts, mod_ts) in [(1, 2), (2, 1)] {
+        for (c_id, mod_id) in [(1, 2), (2, 1)] {
+            let mut env = Env::default().with(x, base.clone());
+            env.lost.insert(e(mod_id));
+            let mut r = registry(vec![(c_id, copy_eff(&c, x, c_ts))]);
+            // Built while C is active.
+            let setting = modification_effect(
+                &set_pt,
+                Some(x),
+                p(1),
+                EffectOrigin::Resolved,
+                ts(mod_ts),
+                objs(&[x]),
+            );
+            r.register(e(mod_id), setting).unwrap();
+            let got = eval(&r, &env, x);
+            assert_eq!(got.names, set(&["test.c"]));
+            if mod_ts > c_ts {
+                assert_eq!(pt(&got), want);
+            } else {
+                // CR 613.2a: the later copy replaces all characteristics.
+                assert_eq!(pt(&got), (Some(literal(7)), Some(literal(8))));
+            }
+            // C expires.
+            assert!(r.remove(e(c_id)));
+            let got = eval(&r, &env, x);
+            assert_eq!(got.names, base.names);
+            assert_eq!(got.mana_cost, base.mana_cost);
+            assert_eq!(got.abilities, base.abilities);
+            assert_eq!(pt(&got), want);
+            let read = copiable_values(&r, &env, x).unwrap();
+            assert_eq!(read, CopiableValues::plain(base.clone()).modified(&set_pt));
+        }
+    }
+    // The snapshot route keeps the expired copy's other characteristics.
+    let env = Env::default().with(x, base.clone());
+    let mut r = registry(vec![(1, copy_eff(&c, x, 1))]);
+    let snapshot = copiable_values(&r, &env, x).unwrap().modified(&set_pt);
+    r.register(e(2), copy_eff(&snapshot, x, 2)).unwrap();
+    assert!(r.remove(e(1)));
+    let got = eval(&r, &env, x);
+    assert_eq!(got.names, set(&["test.c"]));
+    assert_eq!(got.abilities, c_values.abilities);
+}
+
+/// The back face of [`nonmodal_dfc`] with the front cost `front` as copiable values.
+fn back_face_with_front(front: &str) -> CopiableValues {
+    let back = base_characteristics(&nonmodal_dfc(), &back_up(), vocab()).unwrap();
+    CopiableValues::nonmodal_back_face(back, Some(cost(front)))
+}
+
+/// The melded permanent of [`meld_a`] and [`meld_b`] as copiable values (mana value 7).
+fn melded_values() -> CopiableValues {
+    let (a, b) = (meld_a(), meld_b());
+    let pair = MeldedPair::new(&a, &b).unwrap();
+    CopiableValues::melded(&pair, vocab()).unwrap()
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 202.3b, 202.3e, docs/DECISIONS.md "#38 FP-037 — CodeRabbit
+// round 3: base mana-value provenance from the environment": an environment that supplies the
+// base provenance of a nonmodal back face (front {3}{R}) makes evaluate report mana value 4 with
+// no effects, in every context; X in the front cost counts 0. With the default method the same
+// costless base still gives 0.
+#[test]
+fn round3_base_provenance_evaluate_back_face() {
+    let x = o(1);
+    let r = ContinuousEffects::new();
+    let v = back_face_with_front("{3}{R}");
+    assert_eq!(v.characteristics.mana_cost, None);
+    let env = Env::default().with_values(x, &v);
+    let ev = evaluate(&r, &env, x).unwrap();
+    assert_eq!(ev.characteristics, v.characteristics);
+    assert_eq!(ev.mana_value_provenance, v.provenance());
+    assert_eq!(ev.mana_value(OFF), 4);
+    assert_eq!(ev.mana_value(on_stack(3)), 4);
+    // CR 202.3e: X in the front cost counts 0.
+    let vx = back_face_with_front("{X}{3}{R}");
+    let env_x = Env::default().with_values(x, &vx);
+    assert_eq!(evaluate(&r, &env_x, x).unwrap().mana_value(OFF), 4);
+    assert_eq!(evaluate(&r, &env_x, x).unwrap().mana_value(on_stack(5)), 4);
+    // The default method: plain provenance, the costless face's own 0.
+    let plain_env = Env::default().with(x, v.characteristics.clone());
+    let ev = evaluate(&r, &plain_env, x).unwrap();
+    assert!(ev.mana_value_provenance.is_plain());
+    assert_eq!(ev.mana_value(OFF), 0);
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 202.3b, 613.2c, 707.2, docs/DECISIONS.md "#38 FP-037 —
+// CodeRabbit round 3: base mana-value provenance from the environment": copiable_values of such a
+// base carries the back-face provenance, so a copy of the read with SetManaCost({5}) has mana
+// value 0, directly and once registered through copiable_effect on another object and read back.
+#[test]
+fn round3_base_provenance_copiable_values_back_face() {
+    let (x, y) = (o(1), o(2));
+    let v = back_face_with_front("{3}{R}");
+    let env = Env::default()
+        .with_values(x, &v)
+        .with(y, creature("test.y", 1, 1));
+    let r = ContinuousEffects::new();
+    let read = copiable_values(&r, &env, x).unwrap();
+    assert_eq!(read.provenance(), v.provenance());
+    assert_eq!(read.characteristics, v.characteristics);
+    assert_eq!(read.mana_value(OFF), 4);
+    let five = [CopyException::SetManaCost(Some(cost("{5}")))];
+    let copy = read.copy_with(&creature("test.y", 1, 1), &five);
+    assert_eq!(copy.source, ValueSource::CopyOfBackFaceOrMelded);
+    assert_eq!(copy.mana_value(OFF), 0);
+    let r = registry(vec![(1, copy_eff(&copy, y, 1))]);
+    let ev = evaluate(&r, &env, y).unwrap();
+    assert_eq!(ev.characteristics.mana_cost, Some(cost("{5}")));
+    assert_eq!(ev.mana_value(OFF), 0);
+    let back = copiable_values(&r, &env, y).unwrap();
+    assert_eq!(back.mana_value(OFF), 0);
+    assert_eq!(back.copy_with(&other("test.z"), &five).mana_value(OFF), 0);
+    // The default method: plain provenance, so the costed copy is 5.
+    let plain_env = Env::default().with(x, v.characteristics.clone());
+    let plain_read = copiable_values(&ContinuousEffects::new(), &plain_env, x).unwrap();
+    assert!(plain_read.provenance().is_plain());
+    assert_eq!(
+        plain_read
+            .copy_with(&creature("test.y", 1, 1), &five)
+            .mana_value(OFF),
+        5
+    );
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 202.3c, 713.5c, docs/DECISIONS.md "#38 FP-037 — CodeRabbit
+// round 3: base mana-value provenance from the environment": a melded base supplied with its
+// provenance evaluates to the sum of its front faces (7, X counting 0); a copy of it is 0, also
+// through copiable_effect on another object.
+#[test]
+fn round3_base_provenance_melded() {
+    let (x, y) = (o(1), o(2));
+    let v = melded_values();
+    let env = Env::default()
+        .with_values(x, &v)
+        .with(y, creature("test.y", 1, 1));
+    let r = ContinuousEffects::new();
+    let ev = evaluate(&r, &env, x).unwrap();
+    assert_eq!(ev.mana_value(OFF), 7);
+    assert_eq!(ev.mana_value(on_stack(4)), 7);
+    let read = copiable_values(&r, &env, x).unwrap();
+    assert_eq!(read, v);
+    let copy = read.copy_with(&creature("test.y", 1, 1), &[]);
+    assert_eq!(copy.mana_value(OFF), 0);
+    let r = registry(vec![(1, copy_eff(&copy, y, 1))]);
+    assert_eq!(evaluate(&r, &env, y).unwrap().mana_value(OFF), 0);
+    assert_eq!(copiable_values(&r, &env, y).unwrap().mana_value(OFF), 0);
+}
+
+// REQ-OBJ-002, REQ-LAYER-001; CR 613.2b, 708.2, 202.3a, 202.3b, docs/DECISIONS.md "#38 FP-037 —
+// CodeRabbit round 3: base mana-value provenance from the environment": over a back-face base
+// with its provenance, a FaceDown effect resets the provenance to plain (mana value 0), a plain
+// CopyValues effect resets it to plain, a modification_effect keeps it (4, copies as 0). Two
+// interacting effects in both EffectId orders and both timestamp orders.
+#[test]
+fn round3_base_provenance_replaced_or_kept_in_layer_one() {
+    let x = o(1);
+    let v = back_face_with_front("{3}{R}");
+    let env = Env::default().with_values(x, &v);
+    let down = |t: u64| {
+        plain_eff(
+            Layer::L1b,
+            t,
+            x,
+            LayerModification::FaceDown(Box::new(face_down())),
+        )
+    };
+    let plain = CopiableValues::plain(creature("test.p", 2, 2));
+    // Each alone.
+    let r = registry(vec![(1, down(1))]);
+    let ev = evaluate(&r, &env, x).unwrap();
+    assert!(ev.mana_value_provenance.is_plain());
+    assert_eq!(ev.mana_value(OFF), 0);
+    assert_eq!(
+        copiable_values(&r, &env, x).unwrap(),
+        CopiableValues::plain(face_down())
+    );
+    let r = registry(vec![(1, copy_eff(&plain, x, 1))]);
+    let ev = evaluate(&r, &env, x).unwrap();
+    assert!(ev.mana_value_provenance.is_plain());
+    assert_eq!(ev.mana_value(OFF), 3);
+    let r = registry(vec![(1, pt_mod(x, 1, 6, 6))]);
+    let ev = evaluate(&r, &env, x).unwrap();
+    assert_eq!(ev.mana_value_provenance, v.provenance());
+    assert_eq!(ev.mana_value(OFF), 4);
+    let read = copiable_values(&r, &env, x).unwrap();
+    assert_eq!(read.provenance(), v.provenance());
+    assert_eq!(read.characteristics.power, Some(literal(6)));
+    assert_eq!(read.copy_with(&other("test.c"), &[]).mana_value(OFF), 0);
+    // Pairs, both EffectId orders and both timestamp orders.
+    for (ta, tb) in [(1, 2), (2, 1)] {
+        for (ia, ib) in [(1, 2), (2, 1)] {
+            // modification + FaceDown: 1b is after 1a, so face down whatever the timestamps.
+            let r = registry(vec![(ia, pt_mod(x, ta, 6, 6)), (ib, down(tb))]);
+            let ev = evaluate(&r, &env, x).unwrap();
+            assert!(ev.mana_value_provenance.is_plain());
+            assert_eq!(ev.mana_value(OFF), 0);
+            assert_eq!(ev.characteristics, face_down());
+            // modification + plain copy: the later one decides the source.
+            let r = registry(vec![
+                (ia, pt_mod(x, ta, 6, 6)),
+                (ib, copy_eff(&plain, x, tb)),
+            ]);
+            let ev = evaluate(&r, &env, x).unwrap();
+            let read = copiable_values(&r, &env, x).unwrap();
+            assert!(ev.mana_value_provenance.is_plain());
+            assert_eq!(ev.mana_value(OFF), 3);
+            assert!(read.provenance().is_plain());
+            let want_power = if ta > tb { 6 } else { 2 };
+            assert_eq!(ev.characteristics.power, Some(literal(want_power)));
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-CORE-001; CR 613.2c, 202.3b, 202.3c: property over 200 random cases and
+// every provenance kind as the base provenance: with no effects copiable_values gives the base's
+// characteristics and provenance and evaluate reports its mana value; the result does not depend
+// on the call order.
+#[test]
+fn round3_property_base_provenance() {
+    let mut rng = Lcg(0x3b3);
+    let x = o(1);
+    let r = ContinuousEffects::new();
+    for n in 0..200 {
+        let c = random_chars(&mut rng, n);
+        let kinds = provenance_kinds(&c);
+        let v = &kinds[rng.below(kinds.len())];
+        let env = Env::default().with_values(x, v);
+        let read = copiable_values(&r, &env, x).unwrap();
+        assert_same_values(&read, v);
+        let ev = evaluate(&r, &env, x).unwrap();
+        assert_eq!(ev.mana_value_provenance, v.provenance());
+        for ctx in [OFF, on_stack(2)] {
+            assert_eq!(ev.mana_value(ctx), v.mana_value(ctx));
+        }
+        assert_eq!(copiable_values(&r, &env, x).unwrap(), read);
+        assert_eq!(evaluate(&r, &env, x).unwrap(), ev);
     }
 }

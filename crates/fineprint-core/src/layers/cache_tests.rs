@@ -14,8 +14,10 @@ use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::{ObjectSelectorAST, PredicateAST, SelectorFilter, WordRef};
 
+use fineprint_dsl::mana::ManaCostDSL;
+
 use super::*;
-use crate::objects::Characteristics;
+use crate::objects::{Characteristics, ManaValueContext};
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -174,6 +176,8 @@ struct Env {
     designated: BTreeSet<ObjectId>,
     /// The value of a characteristic-defining expression, per controller (a player value).
     player_value: BTreeMap<PlayerId, i64>,
+    /// The base mana-value provenance; plain for any object not listed (round 3).
+    base_provenance: BTreeMap<ObjectId, ManaValueProvenance>,
 }
 
 impl Env {
@@ -229,6 +233,10 @@ impl LayerEnvironment for Env {
 
     fn base(&self, id: ObjectId) -> Option<ObjectBase> {
         self.bases.get(&id).cloned()
+    }
+
+    fn base_mana_value_provenance(&self, id: ObjectId) -> ManaValueProvenance {
+        self.base_provenance.get(&id).cloned().unwrap_or_default()
     }
 
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
@@ -993,4 +1001,46 @@ fn property_cache_equals_full_recompute() {
         }
         assert_eq!(c.version().get(), s.invalidations);
     }
+}
+
+// REQ-LAYER-005, REQ-CORE-001, REQ-OBJ-002; CR 202.3b, docs/DECISIONS.md "#38 FP-037 —
+// CodeRabbit round 3: base mana-value provenance from the environment": with an environment that
+// supplies a nonmodal back-face base provenance (front {3}{R}), the cache and the uncached
+// evaluator agree (results and digest, also under full-recompute), and the digest differs from
+// the same base with the default plain provenance. After the base provenance changes and the
+// base change is declared (ZoneChange), the cache returns the new value.
+#[test]
+fn base_mana_value_provenance_cached_and_fresh_agree() {
+    let r = registry();
+    let plain_env = Env::board();
+    let mut env = Env::board();
+    let front = ManaCostDSL::parse("{3}{R}").unwrap();
+    let back = env.bases[&o(1)].characteristics.clone();
+    assert_eq!(back.mana_cost, None);
+    let v = CopiableValues::nonmodal_back_face(back, Some(front));
+    env.base_provenance.insert(o(1), v.provenance());
+    let mut c = LayerCache::new();
+    for _ in 0..2 {
+        let cached = c.evaluate_all(&r, &env).unwrap();
+        let fresh = evaluate_all(&r, &env).unwrap();
+        assert_eq!(cached, fresh);
+        assert_eq!(evaluated_digest(&cached), evaluated_digest(&fresh));
+        assert_eq!(cached[&o(1)].mana_value(ManaValueContext::OffStack), 4);
+        assert_eq!(cached[&o(1)].mana_value_provenance, v.provenance());
+        assert_eq!(c.evaluate(&r, &env, o(1)), evaluate(&r, &env, o(1)));
+    }
+    let plain = evaluate_all(&r, &plain_env).unwrap();
+    assert!(plain[&o(1)].mana_value_provenance.is_plain());
+    assert_eq!(plain[&o(1)].mana_value(ManaValueContext::OffStack), 0);
+    assert_ne!(
+        evaluated_digest(&evaluate_all(&r, &env).unwrap()),
+        evaluated_digest(&plain)
+    );
+    // The base provenance changes back to plain: declared as a base change.
+    env.base_provenance.clear();
+    c.invalidate(Invalidation::ZoneChange);
+    let cached = c.evaluate_all(&r, &env).unwrap();
+    assert_eq!(cached, plain);
+    assert_eq!(evaluated_digest(&cached), evaluated_digest(&plain));
+    assert_eq!(cached[&o(1)].mana_value(ManaValueContext::OffStack), 0);
 }

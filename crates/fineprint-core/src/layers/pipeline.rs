@@ -64,8 +64,9 @@ pub struct Evaluated {
     pub characteristics: Characteristics,
     /// The controller (set in layer 2, CR 613.1b).
     pub controller: Option<PlayerId>,
-    /// How the mana value is derived (CR 202.3a-c): plain (the characteristics' own) for the
-    /// base; set by every layer-1 effect that replaces all characteristics
+    /// How the mana value is derived (CR 202.3a-c): for the base,
+    /// [`LayerEnvironment::base_mana_value_provenance`] (plain, the characteristics' own, by
+    /// default); set by every layer-1 effect that replaces all characteristics
     /// ([`LayerModification::CopyValuesWithProvenance`] to its provenance,
     /// [`LayerModification::CopyValues`] and [`LayerModification::FaceDown`] to plain);
     /// [`LayerModification::ApplyCopyExceptions`] may only set its colors pin (CR 707.9b); no
@@ -105,6 +106,28 @@ pub trait LayerEnvironment {
 
     /// The base of `id`; `None` means unknown.
     fn base(&self, id: ObjectId) -> Option<ObjectBase>;
+
+    /// The provenance of the base mana value of `id` before layer 1 (CR 613.1): how the mana
+    /// value of [`ObjectBase::characteristics`] is derived. Called only after [`Self::base`]
+    /// returned `Some` for `id`; both [`evaluate`] and [`crate::layers::copiable_values`] start
+    /// from it. Default: [`ManaValueProvenance::plain`], right for an ordinary object.
+    ///
+    /// For the back face of a nonmodal double-faced object, return
+    /// [`crate::layers::CopiableValues::nonmodal_back_face`]`(..).provenance()`; for a melded
+    /// permanent, [`crate::layers::CopiableValues::melded`]`(..)?.provenance()` (CR 202.3b,
+    /// 202.3c, 713.5c): the object then has the fixed mana value and a copy of it has mana value
+    /// 0. Layers 1a and 1b may replace it: [`LayerModification::CopyValues`] and
+    /// [`LayerModification::FaceDown`] reset it to plain,
+    /// [`LayerModification::CopyValuesWithProvenance`] sets it, and
+    /// [`LayerModification::ApplyCopyExceptions`] keeps it (it may only pin the colors).
+    ///
+    /// The value is part of the object's base: a change to it is declared to a
+    /// [`crate::layers::LayerCache`] with the same invalidation as any other base change
+    /// ([`crate::layers::Invalidation::ZoneChange`]). It must be a pure read (REQ-CORE-001).
+    fn base_mana_value_provenance(&self, id: ObjectId) -> ManaValueProvenance {
+        let _ = id;
+        ManaValueProvenance::plain()
+    }
 
     /// The counters on `id`: kind to amount (at least 1). Default: none.
     fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
@@ -406,13 +429,15 @@ pub fn evaluate_with_order(
 ) -> Result<(Evaluated, OrderRecord), LayerError> {
     // CR 613.1: start with the actual object.
     let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
+    // CR 202.3b, 202.3c, 713.5c: the base's own mana-value provenance (plain by default).
+    let base_provenance = env.base_mana_value_provenance(id);
     let on_battlefield = base.on_battlefield;
     // `pt` is `None` until layer 7 starts or when the object has no power and toughness.
     let mut scratch = Scratch {
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
-            mana_value_provenance: ManaValueProvenance::plain(),
+            mana_value_provenance: base_provenance,
         },
         pt: None,
     };
