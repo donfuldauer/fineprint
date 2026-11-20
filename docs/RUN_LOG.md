@@ -413,3 +413,5 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 04-layers | #40 | rules-researcher | Opus 5.5 | 1 | done | - | baseline CR 2026-11-06 matches; no SRS discrepancy; no CR 614.12d |
 | 04-layers | #40 | Implementer | Opus 5.5 | 1 | done | fmt, clippy, guard clean; workspace 3588 passed 0 failed in both modes; coverage not measured (cargo-llvm-cov missing) | etb.rs, etb_tests.rs (23 tests), mod.rs registration, DECISIONS entry |
 | 04-layers | #40 | Independent Tester | Opus 5.5 | 1 | done | spec_replacement_etb 42 passed; fmt, clippy, guard clean | black-box against the fixed signature |
+| 04-layers | #40 | work-verifier | Opus 5.5 | 1 | fail | fmt, clippy, guard clean; workspace 3588 passed 0 failed in both modes; etb.rs 92.24 %, core 98.9 %; cr check: 607.2f and 614.1d not in docs/cr-citations.json | head 5482115 |
+| 04-layers | #40 | Orchestrator (triage T0) | Opus 5.5 | 1 | done | cr check ok (812 cited rules, baseline CR-2026-11-06) | `cargo xtask cr index` regenerated docs/cr-citations.json |
