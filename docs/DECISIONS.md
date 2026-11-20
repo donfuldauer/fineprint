@@ -889,7 +889,9 @@ observed behaviour, not documented, and is inferred from session tags and transc
 (`Fine Print: next ready issue (backstop)`) instead of calling `create_session`. Every session in
 the chain is then started by the scheduled task, whether the owner or the task started the first
 one. The fired run's text names the firing session, and the task ignores that session when it
-checks for a live chain. §1 step 4 reads the session's own ID from `CLAUDE_CODE_REMOTE_SDK_URL`
+checks for a live chain. The marker comment is posted as pending before firing, then edited to
+handed off (or failed). A retry that finds a pending marker fires only if the task has not run
+since the marker was posted. §1 step 4 reads the session's own ID from `CLAUDE_CODE_REMOTE_SDK_URL`
 instead of calling `get_session`. The session-depth limit is dropped, because fired sessions have
 no parent. The owner chose no replacement cap: the chain stops when no issue is ready, or when the
 task finds another live chain.
