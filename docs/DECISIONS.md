@@ -5577,3 +5577,108 @@ PR #188 CodeRabbit comment 4638613299.
 `DuplicateEffect` or `LayerMismatch` depending on caller order.
 **Alternatives:** Report the lowest-id error of either kind (rejected: still depends on how a tie
 between a duplicate and a mismatch on the same id is broken).
+
+## #35 FP-034 - Maximum hand size is a pass B rule
+
+**Decision:** The maximum hand size is computed only in pass B, from `MAX_HAND_SIZE` rule
+entries (`RuleSet::max_hand_size`); it is never a pass A player effect.
+**Rationale:** CR 613.11 names "modify a player's maximum hand size" as its example of an effect
+that modifies the game rules; the DSL has `RuleKind::MaxHandSize`; SRS §14.4.3 lists `MAX_HAND_SIZE`
+among the rule kinds. SRS 6.4's mention of "maximum hand size when it is phrased as a player
+effect" in pass A is covered by the HUMAN_QUEUE wording fix already on this branch.
+**Alternatives:** A player property in pass A (rejected: contradicts the 613.11 example and the
+DSL); both passes (rejected: two sources of truth).
+
+## #35 FP-034 - Dependency hook in the passes after the layers
+
+**Decision:** Both passes order effects by ascending (timestamp, `EffectId`) with an optional
+dependency hook `PostLayerEnvironment::depends_on(a, b)` ("a depends on b"), consulted only
+between effects of the same pass. Repeatedly, among the unapplied effects that depend on no
+unapplied effect, the earliest key applies; when none is free, the earliest-key member of a
+dependency loop with no way out (a strongly connected component of the unapplied effects that
+depends on nothing outside itself) applies, and the relation is looked at again after each
+application. Self-dependence is ignored. Effects whose `effect_exists` is false are dropped first.
+**Rationale:** CR 613.8a defines dependency within a layer, but CR 613.10 and 613.11 both say
+"See also the rules for timestamp order and dependency (rules 613.7 and 613.8)" and SRS 6.4 asks
+for "timestamp order with dependency". The semantics mirror the layer ordering of "#32 FP-031"
+(613.8b: wait until just after all dependencies; simultaneous dependents in timestamp order; a
+loop in timestamp order). Choosing only among closed loops keeps an effect that depends on a loop
+waiting until after the loop member it depends on. This is a modelling choice.
+**Alternatives:** Pure timestamp order (rejected: drops the 613.8 reference); applying the
+earliest remaining effect when none is free (rejected: an effect outside a loop that depends on a
+loop member could apply before it).
+
+## #35 FP-034 - "Can't lose" and "can't win" are pass B rules
+
+**Decision:** "Can't lose the game" and "can't win the game" effects are `WIN_LOSE_RULE` rule
+entries in pass B; no DSL change.
+**Rationale:** The DSL already makes `WIN_LOSE_RULE` a `RuleKind`; such effects modify the game
+rules (CR 613.11).
+**Alternatives:** Player properties in pass A (rejected: would need a DSL change and duplicates
+the rule kind).
+
+## #35 FP-034 - Resolved effects after the layers and CR 611.2c
+
+**Decision:** A rule effect (pass B) is never locked: its selector is matched against the players
+each time the rule set is built, whatever its origin (CR 611.2c: an effect that modifies the rules
+"can affect objects that weren't affected when that continuous effect began"). A player effect
+(pass A) of `EffectOrigin::Resolved` applies to the player set fixed at registration:
+`register_player` rejects a resolved effect with a `PlayerAffected::Selector` with
+`LayerError::Unsupported`, so the caller resolves the set and passes `PlayerAffected::Fixed`.
+This closes "#34 FP-033 - Rules-modifying parts of resolved effects not locked here".
+**Rationale:** Keeps the CR 611.2c split between characteristic/player changes (fixed set) and
+rules changes (not locked) without the passes needing the game state at registration.
+**Alternatives:** Locking in `register_player` through the environment (rejected: the registry
+would need an environment; the caller already knows the players at resolution); locking rule
+effects too (rejected: contradicts 611.2c).
+
+## #35 FP-034 - RuleModification parameter conventions
+
+**Decision:** `RuleModification.params` is opaque in the DSL; pass B reads:
+- `"action"` (string) for `PROHIBITION`, `CAST_PERMISSION`, `PLAY_PERMISSION` and
+  `TIMING_PERMISSION`, compared by exact string equality; an entry with no string `"action"`
+  applies to no action. `RuleSet::query(player, action, permission)` returns `Prohibited` for the
+  earliest applicable prohibition with that action (CR 101.2: prohibitions are evaluated last,
+  whatever the timestamps), else `Permitted` for the earliest applicable entry of the given
+  permission kind with that action, else `NoEffect`. Land plays use the action `"PLAY_LAND"`.
+- `ADDITIONAL_LAND_PLAY`: `"count"`, absent = 1, a non-negative JSON integer = that number, any
+  other value (negative, non-integer, wrong type) = 0. `land_plays_allowed` = 0 under an applicable
+  `"PLAY_LAND"` prohibition (CR 305.2b, 101.2), else 1 + the sum (CR 305.2), saturating.
+- `MAX_HAND_SIZE`: exactly one of `"set": n` (integer), `"delta": n` (integer) or
+  `"unlimited": true`, applied in application order from 7 (CR 402.2): set replaces, delta adds
+  (saturating; nothing when there is no maximum), unlimited removes the maximum until a later set.
+  An entry with none of the keys, more than one of them, a value of the wrong type, or
+  `"unlimited"` not `true` is ignored. Only the final value is clamped to a minimum of 0, so
+  `set -2` then `delta +3` gives 1.
+**Rationale:** Fixed by the brief so that the implementation and the Independent Tester agree;
+ignoring malformed entries (rather than panicking or guessing) keeps untrusted data untrusted
+(R12); clamping only the result follows the brief's "Result clamps at a minimum of 0".
+**Alternatives:** Typed DSL parameters per kind (rejected: a contract change, `fineprint-dsl` is
+not owned here); clamping after every step (rejected: the brief clamps the result); letting the
+first of several keys win (rejected: depends on key precedence the DSL does not define).
+
+## #35 FP-034 - Pass A returns applied effects, not typed properties
+
+**Decision:** `compute_player_properties` returns, per player, the applied player effects
+(`AppliedPlayerEffect { id, modification }`) in application order. Typed derived properties
+(protection, hexproof and others) are derived by later consumers.
+**Rationale:** The DSL `Modification` of a `PlayerEffect` is generic (`op` plus opaque params);
+the engine has no closed set of player properties yet.
+**Alternatives:** A typed `PlayerProperties` struct now (rejected: would invent a vocabulary the
+DSL does not define).
+
+## #35 FP-034 - Cost stages ordering details
+
+**Decision:** `RuleSet::cost_stages(player)` lists only entries applying to `player`: `grants` are
+the `ALT_COST_GRANT` and `ADDITIONAL_COST_REQUIRE` entries merged in application order (CR 601.2b);
+`increases` the `COST_INCREASE` entries; `reductions` the `COST_REDUCTION` entries in application
+order (the default the player may change with `reorder_reductions`, CR 601.2f); `total_effects`
+all `COST_MINIMUM` entries, then all `COST_SET` entries, each kind in application order.
+`reorder_reductions` accepts exactly a permutation of the current ids and otherwise returns
+`LayerError::Unsupported` leaving the list unchanged. Rule entries keep every player of their
+resolved set, including an empty set; `RuleSet::entries` lists them all. Players in a fixed set
+that the environment does not list are dropped in both passes.
+**Rationale:** Matches the brief's contract; nothing is computed here, the casting procedure uses
+the stages.
+**Alternatives:** Grants grouped by kind (rejected: loses the application order the brief asks
+for).
