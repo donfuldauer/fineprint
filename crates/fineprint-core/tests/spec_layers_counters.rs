@@ -204,6 +204,33 @@ fn keyword_counter_versus_remove_keyword_both_orders() {
     }
 }
 
+// REQ-LAYER-001, REQ-TEST-001, CR 702.11e, 122.1b, 613.1f, 613.7c: a variant keyword counter
+// ("hexproof from red") is removed by a later RemoveKeyword("hexproof") and kept by an earlier
+// one; the kept ability carries the full keyword string.
+#[test]
+fn remove_keyword_hexproof_vs_variant_counter_both_timestamp_orders() {
+    for (counter_ts, present) in [(2, false), (9, true)] {
+        let mut env = TestEnv::new();
+        let a = env.put(oid(1), creature("test.vanilla_2_2", 2, 2));
+        env.counter(a, "hexproof from red", 1, counter_ts);
+        let r = registry(&[(
+            1,
+            eff(
+                Layer::L6,
+                5,
+                objs(&[a]),
+                LayerModification::RemoveKeyword("hexproof".to_string()),
+            ),
+        )]);
+        let c = evaluate(&r, &env, a).unwrap().characteristics;
+        assert_eq!(
+            has_kw(&c, "hexproof from red"),
+            present,
+            "counter at {counter_ts}"
+        );
+    }
+}
+
 // REQ-LAYER-001, CR 613.7c (brief): a counter without a counter timestamp is treated as
 // timestamp 0, so any removal with a later timestamp removes its keyword.
 #[test]
