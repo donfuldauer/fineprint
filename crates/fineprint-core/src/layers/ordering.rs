@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use fineprint_base::ids::{EffectId, ObjectId, Timestamp};
 use fineprint_dsl::ability::Layer;
 
+use super::lockin::LockRecord;
 use super::pipeline::{
     Evaluated, LayerEnvironment, Step, apply_step, declared_pt_adjustment, step_applies, step_order,
 };
@@ -105,7 +106,8 @@ fn item_of(step: &Step<'_>) -> OrderItem {
 }
 
 /// Applies every step of one layer to `scratch` in the REQ-LAYER-002 order and appends each
-/// step to `out` as it is used.
+/// step to `out` as it is used. Every effect that applies is recorded in `locks`, so that a
+/// linked part of a later layer follows it (CR 613.6).
 ///
 /// CR 613.3: in layers 2-6 the CDA steps form a first group and the others a second; elsewhere
 /// all steps form one group. Within a group (CR 613.8b, 613.8c): let U be the unapplied steps;
@@ -118,6 +120,7 @@ pub(super) fn run_layer(
     env: &dyn LayerEnvironment,
     id: ObjectId,
     scratch: &mut Scratch,
+    locks: &mut LockRecord<'_>,
     out: &mut Vec<OrderStep>,
 ) {
     // CR 613.7: index order is ordering-key order (timestamp, effects before counters, EffectId,
@@ -138,7 +141,7 @@ pub(super) fn run_layer(
         let mut remaining = group;
         while !remaining.is_empty() {
             // CR 613.8c: the relation is recomputed against the current state each time.
-            let deps = dependencies(&steps, &remaining, env, id, scratch);
+            let deps = dependencies(&steps, &remaining, env, id, scratch, locks);
             let candidate = (0..remaining.len()).find(|&i| !deps[i].iter().any(|&d| d));
             let (pick, from_loop) = match candidate {
                 // CR 613.8b: the earliest independent step.
@@ -157,9 +160,13 @@ pub(super) fn run_layer(
                 Selection::Timestamp
             };
             let step = &steps[index].1;
-            let applies = step_applies(step, env, id, &scratch.state);
+            let applies = step_applies(step, env, id, &scratch.state, locks);
             if applies {
                 apply_step(scratch, step);
+                if let Step::Effect(eid, _) = step {
+                    // CR 613.6: the set this effect applied to in this layer.
+                    locks.record(*eid);
+                }
             }
             applied[index] = true;
             out.push(OrderStep {
@@ -185,6 +192,7 @@ fn dependencies(
     env: &dyn LayerEnvironment,
     id: ObjectId,
     scratch: &Scratch,
+    locks: &LockRecord<'_>,
 ) -> Vec<Vec<bool>> {
     let n = remaining.len();
     let mut deps = vec![vec![false; n]; n];
@@ -194,12 +202,12 @@ fn dependencies(
     // B's behaviour without A: whether it applies, and its output if it does.
     let without: Vec<Option<Scratch>> = remaining
         .iter()
-        .map(|&b| trial(&steps[b].1, env, id, scratch))
+        .map(|&b| trial(&steps[b].1, env, id, scratch, locks))
         .collect();
     for (j, &a) in remaining.iter().enumerate() {
         let step_a = &steps[a].1;
         // CR 613.8a (b): apply A to a scratch copy.
-        let Some(after_a) = trial(step_a, env, id, scratch) else {
+        let Some(after_a) = trial(step_a, env, id, scratch, locks) else {
             continue;
         };
         if after_a == *scratch {
@@ -212,7 +220,7 @@ fn dependencies(
             if i == j || is_cda(step_a) != is_cda(step_b) {
                 continue;
             }
-            let with = trial(step_b, env, id, &after_a);
+            let with = trial(step_b, env, id, &after_a, locks);
             deps[i][j] = match (&without[i], &with) {
                 // B applies (or exists) in neither state: nothing changed.
                 (None, None) => false,
@@ -236,8 +244,9 @@ fn trial(
     env: &dyn LayerEnvironment,
     id: ObjectId,
     from: &Scratch,
+    locks: &LockRecord<'_>,
 ) -> Option<Scratch> {
-    if !step_applies(step, env, id, &from.state) {
+    if !step_applies(step, env, id, &from.state, locks) {
         return None;
     }
     let mut copy = from.clone();

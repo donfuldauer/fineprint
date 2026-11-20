@@ -5473,3 +5473,107 @@ exception to "the comparison never reads which modification B is".
 belongs to #183 FP-144); compare existence with a separate trial path (rejected: the real
 application and the trial would disagree). (b) Widen P/T to `i128` everywhere (rejected: changes
 the `i64` contract and the saturation behaviour); compare saturated values (the bug).
+
+## #34 FP-033 - "Starts to apply" and the empty first-layer set
+
+**Decision:** The set of a multi-layer effect is fixed by its anchor, the part in the earliest
+layer or sublayer of the group (613.1 order); each `SameAsLayer` part applies to an object
+exactly when that anchor applied to it earlier in the same evaluation. When the anchor applied to
+no object (an empty set, a selector that matched nothing, or a static anchor whose generating
+ability did not exist), the linked parts apply to nothing: the empty set is locked like any
+other. This is an INFERENCE, not a rule: CR 613.6 does not define "starts to apply" nor say what
+happens when the first layer's set is empty.
+**Rationale:** 613.6 says the effect "will continue to be applied to the same set of objects";
+reading "the same set" literally makes the empty set stay empty, and it keeps one rule (follow the
+anchor) with no special case. Letting a later part fall back to its own selector would make the
+later layer choose a set the first layer did not, which is what 613.6 forbids.
+**Alternatives:** Treat an empty first set as "never started" and let later parts choose their
+own set (rejected: not supported by the CR text and introduces a second matching rule); define
+the start as the first layer whose set is non-empty (rejected: same reason).
+
+## #34 FP-033 - SRS 6.3 paraphrase gaps
+
+**Decision:** Where SRS 6.3 paraphrases the CR, the CR text governs: (i) SRS 6.3 omits the CR
+611.2b qualifier "and doesn't begin again during that spell or ability's resolution";
+`ForAsLongAsWindow::effect_does_something` implements the CR (a window that ended before the
+first application but begins again during the resolution does something). (ii) CR 611.2c: each
+part of a resolved group is locked independently (`register_group` resolves every resolved
+selector part on its own, all against the registry as it was before the call). (iii) CR 613.6
+covers sublayers (7a to 7b to 7c to 7d) and effects from any source, static or resolved; for a
+static ability the lock holds only within one evaluation (the record lives in the per-object
+evaluation), so its selector is matched again on the next computation (CR 611.3a).
+**Rationale:** The brief's CR baseline excerpts and the researcher notes; the SRS is a
+paraphrase. No rule number differs between SRS and CR, so nothing goes to HUMAN_QUEUE.
+**Alternatives:** Follow the SRS wording for 611.2b (rejected: CR governs); lock a static group's
+set across evaluations (rejected: contradicts 611.3a).
+
+## #34 FP-033 - Lock-in API shape
+
+**Decision:** A multi-layer effect is registered with `ContinuousEffects::register_group(env,
+parts)`, one `ContinuousEffect` per layer or sublayer, all or nothing. A part with
+`Affected::SameAsLayer(l)` links to its anchor: the non-linked part of the same group whose layer
+is `l`, the lowest `EffectId` if several; `l` must be strictly earlier in `Layer::ALL` order,
+otherwise `LayerError::BadLink(part)`. Links are stored in the registry (part to anchor);
+removing an anchor drops the links to it, so its parts then apply to nothing. Resolved selector
+parts are locked to `Affected::Objects` only by group registration (`resolve_affected_set`:
+every object of `env.objects()` evaluated fully, ascending `ObjectId`); a resolved `SameAsLayer`
+part keeps `SameAsLayer` and follows its (locked) anchor. Plain `register` is unchanged: it never
+locks a selector and still rejects `SameAsLayer` with `Unsupported`, because a link needs a
+group. Parts are validated in ascending `EffectId` order, so neither results nor the reported
+error depend on the order the caller lists the parts in. A linked part does not consult
+`generating_ability_exists` (613.6: "even if the ability generating the effect is removed during
+this process"); the dependency trial uses the same membership rule as the real application.
+`register_group_for_as_long_as` validates and locks exactly as `register_group`, then registers
+nothing and returns `Ok(false)` when the window makes the effect do nothing (CR 611.2b).
+**Rationale:** The shape fixed by the brief so that the Independent Tester can code against it;
+additive to the existing API; keeps one source of truth for membership (`step_applies`) and no
+state outside one evaluation (R3).
+**Alternatives:** A group id on each effect, with the anchor found at evaluation time (rejected:
+larger API change, and the anchor would be re-derived on every evaluation); locking resolved
+selectors in plain `register` (rejected: changes existing behaviour and tests); letting linked
+parts check the generating ability (rejected: contradicts 613.6).
+
+## #34 FP-033 - Rules-modifying parts of resolved effects not locked here
+
+**Decision:** CR 611.2c also says that a part of a resolved effect that does not modify
+characteristics or control "modifies the rules of the game" and can affect objects that were not
+affected when it began. Such parts belong to the passes after the layers (613.10, 613.11) and to
+REQ-LAYER-004; this unit locks only characteristic- and control-changing parts (every
+`LayerModification` is one) and does nothing for rules-modifying parts.
+**Rationale:** The layers module models only layer modifications; the passes after the layers are
+a later unit.
+**Alternatives:** Model rules-modifying parts now (rejected: out of scope, no data model yet).
+
+## #34 FP-033 - Links follow only the first-layer anchor
+
+**Decision:** Refines (does not replace) "#34 FP-033 - Lock-in API shape": its phrase "the
+non-linked part of the same group whose layer is `l`" is narrowed to "`l` must be the earliest
+layer among the group's non-linked parts". Let FIRST be the earliest layer, in `Layer::ALL`
+order, among the parts of a group whose affected set is not `SameAsLayer`. A part with
+`Affected::SameAsLayer(l)` is valid only if `l == FIRST` and `l` is strictly earlier than the
+part's own layer; its anchor is the non-linked part of layer FIRST with the lowest `EffectId`.
+Otherwise `register_group` returns `LayerError::BadLink(part)` and the registry is unchanged.
+Parts with a selector or an object set (not `SameAsLayer`) stay independent at any layer,
+including between FIRST and a linked part: they are never linked and keep their own set (CR
+611.2c). This is an INFERENCE from CR 613.6 ("If an effect starts to apply in one layer ... it
+will continue to be applied to the same set of objects"), SRS 6.3 ("the affected set chosen in
+the first layer where it applies") and "#34 FP-033 - 'Starts to apply' and the empty first-layer
+set". PR #188 CodeRabbit comment 4638613308.
+**Rationale:** A link to a mid-chain independent part would start a separate chain, letting a
+later layer choose a set the effect's first layer did not choose.
+**Alternatives:** Represent several explicit chains per group (rejected: a larger model change,
+and it contradicts the single-set reading of 613.6); leave the check as it was, only "strictly
+earlier" (rejected: a link could follow a set the effect's first layer did not choose).
+
+## #34 FP-033 - Duplicate ids are reported before layer mismatches
+
+**Decision:** `register_group` sorts the parts by ascending `EffectId`, then pass 1 returns
+`DuplicateEffect(id)` for the first id already registered or repeated in the group; only then
+pass 2 returns `LayerMismatch` for the first part whose modification is outside its layer. A
+group with a duplicate id is always reported as `DuplicateEffect`, whatever else is wrong with it.
+PR #188 CodeRabbit comment 4638613299.
+**Rationale:** The reported error must not depend on the order the caller lists the parts in
+(REQ-CORE-001, R3); with one combined pass and a stable sort, two parts sharing an id gave
+`DuplicateEffect` or `LayerMismatch` depending on caller order.
+**Alternatives:** Report the lowest-id error of either kind (rejected: still depends on how a tie
+between a duplicate and a mismatch on the same id is broken).

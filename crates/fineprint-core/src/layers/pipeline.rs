@@ -13,6 +13,7 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
+use super::lockin::LockRecord;
 use super::ordering::{OrderRecord, Scratch, run_layer};
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
@@ -255,15 +256,24 @@ pub(super) fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -
 }
 
 /// Whether `step` applies to `id` in `state`: an effect by its affected set ([`applies_to`])
-/// and the existence of its generating ability ([`generator_exists`]); counters always. Used
-/// both by the real application and by the dependency trial, so the two agree.
+/// and the existence of its generating ability ([`generator_exists`]); a linked
+/// ([`Affected::SameAsLayer`]) part by whether its anchor applied to `id` earlier in this
+/// evaluation (`locks`, CR 613.6); counters always. Used both by the real application and by
+/// the dependency trial, so the two agree.
 pub(super) fn step_applies(
     step: &Step<'_>,
     env: &dyn LayerEnvironment,
     id: ObjectId,
     state: &Evaluated,
+    locks: &LockRecord<'_>,
 ) -> bool {
     match step {
+        // CR 613.6: once the effect starts to apply in one layer, it continues to apply to the
+        // same set of objects in each later layer and sublayer, even if the ability generating
+        // it is removed during this process; so the generating ability is not consulted.
+        Step::Effect(eid, effect) if matches!(effect.affected, Affected::SameAsLayer(_)) => {
+            locks.linked_applies(*eid)
+        }
         Step::Effect(eid, effect) => {
             applies_to(effect, env, id, state) && generator_exists(*eid, effect, env, id, state)
         }
@@ -390,6 +400,8 @@ pub fn evaluate_with_order(
         object: id,
         steps: Vec::new(),
     };
+    // CR 613.6, 611.3a: the lock-in record of this evaluation only.
+    let mut locks = LockRecord::new(effects);
     for &layer in Layer::ALL {
         if layer == Layer::L7a {
             scratch.pt = start_layer_7(&mut scratch.state, env, id, on_battlefield);
@@ -413,7 +425,15 @@ pub fn evaluate_with_order(
             }
         }
         // CR 613.2, 613.3, 613.4, 613.7, 613.8: the order within the layer or sublayer.
-        run_layer(layer, steps, env, id, &mut scratch, &mut record.steps);
+        run_layer(
+            layer,
+            steps,
+            env,
+            id,
+            &mut scratch,
+            &mut locks,
+            &mut record.steps,
+        );
     }
     Ok((scratch.state, record))
 }
@@ -452,7 +472,7 @@ fn applies_to(
                 candidate_view: state,
             },
         ),
-        // Registration rejects it; never applies.
+        // Decided by the lock-in record in [`step_applies`] (CR 613.6).
         Affected::SameAsLayer(_) => false,
     }
 }
