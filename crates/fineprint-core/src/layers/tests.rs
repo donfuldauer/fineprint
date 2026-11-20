@@ -433,6 +433,15 @@ fn modification_layer_table() {
         (set_pt(None, None), vec![Layer::L7a, Layer::L7b]),
         (modify(0, 0), vec![Layer::L7c]),
         (LayerModification::SwitchPt, vec![Layer::L7d]),
+        // REQ-DSL-012, CR 613.1c: the text-changing effect belongs to layer 3 only.
+        (
+            LayerModification::ReplaceTextWord {
+                category: fineprint_dsl::text::RewritableCategory::BasicLandType,
+                from: "Swamp".to_owned(),
+                to: "Island".to_owned(),
+            },
+            vec![Layer::L3],
+        ),
     ];
     for (m, layers) in table {
         for &l in Layer::ALL {

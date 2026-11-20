@@ -10,10 +10,12 @@ use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream};
 use fineprint_dsl::expr::ObjectSelectorAST;
+use fineprint_dsl::text::RewritableCategory;
 
 use super::error::LayerError;
 use super::lockin::{ForAsLongAsWindow, PreparedGroup, prepare_group};
 use super::pipeline::LayerEnvironment;
+use super::text::validate_modification;
 use crate::objects::Characteristics;
 
 /// Where a continuous effect comes from; decides its timestamp (CR 613.7a, 613.7b).
@@ -58,6 +60,21 @@ pub enum LayerModification {
     SetController(PlayerId),
     /// Layer 3 (CR 613.1c): replaces the rules text.
     SetText(TextTokenStream),
+    /// Layer 3 (CR 612.1, 612.2, 613.1c): the text-changing effect `REPLACE_TEXT_WORD`. Every
+    /// rewritable word of the rules text with this `category` and exactly the value `from`
+    /// becomes `to`; literal text, name references and card-name words are never rewritten, and
+    /// granted abilities are not text (CR 612.3). Category `CARD_NAME` and empty or
+    /// noncharacter words are rejected at registration ([`LayerError::Unsupported`]). Rules text
+    /// that is empty or does not decode as a token stream is left unchanged
+    /// ([`crate::layers::rewrite_text_words`], [`crate::layers::decode_rules_text`]).
+    ReplaceTextWord {
+        /// The word category (`COLOR_WORD`, `BASIC_LAND_TYPE`, `CREATURE_TYPE` or `NUMBER`).
+        category: RewritableCategory,
+        /// The word replaced (exact, case-sensitive).
+        from: String,
+        /// The word it becomes.
+        to: String,
+    },
     /// Layer 4 (CR 613.1d): adds the given supertypes, card types and subtypes (union).
     AddTypes {
         /// Supertypes to add.
@@ -117,7 +134,9 @@ impl LayerModification {
             LayerModification::CopyValues(_) => &[Layer::L1a],
             LayerModification::FaceDown(_) => &[Layer::L1b],
             LayerModification::SetController(_) => &[Layer::L2],
-            LayerModification::SetText(_) => &[Layer::L3],
+            LayerModification::SetText(_) | LayerModification::ReplaceTextWord { .. } => {
+                &[Layer::L3]
+            }
             LayerModification::AddTypes { .. }
             | LayerModification::SetTypes { .. }
             | LayerModification::RemoveSubtypes(_) => &[Layer::L4],
@@ -178,10 +197,11 @@ impl ContinuousEffects {
     ///
     /// # Errors
     /// [`LayerError::DuplicateEffect`] if `id` is registered; [`LayerError::LayerMismatch`] if
-    /// the modification does not belong to the effect's layer; [`LayerError::Unsupported`] if
-    /// the affected set is [`Affected::SameAsLayer`] (a link needs a group:
-    /// [`ContinuousEffects::register_group`]). The registry is then unchanged. A selector is
-    /// stored as given, never locked.
+    /// the modification does not belong to the effect's layer; [`LayerError::Unsupported`] for
+    /// a [`LayerModification::ReplaceTextWord`] of category `CARD_NAME` or with an empty or
+    /// noncharacter word (CR 612.2), or if the affected set is [`Affected::SameAsLayer`] (a link
+    /// needs a group: [`ContinuousEffects::register_group`]). The registry is then unchanged. A
+    /// selector is stored as given, never locked.
     pub fn register(&mut self, id: EffectId, effect: ContinuousEffect) -> Result<(), LayerError> {
         if self.effects.contains_key(&id) {
             return Err(LayerError::DuplicateEffect(id));
@@ -191,6 +211,8 @@ impl ContinuousEffects {
                 layer: effect.layer,
             });
         }
+        // CR 612.2: no word replacement of card names; the words must be valid.
+        validate_modification(&effect.modification)?;
         if matches!(effect.affected, Affected::SameAsLayer(_)) {
             return Err(LayerError::Unsupported(
                 "sameAsLayer affected sets (CR 613.6 lock-in)",
@@ -219,7 +241,9 @@ impl ContinuousEffects {
     /// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for an
     /// id given twice or already registered; [`LayerError::LayerMismatch`] for a modification
     /// outside its part's layer (duplicates are reported before mismatches, each in ascending
-    /// id order); [`LayerError::BadLink`] for a `SameAsLayer` part without a valid anchor in the
+    /// id order); [`LayerError::Unsupported`] for an invalid
+    /// [`LayerModification::ReplaceTextWord`] (as [`ContinuousEffects::register`], after the
+    /// mismatches); [`LayerError::BadLink`] for a `SameAsLayer` part without a valid anchor in the
     /// group's first layer; the first error of evaluating an object while locking a selector.
     pub fn register_group(
         &mut self,
