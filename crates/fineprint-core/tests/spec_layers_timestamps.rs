@@ -11,9 +11,10 @@ mod support;
 
 use fineprint_base::ids::{IdGenerator, Timestamp};
 use fineprint_core::layers::{
-    ContinuousEffects, CounterHolder, EffectOrigin, LayerError, LayerModification,
-    SimultaneousStamp, StampReason, TimestampLedger, evaluate, restamp_static_effects,
-    stamp_resolved_effect, stamp_static_and_resolved, static_effect_timestamp,
+    ContinuousEffects, CounterHolder, EffectOrigin, LayerEnvironment, LayerError,
+    LayerModification, SimultaneousStamp, StampReason, TimestampLedger, evaluate,
+    restamp_static_effects, stamp_resolved_effect, stamp_static_and_resolved,
+    static_effect_timestamp,
 };
 use support::*;
 
@@ -341,7 +342,7 @@ fn restamp_preserves_order_among_granted_effects() {
     assert_eq!(t(8), last(&tsg));
 }
 
-// REQ-CORE-002, CR 613.7a, 613.7e (Rune-of-Flight-like scenario, synthetic): an Aura grants
+// REQ-CORE-002, CR 613.7a, 613.7e (synthetic Aura-and-Equipment scenario): an Aura grants
 // an Equipment "equipped creature has flying" later than the Equipment's own "equipped creature
 // loses flying"; the creature has flying. After the Equipment is re-stamped (attached again)
 // and its static effects re-stamped, the same effect still wins.
@@ -352,7 +353,7 @@ fn granted_flying_versus_printed_loses_flying_survives_restamp() {
     let mut env = TestEnv::new();
     let creature_id = env.put(oid(1), creature("test.bearer_2_2", 2, 2));
     let equipment = env.put(oid(2), artifact("test.heavy_equipment_like"));
-    let aura = env.put(oid(3), enchantment("test.wing_rune_like"));
+    let aura = env.put(oid(3), enchantment("test.flight_aura_like"));
     let other_creature = env.put(oid(4), creature("test.second_bearer_1_1", 1, 1));
 
     let t_equipment = ledger
@@ -437,6 +438,107 @@ fn granted_flying_versus_printed_loses_flying_survives_restamp() {
         &evaluate(&wrong, &env, creature_id).unwrap().characteristics,
         "flying"
     ));
+}
+
+// REQ-CORE-002, CR 613.7a, 613.7e: after EVERY one of three re-attachments the printed
+// "loses flying" effect keeps its place before the granted "has flying" effect (the grant is
+// registered under the LOWER EffectId, so only timestamps can make it win); both timestamps
+// grow, resolved effects and other sources' effects are untouched, and the creature has flying.
+#[test]
+fn repeated_reattachment_keeps_granted_flying_after_printed_removal() {
+    let mut tsg = tgen();
+    let mut ledger = TimestampLedger::new();
+    let mut env = TestEnv::new();
+    let bearer = env.put(oid(1), creature("test.bearer_2_2", 2, 2));
+    let equipment = env.put(oid(2), artifact("test.heavy_equipment_like"));
+    let aura = env.put(oid(3), enchantment("test.flight_aura_like"));
+    let foreign_source = env.put(oid(4), enchantment("test.foreign_source"));
+
+    let mut t_equipment = ledger
+        .stamp_object(&mut tsg, equipment, StampReason::EntersZone)
+        .unwrap();
+    let t_aura = ledger
+        .stamp_object(&mut tsg, aura, StampReason::Attached)
+        .unwrap();
+    assert!(t_aura > t_equipment);
+    let t_resolved = stamp_resolved_effect(&mut tsg).unwrap();
+    let t_foreign = ledger
+        .stamp_object(&mut tsg, foreign_source, StampReason::EntersZone)
+        .unwrap();
+
+    let printed = EffectOrigin::Static { granted_at: None };
+    let granted = EffectOrigin::Static {
+        granted_at: Some(t_aura),
+    };
+    let loses = static_eff(
+        equipment,
+        None,
+        Layer::L6,
+        static_effect_timestamp(t_equipment, &printed).get(),
+        objs(&[bearer]),
+        LayerModification::RemoveKeyword("flying".into()),
+    );
+    let has = static_eff(
+        equipment,
+        Some(t_aura.get()),
+        Layer::L6,
+        static_effect_timestamp(t_equipment, &granted).get(),
+        objs(&[bearer]),
+        LayerModification::AddAbility(kw_ability("test.granted_flying", "flying")),
+    );
+    let resolved = eff(
+        Layer::L7c,
+        t_resolved.get(),
+        objs(&[bearer]),
+        modify_pt(1, 1),
+    );
+    let foreign = static_eff(
+        foreign_source,
+        None,
+        Layer::L7c,
+        t_foreign.get(),
+        objs(&[bearer]),
+        modify_pt(2, 2),
+    );
+    // the grant has the LOWER EffectId (1) than the removal (2)
+    let mut effects = registry(&[
+        (1, has),
+        (2, loses),
+        (3, resolved.clone()),
+        (4, foreign.clone()),
+    ]);
+    let ev = evaluate(&effects, &env, bearer).unwrap();
+    assert_eq!(
+        count_kw(&ev.characteristics, "flying"),
+        1,
+        "before any attachment"
+    );
+
+    for round in 1..=3 {
+        let prev_loses = effects.get(eid(2)).unwrap().timestamp;
+        let prev_has = effects.get(eid(1)).unwrap().timestamp;
+        let t_new = ledger
+            .stamp_object(&mut tsg, equipment, StampReason::Attached)
+            .unwrap();
+        restamp_static_effects(&mut effects, &mut tsg, equipment, t_equipment, t_new).unwrap();
+        t_equipment = t_new;
+        let now_loses = effects.get(eid(2)).unwrap().timestamp;
+        let now_has = effects.get(eid(1)).unwrap().timestamp;
+        assert!(now_loses < now_has, "round {round}: relative order kept");
+        assert!(
+            now_loses > prev_loses,
+            "round {round}: printed effect moved on"
+        );
+        assert!(now_has > prev_has, "round {round}: granted effect moved on");
+        assert_eq!(effects.get(eid(3)), Some(&resolved), "round {round}");
+        assert_eq!(effects.get(eid(4)), Some(&foreign), "round {round}");
+        let ev = evaluate(&effects, &env, bearer).unwrap();
+        assert_eq!(
+            count_kw(&ev.characteristics, "flying"),
+            1,
+            "round {round}: still flying"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -711,7 +813,7 @@ fn simultaneous_stamps_with_other_active_player() {
 fn simultaneous_stamps_ignore_batch_input_order() {
     let base = batch();
     let mut expected = None;
-    for perm in permutations(base.len()).into_iter().step_by(7) {
+    for perm in permutations(base.len()) {
         let items: Vec<SimultaneousStamp> = perm
             .iter()
             .map(|i| stamp(base[*i].object.get(), base[*i].player, base[*i].choice))
@@ -900,6 +1002,7 @@ fn nearly_exhausted_generator_is_all_or_nothing() {
         Err(LayerError::IdExhausted)
     );
     assert_eq!(ledger, before);
+    assert_eq!(tsg.last_issued(), u64::MAX - 1, "no timestamp consumed");
 
     // object 1 has one sticker: the host stamp and the sticker stamp need two values
     let mut tsg = IdGenerator::<Timestamp>::from_last_issued(u64::MAX - 1);
@@ -908,12 +1011,14 @@ fn nearly_exhausted_generator_is_all_or_nothing() {
         Err(LayerError::IdExhausted)
     );
     assert_eq!(ledger, before);
+    assert_eq!(tsg.last_issued(), u64::MAX - 1, "no timestamp consumed");
 
     let mut tsg = IdGenerator::<Timestamp>::from_last_issued(u64::MAX - 1);
     assert_eq!(
         stamp_static_and_resolved(&mut tsg),
         Err(LayerError::IdExhausted)
     );
+    assert_eq!(tsg.last_issued(), u64::MAX - 1, "no timestamp consumed");
 
     // with exactly enough left it succeeds
     let mut tsg = IdGenerator::<Timestamp>::from_last_issued(u64::MAX - 2);
@@ -922,4 +1027,39 @@ fn nearly_exhausted_generator_is_all_or_nothing() {
         .unwrap();
     assert_eq!(h, ts(u64::MAX - 1));
     assert_eq!(ledger.sticker_timestamp(oid(1), 1), Some(ts(u64::MAX)));
+    assert_eq!(tsg.last_issued(), u64::MAX);
+}
+
+// REQ-CORE-002, REQ-LAYER-001, CR 613.7c, 122.1b, 613.1f: `counter_no_ts` replacing a counter
+// kind drops its earlier timestamp, so the timestamp-zero fallback applies: the keyword counter
+// then applies BEFORE a layer-6 removal at timestamp 5 and the object ends without haste. With
+// the timestamp kept at 7 (control) the counter applies after the removal and the object has it.
+#[test]
+fn counter_without_timestamp_falls_back_to_zero_even_when_replacing() {
+    let mut env = TestEnv::new();
+    let a = env.put(oid(1), creature("test.bearer_2_2", 2, 2));
+    let removal = |kind: LayerModification| registry(&[(1, eff(Layer::L6, 5, objs(&[a]), kind))]);
+    env.counter(a, "haste", 1, 7);
+    for m in [
+        LayerModification::RemoveAllAbilities,
+        LayerModification::RemoveKeyword("haste".into()),
+    ] {
+        let r = removal(m.clone());
+        assert!(
+            has_kw(&evaluate(&r, &env, a).unwrap().characteristics, "haste"),
+            "counter at 7 survives a removal at 5: {m:?}"
+        );
+    }
+    env.counter_no_ts(a, "haste", 2);
+    assert_eq!(env.counter_timestamp(a, "haste"), None);
+    for m in [
+        LayerModification::RemoveAllAbilities,
+        LayerModification::RemoveKeyword("haste".into()),
+    ] {
+        let r = removal(m.clone());
+        assert!(
+            !has_kw(&evaluate(&r, &env, a).unwrap().characteristics, "haste"),
+            "timestamp-zero counter is removed by a removal at 5: {m:?}"
+        );
+    }
 }

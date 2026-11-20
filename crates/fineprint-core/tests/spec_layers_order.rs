@@ -212,15 +212,15 @@ fn set_types_versus_add_types_both_orders() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// item 2 / item 11: Humility-like + Opalescence-like, both timestamp orders
+// item 2 / item 11: ability-removing + enchantment-animating enchantments, both timestamp orders
 // ---------------------------------------------------------------------------------------------
 
 /// The synthetic battlefield: a global "creatures lose all abilities and are 1/1" enchantment
-/// (`test.global_humility_like`), a "noncreature enchantments are 4/4 creatures" enchantment
+/// (`test.global_ability_remover`), a "noncreature enchantments are 4/4 creatures" enchantment
 /// (`test.global_animate_like`), another enchantment and a plain creature.
-fn humility_opalescence(t_humility: u64, t_animate: u64) -> (TestEnv, ContinuousEffects) {
+fn ability_removal_and_animation(t_remove: u64, t_animate: u64) -> (TestEnv, ContinuousEffects) {
     let mut env = TestEnv::new();
-    let h = env.put(oid(10), enchantment("test.global_humility_like"));
+    let h = env.put(oid(10), enchantment("test.global_ability_remover"));
     let o = env.put(oid(11), enchantment("test.global_animate_like"));
     env.put(
         oid(12),
@@ -265,7 +265,7 @@ fn humility_opalescence(t_humility: u64, t_animate: u64) -> (TestEnv, Continuous
                 h,
                 None,
                 Layer::L6,
-                t_humility,
+                t_remove,
                 by_sel(SEL_CREATURE),
                 LayerModification::RemoveAllAbilities,
             ),
@@ -277,7 +277,7 @@ fn humility_opalescence(t_humility: u64, t_animate: u64) -> (TestEnv, Continuous
                 h,
                 None,
                 Layer::L7b,
-                t_humility,
+                t_remove,
                 by_sel(SEL_CREATURE),
                 set_pt(Some(1), Some(1)),
             ),
@@ -286,13 +286,13 @@ fn humility_opalescence(t_humility: u64, t_animate: u64) -> (TestEnv, Continuous
     (env, effects)
 }
 
-// REQ-LAYER-001, REQ-TEST-001, CR 613.1, 613.4b, 613.5, 613.7: Humility-like EARLIER than
-// Opalescence-like: in 7b the 1/1 applies first and the 4/4 last, so enchantment-creatures
+// REQ-LAYER-001, REQ-TEST-001, CR 613.1, 613.4b, 613.5, 613.7: ability-removing enchantment EARLIER than
+// the enchantment-animating enchantment: in 7b the 1/1 applies first and the 4/4 last, so enchantment-creatures
 // are 4/4 and the plain creature 1/1; all of them lost their abilities in layer 6 (the
 // layer-6 selector sees the layer-4 result).
 #[test]
-fn humility_like_before_animate_like() {
-    let (env, effects) = humility_opalescence(1, 2);
+fn ability_removal_before_animation() {
+    let (env, effects) = ability_removal_and_animation(1, 2);
     for e in [oid(10), oid(11), oid(13)] {
         let ev = evaluate(&effects, &env, e).unwrap();
         assert_eq!(
@@ -309,12 +309,12 @@ fn humility_like_before_animate_like() {
     assert_eq!(pt(&c), spt(1, 1));
 }
 
-// REQ-LAYER-001, REQ-TEST-001, CR 613.1, 613.4b, 613.5, 613.7: Humility-like LATER than
-// Opalescence-like: the 1/1 applies last, so every creature (enchantments included) is 1/1
+// REQ-LAYER-001, REQ-TEST-001, CR 613.1, 613.4b, 613.5, 613.7: ability-removing enchantment LATER than
+// the enchantment-animating enchantment: the 1/1 applies last, so every creature (enchantments included) is 1/1
 // with no abilities.
 #[test]
-fn humility_like_after_animate_like() {
-    let (env, effects) = humility_opalescence(2, 1);
+fn ability_removal_after_animation() {
+    let (env, effects) = ability_removal_and_animation(2, 1);
     for e in [oid(10), oid(11), oid(13)] {
         let ev = evaluate(&effects, &env, e).unwrap();
         assert_eq!(
@@ -330,11 +330,11 @@ fn humility_like_after_animate_like() {
     assert_eq!(pt(&c), spt(1, 1));
 }
 
-// REQ-LAYER-001, CR 613.1, 613.5: without the layer-4 effect, the Humility-like effects leave
+// REQ-LAYER-001, CR 613.1, 613.5: without the layer-4 effect, the ability-removing effects leave
 // the enchantments alone (the selector really depends on the layer-4 result).
 #[test]
-fn humility_like_alone_spares_noncreature_enchantments() {
-    let (env, mut effects) = humility_opalescence(1, 2);
+fn ability_removal_alone_spares_noncreature_enchantments() {
+    let (env, mut effects) = ability_removal_and_animation(1, 2);
     assert!(effects.remove(eid(1)));
     let ev = evaluate(&effects, &env, oid(13)).unwrap();
     assert_eq!(norm(&ev.characteristics), *env.base_chars(oid(13)));
@@ -522,14 +522,14 @@ fn counter_and_three_effects_give_5_8_in_any_order() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// item 11: 613.6 locked set across layers 4 and 7b (Svogthos-style), at this unit's level
+// item 11: 613.6 locked set across layers 4 and 7b (locked land animation), at this unit's level
 // ---------------------------------------------------------------------------------------------
 
 // REQ-LAYER-001, REQ-TEST-001, CR 613.6 (example), 611.2c: a land given a layer-4 "is a
 // creature" and a layer-7b "3/3" with the SAME locked set, then a 7c +1/+1, is a 4/4 land
 // creature that keeps its land abilities.
 #[test]
-fn land_animated_by_locked_pair_then_pumped_is_4_4() {
+fn locked_land_animation_pair_then_pumped_is_4_4() {
     let mut env = TestEnv::new();
     let l = env.put(oid(1), land("test.animated_land"));
     let other = env.put(oid(2), land("test.other_land"));
