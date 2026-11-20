@@ -390,6 +390,17 @@ fn modification_layer_table() {
     let c = Box::new(creature("test.copy", 1, 1));
     let table: Vec<(LayerModification, Vec<Layer>)> = vec![
         (LayerModification::CopyValues(c.clone()), vec![Layer::L1a]),
+        (
+            LayerModification::CopyValuesWithProvenance {
+                characteristics: c.clone(),
+                provenance: ManaValueProvenance::plain(),
+            },
+            vec![Layer::L1a],
+        ),
+        (
+            LayerModification::ApplyCopyExceptions(Vec::new()),
+            vec![Layer::L1a],
+        ),
         (LayerModification::FaceDown(c), vec![Layer::L1b]),
         (LayerModification::SetController(p(1)), vec![Layer::L2]),
         (

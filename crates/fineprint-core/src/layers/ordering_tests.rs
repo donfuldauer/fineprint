@@ -1482,6 +1482,7 @@ fn replay(
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
+            mana_value_provenance: ManaValueProvenance::plain(),
         },
         pt: None,
     };
@@ -1713,6 +1714,7 @@ fn req_layer_002_generating_ability_default_is_true() {
     let view = Evaluated {
         characteristics: artifact(),
         controller: None,
+        mana_value_provenance: ManaValueProvenance::plain(),
     };
     assert!(Plain.generating_ability_exists(e(1), o(1), Some(&view)));
     assert!(Plain.generating_ability_exists(e(1), o(2), None));
@@ -1860,6 +1862,7 @@ fn req_layer_002_declared_pt_adjustment() {
         state: Evaluated {
             characteristics: c,
             controller: Some(p(1)),
+            mana_value_provenance: ManaValueProvenance::plain(),
         },
         pt,
     };

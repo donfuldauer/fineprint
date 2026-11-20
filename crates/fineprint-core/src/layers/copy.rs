@@ -15,13 +15,16 @@
 //! [`CopyException`] in order (CR 707.2, 707.3, 707.9a-d). [`CopiableValues::modified`] is a
 //! copiable modification that is not a copy, such as an "as ... enters" ability setting power
 //! and toughness (CR 613.2a, 707.2). [`copiable_effect`] wraps either in a layer-1a
-//! [`ContinuousEffect`]; [`merge_effect`] is the layer-1a effect of a merge, stamped at the
-//! merge (CR 731.2a). The values are a snapshot taken when the effect is built: changing the
-//! original afterwards changes no built effect (CR 707.2b, 707.2c). Merge and copy effects share
+//! [`ContinuousEffect`] that replaces all characteristics and carries the mana-value provenance
+//! ([`ManaValueProvenance`]); [`modification_effect`] is the layer-1a effect of a non-copy
+//! modification that changes only the fields it sets; [`merge_effect`] is the layer-1a effect
+//! of a merge, stamped at the merge (CR 731.2a). The values are a snapshot taken when the effect
+//! is built: changing the original afterwards changes no built effect (CR 707.2b, 707.2c). Merge and copy effects share
 //! layer 1a and apply in timestamp order (CR 613.2); nothing in the evaluator is special-cased.
 //!
-//! [`copiable_characteristics`] reads an object's copiable values: its base characteristics
-//! after layers 1a and 1b only, so a copy of a copy, of a face-down object (CR 707.2 example,
+//! [`copiable_values`] reads an object's copiable values, with their mana-value provenance, and
+//! [`copiable_characteristics`] its copiable characteristics: its base characteristics after
+//! layers 1a and 1b only, so a copy of a copy, of a face-down object (CR 707.2 example,
 //! 708.2) and of a prototyped permanent (CR 719.3d) take the right values. Counters and the
 //! effects of layers 2-7 are not copied (CR 707.2).
 //!
@@ -44,29 +47,15 @@ use super::error::LayerError;
 use super::lockin::LockRecord;
 use super::ordering::{Keyed, Scratch, run_layer};
 use super::pipeline::{Evaluated, LayerEnvironment, Step};
+pub use super::registry::ValueSource;
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+    ManaValueProvenance,
 };
 use crate::layouts::{FaceUp, LayoutError, MeldedPair, MergedPermanent};
 use crate::objects::{
     CdaColors, Characteristics, ManaValueContext, ManaValueSubject, base_colors, mana_value,
 };
-
-/// How an object's mana value is derived (CR 202.3a-c, 713.5c).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ValueSource {
-    /// Its own mana cost (also a modal DFC face, a token, a face-down object).
-    Plain,
-    /// The mana value is fixed from outside the characteristics: the back face of a nonmodal
-    /// DFC (front cost), a melded permanent (sum of fronts), a merged permanent (top component).
-    Fixed {
-        /// The mana value.
-        mana_value: i64,
-    },
-    /// A copy of the back face of a nonmodal DFC or of a melded permanent: mana value 0
-    /// (CR 202.3b, 202.3c). Copying a `CopyOfBackFaceOrMelded` keeps it.
-    CopyOfBackFaceOrMelded,
-}
 
 /// An object's copiable values: its characteristics at the end of layer 1 (CR 613.2c) and the
 /// source of its mana value.
@@ -94,8 +83,11 @@ pub enum CopyException {
     /// CR 707.9b: the names become exactly these.
     SetNames(BTreeSet<String>),
     /// CR 707.9b: the mana cost becomes this. The colors are re-derived from the new cost and
-    /// the color indicator only if they equalled that derivation of the old cost; otherwise they
-    /// are left (docs/DECISIONS.md "#38 FP-037 — SetManaCost and colors").
+    /// the color indicator only if no earlier exception of the same effect set or kept the
+    /// colors ([`CopyException::SetColors`], [`CopyException::NotCopied`] of
+    /// [`CopiedCharacteristic::Colors`]) and they equalled that derivation of the old cost;
+    /// otherwise they are left (docs/DECISIONS.md "#38 FP-037 — SetManaCost and colors" and
+    /// "#38 FP-037 — CodeRabbit round 1: colors pinned by SetColors and NotCopied(Colors)").
     SetManaCost(Option<ManaCostDSL>),
     /// CR 707.9b, 707.9d: the colors become exactly these and the color indicator is not
     /// copied (cleared).
@@ -171,6 +163,9 @@ enum CdaTarget {
 impl CopyException {
     /// The characteristic whose copied CDA this exception stops from being copied (CR 707.9d):
     /// a set value or a value not copied. `Add*` types keep their CDAs (707.9d last sentence).
+    ///
+    /// Any type-line exception drops any layer-4 CDA: the placeholder ability data does not say
+    /// which part of the type line a layer-4 CDA defines; per-part targets are tracked in #198.
     fn cda_target(&self) -> Option<CdaTarget> {
         match self {
             CopyException::SetColors(_)
@@ -182,7 +177,12 @@ impl CopyException {
                 CopiedCharacteristic::Supertypes
                 | CopiedCharacteristic::CardTypes
                 | CopiedCharacteristic::Subtypes,
-            ) => Some(CdaTarget::Types),
+            ) => {
+                // Any type-line exception drops any layer-4 CDA: the placeholder ability data
+                // does not say which part of the type line a layer-4 CDA defines; per-part
+                // targets are tracked in #198.
+                Some(CdaTarget::Types)
+            }
             CopyException::SetPower(_)
             | CopyException::SetToughness(_)
             | CopyException::NotCopied(
@@ -225,8 +225,15 @@ fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
 }
 
 /// Applies `exceptions` in slice order to `c`; `own` is the copier's values for
-/// [`CopyException::NotCopied`] (CR 707.9a-d).
-fn apply_exceptions(c: &mut Characteristics, own: &Characteristics, exceptions: &[CopyException]) {
+/// [`CopyException::NotCopied`] (CR 707.9a-d). Colors set or kept by an exception stay pinned
+/// for the rest of this call: a later [`CopyException::SetManaCost`] does not re-derive them.
+pub(super) fn apply_exceptions(
+    c: &mut Characteristics,
+    own: &Characteristics,
+    exceptions: &[CopyException],
+) {
+    // CR 707.9b, 707.9c, 707.9d: colors an exception set or kept are final for this effect.
+    let mut colors_pinned = false;
     for exception in exceptions {
         match exception {
             // CR 707.9a: the gained ability becomes part of the copiable values.
@@ -236,7 +243,7 @@ fn apply_exceptions(c: &mut Characteristics, own: &Characteristics, exceptions: 
             CopyException::SetManaCost(cost) => {
                 let derived_old =
                     base_colors(c.mana_cost.as_ref(), c.color_indicator, CdaColors::None);
-                if c.colors == derived_old {
+                if !colors_pinned && c.colors == derived_old {
                     c.colors = base_colors(cost.as_ref(), c.color_indicator, CdaColors::None);
                 }
                 c.mana_cost.clone_from(cost);
@@ -245,6 +252,7 @@ fn apply_exceptions(c: &mut Characteristics, own: &Characteristics, exceptions: 
             CopyException::SetColors(m) => {
                 c.colors = *m;
                 c.color_indicator = None;
+                colors_pinned = true;
             }
             CopyException::SetSupertypes(s) => c.supertypes.clone_from(s),
             CopyException::SetCardTypes(s) => c.card_types.clone_from(s),
@@ -257,7 +265,12 @@ fn apply_exceptions(c: &mut Characteristics, own: &Characteristics, exceptions: 
             CopyException::SetPower(v) => c.power = Some(v.clone()),
             CopyException::SetToughness(v) => c.toughness = Some(v.clone()),
             // CR 707.9c: the copier keeps its original value.
-            CopyException::NotCopied(field) => keep_own(c, own, *field),
+            CopyException::NotCopied(field) => {
+                keep_own(c, own, *field);
+                if *field == CopiedCharacteristic::Colors {
+                    colors_pinned = true;
+                }
+            }
         }
     }
 }
@@ -340,11 +353,12 @@ impl CopiableValues {
 
     /// A merged permanent: the topmost component's characteristics, plus every component's
     /// abilities when mutated ([`MergedPermanent::base_characteristics`], CR 731.2a, 702.140e),
-    /// and the topmost component's mana value. The source is [`ValueSource::Plain`] when that
-    /// mana value equals the characteristics' own off the stack, otherwise
-    /// [`ValueSource::Fixed`]. A `Fixed` merged value copies as a back face (mana value 0,
-    /// CR 202.3b) only when the topmost component is a nonmodal double-faced card with its back
-    /// face up or copying a back face; otherwise it copies as `Plain`.
+    /// and the topmost component's mana value. When the topmost component is a nonmodal
+    /// double-faced card with its back face up or copying a back face, the source is always
+    /// [`ValueSource::Fixed`] and the value copies as a back face (mana value 0, CR 202.3b), even
+    /// when the numbers match. Otherwise the source is [`ValueSource::Plain`] when that mana
+    /// value equals the characteristics' own off the stack, else `Fixed`, and it copies as
+    /// `Plain`.
     ///
     /// # Errors
     /// The [`LayoutError`] of [`MergedPermanent::base_characteristics`] or
@@ -357,12 +371,13 @@ impl CopiableValues {
         let characteristics = merged.base_characteristics(vocab)?;
         let mv = merged.mana_value(vocab)?;
         let own = characteristics.mana_value(ManaValueContext::OffStack);
-        if mv == own {
-            return Ok(CopiableValues::plain(characteristics));
-        }
         let top = &merged.components()[0];
+        // CR 202.3b: a back-face top keeps its classification even when the numbers match.
         let back_face_top = top.def.layout == LayoutBehavior::DfcNonmodal
             && (top.query.status.face_up == FaceUp::Back || top.query.status.copying_back_face);
+        if mv == own && !back_face_top {
+            return Ok(CopiableValues::plain(characteristics));
+        }
         Ok(CopiableValues {
             characteristics,
             source: ValueSource::Fixed { mana_value: mv },
@@ -375,11 +390,32 @@ impl CopiableValues {
     /// value; [`ValueSource::CopyOfBackFaceOrMelded`] 0 (CR 202.3b, 202.3c).
     #[must_use]
     pub fn mana_value(&self, ctx: ManaValueContext) -> i64 {
-        match self.source {
-            ValueSource::Plain => self.characteristics.mana_value(ctx),
-            ValueSource::Fixed { mana_value } => mana_value,
-            // CR 202.3b, 202.3c: a copy of a nonmodal back face or of a melded permanent is 0.
-            ValueSource::CopyOfBackFaceOrMelded => 0,
+        // CR 202.3, 202.3b, 202.3c, 202.3e.
+        self.provenance().mana_value(&self.characteristics, ctx)
+    }
+
+    /// The provenance of the mana value: the source and whether a copy has mana value 0
+    /// (CR 202.3b, 202.3c).
+    #[must_use]
+    pub fn provenance(&self) -> ManaValueProvenance {
+        ManaValueProvenance {
+            source: self.source.clone(),
+            zero_when_copied: self.zero_when_copied,
+        }
+    }
+
+    /// Copiable values from characteristics and a mana-value provenance, for example those of
+    /// an [`Evaluated`] ([`Evaluated::mana_value_provenance`]); [`copiable_values`] builds them
+    /// this way. The inverse of [`CopiableValues::provenance`].
+    #[must_use]
+    pub fn with_provenance(
+        characteristics: Characteristics,
+        provenance: ManaValueProvenance,
+    ) -> CopiableValues {
+        CopiableValues {
+            characteristics,
+            source: provenance.source,
+            zero_when_copied: provenance.zero_when_copied,
         }
     }
 
@@ -412,11 +448,7 @@ impl CopiableValues {
         }
         // CR 707.9a-c: the exceptions, in order.
         apply_exceptions(&mut c, own, exceptions);
-        let zero = match self.source {
-            ValueSource::CopyOfBackFaceOrMelded => true,
-            ValueSource::Fixed { .. } => self.zero_when_copied,
-            ValueSource::Plain => false,
-        };
+        let zero = self.provenance().copies_as_zero();
         CopiableValues {
             characteristics: c,
             // CR 202.3b, 202.3c: a copy of a back face or melded permanent has mana value 0.
@@ -433,6 +465,10 @@ impl CopiableValues {
     /// toughness, CR 613.2a, 707.2): these values with the exceptions applied in order, source
     /// unchanged. A [`CopyException::NotCopied`] keeps this object's own value (no change), and
     /// no ability is dropped.
+    ///
+    /// The result is a complete snapshot: [`copiable_effect`] of it replaces all characteristics,
+    /// copied ones included. The layer-1a effect that carries only the fields the modification
+    /// sets is [`modification_effect`].
     #[must_use]
     pub fn modified(&self, exceptions: &[CopyException]) -> CopiableValues {
         let mut c = self.characteristics.clone();
@@ -445,14 +481,18 @@ impl CopiableValues {
     }
 }
 
-/// The copiable values of `id`: the object's characteristics after layers 1a and 1b only
-/// (CR 613.2c, 707.2). Counters and effects of layers 2-7 do not apply, and power and
+/// The copiable characteristics of `id`: the object's characteristics after layers 1a and 1b
+/// only (CR 613.2c, 707.2). Counters and effects of layers 2-7 do not apply, and power and
 /// toughness stay as expressions (a characteristic-defining expression is not evaluated).
 ///
 /// The two sublayers are run exactly as [`crate::layers::evaluate`] runs them (same ordering,
 /// affected sets, lock-in and generating-ability checks), so layer 1a applies before 1b
 /// (CR 613.2a, 613.2b): a face-down permanent that becomes a copy stays face down (CR 708.10)
 /// and a copy of a face-down permanent copies its face-down values (CR 708.2).
+///
+/// This gives the characteristics only: wrapping them with [`CopiableValues::plain`] loses a
+/// fixed or zero mana value (CR 202.3b, 202.3c). [`copiable_values`] is the same run with the
+/// mana-value provenance, and is what a copy of `id` should copy.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -461,12 +501,43 @@ pub fn copiable_characteristics(
     env: &dyn LayerEnvironment,
     id: ObjectId,
 ) -> Result<Characteristics, LayerError> {
+    layer_one(effects, env, id).map(|state| state.characteristics)
+}
+
+/// The copiable values of `id`: the characteristics of [`copiable_characteristics`] (the same
+/// layer 1a and 1b run, CR 613.2c, 707.2) with the mana-value provenance of that run
+/// ([`Evaluated::mana_value_provenance`]): plain for the base, set by each layer-1a effect that
+/// replaces all characteristics, kept by a [`modification_effect`], plain again after a
+/// face-down effect (CR 708.2, 202.3a). For any values `V`, registering [`copiable_effect`] of
+/// `V` on an object and reading `copiable_values` gives `V` back.
+///
+/// # Errors
+/// [`LayerError::UnknownObject`] if the environment has no base for `id`.
+pub fn copiable_values(
+    effects: &ContinuousEffects,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+) -> Result<CopiableValues, LayerError> {
+    let state = layer_one(effects, env, id)?;
+    Ok(CopiableValues::with_provenance(
+        state.characteristics,
+        state.mana_value_provenance,
+    ))
+}
+
+/// `id` after layers 1a and 1b only (CR 613.2, 613.2c).
+fn layer_one(
+    effects: &ContinuousEffects,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+) -> Result<Evaluated, LayerError> {
     // CR 613.1: start with the actual object.
     let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
     let mut scratch = Scratch {
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
+            mana_value_provenance: ManaValueProvenance::plain(),
         },
         pt: None,
     };
@@ -481,12 +552,16 @@ pub fn copiable_characteristics(
             .collect();
         run_layer(layer, steps, env, id, &mut scratch, &mut locks, &mut record);
     }
-    Ok(scratch.state.characteristics)
+    Ok(scratch.state)
 }
 
 /// A layer-1a continuous effect (CR 613.2a) carrying these copiable values, with the given
-/// timestamp (CR 613.7b): [`Layer::L1a`], [`LayerModification::CopyValues`], `is_cda` false,
-/// [`Affected::Objects`]`(objects)`. The values are a snapshot (CR 707.2b, 707.2c).
+/// timestamp (CR 613.7b): [`Layer::L1a`], `is_cda` false, [`Affected::Objects`]`(objects)`.
+/// The modification is [`LayerModification::CopyValues`] when the values' mana value is plain,
+/// otherwise [`LayerModification::CopyValuesWithProvenance`], so the evaluated object and
+/// [`copiable_values`] keep a fixed or zero mana value (CR 202.3b, 202.3c). Either replaces all
+/// characteristics. The values are a snapshot (CR 707.2b, 707.2c); for a modification that
+/// changes only the fields it sets, use [`modification_effect`].
 #[must_use]
 pub fn copiable_effect(
     values: &CopiableValues,
@@ -504,12 +579,57 @@ pub fn copiable_effect(
         is_cda: false,
         origin,
         affected: Affected::Objects(objects),
-        modification: LayerModification::CopyValues(Box::new(values.characteristics.clone())),
+        modification: copy_modification(values),
+    }
+}
+
+/// The layer-1a modification of `values`: plain values as [`LayerModification::CopyValues`],
+/// any other provenance as [`LayerModification::CopyValuesWithProvenance`].
+fn copy_modification(values: &CopiableValues) -> LayerModification {
+    let characteristics = Box::new(values.characteristics.clone());
+    let provenance = values.provenance();
+    if provenance.is_plain() {
+        LayerModification::CopyValues(characteristics)
+    } else {
+        LayerModification::CopyValuesWithProvenance {
+            characteristics,
+            provenance,
+        }
+    }
+}
+
+/// A layer-1a continuous effect (CR 613.2a, 707.2) for a copiable modification that is not a
+/// copy, such as an "as ... enters" ability setting power and toughness: the `exceptions`, in
+/// order, applied to the object's characteristics as layer 1a has them at this effect's
+/// timestamp ([`LayerModification::ApplyCopyExceptions`]). Only the fields the exceptions set
+/// change, so removing an earlier copy effect also removes what it copied while the set values
+/// stay; a later copy effect replaces all characteristics, these included (CR 613.2, timestamp
+/// order). A [`CopyException::NotCopied`] changes nothing; no ability is dropped; the mana-value
+/// provenance is kept. [`Layer::L1a`], `is_cda` false, [`Affected::Objects`]`(objects)`.
+#[must_use]
+pub fn modification_effect(
+    exceptions: &[CopyException],
+    source: Option<ObjectId>,
+    controller: PlayerId,
+    origin: EffectOrigin,
+    timestamp: Timestamp,
+    objects: BTreeSet<ObjectId>,
+) -> ContinuousEffect {
+    ContinuousEffect {
+        source,
+        controller,
+        timestamp,
+        layer: Layer::L1a,
+        is_cda: false,
+        origin,
+        affected: Affected::Objects(objects),
+        modification: LayerModification::ApplyCopyExceptions(exceptions.to_vec()),
     }
 }
 
 /// The layer-1a effect of a merge (CR 731.2a, 613.2a): [`copiable_effect`] of
-/// [`CopiableValues::merged`] for the one merged `object`, no source, origin
+/// [`CopiableValues::merged`] for the one merged `object` (so a fixed mana value, or a back-face
+/// top whose copy has mana value 0, is carried with it), no source, origin
 /// [`EffectOrigin::Resolved`], stamped at the merge (`timestamp`, which the caller takes from
 /// its ledger). A later merge is a new effect with a later timestamp and supersedes this one by
 /// timestamp order (CR 613.2); the caller may remove the old one.
