@@ -5543,3 +5543,37 @@ REQ-LAYER-004; this unit locks only characteristic- and control-changing parts (
 **Rationale:** The layers module models only layer modifications; the passes after the layers are
 a later unit.
 **Alternatives:** Model rules-modifying parts now (rejected: out of scope, no data model yet).
+
+## #34 FP-033 - Links follow only the first-layer anchor
+
+**Decision:** Refines (does not replace) "#34 FP-033 - Lock-in API shape": its phrase "the
+non-linked part of the same group whose layer is `l`" is narrowed to "`l` must be the earliest
+layer among the group's non-linked parts". Let FIRST be the earliest layer, in `Layer::ALL`
+order, among the parts of a group whose affected set is not `SameAsLayer`. A part with
+`Affected::SameAsLayer(l)` is valid only if `l == FIRST` and `l` is strictly earlier than the
+part's own layer; its anchor is the non-linked part of layer FIRST with the lowest `EffectId`.
+Otherwise `register_group` returns `LayerError::BadLink(part)` and the registry is unchanged.
+Parts with a selector or an object set (not `SameAsLayer`) stay independent at any layer,
+including between FIRST and a linked part: they are never linked and keep their own set (CR
+611.2c). This is an INFERENCE from CR 613.6 ("If an effect starts to apply in one layer ... it
+will continue to be applied to the same set of objects"), SRS 6.3 ("the affected set chosen in
+the first layer where it applies") and "#34 FP-033 - 'Starts to apply' and the empty first-layer
+set". PR #188 CodeRabbit comment 4638613308.
+**Rationale:** A link to a mid-chain independent part would start a separate chain, letting a
+later layer choose a set the effect's first layer did not choose.
+**Alternatives:** Represent several explicit chains per group (rejected: a larger model change,
+and it contradicts the single-set reading of 613.6); leave the check as it was, only "strictly
+earlier" (rejected: a link could follow a set the effect's first layer did not choose).
+
+## #34 FP-033 - Duplicate ids are reported before layer mismatches
+
+**Decision:** `register_group` sorts the parts by ascending `EffectId`, then pass 1 returns
+`DuplicateEffect(id)` for the first id already registered or repeated in the group; only then
+pass 2 returns `LayerMismatch` for the first part whose modification is outside its layer. A
+group with a duplicate id is always reported as `DuplicateEffect`, whatever else is wrong with it.
+PR #188 CodeRabbit comment 4638613299.
+**Rationale:** The reported error must not depend on the order the caller lists the parts in
+(REQ-CORE-001, R3); with one combined pass and a stable sort, two parts sharing an id gave
+`DuplicateEffect` or `LayerMismatch` depending on caller order.
+**Alternatives:** Report the lowest-id error of either kind (rejected: still depends on how a tie
+between a duplicate and a mismatch on the same id is broken).

@@ -34,8 +34,8 @@
 //!
 //! **Lock-in** (REQ-LAYER-003, SRS 6.3). A multi-layer effect is registered as a group of
 //! parts, one per layer or sublayer ([`ContinuousEffects::register_group`]). A part whose
-//! affected set is [`Affected::SameAsLayer`] follows its anchor, the part of the named earlier
-//! layer: within one evaluation of an object it applies exactly when the anchor applied to that
+//! affected set is [`Affected::SameAsLayer`] follows its anchor, the part of the group's first
+//! layer (the earliest layer of its parts that are not `SameAsLayer`): within one evaluation of an object it applies exactly when the anchor applied to that
 //! object, even if the object stopped matching the selector or the generating ability was
 //! removed in between (CR 613.6). An anchor that applied to nothing locks its parts to nothing.
 //! A resolved part with a selector is locked to the concrete set

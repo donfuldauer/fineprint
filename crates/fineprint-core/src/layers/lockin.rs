@@ -6,8 +6,8 @@
 //!
 //! A multi-layer effect is registered as a group ([`ContinuousEffects::register_group`]): one
 //! [`ContinuousEffect`] per layer or sublayer. A part whose affected set is
-//! [`Affected::SameAsLayer`] is linked to its anchor (the part of the named, strictly earlier
-//! layer) and applies to an object exactly when the anchor applied to it earlier in the same
+//! [`Affected::SameAsLayer`] is linked to its anchor (the part of the group's first layer, which
+//! must be strictly earlier) and applies to an object exactly when the anchor applied to it earlier in the same
 //! evaluation (CR 613.6). A resolved part with a selector is replaced by the concrete set of
 //! objects matching it when the group is registered (CR 611.2c); a static part keeps its selector
 //! and is matched again on every evaluation (CR 611.3a). A "for as long as" window that never
@@ -108,11 +108,22 @@ pub(super) struct PreparedGroup {
 /// Validates a group against `registry` and locks its resolved selector parts (CR 613.6,
 /// 611.2c). Nothing is modified; every part locks against the registry as it is now.
 ///
+/// The parts are sorted by ascending [`EffectId`], then checked in passes, each pass walking the
+/// parts in that order: (1) duplicate ids, (2) layer mismatches, (3) links, (4) selector locking.
+/// A group with a duplicate id is therefore always reported as [`LayerError::DuplicateEffect`],
+/// whatever else is wrong with it, and the order the caller lists the parts in never changes a
+/// result or the reported error (REQ-CORE-001).
+///
+/// A `SameAsLayer(l)` part is valid only if `l` is the group's first layer (the earliest layer,
+/// in [`Layer::ALL`] order, of the parts that are not `SameAsLayer`) and `l` is strictly earlier
+/// than the part's own layer; its anchor is the lowest-id non-linked part of that layer.
+///
 /// # Errors
-/// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for an id
-/// used twice in the group or already registered; [`LayerError::LayerMismatch`] for a
-/// modification outside its part's layer; [`LayerError::BadLink`] for a `SameAsLayer` part
-/// without an anchor in a strictly earlier layer; the first error of [`resolve_affected_set`].
+/// [`LayerError::Unsupported`] for an empty group; [`LayerError::DuplicateEffect`] for the
+/// lowest id used twice in the group or already registered; [`LayerError::LayerMismatch`] for
+/// the lowest-id part whose modification is outside its layer; [`LayerError::BadLink`] for a
+/// `SameAsLayer` part that does not name the group's first layer or whose own layer is not
+/// strictly later; the first error of [`resolve_affected_set`].
 pub(super) fn prepare_group(
     registry: &ContinuousEffects,
     env: &dyn LayerEnvironment,
@@ -121,19 +132,32 @@ pub(super) fn prepare_group(
     if parts.is_empty() {
         return Err(LayerError::Unsupported("empty effect group"));
     }
-    // Ascending EffectId: the order the caller listed the parts in never changes a result or
-    // which error is reported (REQ-CORE-001).
+    // Ascending EffectId, then one pass per kind of error: every duplicate id is reported before
+    // any layer mismatch, so neither a result nor the reported error depends on the order the
+    // caller listed the parts in (REQ-CORE-001).
     parts.sort_by_key(|(id, _)| *id);
-    for (i, (id, part)) in parts.iter().enumerate() {
+    // Pass 1: duplicate ids, against the registry and within the group.
+    for (i, (id, _)) in parts.iter().enumerate() {
         if registry.get(*id).is_some() || (i > 0 && parts[i - 1].0 == *id) {
             return Err(LayerError::DuplicateEffect(*id));
         }
+    }
+    // Pass 2: layer mismatches (ids are unique now, so the first is well defined).
+    for (_, part) in &parts {
         if !part.modification.belongs_to(part.layer) {
             return Err(LayerError::LayerMismatch { layer: part.layer });
         }
     }
-    // CR 613.6: each SameAsLayer part continues the set its anchor started with in an earlier
-    // layer or sublayer. The anchor is the lowest-id non-linked part of the named layer.
+    // CR 613.6: an effect that "starts to apply in one layer" continues to apply to "the same
+    // set of objects" in each later layer; SRS 6.3: the set chosen "in the first layer where it
+    // applies". INFERENCE (docs/DECISIONS.md): a SameAsLayer part may only follow the group's
+    // first layer, the earliest layer of its non-linked parts; its anchor is the lowest-id
+    // non-linked part of that layer. Other non-linked parts stay independent (CR 611.2c).
+    let first_layer = parts
+        .iter()
+        .filter(|(_, a)| !matches!(a.affected, Affected::SameAsLayer(_)))
+        .map(|(_, a)| a.layer)
+        .min_by_key(|l| layer_index(*l));
     let mut links = BTreeMap::new();
     for (id, part) in &parts {
         let Affected::SameAsLayer(anchor_layer) = part.affected else {
@@ -146,7 +170,10 @@ pub(super) fn prepare_group(
             })
             .map(|(aid, _)| *aid);
         match anchor {
-            Some(aid) if layer_index(anchor_layer) < layer_index(part.layer) => {
+            Some(aid)
+                if first_layer == Some(anchor_layer)
+                    && layer_index(anchor_layer) < layer_index(part.layer) =>
+            {
                 links.insert(*id, aid);
             }
             _ => return Err(LayerError::BadLink(*id)),
