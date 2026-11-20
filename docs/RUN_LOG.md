@@ -348,3 +348,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 04-layers | #34 | work-classifier | Sonnet 5.5 | 2 | routed | — | T2 x2 (Implementer + Independent Tester), disjoint owned paths |
 | 04-layers | #34 | Implementer | Opus 5.5 | 1 | done | workspace 3081 passed; fmt, clippy, guard clean; layers lib 119 passed (20 new lockin tests) | 084e9d7; register_group, register_group_for_as_long_as, resolve_affected_set, ForAsLongAsWindow, LayerError::BadLink; 4 DECISIONS entries |
 | 04-layers | #34 | Independent Tester | Opus 5.5 | 1 | done | spec_layers_lockin 29 passed; all spec_* 1440 passed | 2b370be; scenarios A-I black-box |
+| 04-layers | #34 | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy, guard clean; workspace 3081 passed 0 failed 0 ignored; core 98.87 %, lockin.rs 100 %; owned paths clean per commit | head e1e2cfd |
+| 04-layers | #34 (PR #188 review round 1) | work-classifier | Sonnet 5.5 | 1 | routed | — | 3 CodeRabbit findings (4638613299 F1 minor, 4638613308 F2 major, 4638613318 F3 minor) all valid; src Fixer T2 + tester-side Fixer T1 |
+| 04-layers | #34 (PR #188 review round 1) | Fixer (src) | Opus 5.5 | 1 | done | workspace 3089 passed; fmt, clippy, guard clean | duplicate pass before layer pass; SameAsLayer only to first-layer anchor; unit order-record check; 2 DECISIONS entries |
+| 04-layers | #34 (PR #188 review round 1) | Fixer (tester) | Sonnet 5.5 | 1 | done | spec_layers_lockin 33 passed | F3 order-record assertions; F1/F2 black-box tests (j_*) |
