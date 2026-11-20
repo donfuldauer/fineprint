@@ -7,6 +7,7 @@
 // REQ-LAYER-001 and REQ-CORE-001 preserved. Synthetic ids, synthetic characteristics and
 // neutral names only (REQ-TEST-001).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
@@ -183,6 +184,11 @@ struct Env {
     bases: BTreeMap<ObjectId, ObjectBase>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
     counter_ts: BTreeMap<(ObjectId, String), Timestamp>,
+    /// Effect id to the keyword its generating ability is (CR 613.8a existence): the ability
+    /// exists while the source, seen through `source_view`, has that keyword.
+    generators: BTreeMap<EffectId, String>,
+    /// Every `generating_ability_exists` call: (effect, source, whether `source_view` was given).
+    generator_calls: RefCell<Vec<(EffectId, ObjectId, bool)>>,
 }
 
 impl Env {
@@ -205,6 +211,11 @@ impl Env {
             .insert(kind.to_owned(), amount);
         self.counter_ts
             .insert((id, kind.to_owned()), Timestamp::new(t));
+        self
+    }
+
+    fn generator(mut self, effect: EffectId, keyword: &str) -> Env {
+        self.generators.insert(effect, keyword.to_owned());
         self
     }
 }
@@ -246,6 +257,21 @@ impl LayerEnvironment for Env {
                 .as_ref()
                 .is_some_and(|q| holds(q, ctx.candidate_view)),
             ObjectSelectorAST::Ref(_) => false,
+        }
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        self.generator_calls
+            .borrow_mut()
+            .push((effect, source, source_view.is_some()));
+        match (self.generators.get(&effect), source_view) {
+            (Some(keyword), Some(view)) => has_kw(&view.characteristics, keyword),
+            _ => true,
         }
     }
 }
@@ -1276,9 +1302,11 @@ fn random_effect(rng: &mut Lcg, affected: Affected) -> ContinuousEffect {
 /// counters, then EffectId or counter kind.
 type Key = (usize, Timestamp, u8, Option<EffectId>, Option<String>);
 
-/// REQ-LAYER-002, CR 613.7, 613.8b: with no dependency and no CDA, the order used equals
-/// timestamp order (ties: effects before counters, ascending EffectId, ascending counter kind)
-/// and every step is selected by timestamp, for 300 random scenes in 4 registration orders each.
+/// REQ-LAYER-002, CR 613.4c, 613.7, 613.8a, 613.8b: with no dependency and no CDA, the order
+/// used equals timestamp order (ties: effects before counters, ascending EffectId, ascending
+/// counter kind) and every step is selected by timestamp, for 300 random scenes in 4
+/// registration orders each, each also run with the base power and toughness at the `i64`
+/// bounds (where 7c adders and P/T counters saturate) to show saturation creates no dependency.
 #[test]
 fn req_layer_002_property_no_dependency_is_timestamp_order() {
     let mut rng = Lcg(0x0613_0008);
@@ -1327,15 +1355,22 @@ fn req_layer_002_property_no_dependency_is_timestamp_order() {
         for _ in 0..4 {
             let mut shuffled = list.clone();
             rng.shuffle(&mut shuffled);
-            let (_, rec) = run(&shuffled, &env, o(1));
-            let got: Vec<OrderItem> = rec.steps.iter().map(|s| s.item.clone()).collect();
-            assert_eq!(got, want, "seed {seed}");
-            assert!(
-                rec.steps
-                    .iter()
-                    .all(|s| s.selection == Selection::Timestamp),
-                "seed {seed}: {rec:?}"
-            );
+            // CR 613.4c, 613.8a: the same scene at the i64 bounds orders the same way.
+            for (power, toughness) in [(2, 3), (i64::MAX, i64::MIN), (i64::MIN, i64::MAX)] {
+                let env = env.clone().with(
+                    o(1),
+                    creature(power, toughness, vec![kw("flying"), ability("printed")]),
+                );
+                let (_, rec) = run(&shuffled, &env, o(1));
+                let got: Vec<OrderItem> = rec.steps.iter().map(|s| s.item.clone()).collect();
+                assert_eq!(got, want, "seed {seed} {power}");
+                assert!(
+                    rec.steps
+                        .iter()
+                        .all(|s| s.selection == Selection::Timestamp),
+                    "seed {seed} {power}: {rec:?}"
+                );
+            }
         }
     }
 }
@@ -1343,13 +1378,15 @@ fn req_layer_002_property_no_dependency_is_timestamp_order() {
 /// REQ-LAYER-002, REQ-CORE-001, CR 613.3, 613.8b, 613.8c: for random scenes with selector
 /// effects (so dependencies and loops occur), CDAs and counters: every step is used exactly
 /// once, layers appear in `Layer::ALL` order, in layers 2-6 every CDA precedes every non-CDA,
-/// a step is `applied` exactly when its affected set includes the object, and registration
-/// order changes neither the Evaluated nor the record.
+/// a step is `applied` exactly when its affected set includes the object (checked by replaying
+/// the record from the base, matching both applied and unapplied selector effects), and
+/// registration order changes neither the Evaluated nor the record.
 #[test]
 fn req_layer_002_property_order_invariants_with_dependencies() {
     let mut rng = Lcg(0x0613_0803);
     let words = ["Alphakin", "Betakin", "Testkin"];
     let mut seen = BTreeSet::new();
+    let mut selector_applied = BTreeSet::new();
     for seed in 0..300 {
         let mut env = Env::default().with(o(1), creature(2, 3, vec![kw("flying")]));
         for kind in ["+1/+1", "flying"] {
@@ -1401,6 +1438,10 @@ fn req_layer_002_property_order_invariants_with_dependencies() {
                 assert!(matches!(s.item, OrderItem::Effect(_)), "seed {seed}");
             }
         }
+        // Replay the record from the base: `applied` is exactly whether the effect's affected
+        // set includes the object at that step (CR 611.2c, 611.3a, 613.5); counters always.
+        let replayed = replay(&rec, &list, &env, &mut selector_applied, seed);
+        assert_eq!(replayed, ev, "seed {seed}");
         for _ in 0..3 {
             let mut shuffled = list.clone();
             rng.shuffle(&mut shuffled);
@@ -1413,4 +1454,479 @@ fn req_layer_002_property_order_invariants_with_dependencies() {
     }
     // The generator reaches every kind of selection.
     assert_eq!(seen.len(), 4, "{seen:?}");
+    // Selector effects were seen both applying and not applying: the replay check is not vacuous.
+    assert_eq!(
+        selector_applied,
+        [false, true].into_iter().collect(),
+        "{selector_applied:?}"
+    );
+}
+
+/// Replays `rec` on object 1 from its base, step by step in the recorded order, asserting that
+/// each step's `applied` equals whether its affected set includes the object at that point,
+/// computed from the effect's `affected` alone: a locked set by membership, a selector by
+/// `env.matches` on the replayed state. Records in `selector_applied` every value seen for a
+/// selector effect. Returns the replayed result.
+fn replay(
+    rec: &OrderRecord,
+    list: &[(u64, ContinuousEffect)],
+    env: &Env,
+    selector_applied: &mut BTreeSet<bool>,
+    seed: u64,
+) -> Evaluated {
+    use super::ordering::Scratch;
+    use super::pipeline::{Step, apply_step, start_layer_7};
+    let base = env.base(o(1)).unwrap();
+    let counters = env.counters(o(1));
+    let mut scratch = Scratch {
+        state: Evaluated {
+            characteristics: base.characteristics,
+            controller: base.controller,
+        },
+        pt: None,
+    };
+    for &layer in Layer::ALL {
+        if layer == Layer::L7a {
+            // The evaluator's own start of layer 7 (CR 613.4, 208.3).
+            scratch.pt = start_layer_7(&mut scratch.state, env, o(1), base.on_battlefield);
+        }
+        for s in rec.steps.iter().filter(|s| s.layer == layer) {
+            match &s.item {
+                OrderItem::Effect(id) => {
+                    let x = &list.iter().find(|(k, _)| e(*k) == *id).unwrap().1;
+                    let expected = if let Affected::Selector(selector) = &x.affected {
+                        let m = env.matches(
+                            selector,
+                            &MatchContext {
+                                source: x.source,
+                                effect_controller: x.controller,
+                                candidate: o(1),
+                                candidate_view: &scratch.state,
+                            },
+                        );
+                        selector_applied.insert(m);
+                        m
+                    } else {
+                        matches!(&x.affected, Affected::Objects(set) if set.contains(&o(1)))
+                    };
+                    assert_eq!(s.applied, expected, "seed {seed}: {s:?}");
+                    if expected {
+                        apply_step(&mut scratch, &Step::Effect(*id, x));
+                    }
+                }
+                OrderItem::Counter(kind) => {
+                    assert!(s.applied, "seed {seed}: {s:?}");
+                    apply_step(&mut scratch, &Step::Counter(kind, counters[kind]));
+                }
+            }
+        }
+    }
+    scratch.state
+}
+
+// ---------------------------------------------------------------------------------------------
+// Existence of the generating ability (CR 613.8a, 611.2, 611.3, 113.6)
+// ---------------------------------------------------------------------------------------------
+
+/// test.existence_remover (effect 1, layer 6, locked on object 1) and test.existence_grant
+/// (effect 2, layer 6): the grant gives `marker` to objects without trample; `grant_origin` and
+/// `grant_source` are its origin and source. The environment says the grant's generating ability
+/// is object 1's flying.
+fn existence_scene(
+    remover: LayerModification,
+    (t_remover, t_grant): (u64, u64),
+    grant_origin: EffectOrigin,
+    grant_source: Option<ObjectId>,
+) -> (Vec<(u64, ContinuousEffect)>, Env) {
+    let env = Env::default()
+        .with(o(1), creature(2, 2, vec![kw("flying"), kw("trample")]))
+        .with(o(2), artifact())
+        .generator(e(2), "flying");
+    let grant = ContinuousEffect {
+        source: grant_source,
+        origin: grant_origin,
+        ..eff(
+            Layer::L6,
+            t_grant,
+            filter(not(PredicateAST::HasKeyword {
+                keyword: "trample".to_owned(),
+            })),
+            LayerModification::AddAbility(ability("marker")),
+        )
+    };
+    (
+        vec![
+            // test.existence_remover
+            (1, eff(Layer::L6, t_remover, only(o(1)), remover)),
+            // test.existence_grant
+            (2, grant),
+        ],
+        env,
+    )
+}
+
+fn has_marker(ev: &Evaluated) -> bool {
+    ev.characteristics.abilities.contains(&ability("marker"))
+}
+
+fn static_origin() -> EffectOrigin {
+    EffectOrigin::Static { granted_at: None }
+}
+
+/// REQ-LAYER-002, CR 613.8a, 611.3, 113.6, 613.7: the remover removes every ability of the
+/// grant's source, the grant's generating ability included. In both timestamp orders the grant
+/// does not apply (before the remover its selector does not match; after it, its generating
+/// ability no longer exists), so no dependency is found and no marker is granted.
+#[test]
+fn req_layer_002_removed_generating_ability_stops_effect_both_orders() {
+    for (t_remover, t_grant) in [(1, 2), (2, 1)] {
+        let (list, env) = existence_scene(
+            LayerModification::RemoveAllAbilities,
+            (t_remover, t_grant),
+            static_origin(),
+            Some(o(1)),
+        );
+        let (ev, rec) = run(&list, &env, o(1));
+        assert!(!has_marker(&ev), "{t_remover} {t_grant}");
+        assert!(ev.characteristics.abilities.is_empty());
+        let mut want = vec![
+            (fx(1), Selection::Timestamp, true),
+            (fx(2), Selection::Timestamp, false),
+        ];
+        if t_grant < t_remover {
+            want.reverse();
+        }
+        assert_eq!(steps_in(&rec, Layer::L6), want, "{t_remover} {t_grant}");
+        // The hook saw the source's state so far (the source is the evaluated object).
+        assert!(
+            env.generator_calls
+                .borrow()
+                .iter()
+                .all(|&call| call == (e(2), o(1), true))
+        );
+        assert!(!env.generator_calls.borrow().is_empty());
+    }
+}
+
+/// REQ-LAYER-002, CR 613.8a, 613.8b (control): the remover removes trample only; the grant's
+/// generating ability (flying) still exists and its selector now matches, so the grant depends
+/// on the remover and applies after it in both timestamp orders.
+#[test]
+fn req_layer_002_generating_ability_kept_effect_applies_both_orders() {
+    for (t_remover, t_grant) in [(1, 2), (2, 1)] {
+        let (list, env) = existence_scene(
+            LayerModification::RemoveKeyword("trample".to_owned()),
+            (t_remover, t_grant),
+            static_origin(),
+            Some(o(1)),
+        );
+        let (ev, rec) = run(&list, &env, o(1));
+        assert!(has_marker(&ev), "{t_remover} {t_grant}");
+        assert!(has_kw(&ev.characteristics, "flying"));
+        let first = if t_remover < t_grant {
+            Selection::Timestamp
+        } else {
+            Selection::Dependency
+        };
+        assert_eq!(
+            steps_in(&rec, Layer::L6),
+            vec![(fx(1), first, true), (fx(2), Selection::Timestamp, true)]
+        );
+    }
+}
+
+/// REQ-LAYER-002, CR 613.8a, 611.2, 613.8b: exempt effects. A resolved effect with a source
+/// (CR 611.2: it exists independently of its source's abilities), a static effect whose source
+/// is another object (its existence is not judged here: `source_view` is `None`, treated as
+/// existing), and a static effect without a source: in each case the grant depends on the
+/// remover and applies after it in both timestamp orders, and the marker is granted.
+#[test]
+fn req_layer_002_existence_exemptions_both_orders() {
+    let cases = [
+        (EffectOrigin::Resolved, Some(o(1))),
+        (static_origin(), Some(o(2))),
+        (static_origin(), None),
+    ];
+    for (origin, source) in cases {
+        for (t_remover, t_grant) in [(1, 2), (2, 1)] {
+            let (list, env) = existence_scene(
+                LayerModification::RemoveAllAbilities,
+                (t_remover, t_grant),
+                origin.clone(),
+                source,
+            );
+            let (ev, rec) = run(&list, &env, o(1));
+            assert!(
+                has_marker(&ev),
+                "{origin:?} {source:?} {t_remover} {t_grant}"
+            );
+            let first = if t_remover < t_grant {
+                Selection::Timestamp
+            } else {
+                Selection::Dependency
+            };
+            assert_eq!(
+                steps_in(&rec, Layer::L6),
+                vec![(fx(1), first, true), (fx(2), Selection::Timestamp, true)]
+            );
+            let calls = env.generator_calls.borrow();
+            if source == Some(o(2)) {
+                // CR 613.8a: another object's source is asked without a view.
+                assert!(!calls.is_empty());
+                assert!(calls.iter().all(|&call| call == (e(2), o(2), false)));
+            } else {
+                // Resolved, or no source: the hook is never asked.
+                assert!(calls.is_empty(), "{origin:?} {source:?}");
+            }
+        }
+    }
+}
+
+/// An environment that keeps every default method.
+struct Plain;
+
+impl LayerEnvironment for Plain {
+    fn objects(&self) -> Vec<ObjectId> {
+        vec![o(1)]
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        (id == o(1)).then(|| ObjectBase {
+            characteristics: creature(1, 1, vec![kw("flying")]),
+            controller: Some(p(1)),
+            on_battlefield: true,
+        })
+    }
+
+    fn matches(&self, _: &ObjectSelectorAST, _: &MatchContext<'_>) -> bool {
+        true
+    }
+}
+
+/// REQ-LAYER-002, CR 613.8a: the default `generating_ability_exists` is `true`, so an
+/// environment without the hook keeps the previous behaviour: a static effect of the evaluated
+/// object applies after its abilities are removed.
+#[test]
+fn req_layer_002_generating_ability_default_is_true() {
+    let view = Evaluated {
+        characteristics: artifact(),
+        controller: None,
+    };
+    assert!(Plain.generating_ability_exists(e(1), o(1), Some(&view)));
+    assert!(Plain.generating_ability_exists(e(1), o(2), None));
+    let list = [
+        (
+            1,
+            eff(
+                Layer::L6,
+                1,
+                only(o(1)),
+                LayerModification::RemoveAllAbilities,
+            ),
+        ),
+        (
+            2,
+            ContinuousEffect {
+                source: Some(o(1)),
+                origin: static_origin(),
+                ..eff(
+                    Layer::L6,
+                    2,
+                    filter(PredicateAST::IsCreature),
+                    LayerModification::AddAbility(ability("marker")),
+                )
+            },
+        ),
+    ];
+    let (ev, rec) = evaluate_with_order(&registry(&list), &Plain, o(1)).unwrap();
+    assert!(has_marker(&ev));
+    assert!(rec.steps.iter().all(|s| s.applied));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Declared P/T adjustments at the i64 bounds (CR 613.4c, 613.7, 613.8a)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-LAYER-002, CR 613.4c, 613.7, 613.8a: two 7c adders on a locked set never depend on each
+/// other, even when one saturates at the `i64` bounds: they apply in timestamp order (both
+/// selected by timestamp) and the result is that of timestamp order.
+#[test]
+fn req_layer_002_saturated_adders_are_independent_both_orders() {
+    const MAX: i64 = i64::MAX;
+    const MIN: i64 = i64::MIN;
+    // (base, first (ts 1), second (ts 2), expected).
+    let cases = [
+        ((MAX, MAX), (1, 1), (-2, -2), (MAX - 2, MAX - 2)),
+        ((MAX, MAX), (-2, -2), (1, 1), (MAX - 1, MAX - 1)),
+        ((MIN, MIN), (-1, -1), (2, 2), (MIN + 2, MIN + 2)),
+        ((MIN, MIN), (2, 2), (-1, -1), (MIN + 1, MIN + 1)),
+        // Toughness alone at each bound, power far from them.
+        ((2, MAX), (0, 1), (0, -2), (2, MAX - 2)),
+        ((2, MIN), (0, -1), (0, 2), (2, MIN + 2)),
+        // Power and toughness at opposite bounds.
+        ((MAX, MIN), (1, -1), (-2, 2), (MAX - 2, MIN + 2)),
+    ];
+    for (base, first, second, want) in cases {
+        let env = Env::default().with(o(1), creature(base.0, base.1, Vec::new()));
+        let (ev, rec) = run(
+            &[
+                (
+                    1,
+                    eff(Layer::L7c, 1, only(o(1)), modify_pt(first.0, first.1)),
+                ),
+                (
+                    2,
+                    eff(Layer::L7c, 2, only(o(1)), modify_pt(second.0, second.1)),
+                ),
+            ],
+            &env,
+            o(1),
+        );
+        assert_eq!(pt(&ev.characteristics), Some(want), "{base:?} {first:?}");
+        assert_eq!(
+            steps_in(&rec, Layer::L7c),
+            vec![
+                (fx(1), Selection::Timestamp, true),
+                (fx(2), Selection::Timestamp, true)
+            ],
+            "{base:?} {first:?}"
+        );
+    }
+}
+
+/// REQ-LAYER-002, CR 613.4c, 613.7, 613.7c, 613.8a, 122.1a: a P/T counter and a 7c adder at the
+/// `i64` bounds are independent in both timestamp orders.
+#[test]
+fn req_layer_002_saturated_counter_and_adder_independent_both_orders() {
+    const MAX: i64 = i64::MAX;
+    const MIN: i64 = i64::MIN;
+    // (base, counter kind, effect amount, expected counter-first, expected effect-first).
+    let cases = [
+        (
+            (MAX, MAX),
+            "+1/+1",
+            -2,
+            (MAX - 2, MAX - 2),
+            (MAX - 1, MAX - 1),
+        ),
+        (
+            (MIN, MIN),
+            "-1/-1",
+            2,
+            (MIN + 2, MIN + 2),
+            (MIN + 1, MIN + 1),
+        ),
+    ];
+    for (base, kind, amount, counter_first, effect_first) in cases {
+        for (t_counter, t_effect) in [(1, 2), (2, 1)] {
+            let env = Env::default()
+                .with(o(1), creature(base.0, base.1, Vec::new()))
+                .counter(o(1), kind, 1, t_counter);
+            let (ev, rec) = run(
+                &[(
+                    1,
+                    eff(Layer::L7c, t_effect, only(o(1)), modify_pt(amount, amount)),
+                )],
+                &env,
+                o(1),
+            );
+            let mut want_steps = vec![
+                (counter_item(kind), Selection::Timestamp, true),
+                (fx(1), Selection::Timestamp, true),
+            ];
+            let want = if t_counter < t_effect {
+                counter_first
+            } else {
+                want_steps.reverse();
+                effect_first
+            };
+            assert_eq!(pt(&ev.characteristics), Some(want), "{kind} {t_counter}");
+            assert_eq!(steps_in(&rec, Layer::L7c), want_steps, "{kind} {t_counter}");
+        }
+    }
+}
+
+/// REQ-LAYER-002, CR 613.4c, 122.1a: the declared adjustment of each kind of step: a `ModifyPt`
+/// effect its amounts, P/T counters amount times the per-counter change (no saturation, in
+/// `i128`), and nothing for another modification, a keyword counter, an object without a P/T
+/// pair, or P/T counters on a non-creature.
+#[test]
+fn req_layer_002_declared_pt_adjustment() {
+    use super::ordering::Scratch;
+    use super::pipeline::{Step, declared_pt_adjustment};
+    let with_pt = |c: Characteristics, pt: Option<(i64, i64)>| Scratch {
+        state: Evaluated {
+            characteristics: c,
+            controller: Some(p(1)),
+        },
+        pt,
+    };
+    let creature_scratch = with_pt(creature(1, 1, Vec::new()), Some((1, 1)));
+    let adder = eff(Layer::L7c, 1, only(o(1)), modify_pt(i64::MAX, -3));
+    let setter = eff(Layer::L7b, 1, only(o(1)), set_pt(0, 0));
+    assert_eq!(
+        declared_pt_adjustment(&Step::Effect(e(1), &adder), &creature_scratch),
+        Some((i128::from(i64::MAX), -3))
+    );
+    assert_eq!(
+        declared_pt_adjustment(&Step::Effect(e(1), &setter), &creature_scratch),
+        None
+    );
+    assert_eq!(
+        declared_pt_adjustment(&Step::Counter("-2/-1", i64::MAX), &creature_scratch),
+        Some((-2 * i128::from(i64::MAX), -i128::from(i64::MAX)))
+    );
+    assert_eq!(
+        declared_pt_adjustment(&Step::Counter("flying", 1), &creature_scratch),
+        None
+    );
+    // No P/T pair.
+    let no_pt = with_pt(creature(1, 1, Vec::new()), None);
+    assert_eq!(
+        declared_pt_adjustment(&Step::Effect(e(1), &adder), &no_pt),
+        None
+    );
+    // A non-creature with a P/T pair: P/T counters do nothing (CR 122.1a), adders declare.
+    let non_creature = with_pt(artifact(), Some((1, 1)));
+    assert_eq!(
+        declared_pt_adjustment(&Step::Counter("+1/+1", 1), &non_creature),
+        None
+    );
+    assert_eq!(
+        declared_pt_adjustment(&Step::Effect(e(1), &adder), &non_creature),
+        Some((i128::from(i64::MAX), -3))
+    );
+}
+
+/// REQ-LAYER-002, CR 613.4d, 613.7, 613.8a: two 7d switches do not depend on each other (each
+/// switches the pair in both states, although the numbers it writes differ), so they apply in
+/// timestamp order, both selected by timestamp, and the pair ends as it began.
+#[test]
+fn req_layer_002_two_switches_independent_both_orders() {
+    let env = Env::default().with(o(1), creature(2, 3, Vec::new()));
+    for (t1, t2) in [(1, 2), (2, 1)] {
+        let (ev, rec) = run(
+            &[
+                (
+                    1,
+                    eff(Layer::L7d, t1, only(o(1)), LayerModification::SwitchPt),
+                ),
+                (
+                    2,
+                    eff(Layer::L7d, t2, only(o(1)), LayerModification::SwitchPt),
+                ),
+            ],
+            &env,
+            o(1),
+        );
+        assert_eq!(pt(&ev.characteristics), Some((2, 3)));
+        let mut want = vec![
+            (fx(1), Selection::Timestamp, true),
+            (fx(2), Selection::Timestamp, true),
+        ];
+        if t2 < t1 {
+            want.reverse();
+        }
+        assert_eq!(steps_in(&rec, Layer::L7d), want, "{t1} {t2}");
+    }
 }
