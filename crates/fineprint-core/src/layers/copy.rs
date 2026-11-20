@@ -505,14 +505,12 @@ impl CopiableValues {
     /// [`CopyException::SetColors`] sets them.
     ///
     /// The result is a complete snapshot: [`copiable_effect`] of it replaces all characteristics,
-    /// copied ones included. The layer-1a effect that carries only the fields the modification
-    /// sets is [`modification_effect`].
-    ///
-    /// An "as ... enters" or "as ... is turned face up" power and toughness setting
-    /// (CR 208.2b; replacement effects, CR 614.1c, 614.1e) built from these values must be
-    /// registered with [`EffectOrigin::Resolved`]: once applied it lasts (CR 611.2a) and the
-    /// evaluator must not drop it when the permanent loses the ability, as it drops a
-    /// static-ability effect (CR 611.3b).
+    /// copied ones included. It is the values-level form of a modification, not the way to
+    /// register an "as ... enters" or "as ... is turned face up" power and toughness setting
+    /// (CR 208.2b; replacement effects, CR 614.1c, 614.1e): register that with
+    /// [`modification_effect`] and [`EffectOrigin::Resolved`], which writes only the fields it
+    /// sets. A snapshot built while an earlier copy effect is active holds the copied name, cost
+    /// and abilities, and would keep them after that copy ends.
     #[must_use]
     pub fn modified(&self, exceptions: &[CopyException]) -> CopiableValues {
         let mut c = self.characteristics.clone();
@@ -552,14 +550,24 @@ pub fn copiable_characteristics(
 
 /// The copiable values of `id`: the characteristics of [`copiable_characteristics`] (the same
 /// layer 1a and 1b run, CR 613.2c, 707.2) with the mana-value provenance of that run
-/// ([`Evaluated::mana_value_provenance`]): plain for the base, set by each layer-1a effect that
-/// replaces all characteristics, kept by a [`modification_effect`] (which may only pin the
-/// colors, CR 707.9b), plain again after a face-down effect (CR 708.2, 202.3a). For any values
-/// `V`, registering [`copiable_effect`] of `V` on an object and reading `copiable_values` gives
-/// `V`'s characteristics and provenance (colors pin included) back when no other applicable
-/// effect changes the characteristics or the provenance before the end of layer 1: a layer-1b
-/// `FaceDown` effect, a later layer-1a copy or modification, or an earlier one that is not
-/// replaced.
+/// ([`Evaluated::mana_value_provenance`]): the base's
+/// ([`crate::layers::LayerEnvironment::base_mana_value_provenance`], plain by default; a
+/// nonmodal back face or melded permanent when the environment says so, CR 202.3b, 202.3c,
+/// 713.5c), set by each layer-1a effect that replaces all characteristics, kept by a
+/// [`modification_effect`] (which may only pin the colors, CR 707.9b), plain again after a
+/// face-down effect (CR 708.2, 202.3a).
+///
+/// Round trip: for any values `V`, registering [`copiable_effect`] of `V` on an object and
+/// reading `copiable_values` gives a value with `V`'s characteristics and `V`'s exported
+/// provenance (`V.provenance()`, colors pin included) when (1) the registered effect applies to
+/// the object (an [`EffectOrigin::Static`] effect is skipped while its generating ability does
+/// not exist, [`crate::layers::LayerEnvironment::generating_ability_exists`]; an
+/// [`EffectOrigin::Resolved`] one always applies) and (2) no other applicable effect changes the
+/// characteristics or the provenance before the end of layer 1: a layer-1b `FaceDown` effect, a
+/// later layer-1a copy or modification, or an earlier one that is not replaced. The read is not
+/// necessarily `==` to `V`: [`CopiableValues`]' `==` compares the raw private copy-as-0 flag and
+/// `source`, so a value whose public `source` was reassigned reads back with equal
+/// characteristics and equal [`CopiableValues::provenance`] but may differ under `==`.
 ///
 /// # Errors
 /// [`LayerError::UnknownObject`] if the environment has no base for `id`.
@@ -587,7 +595,8 @@ fn layer_one(
         state: Evaluated {
             characteristics: base.characteristics,
             controller: base.controller,
-            mana_value_provenance: ManaValueProvenance::plain(),
+            // CR 202.3b, 202.3c, 713.5c: the base's own mana-value provenance (plain by default).
+            mana_value_provenance: env.base_mana_value_provenance(id),
         },
         pt: None,
     };
@@ -614,10 +623,11 @@ fn layer_one(
 /// 707.2c); for a modification that changes only the fields it sets, use
 /// [`modification_effect`].
 ///
-/// An "as ... enters" or "as ... is turned face up" power and toughness setting (CR 208.2b;
-/// replacement effects, CR 614.1c, 614.1e) must be registered with [`EffectOrigin::Resolved`]:
-/// once applied it lasts (CR 611.2a) and the evaluator must not drop it when the permanent loses
-/// the ability, as it drops a static-ability effect (CR 611.3b).
+/// Do not use it for an "as ... enters" or "as ... is turned face up" power and toughness
+/// setting (CR 208.2b; replacement effects, CR 614.1c, 614.1e): a snapshot of
+/// [`CopiableValues::modified`] built while an earlier copy effect is active holds that copy's
+/// name, cost and abilities, which would survive the copy's end. Register the setting with
+/// [`modification_effect`] and [`EffectOrigin::Resolved`].
 #[must_use]
 pub fn copiable_effect(
     values: &CopiableValues,
@@ -665,10 +675,13 @@ fn copy_modification(values: &CopiableValues) -> LayerModification {
 /// pins the colors (CR 707.9b, [`ManaValueProvenance::colors_pinned`]). [`Layer::L1a`],
 /// `is_cda` false, [`Affected::Objects`]`(objects)`.
 ///
-/// An "as ... enters" or "as ... is turned face up" power and toughness setting (CR 208.2b;
-/// replacement effects, CR 614.1c, 614.1e) must be registered with [`EffectOrigin::Resolved`]:
-/// once applied it lasts (CR 611.2a) and the evaluator must not drop it when the permanent loses
-/// the ability, as it drops a static-ability effect (CR 611.3b).
+/// This is the form for an "as ... enters" or "as ... is turned face up" power and toughness
+/// setting (CR 208.2b; replacement effects, CR 614.1c, 614.1e), registered with
+/// [`EffectOrigin::Resolved`]: once applied it lasts (CR 611.2a) and the evaluator must not drop
+/// it when the permanent loses the ability, as it drops a static-ability effect (CR 611.3b). It
+/// writes only the fields it sets, so it can be built while an earlier copy effect is active and
+/// that copy's name, cost and abilities still end with it; [`copiable_effect`] of
+/// [`CopiableValues::modified`] would keep them (a full snapshot).
 #[must_use]
 pub fn modification_effect(
     exceptions: &[CopyException],
