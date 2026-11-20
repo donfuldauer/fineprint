@@ -129,8 +129,8 @@ impl LayerModification {
 }
 
 /// One continuous effect (CR 611): its source, controller, timestamp (CR 613.7), layer, origin,
-/// affected objects and modification. `is_cda` is stored only; characteristic-defining
-/// abilities are not yet ordered first (CR 613.3, 613.4a are a later unit).
+/// affected objects and modification. `is_cda` orders characteristic-defining effects first in
+/// layers 2-6 (CR 613.3) and decides dependency condition (c) (CR 613.8a).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContinuousEffect {
     /// The object whose ability generated the effect, if any.
@@ -141,7 +141,8 @@ pub struct ContinuousEffect {
     pub timestamp: Timestamp,
     /// The layer or sublayer it applies in (CR 613.1).
     pub layer: Layer,
-    /// Whether it comes from a characteristic-defining ability (CR 604.3); stored only.
+    /// Whether it comes from a characteristic-defining ability (CR 604.3); applied first in
+    /// layers 2-6 (CR 613.3) and used by dependency condition (c) (CR 613.8a).
     pub is_cda: bool,
     /// Static ability or resolved spell or ability.
     pub origin: EffectOrigin,

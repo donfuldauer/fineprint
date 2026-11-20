@@ -14,7 +14,9 @@ use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
 use super::ordering::{OrderRecord, Scratch, run_layer};
-use super::registry::{Affected, ContinuousEffect, ContinuousEffects, LayerModification};
+use super::registry::{
+    Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+};
 use crate::objects::Characteristics;
 
 /// The counter kinds that are keyword counters (CR 122.1b), without variants. Ward is not one.
@@ -108,6 +110,26 @@ pub trait LayerEnvironment {
     fn eval_value(&self, expr: &ValueExpressionAST, object: ObjectId) -> Option<i64> {
         let _ = object;
         literal_of(expr)
+    }
+
+    /// Whether the static ability that generates `effect` still exists on its source.
+    /// Called only for `EffectOrigin::Static` effects whose `source` is `Some(source)`.
+    /// `source_view` is `Some(state so far)` only when `source` is the object being
+    /// evaluated; for any other source it is `None` (cross-object evaluation is #186).
+    /// Default: `true` (existence is not modelled).
+    ///
+    /// CR 613.8a, 611.3, 113.6: an effect of a static ability exists only while its generating
+    /// ability does, so an effect whose ability has been removed does not apply, and removing it
+    /// changes the effect's existence (a dependency). Effects from resolved spells and abilities
+    /// (CR 611.2) are never asked.
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        let _ = (effect, source, source_view);
+        true
     }
 }
 
@@ -232,8 +254,9 @@ pub(super) fn step_order(a: &(Timestamp, Step<'_>), b: &(Timestamp, Step<'_>)) -
     })
 }
 
-/// Whether `step` applies to `id` in `state`: an effect by its affected set ([`applies_to`]);
-/// counters always.
+/// Whether `step` applies to `id` in `state`: an effect by its affected set ([`applies_to`])
+/// and the existence of its generating ability ([`generator_exists`]); counters always. Used
+/// both by the real application and by the dependency trial, so the two agree.
 pub(super) fn step_applies(
     step: &Step<'_>,
     env: &dyn LayerEnvironment,
@@ -241,8 +264,58 @@ pub(super) fn step_applies(
     state: &Evaluated,
 ) -> bool {
     match step {
-        Step::Effect(_, effect) => applies_to(effect, env, id, state),
+        Step::Effect(eid, effect) => {
+            applies_to(effect, env, id, state) && generator_exists(*eid, effect, env, id, state)
+        }
         Step::Counter(..) => true,
+    }
+}
+
+/// Whether the effect's generating ability still exists (CR 613.8a, 611.3, 113.6): asked of
+/// the environment ([`LayerEnvironment::generating_ability_exists`]) only for a static effect
+/// with a source, with the state so far when the source is the object `id` being evaluated.
+/// An effect of a resolved spell or ability exists independently of its source's abilities
+/// (CR 611.2); a static effect without a source is not checked.
+fn generator_exists(
+    eid: EffectId,
+    effect: &ContinuousEffect,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    state: &Evaluated,
+) -> bool {
+    match (&effect.origin, effect.source) {
+        (EffectOrigin::Static { .. }, Some(source)) => {
+            env.generating_ability_exists(eid, source, (source == id).then_some(state))
+        }
+        _ => true,
+    }
+}
+
+/// The power and toughness adjustment `step` declares when applied to `from`, in `i128`
+/// without saturation (CR 613.4c, 122.1a): a `ModifyPt` effect its two amounts, P/T counters
+/// the amount times the per-counter change. `None` when the step declares no numeric P/T
+/// adjustment: another modification, the object has no P/T pair, or P/T counters on a
+/// non-creature (which do nothing, [`apply_counter`]). Reads the modification generically,
+/// never card identity (R4); used by the dependency comparison so that saturation at the `i64`
+/// bounds is not mistaken for a change in what the step does (docs/DECISIONS.md "#33 FP-032 —
+/// Review round 1 dispositions").
+pub(super) fn declared_pt_adjustment(step: &Step<'_>, from: &Scratch) -> Option<(i128, i128)> {
+    from.pt?;
+    match step {
+        Step::Effect(_, effect) => match effect.modification {
+            LayerModification::ModifyPt { power, toughness } => {
+                Some((i128::from(power), i128::from(toughness)))
+            }
+            _ => None,
+        },
+        Step::Counter(kind, amount) => {
+            if !from.state.characteristics.card_types.contains("Creature") {
+                return None;
+            }
+            let (dp, dt) = pt_counter_delta(kind)?;
+            let n = i128::from(*amount);
+            Some((i128::from(dp) * n, i128::from(dt) * n))
+        }
     }
 }
 
@@ -386,7 +459,7 @@ fn applies_to(
 
 /// The start of layer 7 (CR 613.4): whether the object has power and toughness after layers
 /// 1-6 (CR 208.3, 208.5), and if so their starting values, written back as literals.
-fn start_layer_7(
+pub(super) fn start_layer_7(
     state: &mut Evaluated,
     env: &dyn LayerEnvironment,
     id: ObjectId,

@@ -11,10 +11,9 @@ use std::collections::BTreeSet;
 
 use fineprint_base::ids::{EffectId, ObjectId, Timestamp};
 use fineprint_dsl::ability::Layer;
-use fineprint_dsl::card::ValueExpressionAST;
 
 use super::pipeline::{
-    Evaluated, LayerEnvironment, Step, apply_step, literal_of, step_applies, step_order,
+    Evaluated, LayerEnvironment, Step, apply_step, declared_pt_adjustment, step_applies, step_order,
 };
 use crate::objects::Characteristics;
 
@@ -37,8 +36,9 @@ pub struct OrderStep {
     pub item: OrderItem,
     /// Why the step was chosen when it was.
     pub selection: Selection,
-    /// `false` when the effect's affected set did not include the object at that point (the
-    /// step was still part of the order); counters always apply.
+    /// `false` when the effect's affected set did not include the object at that point, or its
+    /// generating ability no longer existed (CR 613.8a); the step was still part of the order.
+    /// Counters always apply.
     pub applied: bool,
 }
 
@@ -214,12 +214,14 @@ fn dependencies(
             }
             let with = trial(step_b, env, id, &after_a);
             deps[i][j] = match (&without[i], &with) {
-                // B applies in neither state: nothing changed.
+                // B applies (or exists) in neither state: nothing changed.
                 (None, None) => false,
                 // CR 613.8a (b): its output differs.
-                (Some(out0), Some(out1)) => {
-                    !same_output(&scratch.state, &out0.state, &after_a.state, &out1.state)
-                }
+                (Some(out0), Some(out1)) => !same_output(
+                    (&scratch.state, &out0.state, &after_a.state, &out1.state),
+                    declared_pt_adjustment(step_b, scratch),
+                    declared_pt_adjustment(step_b, &after_a),
+                ),
                 // CR 613.8a (b): its existence or what it applies to changed.
                 _ => true,
             };
@@ -287,14 +289,17 @@ fn find_loop(deps: &[Vec<bool>]) -> usize {
 /// leaves it untouched in both, or makes the same change to it: for a set or the colors, each
 /// element is kept as it was in both or left present (or absent) in both; for the ability list,
 /// each ability's number of copies is the same in both or changed by the same amount; for a
-/// numeric power or toughness, the same amount is added in both; for the P/T pair, it is
-/// switched in both. The comparison reads only the object's characteristics and controller,
-/// never which modification B is (REQ-DSL-013).
+/// numeric power or toughness adjustment, the same amount is declared in both; for the P/T pair,
+/// it is switched in both. The comparison reads only the object's characteristics and controller,
+/// never which modification B is (REQ-DSL-013), with one exception: when B declares a numeric
+/// P/T adjustment in either state (`declared0` without A, `declared1` with A, from
+/// [`declared_pt_adjustment`]), power and toughness count as unchanged exactly when the two
+/// declarations are equal, so that saturation at the `i64` bounds is not taken for a different
+/// amount added (docs/DECISIONS.md "#33 FP-032 — Review round 1 dispositions").
 fn same_output(
-    before0: &Evaluated,
-    after0: &Evaluated,
-    before1: &Evaluated,
-    after1: &Evaluated,
+    (before0, after0, before1, after1): (&Evaluated, &Evaluated, &Evaluated, &Evaluated),
+    declared0: Option<(i128, i128)>,
+    declared1: Option<(i128, i128)>,
 ) -> bool {
     let (b0, a0, b1, a1) = (
         &before0.characteristics,
@@ -344,7 +349,11 @@ fn same_output(
         && set(&b0.subtypes, subtypes, &b1.subtypes, &a1.subtypes)
         && scalar(&b0.rules_text, rules_text, &b1.rules_text, &a1.rules_text)
         && list(&b0.abilities, abilities, &b1.abilities, &a1.abilities)
-        && power_toughness(b0, a0, b1, a1)
+        && match (declared0, declared1) {
+            (None, None) => power_toughness(b0, a0, b1, a1),
+            // CR 613.4c, 613.8a (b): the declared adjustments, not the saturated writes.
+            (d0, d1) => d0 == d1,
+        }
         && scalar(&b0.loyalty, loyalty, &b1.loyalty, &a1.loyalty)
         && scalar(&b0.defense, defense, &b1.defense, &a1.defense)
         && scalar(
@@ -424,31 +433,18 @@ fn list<T: PartialEq>(before0: &[T], after0: &[T], before1: &[T], after1: &[T]) 
         })
 }
 
-/// Power and toughness: each [`number`], or switched in both states.
+/// Power and toughness when B declares no numeric adjustment (a setter, a switch, a copy):
+/// each [`scalar`], or switched in both states. "The same amount added" is decided by the
+/// declared adjustment in [`same_output`], never by the saturated values.
 fn power_toughness(
     b0: &Characteristics,
     a0: &Characteristics,
     b1: &Characteristics,
     a1: &Characteristics,
 ) -> bool {
-    let each = number(&b0.power, &a0.power, &b1.power, &a1.power)
-        && number(&b0.toughness, &a0.toughness, &b1.toughness, &a1.toughness);
+    let each = scalar(&b0.power, &a0.power, &b1.power, &a1.power)
+        && scalar(&b0.toughness, &a0.toughness, &b1.toughness, &a1.toughness);
     let switched =
         |b: &Characteristics, a: &Characteristics| a.power == b.toughness && a.toughness == b.power;
     each || (switched(b0, a0) && switched(b1, a1))
-}
-
-/// [`scalar`], or literal numbers with the same amount added in both states.
-fn number(
-    before0: &Option<ValueExpressionAST>,
-    after0: &Option<ValueExpressionAST>,
-    before1: &Option<ValueExpressionAST>,
-    after1: &Option<ValueExpressionAST>,
-) -> bool {
-    let lit = |v: &Option<ValueExpressionAST>| v.as_ref().and_then(literal_of).map(i128::from);
-    scalar(before0, after0, before1, after1)
-        || matches!(
-            (lit(before0), lit(after0), lit(before1), lit(after1)),
-            (Some(x0), Some(y0), Some(x1), Some(y1)) if y0 - x0 == y1 - x1
-        )
 }
