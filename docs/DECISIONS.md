@@ -5892,7 +5892,7 @@ A = Swamp->Island and B = Swamp->Forest depend on each other (a loop, applied in
 613.8b), so the earlier timestamp's `to` wins. Known gap G6: the trial compares the whole
 `rules_text` field, so on text holding both a Swamp word and an Island word A and B also depend on
 each other (a loop applied in timestamp order), which can differ from 613.8a's derivation (A only
-applies to Swamp words, which B never changes). Follow-up needed; nothing changed here.
+applies to Swamp words, which B never changes). Follow-up #194 (FP-149); nothing changed here.
 `SetText` and `REPLACE_TEXT_WORD` on the same object: the replacement depends on the `SetText`
 under CR 613.8a (b) (applying the `SetText` changes what the replacement does) and the `SetText`
 does not depend on the replacement, so per CR 613.8b the `SetText` applies first in both
@@ -5915,11 +5915,11 @@ candidate's view, so the resolution helpers (`resolve_word_ref`, `text_token_mat
 `resolve_predicate_words`, `resolve_selector_words`) take the source's evaluated table from the
 caller.
 G3 the compile step from the DSL `REPLACE_TEXT_WORD` effect to `LayerModification::ReplaceTextWord`
-has no issue yet (DECISIONS "#34 FP-033" item 8).
+(DECISIONS "#34 FP-033" item 8) is follow-up #195 (FP-150).
 G4 word references reachable only from a value expression outside predicates and selectors are not
-resolved by these helpers.
+resolved by these helpers (also #195).
 G5 copy and text changes (CR 707.2) belong to #38.
-G6 whole-field dependency comparison of `rules_text` (entry above).
+G6 whole-field dependency comparison of `rules_text` (entry above) is follow-up #194 (FP-149).
 **Rationale:** Each gap is owned by another issue or needs one; the brief scopes this unit to the
 layers module.
 **Alternatives:** Implementing them here (rejected: outside owned paths and scope).
