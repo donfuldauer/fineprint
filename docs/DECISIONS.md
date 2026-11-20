@@ -5267,9 +5267,7 @@ evaluated characteristics; (3) CR 613.8 dependency ordering; (4) characteristic-
 abilities first (CR 613.3, 613.4a) using the stored `is_cda`; (5) CR 613.6 lock-in
 (`sameAsLayer`); (6) the cached evaluation mode and the cached-versus-full-recompute differential
 check (REQ-LAYER-005); (7) the passes after the layers (CR 613.10, 613.11); (8) compiling DSL
-characteristic effects into `LayerModification`, word-level text changes (CR 612), and with it
-CR 702.11e (an effect that removes hexproof also removes every "hexproof from [quality]"
-ability; `RemoveKeyword` still matches the keyword string exactly); (9) effect durations and
+characteristic effects into `LayerModification` and word-level text changes (CR 612); (9) effect durations and
 expiry; (10) CDA-first ordering (CR 613.3, 613.4a) and CR 613.8 dependency recomputation,
 including recomputing dependencies as effects apply: #33 FP-032 (CodeRabbit comments 4637189551,
 4637189562); (11) multi-layer affected-set retention (CR 613.6), requiring `Affected::Objects`
@@ -5286,3 +5284,24 @@ a merge operation taking both ids): the merged-permanent unit #65 FP-063 (commen
 **Rationale:** Out of scope per the brief; listed so the plan can pick them up.
 
 **Alternatives:** None.
+
+## #32 FP-031 — RemoveKeyword and hexproof variants
+
+**Decision:** `LayerModification::RemoveKeyword(k)` removes every keyword ability whose keyword
+is `k` exactly and, for `k` = "hexproof" only, every variant "hexproof from [quality]" (the
+name, one ASCII space, a non-empty parameter not starting with a space; the same `is_variant_of`
+helper the keyword-counter classifier uses). The list of such keywords is the private const
+`REMOVAL_REMOVES_VARIANTS = ["hexproof"]`. `RemoveKeyword("hexproof from red")` stays exact.
+Implemented in this unit (CodeRabbit round 2, outside-diff comment on `pipeline.rs`).
+
+**Rationale:** CR 702.11e states that an effect that makes an object lose hexproof makes it lose
+all "hexproof from [quality]" abilities; the baseline states removal-removes-variants for
+hexproof only, so protection, landwalk and the other keyword-counter keywords stay exact. The
+other two clauses of 702.11e (targeting a creature as though it didn't have hexproof, and an
+effect that looks for a card with hexproof) belong to target legality and DSL predicate
+evaluation, not the layer pipeline: they are left to #52 FP-050 (target legality) and #57
+FP-055 (predicate evaluation).
+
+**Alternatives:** Leave `RemoveKeyword` exact and defer 702.11e to DSL compilation (rejected:
+the classifier already exists and the review asked for it); remove variants of every keyword
+(rejected: no CR rule says so for other keywords).
