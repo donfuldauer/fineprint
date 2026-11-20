@@ -2050,3 +2050,112 @@ fn repeated_reattachment_keeps_grant_after_removal() {
         ));
     }
 }
+
+/// A layer-6 `RemoveKeyword(k)` effect on o(1) at timestamp `t`.
+fn remove_keyword(k: &str, t: u64) -> ContinuousEffects {
+    registry(vec![(
+        1,
+        eff(
+            Layer::L6,
+            t,
+            objects([o(1)]),
+            LayerModification::RemoveKeyword(k.to_owned()),
+        ),
+    )])
+}
+
+// REQ-LAYER-001; CR 613.1f, 702.11e: removing hexproof removes hexproof and every
+// "hexproof from [quality]" variant, and nothing else.
+#[test]
+fn remove_hexproof_removes_variants() {
+    let mut c = creature("test.bear", 2, 2);
+    c.abilities = vec![
+        keyword("hexproof", "a1"),
+        keyword("hexproof from red", "a2"),
+        keyword("hexproof from artifacts", "a3"),
+        keyword("hexproofish", "a4"),
+        keyword("flying", "a5"),
+        keyword("ward 2", "a6"),
+        ability("hexproof"),
+    ];
+    let env = Env::default().with(o(1), c);
+    assert_eq!(
+        eval(&remove_keyword("hexproof", 1), &env, o(1))
+            .characteristics
+            .abilities,
+        vec![
+            keyword("hexproofish", "a4"),
+            keyword("flying", "a5"),
+            keyword("ward 2", "a6"),
+            ability("hexproof"),
+        ]
+    );
+}
+
+// REQ-LAYER-001; CR 613.1f, 702.11e: removing one variant removes that string only.
+#[test]
+fn remove_hexproof_variant_is_exact() {
+    let mut c = creature("test.bear", 2, 2);
+    c.abilities = vec![
+        keyword("hexproof", "a1"),
+        keyword("hexproof from red", "a2"),
+        keyword("hexproof from blue", "a3"),
+    ];
+    let env = Env::default().with(o(1), c);
+    assert_eq!(
+        eval(&remove_keyword("hexproof from red", 1), &env, o(1))
+            .characteristics
+            .abilities,
+        vec![
+            keyword("hexproof", "a1"),
+            keyword("hexproof from blue", "a3"),
+        ]
+    );
+}
+
+// REQ-LAYER-001; CR 613.1f, 702.11e: only hexproof removal removes variants; removing flying
+// leaves "flying from red" and "protection from red".
+#[test]
+fn remove_other_keyword_leaves_variants() {
+    let mut c = creature("test.bear", 2, 2);
+    c.abilities = vec![
+        keyword("flying", "a1"),
+        keyword("flying from red", "a2"),
+        keyword("protection from red", "a3"),
+    ];
+    let env = Env::default().with(o(1), c);
+    assert_eq!(
+        eval(&remove_keyword("flying", 1), &env, o(1))
+            .characteristics
+            .abilities,
+        vec![
+            keyword("flying from red", "a2"),
+            keyword("protection from red", "a3"),
+        ]
+    );
+}
+
+// REQ-LAYER-001; CR 122.1b, 613.1f, 613.7, 702.11e: a "hexproof from red" keyword counter is
+// removed by a later RemoveKeyword("hexproof") and survives an earlier one.
+#[test]
+fn remove_hexproof_vs_variant_counter_timestamp_order() {
+    for (remove_ts, has) in [(5, false), (1, true)] {
+        let env = Env::default()
+            .with(o(1), creature("test.bear", 2, 2))
+            .counter(o(1), "hexproof from red", 1, 3);
+        let c = eval(&remove_keyword("hexproof", remove_ts), &env, o(1)).characteristics;
+        assert_eq!(has_keyword(&c, "hexproof from red"), has, "{remove_ts}");
+    }
+}
+
+// REQ-LAYER-001; CR 702.11d, 702.11e: the single definition of a keyword variant.
+#[test]
+fn variant_helper_accepts_and_rejects() {
+    assert!(pipeline::is_variant_of("hexproof from red", "hexproof"));
+    for candidate in ["hexproof", "hexproof ", "hexproof  x", "hexproofish"] {
+        assert!(
+            !pipeline::is_variant_of(candidate, "hexproof"),
+            "{candidate:?}"
+        );
+    }
+}

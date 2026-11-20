@@ -154,23 +154,40 @@ pub fn keyword_counter_keyword(kind: &str) -> Option<&str> {
     // CR 122.1b: the listed keywords "as well as any variants of those keywords".
     KEYWORD_COUNTER_KINDS
         .iter()
-        .any(|name| {
-            kind == *name
-                || kind
-                    .strip_prefix(name)
-                    .and_then(|rest| rest.strip_prefix(' '))
-                    .is_some_and(|param| !param.is_empty() && !param.starts_with(' '))
-        })
+        .any(|name| kind == *name || is_variant_of(kind, name))
         .then_some(kind)
 }
 
-/// Whether `ability` is a keyword ability with keyword `keyword`.
+/// The keywords whose removal also removes every variant of them. CR 702.11e: "Any effect that
+/// causes an object to lose hexproof will cause an object to lose all 'hexproof from [quality]'
+/// abilities." The baseline states this for hexproof only.
+const REMOVAL_REMOVES_VARIANTS: &[&str] = &["hexproof"]; // CR 702.11e
+
+/// Whether `candidate` is a variant of keyword `name`: `name`, one ASCII space, then a non-empty
+/// parameter that does not start with a space (CR 702.11d: "hexproof from red").
+pub(super) fn is_variant_of(candidate: &str, name: &str) -> bool {
+    candidate
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .is_some_and(|param| !param.is_empty() && !param.starts_with(' '))
+}
+
+/// Whether `ability` is a keyword ability that removing keyword `keyword` removes (CR 613.1f):
+/// its keyword is `keyword` exactly, or `keyword` is hexproof and its keyword is a
+/// "hexproof from [quality]" variant ([`is_variant_of`], CR 702.11e).
 fn is_keyword(ability: &AbilityAST, keyword: &str) -> bool {
     let Some(object) = ability.0.as_object() else {
         return false;
     };
-    object.get("kind").and_then(|k| k.as_str()) == Some("KEYWORD")
-        && object.get("keyword").and_then(|k| k.as_str()) == Some(keyword)
+    if object.get("kind").and_then(|k| k.as_str()) != Some("KEYWORD") {
+        return false;
+    }
+    let Some(candidate) = object.get("keyword").and_then(|k| k.as_str()) else {
+        return false;
+    };
+    // CR 702.11e: losing hexproof loses every "hexproof from [quality]" ability.
+    candidate == keyword
+        || (REMOVAL_REMOVES_VARIANTS.contains(&keyword) && is_variant_of(candidate, keyword))
 }
 
 /// The per-counter (power, toughness) change of a P/T counter kind `+X/+Y` or `-X/-Y`
@@ -399,7 +416,7 @@ fn apply_effect(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, m: &LayerMod
         LayerModification::AddAbility(a) => c.abilities.push(a.clone()),
         // CR 613.1f
         LayerModification::RemoveAllAbilities => c.abilities.clear(),
-        // CR 613.1f
+        // CR 613.1f, 702.11e
         LayerModification::RemoveKeyword(k) => c.abilities.retain(|a| !is_keyword(a, k)),
         // CR 613.4a, 613.4b
         LayerModification::SetPt { power, toughness } => {

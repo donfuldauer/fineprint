@@ -82,7 +82,8 @@ pub enum LayerModification {
     AddAbility(AbilityAST),
     /// Layer 6 (CR 613.1f): removes every ability.
     RemoveAllAbilities,
-    /// Layer 6 (CR 613.1f): removes every keyword ability whose `keyword` is this string.
+    /// Layer 6 (CR 613.1f): removes every keyword ability whose `keyword` is this string, and,
+    /// for hexproof, every "hexproof from [quality]" variant (CR 702.11e).
     RemoveKeyword(String),
     /// Layer 7a or 7b (CR 613.4a, 613.4b): `Some(n)` sets that value to `n`; `None` leaves it.
     SetPt {
