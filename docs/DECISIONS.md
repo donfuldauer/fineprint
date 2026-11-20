@@ -5771,11 +5771,17 @@ feature). Extending `state_hash` (rejected: #183). A relative path with `cd` in 
 ## #36 FP-035 — Stale-cache demonstration plan
 
 **Decision:** No sabotage switch ships in the code. The acceptance criterion "a deliberately stale
-cache in a scratch commit fails it" is demonstrated by the Orchestrator on a scratch branch (for
-example, making `invalidate` keep the entries); the spec tests' comparator check (cached results
-against `layers::evaluate_all`) and the digest comparison then fail. The unit test
+cache in a scratch commit fails it" is demonstrated by the Orchestrator on a scratch branch. The
+scratch mutation made `invalidate` a no-op (the version is not bumped and the entries are not
+dropped, so lookups keep hitting the old entries under the same version) and switched off
+registry-change detection; the spec tests' comparator check (cached results against
+`layers::evaluate_all`) and the digest comparison then fail. The unit test
 `environment_changes_need_a_declared_invalidation` also shows, in cached mode, that an undeclared
-change keeps serving the old version's value.
+change keeps serving the old version's value. On draft PR #192 (scratch commit 4e74362, closed
+unmerged) `differential (ubuntu-latest)` failed (3 cache unit tests failed in the full-recompute
+suite) and `test (ubuntu-latest)` failed (6 failed); run locally, 26 of the 51
+`spec_layers_cache_*` tests failed, including `stale_cache_is_detected_by_the_differential` and
+`diff_after_declared_changes`.
 **Rationale:** A feature or flag that makes the cache stale would be dead weight and a risk in
 production code; the scratch commit proves the gate without shipping it.
 **Alternatives:** A `stale-cache` test feature (rejected for the reason above).

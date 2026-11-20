@@ -264,6 +264,9 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Keep incremental compiler state for the two feature modes out of the archived target.
+      CARGO_INCREMENTAL: "0"
     # REQ-LAYER-005: the whole suite also runs in full-recompute mode (the cached mode is the
     # test job), and the layer results of the differential scenarios must be byte-identical in
     # both modes. Linux only: the comparison is platform-independent. FINEPRINT_DIFF_DIR is
@@ -369,28 +372,43 @@ jobs:
           key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-bench-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-bench-
+      # Publish only Criterion results from the current run: Criterion writes to a fresh
+      # directory outside the cached target, so a result for a renamed benchmark cannot be
+      # restored and labelled with the current SHA.
       - name: cargo bench
         if: needs.changes.outputs.code == 'true'
+        env:
+          CRITERION_HOME: ${{ runner.temp }}/criterion
         run: cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot
       - name: Summarise medians
         if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
-          python3 -I - target/criterion >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          python3 -I - "$RUNNER_TEMP/criterion" >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           import json, pathlib, sys
           root = pathlib.Path(sys.argv[1])
+          groups = [
+              "full_recompute_200",
+              "cached_cold_200",
+              "cached_warm_200",
+              "cached_after_invalidation_200",
+          ]
+          rows = []
+          for name in groups:
+              est = root / name / "new" / "estimates.json"
+              if not est.is_file():
+                  sys.exit(f"error: missing benchmark result {est}")
+              median_ns = json.loads(est.read_text())["median"]["point_estimate"]
+              rows.append(f"| {name} | {median_ns / 1e6:.3f} |")
           print("| benchmark | median (ms) |")
           print("| --- | ---: |")
-          for est in sorted(root.glob("**/new/estimates.json")):
-              name = est.parent.parent.relative_to(root).as_posix()
-              median_ns = json.loads(est.read_text())["median"]["point_estimate"]
-              print(f"| {name} | {median_ns / 1e6:.3f} |")
+          print("\n".join(rows))
           EOF
       - name: Upload criterion results
         if: needs.changes.outputs.code == 'true'
         uses: actions/upload-artifact@v4.6.2
         with:
           name: criterion-layers-recompute-${{ github.sha }}
-          path: target/criterion
+          path: ${{ runner.temp }}/criterion
           if-no-files-found: error
           retention-days: 90
