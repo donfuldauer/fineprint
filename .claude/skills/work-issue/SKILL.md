@@ -65,8 +65,8 @@ threads.
       Read the ID from the environment, not from `get_session`:
       `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"`. Only if that variable is unset,
       call `get_session` with no argument. Call `get_session` on another session only to check
-      whether a claim that isn't yours is live (DECISIONS.md "Self-chaining — handoff through the
-      backstop scheduled task").
+      whether a claim that isn't yours is live (DECISIONS.md "Self-chaining — handoff on PR
+      merge").
    2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
       delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
@@ -193,7 +193,8 @@ When every P6 step 5 condition holds on the head commit (required checks green, 
 reviewed the head with no outstanding change request, every thread replied to and resolved,
 branch up to date with `main`, last work-verifier result `pass` for the head):
 
-1. Merge with a merge commit:
+1. If `SELF_CHAIN` is true, post the handoff marker first (§8 step 1). Then merge with a merge
+   commit:
    `gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`.
 2. The repository deletes merged branches automatically; check it did.
 3. **Unblock dependents.** For each issue this one blocks
@@ -210,40 +211,28 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 
 ## 8. Self-chain (only when `SELF_CHAIN` is true)
 
-Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
-now ready; say why in the final message instead.
+The successor is started by the merge itself. The backstop scheduled task
+(`Fine Print: next ready issue (backstop)`) has a GitHub trigger on pull requests merged into
+`main` from `issue/` branches. Each such merge starts a fresh session of that task, which looks
+for the merged issue's handoff marker and continues the chain only if it finds one. This session
+fires nothing. Never call `create_session` or `fire_trigger` to chain: a session started by
+another session asks a person to approve every remote-session tool call, and a session cannot
+fire a task it did not create (DECISIONS.md "Self-chaining — handoff on PR merge"). The task's
+4-hourly scheduled run restarts the chain if the merge's run does not. There is no depth limit:
+the chain runs until no issue is ready.
 
-The successor is always started by the backstop scheduled task, never by this session: fire the
-task, and it starts a fresh session. Never call `create_session` to chain. A session started by
-another session asks a person to approve every remote-session tool call, while a session started
-by the scheduled task does not (DECISIONS.md "Self-chaining — handoff through the backstop
-scheduled task"). There is no depth limit: the chain runs until no issue is ready.
-
-1. **Find the task.** Call `list_triggers` and take the enabled task named
-   `Fine Print: next ready issue (backstop)`. If none exists or it is disabled, post no marker,
-   say so in the final message (a person must restore it), and end the turn.
-2. **Check for an earlier attempt.** Read the merged issue's comments for a marker from this
-   session (step 3).
-   - "Self-chain: handed off" or "Self-chain: handoff failed" (final): fire nothing more; end
-     the turn.
-   - "Self-chain: handing off" (pending): an earlier attempt stopped before confirming, so it
-     may or may not have fired. Fire again as in step 3, reusing this marker instead of posting
-     a new one. Firing twice is safe: if the first run started a session, the second run finds
-     it as a live chain in its step 1 and stops. Don't infer the earlier outcome from the task's
-     `last_run`: a scheduled run is indistinguishable from a fired one, and a scheduled run may
-     have stopped because this session was still live.
-   - No marker: go on to step 3.
-3. Post the pending marker on the merged issue: "Self-chain: handing off to the backstop
-   scheduled task (session <this session's ID>)." Then call `fire_trigger` with the task's ID and
-   the text `Handoff: session <this session's ID> merged #<N> and fired this run. In step 1,
-   ignore that session.`
-4. If `fire_trigger` succeeds, edit the marker to the confirmed text: "Self-chain: handed off to
-   the backstop scheduled task (session <this session's ID>)." If it fails, edit the marker to
-   "Self-chain: handoff failed (session <this session's ID>): <reason>; the next scheduled run
-   picks up the chain." and say the same in the final message. A retry does not fire again
-   after a failure.
-5. End the turn. Fire once per merge, and again only to retry a pending marker (step 2). Never
-   chain from a session whose prompt did not ask for it.
+1. **Before the merge call** (§7 step 1), read the issue's comments. If the latest
+   "Self-chain:" comment from this session is already an uncancelled handoff marker (an earlier
+   attempt), reuse it. Otherwise post: "Self-chain: handoff on merge of PR #<P> (session <this
+   session's ID>)." Post it even if no other issue looks ready yet: dependents are unblocked
+   only after the merge (§7 step 3), and the next session reports and stops if none is ready.
+2. **If the merge call fails** and you are not retrying it in this turn, edit the marker to
+   "Self-chain: handoff cancelled (session <this session's ID>): <reason>." A merge's run
+   ignores a cancelled marker. Post a fresh marker before a later merge attempt.
+3. **After the merge**, finish §7 and end the turn. In the final message, say the next session
+   starts from the merge, or from the next scheduled run if the merge's run does not start one.
+   Never chain from a session whose prompt did not ask for it: without a marker, the merge's run
+   stops.
 
 ## Never
 
