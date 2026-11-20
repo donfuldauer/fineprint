@@ -6413,6 +6413,16 @@ that would touch `layouts/merged.rs` or `layers/copy.rs`, outside this unit's ow
 **Alternatives:** Per-component face-down effects (rejected: components are not objects with
 their own characteristics, CR 731.2a); deciding the mutated case here (rejected: a rules
 question, which agents do not decide).
+**Mutated case (rules-researcher answer, CR 2026-11-06):** a face-down lower component of a
+mutated permanent whose topmost component is face up **does** contribute its abilities, so the
+current `merge_effect` (`mutated = true`) behaviour stands and no code changes. Basis: CR
+702.140e ("A mutated permanent has all abilities of each card and token that represents it")
+is the "unless otherwise specified" exception of CR 731.2a; CR 731.2e makes the merged
+permanent's status that of its topmost component, so with a face-up top the permanent is face
+up and CR 708.2 / layer 1b (613.2b) do not apply to it. If the topmost component is face down,
+the whole permanent is face down and layer 1b leaves only the profile (CR 708.2), with no
+component's abilities. This is an inference from those explicit rules: no CR rule or ruling in
+the baseline states the case directly.
 
 ## #39 FP-038 — LKI of a face-down permanent leaving the battlefield
 
