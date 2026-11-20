@@ -21,8 +21,7 @@ threads.
      open `work-unit` issue labelled `blocked`, every page
      (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open'`).
      For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
-     §7 step 3's rule, replace `blocked` with `ready` and comment "Unblocked by #<N> (PR #<P>)",
-     naming the blocker that closed last. Leave `blocked` alone on an issue with no blockers
+     §7 step 3's rule, unblock it as §7 step 3 does, naming the blocker that closed last. Leave `blocked` alone on an issue with no blockers
      or one that also carries `status:blocked-failure`: there a person set the hold (the plan
      sets `blocked` only from dependencies; other holds use `status:blocked-failure`, PROCESS.md
      P7).
@@ -204,8 +203,10 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 3. **Unblock dependents.** For each issue this one blocks
    (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
    closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
-   its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)". Skip an issue
-   that no longer carries `blocked`: the next session may already have unblocked it (§1 step 0).
+   its `blocked` label with `ready`: add `ready` first, then remove `blocked`, so the issue is
+   never without both. Comment "Unblocked by #<N> (PR #<P>)" unless an "Unblocked by" comment is
+   already there. Skip an issue that no longer carries `blocked`: the next session may already
+   have unblocked it (§1 step 0).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
    and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
