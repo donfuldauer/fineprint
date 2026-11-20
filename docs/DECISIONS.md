@@ -4846,3 +4846,295 @@ contract-change protocol.
 **Alternatives:** Deriving only the host-leaves case from LKI now (rejected: the move-to-new-host
 case would stay wrong and the behaviour would be split across two sources). Changing `Outcome`
 inside #30 (rejected: outside the owned paths, and it breaks the canonical encoding).
+
+## #31 FP-030 — Independent Tester: what the spec tests pin and leave open
+
+**Decision:** The black-box spec tests (`crates/fineprint-core/tests/spec_triggers_stack_*.rs`)
+pin the ask sequence only where the brief fixes it. They pin:
+
+- the ORDER requests' order (part 1 players in APNAP order, then part 2 players in APNAP order);
+- sequential request ids;
+- the modes request coming before the single targets request for a trigger.
+
+They do not pin whether one player's CHOOSE_MODES / CHOOSE_TARGETS requests come before or after
+the next player's ORDER request. Tests where both happen answer by request type. Target lists in
+answers are given in ascending id order, so no test depends on whether `StackedTrigger.targets`
+keeps the answer's order or sorts it.
+
+**Rationale:** The brief (ask sequence items 1 to 3) says ordering happens before modes and
+targets and that requests arrive in APNAP order, but it does not say how one player's target
+requests interleave with the next player's ORDER request. It does not say whether chosen targets
+are normalised either. Pinning either point would test something the contract does not state (R8).
+
+**Alternatives:** Pin per-player completion (ORDER, then all of that player's modes and targets,
+before the next player's ORDER), as CR 101.4b might suggest. Rejected: the brief does not state it,
+and the integration unit can pin it later if needed.
+
+## #31 FP-030 — Real-state environments belong to the integration unit
+
+**Decision:** #31 delivers state, delayed, reflexive and sourceless triggers and the placement
+procedure as pure library code behind the injected traits `TriggerEnv` (from #30) and the new
+`PlacementEnv`. Implementing either trait on the real game state is out of scope for #31: the game
+state has no stack and no ability registry yet. The game-loop integration unit implements both,
+emits `TriggerPutOnStackEvent` / `TriggerRemovedEvent` (SRS 15.4) from `TriggerPlacement`, runs
+the state-based-action loop of CR 603.3b, and takes over the four #30 requirements: (1) a real
+`TriggerEnv::source_survives`; (2) snapshot the `MemoryTable` before the executor retires departing
+Memory and pass it as `pre_memory` to `detect_with_pre_event_memory`; (3) normalise batches with
+`events_from_batch_with_lki`; (4) give every ability instance a distinct ability id
+(`DelayedTriggers::registrations` already does this with `delayed#<n>`). The "Out of scope"
+paragraph of `triggers/mod.rs` says so.
+
+**Rationale:** The brief's GOAL and REQUIREMENTS 7(a); R1 (the state, stack and loop are not owned
+paths of #31); the #30 decisions "Trigger detection design" item 2 and "CR round 1" item 1.
+
+**Alternatives:** A partial `TriggerEnv` on `GameState` now (rejected: no stack or registry to read,
+so it would be a stub that the integration unit rewrites).
+
+## #31 FP-030 — Inferences and choices in the trigger lifecycle
+
+**Decision:**
+1. *Outstanding from trigger time (CR 603.8).* A state-trigger instance counts as outstanding from
+   the moment it triggers (while it waits and while it is on the stack) until
+   `StateTriggers::instance_left_stack`. A false intervening "if" does not mark it.
+2. *No ORDER ask below two triggers (CR 603.3b).* `ORDER_SIMULTANEOUS_TRIGGERS` is asked per player
+   per part only when that player has 2 or more triggers in that part; a single trigger needs no
+   ordering (the CR does not say a single trigger is ordered).
+3. *Ordering before modes and targets.* Each player's order is chosen first; then each trigger, in
+   that order, gets its modes and targets as it goes on the stack. A trigger removed later still
+   took part in the ordering, and its removal leaves the others' relative order unchanged (the CR
+   is silent).
+4. *One removal reason.* Every "no legal choice" removal at placement (an unfillable required
+   target slot, no choosable mode, fewer legal modes than the minimum, or no mode chosen for a
+   min-0 mode set, CR 603.3c-d) uses `RemovedReason::NoLegalTargets`, which maps to
+   `TriggerRemovedEvent{NO_LEGAL_TARGETS}`; SRS 15.4 has no other fitting reason.
+5. *Unfillable slot.* A slot is unfillable when it has fewer legal targets than its minimum (no
+   legal target for a min-1 slot is the common case). A slot with min 0 and no legal target stays
+   in the request with empty `legal` and max 0 and does not remove the trigger. A mode is legal
+   iff each of its own slots is fillable in this sense.
+6. *One-shot delayed triggers (CR 603.7b).* When several waiting entries match a one-shot delayed
+   trigger at once, the first matching element in input (creation) order is used and the
+   registration is consumed. THIS DEPARTS FROM CR 603.7b, which gives the controller of the delayed
+   trigger the choice of which simultaneous event causes it to trigger. The discarded matches
+   cannot be recovered through stack ordering. A matching element whose intervening "if" is false
+   is skipped and does not consume a one-shot entry. The departure is tracked as a follow-up owned
+   by issue #182 (a `CHOOSE` choice for the controller, to be added with the integration of
+   delayed triggers).
+7. *Delayed triggers persist* when their source leaves its zone (the CR is silent; CR 603.7c only
+   says the ability no longer affects an object that left its expected zone).
+8. *Modes recorded ascending* as original indices into the mode list, whatever order the answer
+   lists them in.
+9. *Optional ask at resolution (CR 603.5).* `place_triggers` never asks
+   `CHOOSE_OPTIONAL_TRIGGER`; the resolution unit calls `ask_optional_trigger`. Its default is `NO`
+   (declining is the safe default and matches the generated yes/no default).
+10. *SourcelessAbility split.* The inherent abilities are seven `SourcelessAbility` values under
+    four `SourcelessKind` registrations (2 monarch, CR 726.2; 3 initiative, CR 727.2; rad counters,
+    CR 729.1; speed, CR 702.179d), so one registration per player per designation fires several
+    distinct abilities with stable ids.
+11. *`responds_to_trigger`.* True iff the ability's trigger is an event matcher of kind
+    `EventKind::Triggered` (wire `TRIGGERED`), the DSL's form of "another ability triggering"
+    (CR 603.3b part 2); every other trigger (other event kinds, phase/step, state) is part 1.
+12. *Request options.* `ORDER_SIMULTANEOUS_TRIGGERS` lists the trigger indices as
+    `ChoiceOption::Number(i)` while n! is below `ENUMERATION_LIMIT`, and carries a validator
+    contract (rule `Payload`, bounds n..n) from 8 triggers on. `CHOOSE_TARGETS` has request bounds
+    (sum of slot minimums, sum of clamped slot maximums), lists the distinct legal targets of all
+    slots (players before objects, ascending) while the number of valid answers is below the
+    limit, and otherwise carries a validator contract (rule `Payload`) with the request bounds.
+    `CHOOSE_MODES` is always enumerated (`ChoiceOption::Mode` per offered mode), as the brief
+    says. Every request has `hidden: false` and an empty `reveal_to`.
+13. *Duplicate players in the APNAP list* are a procedure error, like a controller missing from it.
+
+**Rationale:** The brief's contract and ask sequence; CR 603.3b-d, 603.5, 603.7b, 603.8, 700.2b-c;
+SRS 15.3 (ENUMERATION_LIMIT), SRS 15.4; R3 (sorted containers, deterministic re-execution).
+
+**Alternatives:** Ask ORDER for a single trigger (rejected: a no-op request); interleave modes and
+targets with ordering (rejected: the order must be fixed before triggers go on the stack); a
+separate removal reason for "no mode" (rejected: SRS 15.4 defines only INTERVENING_IF_FALSE and
+NO_LEGAL_TARGETS); removing a delayed trigger when its source leaves (rejected: not in the CR);
+asking the optional choice at placement (rejected: CR 603.5 makes it at resolution).
+
+## #31 FP-030 — State-trigger re-arm loop
+
+**Decision:** A state trigger removed at placement for having no legal choice leaves the stack and
+re-arms; if its condition still holds it triggers again at once, and the cycle can repeat
+indefinitely. #31 does not break that loop: it is left to the CR 104.4b loop handling (a later
+unit).
+
+**Rationale:** CR 603.8 re-checks the condition after the instance leaves the stack; stopping the
+cycle is a loop-detection question, not a trigger-placement one.
+
+**Alternatives:** Suppress re-arming after a placement removal (rejected: CR 603.8 gives no such
+exception).
+
+## #31 FP-030 — SRS gaps found
+
+**Decision:** Three SRS gaps, queued as P8 SRS edits in docs/HUMAN_QUEUE.md; the code follows the
+CR (CR 2026-11-06 wins):
+1. SRS 8.2 item 7 omits the two-part process of CR 603.3b. Already queued by #30 (HUMAN_QUEUE
+   "[#30 FP-029] SRS §8.2" item (2)); not queued again.
+2. SRS 8.2 item 4 omits "if the object with the ability is still in the same zone" from the
+   re-check after the instance leaves the stack (CR 603.8).
+3. SRS 15.3 gives no timing for `CHOOSE_OPTIONAL_TRIGGER`; CR 603.5 makes the "may" choice when
+   the ability resolves.
+
+**Rationale:** R8; PROCESS.md P8 (SRS edits need a person).
+
+**Alternatives:** Edit the SRS here (rejected: P8).
+
+## #31 FP-030 CR round 1 — ordering labels
+
+**Decision:** The `ORDER_SIMULTANEOUS_TRIGGERS` payload keeps each trigger's
+`PendingTrigger::description()` as its label. Only when two or more triggers of the same group
+(same player, same CR 603.3b part) share that label is ` with ` and the trigger's chooser-visible
+bindings appended, in binding-name order: `<name>=player <n>` for a player binding and
+`<name>=object <n>` for an object binding that `PlacementEnv::is_public_object` accepts. Value
+bindings and non-public objects are never shown; with nothing to show the label stays the base
+description. `is_public_object` defaults to `false`, so by default no object is shown.
+`PendingTrigger::description()` and `ask_optional_trigger` are unchanged.
+
+**Rationale:** CR 603.3b and CR 101.4c let the controller choose the order, so the request should
+let them tell otherwise identical entries apart. Which objects a player may see is the
+hidden-information rule REQ-CORE-004, which belongs to the integration unit (DECISIONS "#31 FP-030
+— Real-state environments belong to the integration unit"); the safe default is to show nothing
+until that unit supplies the real visibility rule.
+
+**Alternatives:** Always show every binding (rejected: leaks private objects, R12, REQ-CORE-004);
+show the event indices (rejected: `PendingTrigger` does not carry them); change
+`description()` for every trigger (rejected: changes labels that are already unique and the
+optional-trigger request).
+
+## #31 FP-030 CR round 1 — deferred findings
+
+**Decision:** These CodeRabbit round-1 findings on PR #181 are deferred to issue #182 and are not
+implemented in this unit:
+
+(a) A one-shot delayed trigger's executable ability. `take_triggered` and `fire` remove the
+registry entry, so a `PendingTrigger` of a delayed trigger has no stored effect. The form (carry
+the ability in `PendingTrigger`, or a resolver-side snapshot keyed by the pending trigger) depends
+on the stack-object and resolver representation (#58 FP-056), which does not exist yet. Thread:
+https://github.com/donfuldauer/fineprint/pull/181#discussion_r4635776824
+
+(b) `StateTriggers::check` ignores `limit` (perTurn, perGame) because it has no access to Memory.
+The per-ability counters live in `MemoryTable` and are shared with event detection. The game-loop
+integration (#44 FP-043) owns the call site and Memory access. Thread:
+https://github.com/donfuldauer/fineprint/pull/181#discussion_r4635776870
+
+(c) The CR 603.7b controller choice of which simultaneous event causes a one-shot delayed trigger
+to trigger (see item 6 of "#31 FP-030 — Inferences and choices in the trigger lifecycle"). Until
+it is added, the implementation departs from CR 603.7b.
+
+(d) Combined target legality across slots (unverified review finding on `place.rs`).
+`PlacementEnv::legal_targets` gives independent per-slot candidate lists, so "must target X if
+able"-style requirements across slots cannot be expressed. This needs a combined-legality
+extension of `PlacementEnv`, together with the casting legality unit (#52 FP-050) and the real
+environments. Per-slot repeats stay allowed.
+
+**Rationale:** Each item needs the real game state, stack or resolver that the integration unit
+builds (see "#31 FP-030 — Real-state environments belong to the integration unit"). Deferring
+keeps this unit's public API from changing twice.
+
+**Alternatives:** Implement a stopgap interface now (rejected: it would be replaced by the
+integration design and would change the public API again). Add the controller choice of (c) now
+(rejected: it needs the same request and answer protocol as the integration unit's choices and
+no card needs it yet).
+
+## #31 FP-030 CR round 2 — delayed trigger limits
+
+**Decision:** The trigger limit of a delayed triggered ability (`limit`, CR 603.2h) is kept by
+`DelayedTriggers` in per-registration counters (the turn last counted, the count that turn, the
+count this game). `DelayedTriggers::take_triggered(env, turn, waiting)` checks it for each
+element after the intervening "if" passed (CR 603.4) and before the one-shot bookkeeping
+(CR 603.7b), in input order. An element that fails its condition, or is dropped by the limit,
+counts nothing and does not consume a one-shot. `registrations()` lists every delayed ability
+with both `intervening_if` and `limit` set to `None`, so `detect` never counts a delayed
+ability's limit, and Memory carries no `trigger.limit.*` counters for delayed abilities. The
+counters are not keyed by source, so they survive the source leaving its zone and are not reset
+by it, consistent with "#31 FP-030 — Inferences and choices in the trigger lifecycle" (delayed
+triggers persist). `fire` (phase or step delayed triggers, no event) counts no limit. The
+registration given to `TriggerEnv::condition_holds` inside `take_triggered` keeps the
+intervening "if" and also has `limit` set to `None` (the same helper builds both).
+
+**Rationale:** `detect` (unit #30's `detect.rs`, which this unit may not change) counts a limit
+before it can see a delayed trigger's captured bindings, so since round 1 (where the condition
+moved to `take_triggered`) an event that failed the condition used up the limit, within one batch
+(the in-call tally) and across calls in the same turn (Memory), and suppressed a later passing
+event. Counting in `DelayedTriggers` after the condition restores the order condition, then
+limit.
+
+**Alternatives:** Change `detect.rs` to accept captured bindings for delayed registrations
+(rejected: the file belongs to #30 and must stay byte-identical). Roll Memory back after
+`take_triggered` drops an element (rejected: it does not repair the in-batch tally, which drops
+the later passing candidate before `take_triggered` sees it).
+
+## #31 FP-030 CR round 3 — delayed trigger limits at a phase or step
+
+**Decision:** `DelayedTriggers::fire(id, turn)` checks and counts the registration's limit with the
+same counters as `take_triggered`; a dropped firing counts nothing and does not consume a
+one-shot. This supersedes the sentence "`fire` ... counts no limit" in "#31 FP-030 CR round 2 —
+delayed trigger limits".
+
+**Rationale:** Finding 1 verified: a duration registration with `per_game: Some(1)` fired on every
+call of `fire` (CR 603.2h, CR 603.7b).
+
+**Alternatives:** Leave `fire` unlimited (rejected: the DSL attaches `limit` to every triggered
+ability; SRS 8.2 item 8).
+
+## #31 FP-030 CR round 3 — delayed trigger counters are not in the MemoryTable
+
+**Decision:** The limit counters of a delayed triggered ability stay in `Delayed.counts` inside
+`DelayedTriggers`; they are not written to `MemoryTable`.
+
+**Rationale:** (i) `MemoryTable` is `BTreeMap<ObjectId, Memory>`
+(crates/fineprint-core/src/memory/record.rs): its only identity is an object id, and
+`MemoryTable::apply_zone_change` removes the old object's Memory when the object changes zone and
+gives the new object only persistent choices (CR 400.7, CR 607.2p). A delayed ability is
+registered by an effect, is not an object and has no object id of its own; its source is an
+object whose Memory is retired on a zone change, yet a delayed trigger persists when its source
+leaves its zone (docs/DECISIONS.md "#31 FP-030 — Inferences and choices") and its used limit must
+still count. Keying the counters by the source's id would reset or lose them at the zone change;
+keying them by a synthetic id would need a new identity space and a change in the memory module,
+which this unit may not touch. (ii) `detect` must not count a delayed ability's limit in Memory at
+all, because it checks the limit before it can see the captured bindings; the CR 603.4 order
+(condition, then limit) is only possible in `take_triggered`/`fire` (docs/DECISIONS.md "#31 FP-030
+CR round 2 — delayed trigger limits"). (iii) `DelayedTriggers` is itself per-game state with the
+same purpose as Memory here: one value per ability instance (`delayed#<n>`, never reused, ids
+unique per game), cloneable as a snapshot, ordered containers only (R3), alive exactly as long as
+the registration; its counters are as deterministic and as serialisable as a MemoryTable entry.
+The intent of SRS 8.2 item 8 (limits tracked per ability instance, persistent across the game,
+deterministic state) is met; only the literal word "Memory" is not.
+
+**Alternatives:** Store under the source's Memory (rejected, retired at zone change); a new Memory
+slot keyed by `delayed#<n>` (rejected, memory module is another unit's, and the key space is not
+object ids); change `detect.rs` (rejected, unit #30's file).
+
+## #31 FP-030 CR round 4 — delayed trigger condition at a phase or step
+
+**Decision:** `DelayedTriggers::fire(env, turn, id)` evaluates the stored intervening "if"
+(CR 603.4) with the captured bindings in `StateView::PostEvent` before it counts the limit
+(CR 603.2h); a false condition counts nothing and does not consume a one-shot (CR 603.7b);
+`take_triggered` and `fire` share one condition helper and one counter set. This supersedes
+(i) the sentence "`fire` ... counts no limit" in "#31 FP-030 CR round 2 — delayed trigger
+limits", (ii) "No intervening 'if' is evaluated here" in "#31 FP-030 CR round 3 — delayed
+trigger limits at a phase or step" and (iii) the words "only possible in
+`take_triggered`/`fire`", which read as if `fire` evaluated the condition before round 4: from
+round 4 on both do.
+
+**Rationale:** The finding, verified: a false occurrence used up a per-turn or per-game limit
+and a later true occurrence returned None.
+
+**Alternatives:** A `condition: bool` parameter (rejected: the caller would need the stored
+predicate and the captured bindings, which `DelayedTriggers` owns, and could skip the check); a
+documented caller-side check (rejected: the same, and `take_triggered` does it inside, so the
+two entry points would differ).
+
+## #31 FP-030 CR round 4 — limits of state triggers are the caller's
+
+**Decision:** `StateTriggers::check` does not apply a state trigger's `limit` and does not stay
+in step with a delayed ability that has a state trigger (state.rs doc).
+
+**Rationale:** `check(env)` has no turn and no Memory, `detect` skips `Trigger::State`
+(detect.rs), and the integration unit owns turn state and Memory; changing `check`'s signature
+touches every caller and test and is out of scope for this round.
+
+**Alternatives:** Counters inside `StateTriggers` keyed by (source, ability id) and a `turn`
+parameter (rejected for this round: a signature change to a public method; recommended as the
+first item of the integration unit); a P8 item (rejected: a design choice, not a human task).
