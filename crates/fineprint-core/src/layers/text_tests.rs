@@ -816,6 +816,7 @@ fn layer3_respects_locked_set() {
         Evaluated {
             characteristics: env.bases[&o(2)].characteristics.clone(),
             controller: Some(PlayerId::new(1)),
+            mana_value_provenance: ManaValueProvenance::plain(),
         }
     );
 }

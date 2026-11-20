@@ -62,7 +62,7 @@ use serde::Serialize;
 
 use super::error::LayerError;
 use super::pipeline::{self, Evaluated, LayerEnvironment};
-use super::registry::ContinuousEffects;
+use super::registry::{ContinuousEffects, ManaValueProvenance, ValueSource};
 use crate::objects::Characteristics;
 
 /// Whether this build runs in full-recompute mode (the `full-recompute` cargo feature): the
@@ -97,7 +97,9 @@ impl StateVersion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Invalidation {
     /// An object entered or left the battlefield or another zone: a change to
-    /// `ObjectBase::on_battlefield`, to an object's base, or to the list `objects()` returns.
+    /// `ObjectBase::on_battlefield`, to an object's base (its base mana-value provenance,
+    /// `LayerEnvironment::base_mana_value_provenance`, included), or to the list `objects()`
+    /// returns.
     ZoneChange,
     /// An object's controller before layer 2 changed (`ObjectBase::controller`).
     ControlChange,
@@ -279,26 +281,47 @@ impl LayerCache {
 /// The SHA-256 digest (fineprint_base) of every `(ObjectId, Evaluated)` of `map`, used by the
 /// differential test to compare cached and full-recompute results (REQ-LAYER-005).
 ///
-/// The preimage is canonical and deterministic: the ASCII tag `fineprint.layers.evaluated.v1`,
+/// The preimage is canonical and deterministic: the ASCII tag `fineprint.layers.evaluated.v2`,
 /// the number of entries, then for each entry in ascending [`ObjectId`] order the object id,
-/// the characteristics and the controller (`Option`). The characteristics are encoded field by
+/// the characteristics, the controller (`Option`) and the mana-value provenance
+/// ([`Evaluated::mana_value_provenance`]: a variant tag, 0 plain, 1 fixed followed by the mana
+/// value as `i64`, 2 a copy of a back face or melded permanent; then the flag that a fixed value
+/// comes from a back face or melded permanent, as `bool`; then the colors pin
+/// ([`ManaValueProvenance::colors_pinned`], CR 707.9b), as `bool`). The characteristics are encoded field by
 /// field in declaration order exactly as LKI records encode them (decision "#24 FP-023 —
 /// Characteristics encoding"): sets and integers through their canonical encoding, the mana
 /// cost as its canonical text, color masks as their bits, and the DSL trees (rules text,
 /// abilities, power, toughness) as tag 0 and their RFC 8785 canonical JSON (tag 1 and
 /// MessagePack if canonical JSON is impossible, tag 2 if neither exists). Equal maps give equal
-/// digests; a change to any characteristic or controller changes the preimage.
+/// digests; a change to any characteristic, the controller or the provenance changes the
+/// preimage.
 #[must_use]
 pub fn evaluated_digest(map: &BTreeMap<ObjectId, Evaluated>) -> Digest {
     let mut out = Vec::new();
-    put_bytes(&mut out, b"fineprint.layers.evaluated.v1");
+    put_bytes(&mut out, b"fineprint.layers.evaluated.v2");
     put_len(&mut out, map.len());
     for (id, evaluated) in map {
         id.encode_canonical(&mut out);
         encode_characteristics(&evaluated.characteristics, &mut out);
         evaluated.controller.encode_canonical(&mut out);
+        encode_provenance(&evaluated.mana_value_provenance, &mut out);
     }
     sha256(&out)
+}
+
+/// Appends the encoding of a mana-value provenance: the source's variant tag (and its mana
+/// value for `Fixed`), then its back-face-or-melded flag, then its colors pin.
+fn encode_provenance(p: &ManaValueProvenance, out: &mut Vec<u8>) {
+    match &p.source {
+        ValueSource::Plain => put_variant(out, 0),
+        ValueSource::Fixed { mana_value } => {
+            put_variant(out, 1);
+            mana_value.encode_canonical(out);
+        }
+        ValueSource::CopyOfBackFaceOrMelded => put_variant(out, 2),
+    }
+    p.zero_when_copied.encode_canonical(out);
+    p.colors_pinned.encode_canonical(out);
 }
 
 /// Appends a deterministic encoding of a serde value: tag 0 and its RFC 8785 canonical JSON;
