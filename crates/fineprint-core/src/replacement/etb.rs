@@ -9,13 +9,19 @@
 //!
 //! **Projection** ([`project`]). The permanent as it would exist on the battlefield (CR 614.12):
 //! the caller's base of the entering object, always presented as on the battlefield; the base
-//! characteristics replaced by every applied [`EtbAction::EntersAsCopyOf`] (ascending
-//! [`EffectId`]); the layers evaluated with the continuous effects already in force plus the
-//! permanent's own static abilities ([`EtbEntry::own_statics`], registered on a clone); then
-//! every applied [`EtbAction::AddCardTypes`]. Once a copy effect has been applied, the
+//! characteristics replaced by the LAST applied [`EtbAction::EntersAsCopyOf`] in application
+//! order ([`EtbApplied::sequence`], CR 707.2, CR 616.1f); the layers evaluated with the
+//! continuous effects already in force plus, on a clone of the registry, the permanent's own
+//! static abilities ([`EtbEntry::own_statics`]) or, once a copy has been applied, the statics the
+//! last applied copy declares ([`CopyAbilities`], CR 707.5), and one synthetic layer-4 effect
+//! adding the card types of every applied [`EtbAction::AddCardTypes`] (CR 613.1d), so power,
+//! toughness and later layers see the added type. Once a copy effect has been applied, the
 //! permanent's own statics and its own [`EtbScope::ThisPermanent`] effects no longer count: its
-//! abilities are the copy's. The three CR 614.12 inputs have no order in the CR; the order used
-//! is docs/DECISIONS.md "#40 FP-039 — ETB projection API and modelling choices".
+//! abilities are the last copy's declared ones. A [`EtbScope::ThisPermanent`] effect also needs
+//! its generating ability on the projected permanent
+//! ([`LayerEnvironment::generating_ability_exists`], CR 614.12, CR 603.6d). The three CR 614.12
+//! inputs have no order in the CR; the order used is docs/DECISIONS.md "#40 FP-039 — ETB
+//! projection API and modelling choices".
 //!
 //! **Loop** ([`resolve_entering`]). Per entry, in slice order: the applicable effects
 //! ([`applicable`]) of the current projection; only the highest-priority [`Tier`] present is
@@ -28,9 +34,11 @@
 //! `CHOOSE_OPTION_OR_VALUE` of the entry's controller before anything moves; the answer is
 //! carried in [`EtbApplied::chosen`] and in the entry's [`Memory`].
 //!
-//! **Payability** (CR 614.12b). Each option commits a cost to its chooser; an option is offered
-//! only if its cost plus the cheapest cost of every other undecided choice of that chooser fits
-//! the remaining budget.
+//! **Payability** (CR 614.12b, CR 616.2). Each option commits a cost to its chooser; an option is
+//! offered only if its cost, plus the least total cost the rest of its entry can still commit
+//! (an exact lookahead over the effects that apply or become applicable), plus that least total
+//! of every later entry of the same chooser, fits the remaining budget (u128 arithmetic, at most
+//! [`MAX_LOOKAHEAD_STATES`] states per entry). The CR 616.1 order choice is never filtered.
 //!
 //! **Standalone scope.** Not joined to the bus or `GameState`: the caller supplies every input
 //! and applies the result. Determinism (REQ-CORE-001): ordered containers, integer arithmetic,
@@ -40,6 +48,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
+use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::ValueExpressionAST;
 use fineprint_dsl::expr::ObjectSelectorAST;
 
@@ -49,8 +58,8 @@ use crate::choice::{
     ChoiceReason, ChoiceResponse, ChoiceType, Interrupt, PendingChoiceRequest,
 };
 use crate::layers::{
-    ContinuousEffect, ContinuousEffects, Evaluated, LayerEnvironment, LayerError,
-    ManaValueProvenance, MatchContext, ObjectBase, evaluate,
+    Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, Evaluated, LayerEnvironment,
+    LayerError, LayerModification, ManaValueProvenance, MatchContext, ObjectBase, evaluate,
 };
 use crate::memory::{ChoiceValue, Memory, MemoryTable};
 use crate::objects::Characteristics;
@@ -142,10 +151,13 @@ pub enum EtbAction {
         amount: i64,
     },
     /// "enters as a copy": the entering permanent's base characteristics are replaced by these
-    /// copiable values (applied to the base, not as a layer effect).
+    /// copiable values (applied to the base, not as a layer effect). The last applied copy wins
+    /// (CR 707.2); its abilities besides characteristics are declared with
+    /// [`EtbEffects::set_copy_abilities`].
     EntersAsCopyOf(Box<Characteristics>),
-    /// "enters as an additional <types>": these card types are added to the projected
-    /// permanent's card types AFTER the layers of the continuous effects have been evaluated.
+    /// "enters as an additional <types>": these card types are added by a layer-4 effect
+    /// (CR 613.1d) whose timestamp is later than every continuous effect of the projection
+    /// (CR 613.7), so power, toughness and later layers see them; not copiable (CR 707.2).
     AddCardTypes(BTreeSet<String>),
     /// "As this enters, choose ...": asks the entry's controller (CR 614.12a) and stores the
     /// answer under `key`.
@@ -230,10 +242,26 @@ impl EtbEffect {
     }
 }
 
-/// The ETB effects in force, keyed and iterated by ascending [`EffectId`].
+/// What a copy effect gives its entrant besides characteristics (CR 707.5, CR 614.12).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CopyAbilities {
+    /// Static abilities of the copy model, as continuous effects. When this copy is the LAST
+    /// applied copy of an entry, [`project`] registers them on the cloned registry bound to the
+    /// entrant: `source` is set to `Some(entry.object)`, and an [`Affected::Objects`] set is
+    /// replaced by `{entry.object}` (an [`Affected::Selector`] is kept).
+    pub statics: Vec<(EffectId, ContinuousEffect)>,
+    /// Ids of [`EtbEffects`] entries (scope [`EtbScope::ThisPermanent`]) that are replacement
+    /// abilities of the copy model. When this copy is the last applied copy, they apply to the
+    /// entrant as if their source were the entrant (CR 707.5).
+    pub etb: Vec<EffectId>,
+}
+
+/// The ETB effects in force, keyed and iterated by ascending [`EffectId`], and the abilities
+/// each copy effect gives its entrant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EtbEffects {
     effects: BTreeMap<EffectId, EtbEffect>,
+    copy_abilities: BTreeMap<EffectId, CopyAbilities>,
 }
 
 impl EtbEffects {
@@ -255,9 +283,34 @@ impl EtbEffects {
         Ok(())
     }
 
-    /// Removes and returns the effect `id`, if present.
+    /// Removes and returns the effect `id`, if present; a copy effect's
+    /// [`CopyAbilities`] declaration is dropped with it.
     pub fn remove(&mut self, id: EffectId) -> Option<EtbEffect> {
+        self.copy_abilities.remove(&id);
         self.effects.remove(&id)
+    }
+
+    /// Declares the abilities copy effect `copy` gives its entrant (CR 707.5); replaces an
+    /// earlier declaration for `copy`.
+    ///
+    /// # Errors
+    /// [`EtbError::NotACopyEffect`] if `copy` is not in the set or its action is not
+    /// [`EtbAction::EntersAsCopyOf`] (nothing changes).
+    pub fn set_copy_abilities(
+        &mut self,
+        copy: EffectId,
+        abilities: CopyAbilities,
+    ) -> Result<(), EtbError> {
+        match self.effects.get(&copy) {
+            Some(EtbEffect {
+                action: EtbAction::EntersAsCopyOf(_),
+                ..
+            }) => {
+                self.copy_abilities.insert(copy, abilities);
+                Ok(())
+            }
+            _ => Err(EtbError::NotACopyEffect(copy)),
+        }
     }
 
     /// The effect `id`, if present.
@@ -284,6 +337,8 @@ impl EtbEffects {
 pub enum EtbError {
     /// An effect with this id is already present.
     DuplicateEffect(EffectId),
+    /// [`EtbEffects::set_copy_abilities`] names an effect that is absent or not a copy effect.
+    NotACopyEffect(EffectId),
     /// The layer system failed (an unknown object, a duplicate own-static id, ...).
     Layer(LayerError),
     /// A choice has no option whose cost leaves the combined costs payable (CR 614.12b).
@@ -300,6 +355,9 @@ impl fmt::Display for EtbError {
         match self {
             EtbError::DuplicateEffect(id) => {
                 write!(f, "ETB effect {} is already present", id.get())
+            }
+            EtbError::NotACopyEffect(id) => {
+                write!(f, "ETB effect {} is not a present copy effect", id.get())
             }
             EtbError::Layer(e) => write!(f, "layer error: {e}"),
             EtbError::Unpayable { chooser, key } => write!(
@@ -350,10 +408,31 @@ pub struct EtbEntry {
 /// What has already modified this entry (CR 614.12, first input; CR 616.1f).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EtbApplied {
-    /// The applied effects.
+    /// The applied effects: the set that stops an effect applying twice.
     pub effects: BTreeSet<EffectId>,
     /// Chosen values by key (the keys of applied [`EtbAction::Choose`] actions).
     pub chosen: BTreeMap<String, ChoiceValue>,
+    /// The order the effects were applied in (CR 616.1f), first applied first.
+    /// [`resolve_entering`] fills it.
+    pub order: Vec<EffectId>,
+}
+
+impl EtbApplied {
+    /// The application sequence: `order` (skipping ids not in `effects` and repeated ids), then
+    /// every id of `effects` not in `order`, ascending. With an empty `order` this is the
+    /// ascending-id order.
+    #[must_use]
+    pub fn sequence(&self) -> Vec<EffectId> {
+        let mut seen: BTreeSet<EffectId> = BTreeSet::new();
+        let mut out = Vec::with_capacity(self.effects.len());
+        for id in &self.order {
+            if self.effects.contains(id) && seen.insert(*id) {
+                out.push(*id);
+            }
+        }
+        out.extend(self.effects.iter().filter(|id| !seen.contains(id)).copied());
+        out
+    }
 }
 
 /// The permanent as it would exist on the battlefield (CR 614.12).
@@ -361,9 +440,10 @@ pub struct EtbApplied {
 pub struct ProjectedPermanent {
     /// The entering object.
     pub object: ObjectId,
-    /// Characteristics and controller after the base was modified by applied copy effects, the
-    /// layers were evaluated with the own statics and continuous effects in force (always as
-    /// an on-battlefield object), and applied [`EtbAction::AddCardTypes`] were added.
+    /// Characteristics and controller after the base was replaced by the last applied copy
+    /// effect and the layers were evaluated (always as an on-battlefield object) with the
+    /// continuous effects in force, the own statics (or the last copy's declared statics) and
+    /// the layer-4 addition of applied [`EtbAction::AddCardTypes`].
     pub evaluated: Evaluated,
     /// Whether an applied effect makes it enter tapped.
     pub tapped: bool,
@@ -437,42 +517,102 @@ impl LayerEnvironment for Projected<'_> {
     }
 }
 
-/// The applied effects of `applied`, ascending id (unknown ids are skipped).
-fn applied_effects<'a>(
-    ctx: &EtbContext<'a>,
-    applied: &'a EtbApplied,
-) -> impl Iterator<Item = &'a EtbEffect> + use<'a> {
+/// The applied effects of `applied` in application order ([`EtbApplied::sequence`]; unknown
+/// ids are skipped).
+fn applied_effects<'a>(ctx: &EtbContext<'a>, applied: &EtbApplied) -> Vec<&'a EtbEffect> {
     let effects = ctx.effects;
     applied
-        .effects
-        .iter()
-        .filter_map(move |id| effects.get(*id))
+        .sequence()
+        .into_iter()
+        .filter_map(|id| effects.get(id))
+        .collect()
+}
+
+/// The last applied copy effect of `applied` in application order, if any (CR 707.2,
+/// CR 616.1f).
+fn last_copy<'a>(ctx: &EtbContext<'a>, applied: &EtbApplied) -> Option<&'a EtbEffect> {
+    applied_effects(ctx, applied)
+        .into_iter()
+        .rev()
+        .find(|e| matches!(e.action, EtbAction::EntersAsCopyOf(_)))
+}
+
+/// `effect` bound to the entrant `object`: its source, and a locked object set, become the
+/// entrant (CR 707.5: the copy's static abilities are the entrant's).
+fn bind_to(object: ObjectId, effect: &ContinuousEffect) -> ContinuousEffect {
+    let mut bound = effect.clone();
+    bound.source = Some(object);
+    if let Affected::Objects(_) = bound.affected {
+        bound.affected = Affected::Objects([object].into_iter().collect());
+    }
+    bound
+}
+
+/// The synthetic layer-4 effect adding `types` to `object` (CR 613.1d, CR 205.1b): an id and a
+/// timestamp strictly above every effect of `continuous` (CR 613.7), so it applies after them.
+///
+/// # Errors
+/// [`LayerError::IdExhausted`] if no such id or timestamp exists.
+fn added_types_effect(
+    continuous: &ContinuousEffects,
+    object: ObjectId,
+    controller: PlayerId,
+    types: BTreeSet<String>,
+) -> Result<(EffectId, ContinuousEffect), LayerError> {
+    let mut max_id = 0u64;
+    let mut max_ts = 0u64;
+    for (id, effect) in continuous.iter() {
+        max_id = max_id.max(id.get());
+        max_ts = max_ts.max(effect.timestamp.get());
+    }
+    let id = max_id.checked_add(1).ok_or(LayerError::IdExhausted)?;
+    let ts = max_ts.checked_add(1).ok_or(LayerError::IdExhausted)?;
+    Ok((
+        EffectId::new(id),
+        ContinuousEffect {
+            source: Some(object),
+            controller,
+            timestamp: Timestamp::new(ts),
+            layer: Layer::L4,
+            is_cda: false,
+            origin: EffectOrigin::Static { granted_at: None },
+            affected: Affected::Objects([object].into_iter().collect()),
+            modification: LayerModification::AddTypes {
+                supertypes: BTreeSet::new(),
+                card_types: types,
+                subtypes: BTreeSet::new(),
+            },
+        },
+    ))
 }
 
 /// The projected permanent for `applied` (REQ-EVENT-001, CR 614.12): a pure function, no
-/// choice is asked and no input changes.
+/// choice is asked and no input changes. Applied effects are replayed in
+/// [`EtbApplied::sequence`] order, so the last applied copy supplies the base (CR 707.2,
+/// CR 616.1f).
 ///
 /// # Errors
 /// [`EtbError::Layer`]: `LayerError::UnknownObject(entry.object)` if the environment does not
-/// know the object, `LayerError::DuplicateEffect` if an own static's id is already registered,
-/// or any other evaluation error.
+/// know the object, `LayerError::DuplicateEffect` if an own static's (or a declared copy
+/// static's) id is already registered, `LayerError::IdExhausted` if no id or timestamp is left
+/// for the added card types, or any other evaluation error.
 pub fn project(
     ctx: &EtbContext<'_>,
     entry: &EtbEntry,
     applied: &EtbApplied,
 ) -> Result<ProjectedPermanent, EtbError> {
-    if ctx.env.base(entry.object).is_none() {
+    let Some(base) = ctx.env.base(entry.object) else {
         return Err(EtbError::Layer(LayerError::UnknownObject(entry.object)));
-    }
-    // CR 614.12 (first input): applied copy effects replace the base, the last (highest id)
-    // winning.
-    let mut copy: Option<&Characteristics> = None;
+    };
+    // CR 614.12 (first input), CR 707.2, CR 616.1f: applied copy effects replace the base, the
+    // last applied winning.
+    let mut copy: Option<(EffectId, &Characteristics)> = None;
     let mut tapped = false;
     let mut counters: BTreeMap<String, i64> = BTreeMap::new();
     let mut added: BTreeSet<String> = BTreeSet::new();
     for effect in applied_effects(ctx, applied) {
         match &effect.action {
-            EtbAction::EntersAsCopyOf(c) => copy = Some(c),
+            EtbAction::EntersAsCopyOf(c) => copy = Some((effect.id, c)),
             EtbAction::EntersTapped => tapped = true,
             EtbAction::EntersWithCounters { kind, amount } => {
                 let n = counters.entry(kind.clone()).or_insert(0);
@@ -485,21 +625,42 @@ pub fn project(
     let env = Projected {
         inner: ctx.env,
         object: entry.object,
-        copy,
+        copy: copy.map(|(_, c)| c),
     };
-    // CR 614.12 (second and third inputs): the own statics (not once a copy replaced the
-    // permanent's abilities) on a clone of the effects already in force.
-    let mut evaluated = if copy.is_none() && !entry.own_statics.is_empty() {
+    // CR 614.12 (second input): the own statics, or once a copy replaced the permanent's
+    // abilities, the statics the last copy declares, bound to the entrant (CR 707.5).
+    let statics: Vec<(EffectId, ContinuousEffect)> = match copy {
+        None => entry.own_statics.clone(),
+        Some((id, _)) => ctx
+            .effects
+            .copy_abilities
+            .get(&id)
+            .map(|a| {
+                a.statics
+                    .iter()
+                    .map(|(sid, s)| (*sid, bind_to(entry.object, s)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let evaluated = if statics.is_empty() && added.is_empty() {
+        // CR 614.12 (third input): the effects already in force.
+        evaluate(ctx.continuous, &env, entry.object)?
+    } else {
         let mut continuous = ctx.continuous.clone();
-        for (id, effect) in &entry.own_statics {
-            continuous.register(*id, effect.clone())?;
+        for (id, effect) in statics {
+            continuous.register(id, effect)?;
+        }
+        if !added.is_empty() {
+            // CR 613.1d, CR 613.7, CR 205.1b: "enters as an additional <type>" is a layer-4
+            // type addition later than every other effect; P/T (CR 208.3) and later layers see
+            // the type.
+            let controller = base.controller.unwrap_or(entry.controller);
+            let (id, effect) = added_types_effect(&continuous, entry.object, controller, added)?;
+            continuous.register(id, effect)?;
         }
         evaluate(&continuous, &env, entry.object)?
-    } else {
-        evaluate(ctx.continuous, &env, entry.object)?
     };
-    // CR 614.12: "enters as an additional <type>" is part of how it enters.
-    evaluated.characteristics.card_types.extend(added);
     Ok(ProjectedPermanent {
         object: entry.object,
         evaluated,
@@ -507,11 +668,6 @@ pub fn project(
         counters,
         applied: applied.clone(),
     })
-}
-
-/// Whether any applied effect of `applied` is a copy effect.
-fn copy_applied(ctx: &EtbContext<'_>, applied: &EtbApplied) -> bool {
-    applied_effects(ctx, applied).any(|e| matches!(e.action, EtbAction::EntersAsCopyOf(_)))
 }
 
 /// Whether `condition` holds of `projected`.
@@ -531,15 +687,33 @@ fn applicable_to(
     entry: &EtbEntry,
     projected: &ProjectedPermanent,
 ) -> Vec<EffectId> {
-    let copied = copy_applied(ctx, &projected.applied);
+    // CR 707.5: once a copy applied, the permanent's own abilities are the last copy's.
+    let copy_etb: Option<&[EffectId]> = last_copy(ctx, &projected.applied).map(|c| {
+        ctx.effects
+            .copy_abilities
+            .get(&c.id)
+            .map_or(&[][..], |a| a.etb.as_slice())
+    });
     ctx.effects
         .effects
         .values()
         .filter(|e| !projected.applied.effects.contains(&e.id))
         .filter(|e| match e.scope {
-            // CR 614.12: an effect from the permanent itself that affects only it; once it
-            // enters as a copy, its own abilities are the copy's.
-            EtbScope::ThisPermanent => e.source == Some(entry.object) && !copied,
+            // CR 614.12, CR 603.6d: an effect of the permanent's own ability that affects only
+            // it, while the projected permanent still has that ability (the ETB effect id is
+            // asked in the static-effect id space of the layer hook); once it enters as a
+            // copy, its own abilities are the last copy's declared ones (CR 707.5).
+            EtbScope::ThisPermanent => {
+                let own = match copy_etb {
+                    None => e.source == Some(entry.object),
+                    Some(declared) => declared.contains(&e.id),
+                };
+                own && ctx.env.generating_ability_exists(
+                    e.id,
+                    entry.object,
+                    Some(&projected.evaluated),
+                )
+            }
             // CR 614.12: a general subset does not include its own source as it enters.
             EtbScope::OtherPermanents => e.source != Some(entry.object),
         })
@@ -549,7 +723,8 @@ fn applicable_to(
 }
 
 /// The ids, ascending, of the effects that apply to the projection now (REQ-EVENT-001,
-/// CR 614.12): not in `applied.effects`, scope satisfied, condition true of the projection
+/// CR 614.12): not in `applied.effects`, scope satisfied (for [`EtbScope::ThisPermanent`],
+/// also the generating ability present on the projection), condition true of the projection
 /// ([`project`]). No tier restriction.
 ///
 /// # Errors
@@ -569,7 +744,7 @@ pub struct EtbResolved {
     /// The entering object.
     pub object: ObjectId,
     /// The final projection (its `applied.chosen` holds the chosen values: visible to the
-    /// permanent's abilities on entry).
+    /// permanent's abilities on entry; its `applied.order` the application order).
     pub projected: ProjectedPermanent,
     /// Memory for the entering permanent: each chosen value stored with
     /// [`Memory::set_choice`].
@@ -596,14 +771,119 @@ fn procedure(e: &EtbError) -> Interrupt {
     Interrupt::Error(ChoiceError::Procedure(e.to_string()))
 }
 
-/// The cheapest option cost of a `Choose` effect, if `effect` is one (CR 614.12b).
-fn cheapest_choice(effect: &EtbEffect) -> Option<u64> {
+/// The most lookahead states (applied set, last copy) one entry may visit (R3: a fixed bound,
+/// exceeding it is an error, never a silent truncation).
+const MAX_LOOKAHEAD_STATES: usize = 4096;
+
+/// The cheapest cost `effect` commits when it applies: the cheapest option of a `Choose`
+/// (CR 614.12b), 0 for any other action.
+fn cheapest(effect: &EtbEffect) -> u128 {
     match &effect.action {
         EtbAction::Choose { options, .. } => {
-            Some(options.iter().map(|o| o.cost).min().unwrap_or(0))
+            u128::from(options.iter().map(|o| o.cost).min().unwrap_or(0))
         }
-        _ => None,
+        _ => 0,
     }
+}
+
+/// The exact CR 614.12b lookahead of one entry: the least total cost the rest of the entry can
+/// commit from a state, over every CR 616.1 order (CR 616.1f, CR 616.2: effects that become
+/// applicable count, effects a mandatory replacement removes do not). The option costs never
+/// change the projection, so a state is the applied set plus the last applied copy (which fixes
+/// the projection, CR 707.2).
+struct Lookahead<'c, 'a> {
+    ctx: &'c EtbContext<'a>,
+    entry: &'c EtbEntry,
+    memo: BTreeMap<(BTreeSet<EffectId>, Option<EffectId>), u128>,
+}
+
+/// The lookahead state after `id` is applied to (`set`, `last`).
+fn step(
+    ctx: &EtbContext<'_>,
+    set: &BTreeSet<EffectId>,
+    last: Option<EffectId>,
+    id: EffectId,
+) -> (BTreeSet<EffectId>, Option<EffectId>) {
+    let mut next = set.clone();
+    next.insert(id);
+    let is_copy = ctx
+        .effects
+        .get(id)
+        .is_some_and(|e| matches!(e.action, EtbAction::EntersAsCopyOf(_)));
+    (next, if is_copy { Some(id) } else { last })
+}
+
+impl<'c, 'a> Lookahead<'c, 'a> {
+    fn new(ctx: &'c EtbContext<'a>, entry: &'c EtbEntry) -> Self {
+        Lookahead {
+            ctx,
+            entry,
+            memo: BTreeMap::new(),
+        }
+    }
+
+    /// `mincost(set, last)`: 0 if nothing applies, else the minimum over the candidates `c` of
+    /// the top applicable tier (CR 616.1a-e) of `cheapest(c) + mincost(state + c)`.
+    fn mincost(
+        &mut self,
+        set: &BTreeSet<EffectId>,
+        last: Option<EffectId>,
+    ) -> Result<u128, Interrupt> {
+        // No unapplied effect can commit a cost: nothing to look at.
+        let any_cost = self
+            .ctx
+            .effects
+            .effects
+            .values()
+            .any(|e| !set.contains(&e.id) && cheapest(e) > 0);
+        if !any_cost {
+            return Ok(0);
+        }
+        let key = (set.clone(), last);
+        if let Some(v) = self.memo.get(&key) {
+            return Ok(*v);
+        }
+        if self.memo.len() >= MAX_LOOKAHEAD_STATES {
+            return Err(Interrupt::Error(ChoiceError::Procedure(format!(
+                "the CR 614.12b lookahead of object {} exceeds {MAX_LOOKAHEAD_STATES} states",
+                self.entry.object.get()
+            ))));
+        }
+        // The projection of the state: the last copy applied last.
+        let mut order: Vec<EffectId> = set.iter().copied().filter(|i| Some(*i) != last).collect();
+        order.extend(last);
+        let applied = EtbApplied {
+            effects: set.clone(),
+            chosen: BTreeMap::new(),
+            order,
+        };
+        let projected = project(self.ctx, self.entry, &applied).map_err(|e| procedure(&e))?;
+        let candidates = top_tier(self.ctx, &applicable_to(self.ctx, self.entry, &projected));
+        let mut best: Option<u128> = None;
+        for effect in candidates {
+            let (next, next_last) = step(self.ctx, set, last, effect.id);
+            let rest = self.mincost(&next, next_last)?;
+            // At most one u64 per effect: u128 cannot overflow.
+            let total = cheapest(effect).saturating_add(rest);
+            best = Some(best.map_or(total, |b| b.min(total)));
+        }
+        let value = best.unwrap_or(0);
+        self.memo.insert(key, value);
+        Ok(value)
+    }
+}
+
+/// The effects of `candidates` in the highest-priority tier present (CR 616.1a-e), ascending
+/// id.
+fn top_tier<'a>(ctx: &EtbContext<'a>, candidates: &[EffectId]) -> Vec<&'a EtbEffect> {
+    let effects: Vec<&'a EtbEffect> = candidates
+        .iter()
+        .filter_map(|id| ctx.effects.get(*id))
+        .collect();
+    let Some(tier) = effects.iter().map(|e| e.tier).min() else {
+        return Vec::new();
+    };
+    effects.into_iter().filter(|e| e.tier == tier).collect()
 }
 
 /// The CR 616.1 loop for each entry, in slice order (the caller passes APNAP order), all before
@@ -620,27 +900,30 @@ pub fn resolve_entering(
     payable: &BTreeMap<PlayerId, u64>,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<Vec<EtbResolved>, Interrupt> {
-    // CR 614.12b: the cheapest cost of the `Choose` effects applicable to each entry at its
-    // start (empty `EtbApplied`), for the lookahead of the entries not yet resolved.
-    let mut start_reserve: Vec<(PlayerId, u64)> = Vec::with_capacity(entries.len());
+    // CR 614.12b, CR 616.2: the least total cost each entry can commit from its start, for the
+    // reserve of the entries not yet resolved (entries are independent). Unlimited choosers
+    // need no reserve; every entry is projected first so a projection error comes before any
+    // request.
+    let mut start_reserve: Vec<(PlayerId, u128)> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let ids = applicable(ctx, entry, &EtbApplied::default()).map_err(|e| procedure(&e))?;
-        let sum = ids
-            .iter()
-            .filter_map(|id| ctx.effects.get(*id).and_then(cheapest_choice))
-            .fold(0u64, u64::saturating_add);
-        start_reserve.push((entry.controller, sum));
+        let reserve = if payable.contains_key(&entry.controller) {
+            Lookahead::new(ctx, entry).mincost(&BTreeSet::new(), None)?
+        } else {
+            project(ctx, entry, &EtbApplied::default()).map_err(|e| procedure(&e))?;
+            0
+        };
+        start_reserve.push((entry.controller, reserve));
     }
     let mut remaining = payable.clone();
     let mut out = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
-        // The undecided choices of the later entries of the same chooser.
-        let later: u64 = start_reserve
+        // The least total of the later entries of the same chooser.
+        let later: u128 = start_reserve
             .iter()
             .skip(index.saturating_add(1))
             .filter(|(p, _)| *p == entry.controller)
             .map(|(_, s)| *s)
-            .fold(0u64, u64::saturating_add);
+            .fold(0u128, u128::saturating_add);
         out.push(resolve_one(ctx, entry, later, &mut remaining, choices)?);
     }
     Ok(out)
@@ -650,49 +933,49 @@ pub fn resolve_entering(
 fn resolve_one(
     ctx: &EtbContext<'_>,
     entry: &EtbEntry,
-    later: u64,
+    later: u128,
     remaining: &mut BTreeMap<PlayerId, u64>,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<EtbResolved, Interrupt> {
     let mut applied = EtbApplied::default();
     let mut memory = Memory::new();
+    let mut lookahead = Lookahead::new(ctx, entry);
     loop {
         // CR 616.1f, CR 616.2: re-project after every application.
         let projected = project(ctx, entry, &applied).map_err(|e| procedure(&e))?;
-        let candidates = applicable_to(ctx, entry, &projected);
-        let Some(tier) = candidates
-            .iter()
-            .filter_map(|id| ctx.effects.get(*id).map(|e| e.tier))
-            .min()
-        else {
+        // CR 616.1a-e: only the highest-priority tier present is choosable.
+        let set = top_tier(ctx, &applicable_to(ctx, entry, &projected));
+        if set.is_empty() {
             return Ok(EtbResolved {
                 object: entry.object,
                 projected,
                 memory,
             });
-        };
-        // CR 616.1a-e: only the highest-priority tier present is choosable.
-        let set: Vec<&EtbEffect> = candidates
-            .iter()
-            .filter_map(|id| ctx.effects.get(*id))
-            .filter(|e| e.tier == tier)
-            .collect();
+        }
+        // CR 616.1e: the order choice is never filtered by payability (CR 614.12b restricts
+        // only the choices the effects require).
         let chosen = choose_effect(entry, &set, choices)?;
         if let EtbAction::Choose { key, kind, options } = &chosen.action {
-            // CR 614.12b: the other undecided choices of this entry, applicable now.
-            let here = candidates
-                .iter()
-                .filter(|id| **id != chosen.id)
-                .filter_map(|id| ctx.effects.get(*id).and_then(cheapest_choice))
-                .fold(0u64, u64::saturating_add);
-            let reserve = here.saturating_add(later);
             let budget = remaining.get(&entry.controller).copied();
-            // CR 614.12b: an option is allowed iff its cost and the reserve fit the budget.
+            // CR 614.12b, CR 616.2: the least the rest of this entry can still commit once
+            // this choice is made, plus the later entries' least totals.
+            let reserve = match budget {
+                None => 0,
+                Some(_) => {
+                    let last = last_copy(ctx, &applied).map(|c| c.id);
+                    let (next, next_last) = step(ctx, &applied.effects, last, chosen.id);
+                    lookahead.mincost(&next, next_last)?.saturating_add(later)
+                }
+            };
+            // CR 614.12b: an option is allowed iff its cost and the reserve fit the budget
+            // (exact u128 arithmetic); a cost-0 option always is.
             let allowed: Vec<&EtbOption> = options
                 .iter()
                 .filter(|o| match budget {
                     None => true,
-                    Some(b) => o.cost == 0 || o.cost.saturating_add(reserve) <= b,
+                    Some(b) => {
+                        o.cost == 0 || u128::from(o.cost).saturating_add(reserve) <= u128::from(b)
+                    }
                 })
                 .collect();
             if allowed.is_empty() {
@@ -710,7 +993,9 @@ fn resolve_one(
             memory.set_choice(key, value.clone());
             applied.chosen.insert(key.clone(), value);
         }
+        // CR 616.1f: the application order is recorded.
         applied.effects.insert(chosen.id);
+        applied.order.push(chosen.id);
     }
 }
 
