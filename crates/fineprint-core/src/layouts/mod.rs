@@ -43,12 +43,15 @@
 //! implemented.
 //!
 //! **Out of scope here** (later work): the ATTRACTION layout, tokens (TOKEN, DFC_TOKEN),
-//! variant layouts (PLANAR, SCHEME, VANGUARD, CONSPIRACY, DUNGEON), face-down status, copy
+//! variant layouts (PLANAR, SCHEME, VANGUARD, CONSPIRACY, DUNGEON), applying face-down status
+//! (the [`FaceDownProfile`] data and the reveal rule [`must_reveal_on_leave`] are here, CR 708.2,
+//! 708.9; the layer-1b effect is [`crate::layers::face_down_effect`]), copy
 //! effects (only the `copying_back_face` mana-value flag is modelled), level/lore counters and
 //! designations, and the layer system.
 
 mod alternative;
 mod dfc;
+mod facedown;
 mod faces;
 mod flip;
 mod meld;
@@ -70,6 +73,7 @@ use fineprint_dsl::vocab::RulesVocabulary;
 
 pub use alternative::{AdventurerLayout, OmenLayout, PrototypeLayout};
 pub use dfc::{DfcModalLayout, DfcNonmodalLayout};
+pub use facedown::{FaceDownCause, FaceDownProfile, must_reveal_on_leave};
 pub use flip::FlipLayout;
 pub use meld::{MeldLayout, MeldedPair};
 pub use merged::{MergeSide, MergedComponent, MergedPermanent, MutateLayout};
