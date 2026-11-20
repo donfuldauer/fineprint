@@ -22,7 +22,10 @@ threads.
      (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open'`).
      For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
      §7 step 3's rule, replace `blocked` with `ready` and comment "Unblocked by #<N> (PR #<P>)",
-     naming the blocker that closed last.
+     naming the blocker that closed last. Leave `blocked` alone on an issue with no blockers
+     or one that also carries `status:blocked-failure`: there a person set the hold (the plan
+     sets `blocked` only from dependencies; other holds use `status:blocked-failure`, PROCESS.md
+     P7).
    - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
