@@ -6723,3 +6723,109 @@ Amended in PR #202 review round 3 (H1-H3): duplicate option texts refused at `ad
 a controller mismatch between the environment base and the entry refused, `None` accepted (H2,
 item 4); the `CHOOSE_REPLACEMENT_EFFECT` default is the first candidate with a payable
 continuation, else 0, every candidate still offered (H3, item 5).
+
+## #41 FP-040 — The SbaEnvironment seam
+
+**Decision.** Facts the engine state does not hold yet come from a caller-supplied
+`sba::SbaEnvironment`: whether an object is a copy of a spell or of a card (CR 704.5e), the
+CR 723.3c exemption, the set of objects dealt damage by a deathtouch source since the last check
+(CR 704.5h) and the game variant (CR 704.5c). Every method has a default (standard game, no
+copies, no deathtouch). Toughness, abilities, card types and loyalty come only from the caller's
+`ContinuousEffects` and `LayerEnvironment` (CR 613.1, CR 613.4, CR 306.5c), never from
+`GameState`. `StoredSbaEnvironment` is a plain stored implementation. Battlefield objects the
+layer environment cannot evaluate (any `LayerError`, typically `UnknownObject`) are skipped by
+the object entries, because the pinned `check` returns no error.
+
+**Rationale.** Copies of spells, the deathtouch damage record, the variant and layer
+evaluation inside `GameState` (#183, #186) are owned by later units; the seam lets this unit
+deliver the full CR 704.5a-704.5i semantics now and lets the heartbeat and layer-integration
+units wire the facts without changing the registry.
+
+**Alternatives.** Adding copy and deathtouch markers to `events::ObjectMarkers` (rejected:
+outside the owned paths, R1); returning a `Result` from `check` (rejected: the API is pinned).
+
+## #41 FP-040 — Losing the game is a player designation
+
+**Decision.** A player who loses through CR 704.5a, CR 704.5b or CR 704.5c gets the player
+designation `"lostTheGame"` (`sba::LOST_THE_GAME`, value `DesignationValue::Flag`), and
+`SbaOutcome.lost_players` lists every player newly losing in the pass. A player carrying the
+designation is no longer a subject of these entries. The draw or win decision (CR 104.4a) is
+left to the caller, who sees every loser of the pass together.
+
+**Rationale.** No game-loss event or player-elimination procedure exists yet; a designation is
+part of the hashed `GameState` and rolls back with it.
+
+**Alternatives.** A new `GameEvent::LoseGame` (rejected: changes the events contract, R2); a
+separate loser set outside `GameState` (rejected: not hashed, not part of rollback).
+
+## #41 FP-040 — Zones::cease_to_exist and the owned-path extension
+
+**Decision.** `Zones::cease_to_exist(id) -> Result<CardId, ZoneError>` removes the object and its
+record, returns its card, puts the card into no outside-the-game pool and issues no id; the card
+may later get a new object. `perform_all` calls it for CR 704.5d and CR 704.5e after the move
+batch, only for objects still present (a replacement may have moved one; the new object is
+checked by the next pass), and a ceasing object still in the permanent container also leaves it.
+No LKI is captured (not a zone change). The token mark (per card) and any Memory entry of the
+object stay, since those containers belong to other modules. The brief extended this unit's
+owned paths (R1) to `zones/container.rs` and `zones/tests.rs` for exactly this method.
+
+**Rationale.** `send_outside` puts the card into an outside pool, which is wrong for a token or
+a copy (CR 111.7, CR 707.10a): it ceases to exist.
+
+**Alternatives.** Ceasing before the move batch (rejected: an `Instead` replacement naming the
+object would then fail the whole pass with `UnknownObject`).
+
+## #41 FP-040 — Two-Headed Giant gating
+
+**Decision.** The CR 704.5c entry has the gate `VariantGate::Except(TwoHeadedGiant)` (its text:
+"Ignore this rule in Two-Headed Giant games"); CR 704.5a stays active in every variant (no such
+clause). The team checks CR 704.6a and CR 704.6b are out of scope for this unit and need a
+follow-up unit (team model plus registry entries).
+
+**Rationale.** The CR text of the two entries, quoted in the brief.
+
+**Alternatives.** Gating CR 704.5a too (rejected: contradicts the CR text).
+
+## #41 FP-040 — CR 704.7 merging per subject and result kind
+
+**Decision.** Losses of the game are merged per player: one designation and one
+`lost_players` entry whatever the number of reasons, all listed in `loss_reasons` in registry
+order. Losses of different players are never merged. Moves to the graveyard are one
+`ZoneChange` per object (an object with CR 704.5g and CR 704.5h findings moves once, both
+findings reported), all in ONE batch submitted to `process_batch` with `sba = true`, which
+merges same-object same-destination members (the inherited limitation "FP-028 Known
+limitation: CR 704.7 merging only within one event kind" still holds). Every move uses
+`ZoneChangeCause::StateBasedAction`, so a shield counter's destroy replacement does not apply
+(CR 122.1c, CR 701.8b; "FP-028 SBA destruction and the shield counter's destroy replacement").
+
+**Rationale.** CR 704.7: one replacement effect replaces all SBAs with the same result at the
+same time; a result belongs to one player or object.
+
+**Alternatives.** Distinguishing CR 704.5f ("put into") and CR 704.5g/h ("destroyed") with a
+`Destroy` cause (rejected: the shield counter would then wrongly replace SBA destruction).
+
+## #41 FP-040 — Indestructible and regeneration
+
+**Decision.** A creature whose evaluated abilities include a `KEYWORD` ability with keyword
+`"indestructible"` is skipped by CR 704.5g and CR 704.5h (CR 702.12b) but not by CR 704.5f.
+Regeneration (CR 701.8c) is not modelled; the CR 704.5g/h entries say so in their comments and
+in `SbaAction::Destroy`.
+
+**Rationale.** CR 702.12b; the engine has no regeneration shield yet.
+
+**Alternatives.** Reading indestructible from base characteristics (rejected: CR 613.4, a
+granted or removed keyword must count).
+
+## #41 FP-040 — The deathtouch flag and the empty-library flag are consumed by each pass
+
+**Decision.** `perform_all` calls `SbaEnvironment::clear_deathtouch_damaged` after every
+successful pass and consumes `EventState::take_empty_library_draws` on every successful pass
+(before the move batch, so an empty-library draw caused by a replacement during the batch counts
+for the next check), whether or not anyone loses or dies. On `Pending` or an error, both flags,
+every context component and the replacement registry are as before the call.
+
+**Rationale.** Both conditions are "since the last time state-based actions were checked"
+(CR 704.5b, CR 704.5h); the check happens even when nothing applies.
+
+**Alternatives.** Consuming only when a finding applies (rejected: a stale flag would make a
+player lose at a later check).
