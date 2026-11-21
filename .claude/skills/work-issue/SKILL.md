@@ -42,7 +42,7 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
    timeline, `gh api repos/donfuldauer/fineprint/issues/<n>/timeline`, has a `closed` event
-   from a merged PR, or a merged PR body contains `Closes #<n>`). A blocker closed without a
+   from a merged PR, or a PR merged into `main` whose body contains `Closes #<n>`). A blocker closed without a
    merged PR counts only if a comment on it names the replacement issue(s) that delivered the
    work and those replacements pass the same test. If any is unsatisfied, stop and tell the user
    which ones, and which of them are themselves ready to start. Do not start blocked work.
@@ -54,11 +54,18 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
    no atomic lock, so the earliest claim wins, ordered by **comment ID**. Comment IDs are unique and
    increase over time, so there are no ties. A claim posted after yours always has a higher ID and
    can never supersede a claim that has already passed its check: that claim's session saw every
-   lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
-   on it that is not released and names a live session (when `get_session` is available, it reports
-   `working` or `blocked`; in harnesses without a session-status tool, such as Gemini / Antigravity,
-   treat any unreleased/undeleted claim from another session as live unless the owner confirms it
-   is abandoned). There is no
+   lower-ID claim when it checked.
+   - **Trusted claim authors.** Because this repository is public, ignore claim-shaped comments
+     from untrusted accounts before applying the lowest-ID and liveness rules: a comment is
+     eligible to govern **only** when its GitHub REST `author_association` is `OWNER`, `MEMBER`,
+     or `COLLABORATOR` (write/maintain/admin collaborator) or its `user.login` matches the
+     authenticated harness account (`gh api user --jq .login`).
+   - **Governing claim.** An issue's **governing claim** is the lowest-ID eligible claim comment
+     on it (from a trusted author) that is not released and names a live session (when
+     `get_session` is available, it reports `working` or `blocked`; in harnesses without a
+     session-status tool, such as Gemini / Antigravity, treat any unreleased/undeleted claim from
+     another session by a trusted author as live unless the owner confirms it is abandoned). There
+     is no
    time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
    claim. A claim stops counting only when its session ends, deletes it, or edits it to start with
    `Released:`, and a session deletes (or edits to `Released: <reason>` if delete is unavailable)
@@ -77,9 +84,10 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
       conversation/session ID and UTC timestamp.
    2. Re-read **all** the issue's comments (`gh api -X GET repos/donfuldauer/fineprint/issues/<N>/comments -F per_page=100 -F page=<P>`,
       paged explicitly with `P = 1, 2, …` until a page returns fewer than 100 items, never relying
-      on the default 30-item page), its labels and its state. Only compare claim IDs after the full
-      comment set has been fetched. Your claim loses, and you
-      delete it (or edit it to `Released: <reason>`), if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
+      on the default 30-item page), its labels and its state. Filter out comments from untrusted
+      authors and only compare eligible claim IDs after the full comment set has been fetched. Your
+      claim loses, and you
+      delete it (or edit it to `Released: <reason>` if delete is unavailable), if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
       qualifies as the candidate step 0 chose it as: a ready candidate must still carry `ready`
       and must not have gained `in-progress` from another session; an abandoned candidate must
@@ -97,22 +105,26 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
       lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other).
       **Re-verify a loss once.** Two sessions can each lose at the same moment: one to the
       plan-ID tie-break against an abandoned issue, the other to the first one's claim before it
-      is deleted. So before deleting a losing claim, wait about 30 seconds, then repeat with fresh
+      is deleted. So before deleting (or releasing) a losing claim, wait about 30 seconds, then
+      repeat with fresh
       reads the dependency check of §1 step 2 (every dependency still satisfied), the checks of
       step 4.2 (issue still open and not blocked, governing claim still yours and, without an
       issue number, the candidate still qualifies) and this overlap check. If all of them pass
       and you now win against every live overlapping claim, continue. Otherwise delete your
-      claim; if the dependency check failed, act as in §1 step 2 (report the unsatisfied
+      claim (or edit it to `Released: <reason>` if delete is unavailable); if the dependency check
+      failed, act as in §1 step 2 (report the unsatisfied
       dependencies and which of them are ready, or, without an issue number, move on to the
       next candidate), and for any other failure act as in step 4.2. This cannot let two
       overlapping sessions both proceed: a session only proceeds after a check in which its
       claim beats every live overlapping claim, and the lower comment ID always beats the
       higher.
    4. Only after the claim holds, run the §1 step 2 dependency check once more with fresh reads.
-      If a dependency is no longer satisfied, delete your claim and act as in §1 step 2.
+      If a dependency is no longer satisfied, delete your claim (or edit it to
+      `Released: <reason>` if delete is unavailable) and act as in §1 step 2.
       Otherwise add the `in-progress` label (remove `ready`), then re-read the issue once more:
       if it is now closed or labelled `status:blocked-failure` or `blocked`, remove
-      `in-progress`, delete your claim and act as in step 4.2. Checking after the label change
+      `in-progress`, delete your claim (or edit it to `Released: <reason>` if delete is
+      unavailable) and act as in step 4.2. Checking after the label change
       closes the window between the last check and the change; a block or close after this
       point is handled like any other blocked or closed issue. The cleanup leaves the issue with
       neither `ready` nor `in-progress`. The person who clears `blocked` or `status:blocked-failure` replaces it with `ready`
@@ -125,9 +137,20 @@ Each issue gets its own git worktree, so issues running in parallel never share 
 (if a sandbox restricts sibling directories and only one issue runs in the VM, use the
 single-checkout fallback below). One branch, one PR, one issue.
 
-1. `git fetch origin`. Look for an existing branch and worktree for the issue: `git branch -a
-   --list "*issue/<N>-*"` and `git worktree list`.
-2. **Found (a restart).** Resume it; never reset it to `origin/main`.
+0. **Select the target branch first.** Normally the branch is `issue/<N>-<short-slug>` (when
+   GitHub-triggered session chaining is enabled, the next session starts only when an `issue/`
+   branch merges, §8). However, if the session environment allows pushing only to a single
+   **assigned branch**, select that assigned branch **before** discovery and checkout below, retain
+   its existing local/remote history (never reset it to `origin/main`), and note in the PR body
+   that the chain will not continue from this merge so the owner restarts it with the scheduled
+   task's "Run now".
+1. `git fetch origin`. Look for an existing branch and worktree:
+   - If using an assigned branch `<assigned>`, look for `<assigned>` (`git branch -a --list
+     "*<assigned>"`) and `git worktree list`.
+   - Otherwise look for an existing issue branch: `git branch -a --list "*issue/<N>-*"` and
+     `git worktree list`.
+2. **Found (a restart, or an existing assigned branch).** Resume it; never reset it to
+   `origin/main`.
    - *Worktree:* reuse the worktree if it exists, otherwise `git worktree add ../fineprint-issue-<N> <branch>`
      (for a remote-only branch, `git worktree add -b <branch> ../fineprint-issue-<N> origin/<branch>`).
      In the worktree, if the remote branch exists, `git merge --ff-only origin/<branch>`.
@@ -136,17 +159,13 @@ single-checkout fallback below). One branch, one PR, one issue.
      `git merge --ff-only origin/<branch>`.
    Read the issue comments and the branch's commits, and continue from the step they show was
    reached.
-3. **Not found.**
-   - *Worktree:* `git worktree add -B issue/<N>-<short-slug> ../fineprint-issue-<N> origin/main`.
-   - *Single-checkout fallback:* `git checkout -B issue/<N>-<short-slug> origin/main`.
+3. **Not found** (no existing branch for `<branch>`, where `<branch>` is `<assigned>` if one was
+   assigned, else `issue/<N>-<short-slug>`):
+   - *Worktree:* `git worktree add -B <branch> ../fineprint-issue-<N> origin/main`.
+   - *Single-checkout fallback:* `git checkout -B <branch> origin/main`.
 4. Every later step for this issue (agents' working directory, commits, pushes, checks) runs
    inside that worktree (or directly in the checkout for the single-checkout fallback). If a
    worktree was created, it is removed in §7.
-
-The branch is always `issue/<N>-<short-slug>`: when GitHub-triggered session chaining is enabled,
-the next session starts only when an `issue/` branch merges (§8). If the session may push only to
-an assigned branch, use it, and say in the PR body that the chain will not continue from this
-merge: the owner restarts it with the scheduled task's "Run now".
 
 ## 3. Route and execute
 
