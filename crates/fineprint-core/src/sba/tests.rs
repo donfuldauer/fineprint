@@ -1941,7 +1941,8 @@ fn select(objects: &[ObjectId]) -> ChoiceResponse {
 }
 
 /// The (object, cause) of every zone change and the (object, kind, amount) of every counter
-/// removal submitted in the executed batches of `out`.
+/// removal submitted in the executed batches of `out`. Unattach events (CR 704.5n, CR 704.5p)
+/// are read by [`unattach_events`].
 type BatchShape = (
     Vec<(ObjectId, ZoneChangeCause)>,
     Vec<(ObjectId, String, i64)>,
@@ -1959,11 +1960,24 @@ fn batch_shape(out: &SbaOutcome) -> BatchShape {
                     kind,
                     amount,
                 } => removals.push((*o, kind.clone(), *amount)),
+                GameEvent::Unattach { .. } => {}
                 other => panic!("unexpected event {other:?}"),
             }
         }
     }
     (moves, removals)
+}
+
+/// The attachment of every `Unattach` event executed in `out`, in execution order.
+fn unattach_events(out: &SbaOutcome) -> Vec<ObjectId> {
+    out.executed
+        .iter()
+        .flat_map(|b| &b.events)
+        .filter_map(|ev| match ev.instance.event() {
+            GameEvent::Unattach { attachment } => Some(*attachment),
+            _ => None,
+        })
+        .collect()
 }
 
 // REQ-SBA-001, CR 704.5j, CR 201.2a: two legendary permanents with the same name controlled by
@@ -2092,50 +2106,190 @@ fn sba_704_5j_shared_name_and_two_groups() {
     );
 }
 
+/// The ids of the battlefield objects of `w` among `ids`, ascending.
+fn on_battlefield(w: &World, ids: &[ObjectId]) -> Vec<ObjectId> {
+    ids.iter()
+        .copied()
+        .filter(|&id| {
+            w.zones
+                .object(id)
+                .is_some_and(|r| r.zone == ZoneId::Battlefield)
+        })
+        .collect()
+}
+
+/// Asserts that answering `answer` to the only legend-rule request of `w` is rejected with a
+/// procedure error and changes nothing (also asserted inside the procedure).
+fn assert_legend_answer_rejected(w: &World, answer: &[ObjectId]) {
+    let (run, asked) = drive_answers(w, &[select(answer)]);
+    assert_eq!(asked.len(), 1);
+    assert!(
+        matches!(run.out, Err(BusError::Choice(ChoiceError::Procedure(_)))),
+        "{answer:?} accepted"
+    );
+    assert_eq!(run.hash, w.state_hash());
+}
+
 // REQ-SBA-001, CR 704.5j, CR 201.2a: names that overlap non-transitively (A {X, Y}, B {Y},
-// C {X}) form ONE group of three (connected components, decision #42 FP-041).
+// C {X}) form ONE conflict component; "same name" is pairwise, so the survivors are a maximal
+// set with no two sharing a name: {A} or {B, C} (decision #42 FP-041, conflict graph). One
+// request: candidates [A, B, C], min 1, max 2 (not a clique), default {A}. Invalid answers
+// ({A, B}: same name; {B} alone: C conflicts with nothing kept) are rejected with nothing
+// changed.
 #[test]
-fn sba_704_5j_non_transitive_names_form_one_group() {
+fn sba_704_5j_overlapping_names_keep_a_maximal_set() {
     let mut w = World::new();
     let a = w.create_controlled(1, 1, legendary(&["test.legend_x", "test.legend_y"]));
     let b = w.create_controlled(1, 1, legendary(&["test.legend_y"]));
     let c = w.create_controlled(1, 1, legendary(&["test.legend_x"]));
-    let (run, asked) = drive_answers(&w, &[select(&[b])]);
+    assert_eq!(w.found_by("704.5j"), [a, b, c]);
+
+    let (run, asked) = drive_answers(&w, &[select(&[a])]);
     assert_eq!(asked.len(), 1);
+    let r = &asked[0];
+    assert_eq!(r.chooser, p(1));
+    assert_eq!((r.min, r.max), (1, 2));
     assert_eq!(
-        asked[0].payload,
+        r.payload,
         ChoicePayload::SelectObjectsFromZone {
             candidates: vec![a, b, c]
         }
     );
-    let mut moved: Vec<ObjectId> = batch_shape(&run.out.unwrap())
-        .0
-        .into_iter()
-        .map(|(o, _)| o)
-        .collect();
-    moved.sort();
-    assert_eq!(moved, [a, c]);
+    assert_eq!(r.default_on_timeout, select(&[a]));
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (b, ZoneChangeCause::StateBasedAction),
+            (c, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+    assert_eq!(on_battlefield(&run.state, &[a, b, c]), [a]);
+
+    // {B, C}: A goes, B and C (no name in common) both stay.
+    let (run, _) = drive_answers(&w, &[select(&[c, b])]);
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [(a, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(on_battlefield(&run.state, &[a, b, c]), [b, c]);
+    let mut after = run.state;
+    assert!(after.found_by("704.5j").is_empty());
+
+    for bad in [vec![a, b], vec![b], vec![c], vec![a, c]] {
+        assert_legend_answer_rejected(&w, &bad);
+    }
+
+    // The timeout answer is the greedy set by ascending id: {A}.
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let id = session.pending().unwrap().request_id;
+    session.submit_default(id).unwrap();
+    let Status::Done { state, .. } = session.status() else {
+        panic!("not done");
+    };
+    assert_eq!(on_battlefield(state, &[a, b, c]), [a]);
 }
 
-// REQ-SBA-001, CR 704.5j: a legend-rule answer that is not exactly one candidate is a protocol
-// error (the session itself rejects such answers before they reach the pass).
+// REQ-SBA-001, CR 704.5j, CR 201.2a: a cyclic overlap ({X, Y}, {Y, Z}, {X, Z}): every pair has
+// the same name, so it is a clique: min = max = 1, any single member stays, two are rejected by
+// the session (max 1).
+#[test]
+fn sba_704_5j_cyclic_names_keep_one() {
+    let mut w = World::new();
+    let a = w.create_controlled(1, 1, legendary(&["test.legend_x", "test.legend_y"]));
+    let b = w.create_controlled(1, 1, legendary(&["test.legend_y", "test.legend_z"]));
+    let c = w.create_controlled(1, 1, legendary(&["test.legend_x", "test.legend_z"]));
+    for kept in [a, b, c] {
+        let (run, asked) = drive_answers(&w, &[select(&[kept])]);
+        assert_eq!((asked[0].min, asked[0].max), (1, 1));
+        assert_eq!(asked[0].default_on_timeout, select(&[a]));
+        assert_eq!(on_battlefield(&run.state, &[a, b, c]), [kept]);
+    }
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let r = session.pending().unwrap().clone();
+    assert!(session.submit(r.request_id, select(&[a, b])).is_err());
+}
+
+// REQ-SBA-001, CR 704.5j, CR 201.2a: a path A {X}, B {X, Y}, C {Y}, D {Y, Z}, E {Z}: legal
+// survivor sets are exactly the maximal independent sets; isolated legends (no same-name
+// partner) are never asked and never move.
+#[test]
+fn sba_704_5j_path_and_isolated_legends() {
+    let mut w = World::new();
+    let a = w.create_controlled(1, 1, legendary(&["test.legend_x"]));
+    let b = w.create_controlled(1, 1, legendary(&["test.legend_x", "test.legend_y"]));
+    let c = w.create_controlled(1, 1, legendary(&["test.legend_y"]));
+    let d = w.create_controlled(1, 1, legendary(&["test.legend_y", "test.legend_z"]));
+    let e_ = w.create_controlled(1, 1, legendary(&["test.legend_z"]));
+    let lone = w.create_controlled(1, 1, legendary(&["test.legend_lone"]));
+    let lone2 = w.create_controlled(2, 2, legendary(&["test.legend_x"]));
+    assert_eq!(w.found_by("704.5j"), [a, b, c, d, e_]);
+    let all = [a, b, c, d, e_, lone, lone2];
+    let (run, asked) = drive_answers(&w, &[select(&[a, c, e_])]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!((asked[0].min, asked[0].max), (1, 4));
+    assert_eq!(asked[0].default_on_timeout, select(&[a, c, e_]));
+    assert_eq!(on_battlefield(&run.state, &all), [a, c, e_, lone, lone2]);
+    let (run, _) = drive_answers(&w, &[select(&[a, d])]);
+    assert_eq!(on_battlefield(&run.state, &all), [a, d, lone, lone2]);
+    let (run, _) = drive_answers(&w, &[select(&[b, e_])]);
+    assert_eq!(on_battlefield(&run.state, &all), [b, e_, lone, lone2]);
+    // {A, C}: E has no name in common with a survivor; {A, E}: neither has C; {B, D} and
+    // {C, D} share Y.
+    for bad in [vec![a, c], vec![a, e_], vec![b, d], vec![c, d]] {
+        assert_legend_answer_rejected(&w, &bad);
+    }
+}
+
+// REQ-SBA-001, CR 704.5j: a legend-rule answer that is not a maximal set of candidates without
+// two of the same name is a protocol error (the session itself rejects counts outside min..max
+// and non-candidates before they reach the pass).
 #[test]
 fn sba_704_5j_selection_protocol() {
     let (a, b, c) = (ObjectId::new(1), ObjectId::new(2), ObjectId::new(3));
-    assert_eq!(legend_kept(&[a, b], select(&[b])).unwrap(), b);
-    for bad in [
-        select(&[]),
-        select(&[a, b]),
-        select(&[c]),
-        ChoiceResponse::SelectReplacement { index: 0 },
-    ] {
-        let err = legend_kept(&[a, b], bad).unwrap_err();
+    let pair = LegendGroup {
+        controller: p(1),
+        members: vec![a, b],
+        names: vec![set(&["test.legend_a"]), set(&["test.legend_a"])],
+    };
+    assert!(pair.is_clique());
+    assert_eq!(pair.max_survivors(), 1);
+    assert_eq!(legend_survivors(&pair, select(&[b])).unwrap(), [b]);
+    // A {X, Y}, B {Y}, C {X}.
+    let overlap = LegendGroup {
+        controller: p(1),
+        members: vec![a, b, c],
+        names: vec![
+            set(&["test.legend_x", "test.legend_y"]),
+            set(&["test.legend_y"]),
+            set(&["test.legend_x"]),
+        ],
+    };
+    assert!(!overlap.is_clique());
+    assert_eq!(overlap.max_survivors(), 2);
+    assert_eq!(overlap.default_survivors(), [a]);
+    assert_eq!(legend_survivors(&overlap, select(&[a])).unwrap(), [a]);
+    assert_eq!(legend_survivors(&overlap, select(&[b, c])).unwrap(), [b, c]);
+    let bad_cases: [(&LegendGroup, ChoiceResponse); 9] = [
+        (&pair, select(&[])),
+        (&pair, select(&[a, b])),
+        (&pair, select(&[c])),
+        (&pair, ChoiceResponse::SelectReplacement { index: 0 }),
+        (&overlap, select(&[])),
+        (&overlap, select(&[a, b])),
+        (&overlap, select(&[b])),
+        (&overlap, select(&[b, b, c])),
+        (&overlap, select(&[ObjectId::new(9)])),
+    ];
+    for (group, bad) in bad_cases {
+        let err = legend_survivors(group, bad).unwrap_err();
         assert!(matches!(
             err,
             BusInterrupt::Error(BusError::Choice(ChoiceError::Procedure(_)))
         ));
     }
-    // The session refuses a selection of two.
+    // The session refuses a selection of two in a same-name pair (max 1).
     let mut w = World::new();
     w.create_controlled(1, 1, legendary(&["test.legend_a"]));
     w.create_controlled(1, 1, legendary(&["test.legend_a"]));
@@ -2432,7 +2586,9 @@ fn sba_704_5n_equipment_and_fortification() {
     let out = pass(&mut w);
     assert!(out.performed);
     assert_eq!(out.unattached, [on_player, on_rock, fort_bad]);
-    assert!(out.executed.is_empty());
+    // CR 701.3d: each becomes unattached through an Unattach event, in one batch.
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [on_player, on_rock, fort_bad]);
     for id in [on_player, on_rock, fort_bad, loose] {
         assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
         assert_eq!(w.permanents.attached_to(id), None);
@@ -2924,47 +3080,537 @@ fn property_world_rule() {
     }
 }
 
-// REQ-SBA-001, CR 704.5j (property): for random legendary boards (random names, controllers and
-// answers), after the pass each controller keeps at most one legend of each name, every legend
-// without a same-named partner stays, and a second pass finds no legend-rule finding.
+impl Lcg {
+    /// A uniform index below `len` (`len` > 0).
+    fn index(&mut self, len: usize) -> usize {
+        usize::try_from(self.next(len as u64)).unwrap()
+    }
+}
+
+/// CR 201.2a: whether two name sets have the same name (nameless never does).
+fn same_name(x: &BTreeSet<String>, y: &BTreeSet<String>) -> bool {
+    !x.is_disjoint(y)
+}
+
+/// The test's own model of the CR 704.5j conflict components of `board` (id, controller,
+/// names): per controller, connected components of "same name" with two or more members,
+/// each ascending, the set of all of them.
+fn model_components(board: &[(ObjectId, PlayerId, BTreeSet<String>)]) -> BTreeSet<Vec<ObjectId>> {
+    let mut out = BTreeSet::new();
+    let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
+    for (start, controller, _) in board {
+        if seen.contains(start) {
+            continue;
+        }
+        let mut component = vec![*start];
+        seen.insert(*start);
+        let mut i = 0;
+        while i < component.len() {
+            let current = component[i];
+            let names = &board.iter().find(|(id, _, _)| *id == current).unwrap().2;
+            for (other, c, other_names) in board {
+                if c == controller && !seen.contains(other) && same_name(names, other_names) {
+                    seen.insert(*other);
+                    component.push(*other);
+                }
+            }
+            i += 1;
+        }
+        if component.len() >= 2 {
+            component.sort();
+            out.insert(component);
+        }
+    }
+    out
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.5j, CR 201.2a (property): for seeded random legendary
+// boards (random names, one or two per legend or none, random controllers) and random valid
+// answers (a greedy maximal set over a random order), the requests are exactly the test's own
+// conflict components, and the battlefield after the pass is EXACTLY the expected survivor set
+// (every non-member untouched, per component the chosen survivors). No two survivors of one
+// controller share a name; every removed legend shares a name with a survivor. Non-vacuous:
+// survivors are never empty when a legend exists, and the seeded run both removes legends and
+// keeps more than one member of some component.
 #[test]
 fn property_legend_rule() {
     let mut rng = Lcg(7);
-    let names = ["test.legend_a", "test.legend_b", "test.legend_c"];
-    for _ in 0..100 {
+    let names = [
+        "test.legend_a",
+        "test.legend_b",
+        "test.legend_c",
+        "test.legend_d",
+    ];
+    let mut iterations_with_removal = 0;
+    let mut components_keeping_several = 0;
+    for _ in 0..150 {
         let mut w = World::new();
         let n = rng.next(6) + 2;
+        let mut board: Vec<(ObjectId, PlayerId, BTreeSet<String>)> = Vec::new();
         for _ in 0..n {
             let controller = rng.next(2) + 1;
-            let name = names[usize::try_from(rng.next(3)).unwrap()];
-            w.create_controlled(1, controller, legendary(&[name]));
+            let count = [0, 1, 1, 1, 2, 2][rng.index(6)];
+            let chosen: Vec<&str> = (0..count).map(|_| names[rng.index(names.len())]).collect();
+            let id = w.create_controlled(1, controller, legendary(&chosen));
+            board.push((id, p(controller), set(&chosen)));
         }
-        let groups = {
-            let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
-            let mut count = 0;
-            while let Some(r) = session.pending().cloned() {
-                let ChoicePayload::SelectObjectsFromZone { candidates } = &r.payload else {
-                    panic!("payload");
-                };
-                let pick = candidates[usize::try_from(rng.next(candidates.len() as u64)).unwrap()];
-                session.submit(r.request_id, select(&[pick])).unwrap();
-                count += 1;
-            }
-            let Status::Done { state, .. } = session.status() else {
-                panic!("not done");
+        let all: Vec<ObjectId> = board.iter().map(|(id, _, _)| *id).collect();
+        let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+        let mut asked: BTreeSet<Vec<ObjectId>> = BTreeSet::new();
+        let mut losers: BTreeSet<ObjectId> = BTreeSet::new();
+        while let Some(r) = session.pending().cloned() {
+            let ChoicePayload::SelectObjectsFromZone { candidates } = &r.payload else {
+                panic!("payload");
             };
-            let mut after = state.clone();
-            let mut kept: BTreeMap<(PlayerId, String), usize> = BTreeMap::new();
-            for id in after.zones.contents(ZoneId::Battlefield) {
-                let controller = after.permanents.get(id).unwrap().controller();
-                let card = after.card_of(id);
-                let name = after.chars[&card].names.iter().next().unwrap().clone();
-                *kept.entry((controller, name)).or_default() += 1;
+            let names_of = |id: ObjectId| &board.iter().find(|(o, _, _)| *o == id).unwrap().2;
+            // A random maximal set with no two of the same name: greedy over a random order.
+            let mut order = candidates.clone();
+            for i in (1..order.len()).rev() {
+                let j = rng.index(i + 1);
+                order.swap(i, j);
             }
-            assert!(kept.values().all(|&k| k == 1));
-            assert!(after.found_by("704.5j").is_empty());
-            count
+            let mut kept: Vec<ObjectId> = Vec::new();
+            for id in order {
+                if kept.iter().all(|&k| !same_name(names_of(id), names_of(k))) {
+                    kept.push(id);
+                }
+            }
+            if kept.len() > 1 {
+                components_keeping_several += 1;
+            }
+            losers.extend(candidates.iter().filter(|id| !kept.contains(id)));
+            asked.insert(candidates.clone());
+            session.submit(r.request_id, select(&kept)).unwrap();
+        }
+        let Status::Done { state, output } = session.status() else {
+            panic!("not done");
         };
-        assert!(groups <= 6);
+        assert!(output.is_ok());
+        // The requests are exactly the model's components.
+        assert_eq!(asked, model_components(&board));
+        let expected: Vec<ObjectId> = all
+            .iter()
+            .copied()
+            .filter(|id| !losers.contains(id))
+            .collect();
+        let survivors = on_battlefield(state, &all);
+        assert_eq!(survivors, expected);
+        assert!(!survivors.is_empty());
+        if !losers.is_empty() {
+            iterations_with_removal += 1;
+        }
+        let entry = |id: &ObjectId| board.iter().find(|(o, _, _)| o == id).unwrap();
+        for x in &survivors {
+            for y in &survivors {
+                let (ex, ey) = (entry(x), entry(y));
+                assert!(x == y || ex.1 != ey.1 || !same_name(&ex.2, &ey.2));
+            }
+        }
+        for gone in &losers {
+            let eg = entry(gone);
+            assert!(survivors.iter().any(|s| {
+                let es = entry(s);
+                es.1 == eg.1 && same_name(&es.2, &eg.2)
+            }));
+        }
+        let mut after = state.clone();
+        assert!(after.found_by("704.5j").is_empty());
     }
+    assert!(iterations_with_removal > 0);
+    assert!(components_keeping_several > 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1 (PR #214)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 704.5p: a creature with toughness 0, both
+// counter kinds and attached to a permanent, whose graveyard move a Skip replacement prevents,
+// stays on the battlefield and still gets its counter removals (N of each) and its unattach in
+// the same pass (a follow-up batch); the pass is performed.
+#[test]
+fn prevented_move_still_removes_counters_and_unattaches() {
+    let build = || {
+        let mut w = World::new();
+        let host = w.creature(1, 3);
+        let c = w.creature(1, 0);
+        w.counters(c, "+1/+1", 2);
+        w.counters(c, "-1/-1", 3);
+        w.attach(c, AttachTarget::Permanent(host));
+        (w, host, c)
+    };
+    let (mut w, _, c) = build();
+    assert_eq!(w.found(obj(c)), ["704.5f", "704.5p", "704.5q"]);
+    w.registry
+        .add(ReplacementEffect::new(e(1), sba_move_of(c), Action::Skip))
+        .unwrap();
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.zones.object(c).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!((w.counter(c, "+1/+1"), w.counter(c, "-1/-1")), (0, 1));
+    assert_eq!(w.permanents.attached_to(c), None);
+    assert_eq!(out.unattached, [c]);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        batch_shape(&out),
+        (
+            vec![],
+            vec![(c, "+1/+1".to_owned(), 2), (c, "-1/-1".to_owned(), 2)]
+        )
+    );
+    // The unattach follows the counter removals.
+    let events: Vec<&GameEvent> = out.executed[0]
+        .events
+        .iter()
+        .map(|ev| ev.instance.event())
+        .collect();
+    assert!(matches!(events.last(), Some(GameEvent::Unattach { attachment }) if *attachment == c));
+
+    // Control: without the Skip the creature leaves; no counter removal or unattach event.
+    let (mut w, _, c) = build();
+    let card = w.card_of(c);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(
+        batch_shape(&out),
+        (vec![(c, ZoneChangeCause::StateBasedAction)], vec![])
+    );
+    assert!(unattach_events(&out).is_empty());
+    assert!(out.unattached.is_empty());
+}
+
+// REQ-SBA-001, CR 704.3, CR 616.1: the follow-up batch of a prevented move goes through the
+// replacement bus: a choice between two replacements of a follow-up counter removal suspends
+// the WHOLE pass with nothing changed (main batch included; asserted inside the procedure), and
+// the replayed pass finishes it.
+#[test]
+fn prevented_move_follow_up_choice_restores_the_whole_pass() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let c = w.creature(1, 0);
+    let other = w.creature(2, 0);
+    w.counters(c, "+1/+1", 1);
+    w.counters(c, "-1/-1", 1);
+    w.attach(c, AttachTarget::Permanent(host));
+    let other_card = w.card_of(other);
+    w.registry
+        .add(ReplacementEffect::new(e(1), sba_move_of(c), Action::Skip))
+        .unwrap();
+    for id in [2, 3] {
+        let mut matcher = EventMatcher::new(BusEventKind::RemoveCounters);
+        matcher.affected_object = Some(c);
+        w.registry
+            .add(ReplacementEffect::new(e(id), matcher, Action::Skip))
+            .unwrap();
+    }
+    let run = drive(&w, &[0, 0]);
+    assert_eq!(run.asked, 2);
+    let out = run.out.unwrap();
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 2);
+    assert_eq!(
+        run.state.zone_of_card(other_card),
+        Some(ZoneId::Graveyard(p(2)))
+    );
+    // Both removals were skipped by a replacement; the unattach happened.
+    assert_eq!(
+        (run.state.counter(c, "+1/+1"), run.state.counter(c, "-1/-1")),
+        (1, 1)
+    );
+    assert_eq!(out.unattached, [c]);
+    assert_eq!(run.state.permanents.attached_to(c), None);
+}
+
+// REQ-SBA-001, CR 704.5f, CR 704.5q, CR 400.7: a move replaced into another zone (Instead: to
+// exile) is a departure: the object gets no follow-up events.
+#[test]
+fn replaced_move_elsewhere_gets_no_follow_up() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let c = w.creature(1, 0);
+    w.counters(c, "+1/+1", 1);
+    w.counters(c, "-1/-1", 1);
+    w.attach(c, AttachTarget::Permanent(host));
+    let card = w.card_of(c);
+    w.registry
+        .add(ReplacementEffect::new(
+            e(1),
+            sba_move_of(c),
+            Action::Instead(vec![zone_change(
+                c,
+                ZoneKind::Exile,
+                ZoneChangeCause::StateBasedAction,
+            )]),
+        ))
+        .unwrap();
+    let out = pass(&mut w);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(batch_shape(&out).1.is_empty());
+    assert!(unattach_events(&out).is_empty());
+    assert_eq!(out.executed.len(), 1);
+}
+
+// REQ-SBA-001, CR 704.5n, CR 704.5p, CR 701.3d, CR 603.10c, CR 603.2, CR 704.8: an Equipment on
+// a player (704.5n) and a creature attached to a host that dies in the same pass (704.5p) become
+// unattached through one Unattach event each, ascending id, submitted after the zone changes
+// and counter removals of the same ONE batch. The bus executes the events that are not zone
+// changes first (counter removals and unattaches name live objects), then the moves; the batch
+// captures last known information before any of its events, so the dying host's record still
+// lists the creature attached to it (look-back). The trigger normalisation sees an Unattached
+// occurrence for each.
+#[test]
+fn unattach_events_in_the_batch_reach_triggers_with_look_back() {
+    let mut w = World::new();
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    let dying = w.creature(1, 0);
+    let cr = w.creature(1, 2);
+    let q = w.creature(1, 9);
+    w.counters(q, "+1/+1", 1);
+    w.counters(q, "-1/-1", 1);
+    w.attach(eq, AttachTarget::Player(p(2)));
+    w.attach(cr, AttachTarget::Permanent(dying));
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    let kinds: Vec<(&str, ObjectId)> = out.executed[0]
+        .events
+        .iter()
+        .map(|ev| match ev.instance.event() {
+            GameEvent::ZoneChange { object, .. } => ("move", *object),
+            GameEvent::RemoveCounters {
+                target: CounterTarget::Object(o),
+                ..
+            } => ("counters", *o),
+            GameEvent::Unattach { attachment } => ("unattach", *attachment),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("counters", q),
+            ("counters", q),
+            ("unattach", eq),
+            ("unattach", cr),
+            ("move", dying)
+        ]
+    );
+    assert_eq!(out.unattached, [eq, cr]);
+    let unattached: Vec<(Option<ObjectId>, Option<ObjectId>)> =
+        crate::triggers::events_from_batch(&out.executed[0])
+            .into_iter()
+            .filter(|t| {
+                t.kinds
+                    .contains(&fineprint_dsl::ability::EventKind::Unattached)
+            })
+            .map(|t| (t.subject_pre, t.subject_post))
+            .collect();
+    assert_eq!(unattached, [(Some(eq), Some(eq)), (Some(cr), Some(cr))]);
+    for id in [eq, cr] {
+        assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
+        assert_eq!(w.permanents.attached_to(id), None);
+    }
+    // CR 704.8: the host's last known information is from before the pass.
+    assert_eq!(w.lki.get(dying).unwrap().attached_here(), [cr]);
+}
+
+// REQ-SBA-001, CR 704.5j, CR 101.4, CR 101.4c: two players each with a same-name pair; the
+// active player's legends have the HIGHER ids, and the first request goes to the active player;
+// nothing changes until both have answered; then both losers move in one batch.
+#[test]
+fn legend_choices_in_apnap_order() {
+    let mut w = World::new();
+    let n1 = w.create_controlled(2, 2, legendary(&["test.legend_a"]));
+    let n2 = w.create_controlled(2, 2, legendary(&["test.legend_a"]));
+    let a1 = w.create_controlled(1, 1, legendary(&["test.legend_a"]));
+    let a2 = w.create_controlled(1, 1, legendary(&["test.legend_a"]));
+    let before = w.state_hash();
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let first = session.pending().unwrap().clone();
+    assert_eq!(first.chooser, p(1));
+    assert_eq!(
+        first.payload,
+        ChoicePayload::SelectObjectsFromZone {
+            candidates: vec![a1, a2]
+        }
+    );
+    session.submit(first.request_id, select(&[a2])).unwrap();
+    let second = session.pending().unwrap().clone();
+    assert_eq!(second.chooser, p(2));
+    // No move before every answer.
+    assert_eq!(session.state_hash(), before);
+    session.submit(second.request_id, select(&[n1])).unwrap();
+    let Status::Done { state, output } = session.status() else {
+        panic!("not done");
+    };
+    let out = output.clone().unwrap();
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (n2, ZoneChangeCause::StateBasedAction),
+            (a1, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+    assert_eq!(on_battlefield(state, &[n1, n2, a1, a2]), [n1, a2]);
+}
+
+impl World {
+    /// Three players at 20 life, turn 1, turn order `order`, active player `active`.
+    fn three(order: [u64; 3], active: u64) -> World {
+        let mut w = World::new();
+        let mut game = GameState::new(41, 3, 20).unwrap();
+        game.set_turn_number(1);
+        game.set_turn_order(order.iter().map(|&n| p(n)).collect())
+            .unwrap();
+        game.set_active_player(Some(p(active))).unwrap();
+        w.game = game;
+        w.zones = Zones::new(&[p(1), p(2), p(3)], ZonesConfig::default());
+        w
+    }
+
+    /// A layer-2 effect (CR 613.1b) giving control of `id` to `player`.
+    fn give_control(&mut self, effect: u64, id: ObjectId, player: u64) {
+        self.effects
+            .register(
+                e(effect),
+                ContinuousEffect {
+                    source: None,
+                    controller: p(player),
+                    timestamp: Timestamp::new(effect),
+                    layer: Layer::L2,
+                    is_cda: false,
+                    origin: EffectOrigin::Resolved,
+                    affected: Affected::Objects(BTreeSet::from([id])),
+                    modification: LayerModification::SetController(p(player)),
+                },
+            )
+            .unwrap();
+    }
+}
+
+// REQ-SBA-001, CR 704.5j, CR 101.4: three players, turn order 2, 1, 3, active player 1: APNAP
+// order is 1, 3, 2, which differs from both id order and creation order (3, 2, 1).
+#[test]
+fn legend_choices_follow_turn_order_with_three_players() {
+    let mut w = World::three([2, 1, 3], 1);
+    let mut pairs = BTreeMap::new();
+    for controller in [3, 2, 1] {
+        let x = w.create_controlled(controller, controller, legendary(&["test.legend_a"]));
+        let y = w.create_controlled(controller, controller, legendary(&["test.legend_a"]));
+        pairs.insert(controller, (x, y));
+    }
+    let before = w.state_hash();
+    let answers: Vec<ChoiceResponse> = [1, 3, 2].iter().map(|c| select(&[pairs[c].1])).collect();
+    let (run, asked) = drive_answers(&w, &answers);
+    let choosers: Vec<PlayerId> = asked.iter().map(|r| r.chooser).collect();
+    assert_eq!(choosers, [p(1), p(3), p(2)]);
+    for (r, c) in asked.iter().zip([1, 3, 2]) {
+        assert_eq!(
+            r.payload,
+            ChoicePayload::SelectObjectsFromZone {
+                candidates: vec![pairs[&c].0, pairs[&c].1]
+            }
+        );
+    }
+    let out = run.out.unwrap();
+    assert_eq!(out.executed.len(), 1);
+    let mut moved: Vec<ObjectId> = batch_shape(&out).0.into_iter().map(|(o, _)| o).collect();
+    moved.sort();
+    let mut expected: Vec<ObjectId> = pairs.values().map(|&(x, _)| x).collect();
+    expected.sort();
+    assert_eq!(moved, expected);
+    assert_ne!(run.hash, before);
+}
+
+// REQ-SBA-001, CR 704.5j, CR 613.1b, CR 110.2: legends are grouped by the controller after
+// layer 2. Stored controllers 1 and 2 with a layer-2 effect giving the second to player 1: one
+// group, asked to player 1; the loser goes to its owner's graveyard. Reverse: the same stored
+// controller and a layer-2 effect giving one to player 2: two controllers, no finding.
+#[test]
+fn legend_groups_use_the_evaluated_controller() {
+    let mut w = World::new();
+    let l1 = w.create_controlled(1, 1, legendary(&["test.legend_a"]));
+    let l2 = w.create_controlled(2, 2, legendary(&["test.legend_a"]));
+    assert!(w.found_by("704.5j").is_empty());
+    w.give_control(1, l2, 1);
+    assert_eq!(w.found_by("704.5j"), [l1, l2]);
+    let card2 = w.card_of(l2);
+    let (run, asked) = drive_answers(&w, &[select(&[l1])]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(run.state.zone_of_card(card2), Some(ZoneId::Graveyard(p(2))));
+
+    let mut w = World::new();
+    let m1 = w.create_controlled(1, 1, legendary(&["test.legend_a"]));
+    let m2 = w.create_controlled(1, 1, legendary(&["test.legend_a"]));
+    assert_eq!(w.found_by("704.5j"), [m1, m2]);
+    w.give_control(1, m2, 2);
+    assert!(w.found_by("704.5j").is_empty());
+    assert!(!pass(&mut w).performed);
+}
+
+// REQ-SBA-001, CR 704.5n, CR 702.16d, CR 301.5c: an Equipment on a creature and a Fortification
+// on a land that the environment marks illegal (a protection stand-in) become unattached and
+// stay on the battlefield; unmarked pairs stay attached; an unattached Equipment named in a
+// marked pair is untouched.
+#[test]
+fn sba_704_5n_effects_make_the_attachment_illegal() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let host_ok = w.creature(1, 3);
+    let land = w.create(1, ZoneKind::Battlefield, noncreature("test.land", "Land"));
+    let land_ok = w.create(1, ZoneKind::Battlefield, noncreature("test.land_b", "Land"));
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    let eq_ok = w.create(1, ZoneKind::Battlefield, equipment());
+    let loose = w.create(1, ZoneKind::Battlefield, equipment());
+    let fort = w.create(1, ZoneKind::Battlefield, fortification());
+    let fort_ok = w.create(1, ZoneKind::Battlefield, fortification());
+    w.attach(eq, AttachTarget::Permanent(host));
+    w.attach(eq_ok, AttachTarget::Permanent(host_ok));
+    w.attach(fort, AttachTarget::Permanent(land));
+    w.attach(fort_ok, AttachTarget::Permanent(land_ok));
+    w.env.illegal_equipment_targets = BTreeSet::from([
+        (eq, AttachTarget::Permanent(host)),
+        (fort, AttachTarget::Permanent(land)),
+        (loose, AttachTarget::Permanent(host)),
+    ]);
+    assert!(
+        !w.env
+            .equipment_can_attach(eq, AttachTarget::Permanent(host))
+    );
+    assert!(
+        w.env
+            .equipment_can_attach(eq_ok, AttachTarget::Permanent(host_ok))
+    );
+    assert_eq!(w.found_by("704.5n"), [eq, fort]);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.unattached, [eq, fort]);
+    for id in [eq, fort, loose] {
+        assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
+        assert_eq!(w.permanents.attached_to(id), None);
+    }
+    assert_eq!(
+        w.permanents.attached_to(eq_ok),
+        Some(AttachTarget::Permanent(host_ok))
+    );
+    assert_eq!(
+        w.permanents.attached_to(fort_ok),
+        Some(AttachTarget::Permanent(land_ok))
+    );
+    assert!(w.check().is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n, CR 702.26b: a marked pair whose target is phased out is not checked.
+#[test]
+fn sba_704_5n_marked_pair_with_phased_out_target_is_not_checked() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(eq, AttachTarget::Permanent(host));
+    w.env.illegal_equipment_targets = BTreeSet::from([(eq, AttachTarget::Permanent(host))]);
+    w.phase(host, true);
+    assert!(w.found_by("704.5n").is_empty());
 }

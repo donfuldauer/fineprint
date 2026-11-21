@@ -51,7 +51,8 @@ pub struct SbaFinding {
 
 /// What the state-based action check reads from the caller that the engine state does not
 /// hold yet (REQ-SBA-001). Every method has a default (a standard game with no copies, no
-/// exemption, every world permanent stamped 0, every Aura attachment legal, no counter limits,
+/// exemption, every world permanent stamped 0, every Aura, Equipment and Fortification
+/// attachment legal as far as effects go, no counter limits,
 /// no Saga chapter abilities, no pending chapter or room abilities and no completed dungeon)
 /// except the deathtouch pair [`SbaEnvironment::deathtouch_damaged`] and
 /// [`SbaEnvironment::clear_deathtouch_damaged`], which every implementation provides together.
@@ -171,6 +172,37 @@ pub trait SbaEnvironment {
     /// ```
     fn aura_can_enchant(&self, aura: ObjectId, target: AttachTarget) -> bool {
         let _ = (aura, target);
+        true
+    }
+
+    /// Whether Equipment or Fortification `attachment` may stay attached to `target` as far as
+    /// effects are concerned (CR 704.5n, CR 702.16d, CR 301.5c): `false` when protection or
+    /// another effect says the permanent can't be equipped or fortified by it. The engine
+    /// itself checks the rest of CR 704.5n (attached to a player, to itself, to a permanent
+    /// that left the battlefield, an Equipment on a noncreature or a Fortification on a
+    /// nonland). An attachment to a phased-out permanent is not checked (CR 702.26b).
+    /// Default: `true`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::permanent::AttachTarget;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(Plain.equipment_can_attach(
+    ///     ObjectId::new(1),
+    ///     AttachTarget::Permanent(ObjectId::new(2))
+    /// ));
+    /// ```
+    fn equipment_can_attach(&self, attachment: ObjectId, target: AttachTarget) -> bool {
+        let _ = (attachment, target);
         true
     }
 
@@ -327,6 +359,9 @@ pub struct StoredSbaEnvironment {
     /// The (Aura, target) pairs that are illegal (CR 704.5m, CR 303.4c); every other pair is
     /// legal.
     pub illegal_aura_targets: BTreeSet<(ObjectId, AttachTarget)>,
+    /// The (Equipment or Fortification, target) pairs that protection or another effect makes
+    /// illegal (CR 704.5n, CR 702.16d); every other pair is legal as far as effects go.
+    pub illegal_equipment_targets: BTreeSet<(ObjectId, AttachTarget)>,
     /// The counter limits of each object (CR 704.5r): counter kind to N.
     pub counter_limits: BTreeMap<ObjectId, BTreeMap<String, i64>>,
     /// The final chapter number of each object with one or more chapter abilities
@@ -352,6 +387,7 @@ impl Default for StoredSbaEnvironment {
             deathtouch: BTreeSet::new(),
             world_since: BTreeMap::new(),
             illegal_aura_targets: BTreeSet::new(),
+            illegal_equipment_targets: BTreeSet::new(),
             counter_limits: BTreeMap::new(),
             saga_final_chapter: BTreeMap::new(),
             chapter_pending: BTreeSet::new(),
@@ -384,6 +420,12 @@ impl SbaEnvironment for StoredSbaEnvironment {
 
     fn aura_can_enchant(&self, aura: ObjectId, target: AttachTarget) -> bool {
         !self.illegal_aura_targets.contains(&(aura, target))
+    }
+
+    fn equipment_can_attach(&self, attachment: ObjectId, target: AttachTarget) -> bool {
+        !self
+            .illegal_equipment_targets
+            .contains(&(attachment, target))
     }
 
     fn counter_limits(&self, object: ObjectId) -> BTreeMap<String, i64> {
@@ -422,18 +464,19 @@ impl SbaEnvironment for StoredSbaEnvironment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SbaOutcome {
     /// Whether the pass changed the game state (CR 704.3: "If any state-based actions are
-    /// performed as a result of a check, the check is repeated"): a move or a counter removal
-    /// occurred, an object ceased to exist, was removed from the game or became unattached, a
+    /// performed as a result of a check, the check is repeated"): a move, a counter removal or
+    /// an unattach event occurred, an object ceased to exist or was removed from the game, a
     /// player lost the game, or the replacement registry changed (for
     /// example a one-use replacement effect was consumed). A finding whose only move a
-    /// replacement effect skipped is not performed. Consuming the empty-library-draw and
+    /// replacement effect skipped, with nothing else to do, is not performed. Consuming the empty-library-draw and
     /// deathtouch flags alone does not count.
     pub performed: bool,
     /// Every finding of the pass, in registry order, then subject order: what the check
     /// detected, whether or not it was performed.
     pub findings: Vec<SbaFinding>,
-    /// The batches the replacement bus executed for the zone changes, in execution order
-    /// (empty if there was no move or nothing occurred).
+    /// The batches the replacement bus executed (zone changes, counter removals and unattach
+    /// events), in execution order: the main batch, then the follow-up batch for objects whose
+    /// move a replacement effect prevented (empty if nothing occurred).
     pub executed: Vec<ExecutedBatch>,
     /// The players who lost the game in this pass, ascending.
     pub lost_players: Vec<PlayerId>,
@@ -444,7 +487,9 @@ pub struct SbaOutcome {
     /// replacement effect of the pass moved before it ceased, this is its new id (CR 400.7).
     pub ceased: Vec<ObjectId>,
     /// The permanents that became unattached and stayed on the battlefield (CR 704.5n,
-    /// CR 704.5p), ascending. A permanent that also moves or ceases in the pass is not listed.
+    /// CR 704.5p), ascending: each through a `GameEvent::Unattach` event in
+    /// [`SbaOutcome::executed`]. A permanent that leaves the battlefield or ceases in the pass
+    /// is not listed; one whose move a replacement effect prevented is (it stays).
     pub unattached: Vec<ObjectId>,
     /// The dungeon cards their owners removed from the game (CR 704.5t, CR 309.7), ascending.
     /// Removing a dungeon is not a zone change: no `ZoneChange` event, nothing in `executed`.

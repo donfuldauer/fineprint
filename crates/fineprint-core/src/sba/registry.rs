@@ -78,7 +78,9 @@ pub(super) struct PermanentFacts {
     saga: bool,
     /// The counters on it (CR 122.1), as the layer environment reports them.
     counters: BTreeMap<String, i64>,
-    /// Its controller from the permanent container (CR 704.5j), if the container holds it.
+    /// Its controller (CR 704.5j, CR 613.1b, CR 110.2): the controller after layer 2 of the
+    /// layer evaluation; if the evaluation names none, the controller in the permanent
+    /// container, if the container holds it.
     controller: Option<PlayerId>,
     /// What it is attached to, from the permanent container (CR 701.3a).
     attached_to: Option<AttachTarget>,
@@ -158,7 +160,11 @@ impl<'a> SbaView<'a> {
                     fortification: c.subtypes.contains("Fortification"),
                     saga: c.subtypes.contains("Saga"),
                     counters,
-                    controller: permanent.map(crate::permanent::Permanent::controller),
+                    // CR 613.1b: control-changing effects apply in layer 2; the stored
+                    // controller is only the fallback for an evaluation that names none.
+                    controller: evaluated
+                        .controller
+                        .or_else(|| permanent.map(crate::permanent::Permanent::controller)),
                     attached_to: permanent.and_then(crate::permanent::Permanent::attached_to),
                 },
             );
@@ -580,11 +586,130 @@ fn root(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
-// CR 704.5j, CR 201.2a: the groups of legendary permanents that share a name, per controller.
-// Two permanents are in one group when they are connected by shared names (connected
-// components); an object with no name matches nothing (CR 201.2a, CR 708.2a). Each group has
-// two or more members, ascending, and the groups are ordered by their lowest id.
-pub(super) fn legend_groups(view: &SbaView<'_>) -> Vec<(PlayerId, Vec<ObjectId>)> {
+/// One CR 704.5j conflict component: legendary permanents of one controller connected by
+/// shared names (decision "#42 FP-041 — Legend rule: conflict graph, maximal independent set").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct LegendGroup {
+    /// The (evaluated) controller who chooses (CR 704.5j "that player", CR 613.1b).
+    pub(super) controller: PlayerId,
+    /// The members, ascending (two or more).
+    pub(super) members: Vec<ObjectId>,
+    /// The names of each member, parallel to `members` (CR 201.2a).
+    pub(super) names: Vec<BTreeSet<String>>,
+}
+
+impl LegendGroup {
+    /// CR 201.2a: whether members `i` and `j` have the same name (at least one name in common).
+    /// A nameless object never has the same name as anything.
+    fn same_name(&self, i: usize, j: usize) -> bool {
+        !self.names[i].is_disjoint(&self.names[j])
+    }
+
+    /// Whether every pair of members has the same name (the usual one-name group): then
+    /// exactly one survives.
+    pub(super) fn is_clique(&self) -> bool {
+        let n = self.members.len();
+        (0..n).all(|i| ((i + 1)..n).all(|j| self.same_name(i, j)))
+    }
+
+    /// The largest number of survivors a request offers: 1 for a clique, otherwise one less
+    /// than the size (a connected component with an edge never keeps everything).
+    pub(super) fn max_survivors(&self) -> usize {
+        if self.is_clique() {
+            1
+        } else {
+            self.members.len().saturating_sub(1)
+        }
+    }
+
+    /// The deterministic default survivor set: the greedy maximal independent set by
+    /// ascending object id (take the lowest id, then each next id that has no name in common
+    /// with any already taken).
+    pub(super) fn default_survivors(&self) -> Vec<ObjectId> {
+        let mut taken: Vec<usize> = Vec::new();
+        for i in 0..self.members.len() {
+            if taken.iter().all(|&t| !self.same_name(i, t)) {
+                taken.push(i);
+            }
+        }
+        taken.into_iter().map(|i| self.members[i]).collect()
+    }
+
+    /// CR 704.5j, CR 201.2a: checks that `selected` is a valid survivor set, a MAXIMAL
+    /// independent set of the conflict graph: every selected id is a member, none twice, no two
+    /// selected have the same name, and every member not selected has the same name as at least
+    /// one selected member.
+    ///
+    /// # Errors
+    /// A message naming the violated condition.
+    pub(super) fn check_survivors(&self, selected: &[ObjectId]) -> Result<(), String> {
+        if selected.is_empty() {
+            return Err("the legend rule keeps at least one permanent".to_owned());
+        }
+        let mut indices: BTreeSet<usize> = BTreeSet::new();
+        for id in selected {
+            let Some(i) = self.members.iter().position(|m| m == id) else {
+                return Err(format!("{id:?} is not a candidate"));
+            };
+            if !indices.insert(i) {
+                return Err(format!("{id:?} is selected twice"));
+            }
+        }
+        for &i in &indices {
+            for &j in &indices {
+                if i < j && self.same_name(i, j) {
+                    return Err(format!(
+                        "{:?} and {:?} have the same name and cannot both stay",
+                        self.members[i], self.members[j]
+                    ));
+                }
+            }
+        }
+        for i in 0..self.members.len() {
+            if !indices.contains(&i) && indices.iter().all(|&k| !self.same_name(i, k)) {
+                return Err(format!(
+                    "{:?} has no name in common with a kept permanent and must stay",
+                    self.members[i]
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// CR 101.4: the players in APNAP order: the turn order starting from the active player (all
+/// players ascending if the turn order is empty); players not in the turn order last,
+/// ascending.
+pub(super) fn apnap_order(game: &GameState) -> Vec<PlayerId> {
+    let mut order: Vec<PlayerId> = if game.turn_order().is_empty() {
+        let mut all: Vec<PlayerId> = game.players().map(PlayerState::id).collect();
+        all.sort_unstable();
+        all
+    } else {
+        game.turn_order().to_vec()
+    };
+    if let Some(active) = game.turn().active_player()
+        && let Some(pos) = order.iter().position(|&p| p == active)
+    {
+        order.rotate_left(pos);
+    }
+    let mut rest: Vec<PlayerId> = game
+        .players()
+        .map(PlayerState::id)
+        .filter(|id| !order.contains(id))
+        .collect();
+    rest.sort_unstable();
+    order.extend(rest);
+    order
+}
+
+// CR 704.5j, CR 201.2a: the conflict components of legendary permanents, per (evaluated)
+// controller. The vertices are the evaluated, phased-in, named legendary permanents of one
+// controller; an edge joins two that have at least one name in common (an object with no name
+// matches nothing: CR 201.2a, CR 708.2a). Every connected component with at least one edge is
+// a group (members ascending). CR 101.4: the groups are ordered by their controller's APNAP
+// rank, then (CR 101.4c, decision #42 FP-041) by their lowest id.
+pub(super) fn legend_groups(view: &SbaView<'_>) -> Vec<LegendGroup> {
     let mut by_controller: BTreeMap<PlayerId, Vec<(ObjectId, &BTreeSet<String>)>> = BTreeMap::new();
     for (&id, f) in &view.permanents {
         let Some(controller) = f.controller else {
@@ -612,18 +737,25 @@ pub(super) fn legend_groups(view: &SbaView<'_>) -> Vec<(PlayerId, Vec<ObjectId>)
                 }
             }
         }
-        let mut components: BTreeMap<usize, Vec<ObjectId>> = BTreeMap::new();
-        for (i, &(id, _)) in members.iter().enumerate() {
+        let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..members.len() {
             let r = root(&mut parent, i);
-            components.entry(r).or_default().push(id);
+            components.entry(r).or_default().push(i);
         }
-        for ids in components.into_values() {
-            if ids.len() >= 2 {
-                groups.push((controller, ids));
+        for indices in components.into_values() {
+            // Two or more vertices in one component means at least one edge.
+            if indices.len() >= 2 {
+                groups.push(LegendGroup {
+                    controller,
+                    members: indices.iter().map(|&i| members[i].0).collect(),
+                    names: indices.iter().map(|&i| members[i].1.clone()).collect(),
+                });
             }
         }
     }
-    groups.sort_by_key(|(_, ids)| ids[0]);
+    let order = apnap_order(view.game);
+    let rank = |p: PlayerId| order.iter().position(|&q| q == p).unwrap_or(order.len());
+    groups.sort_by_key(|g| (rank(g.controller), g.members[0]));
     groups
 }
 
@@ -631,7 +763,7 @@ pub(super) fn legend_groups(view: &SbaView<'_>) -> Vec<(PlayerId, Vec<ObjectId>)
 fn legend_rule(view: &SbaView<'_>) -> Vec<SbaSubject> {
     legend_groups(view)
         .into_iter()
-        .flat_map(|(_, ids)| ids)
+        .flat_map(|g| g.members)
         .map(SbaSubject::Object)
         .collect()
 }
@@ -706,7 +838,7 @@ fn illegal_aura(view: &SbaView<'_>) -> Vec<SbaSubject> {
     out
 }
 
-// CR 704.5n, CR 301.5, CR 301.5c, CR 301.6
+// CR 704.5n, CR 301.5, CR 301.5c, CR 301.6, CR 702.16d
 fn illegal_equipment(view: &SbaView<'_>) -> Vec<SbaSubject> {
     view.attachments()
         .filter(|(id, f, target)| {
@@ -731,7 +863,9 @@ fn illegal_equipment(view: &SbaView<'_>) -> Vec<SbaSubject> {
                     };
                     // CR 301.5: Equipment on a creature; CR 301.6: Fortification on a land.
                     let legal = (f.equipment && t.creature) || (f.fortification && t.land);
-                    !legal
+                    // CR 702.16d, CR 301.5c: protection and other effects that say the
+                    // permanent can't be equipped or fortified by it make it illegal too.
+                    !legal || !view.env.equipment_can_attach(*id, *target)
                 }
             }
         })
