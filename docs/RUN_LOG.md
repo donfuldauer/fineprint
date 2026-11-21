@@ -460,3 +460,10 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 06-turn | #45 (PR #213 CR round 1) | Orchestrator | Opus 5.5 | 1 | done | - | triage T0: run-log Notes prefix (thread r4651825471); PR body gains §11.1 coverage and CardCatalog evidence (Linked Issues check) |
 | 06-turn | #45 (PR #213 CR round 1) | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy clean; workspace 3877 passed; format/ coverage 100 %; guard ok | head c384391; restricted-basic regression test fails with the old line |
 | 06-turn | #45 (PR #213 CI `cr`) | classifier + Fixer | Sonnet 5.5 | 1 | done | cr fetch, cr index, cr check ok; xtask 72 passed | T1: docs/cr-citations.json lacked the round-1 citations (100.2a, 100.4, 100.4a, 113.6n, 205.4c); regenerated with `cargo xtask cr index`, baseline unchanged |
+| 05-sba | #42 | work-classifier | Sonnet 5.5 | 1 | needs-rules | - | CR 704.5j-t text not in repo; rules-researcher asked |
+| 05-sba | #42 | rules-researcher | Sonnet 5.5 | 1 | done | - | CR 704.5j-t verbatim (no 704.5l/o); none implemented before; SRS matches CR |
+| 05-sba | #42 | work-classifier | Sonnet 5.5 | 2 | routed | - | T2 Opus for Implementer and Independent Tester; blast radius module; no Fable (allowance unknown) |
+| 05-sba | #42 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace 3983 passed (full-recompute 3984); fineprint-core 98.83 % lines; guard, cr check ok | nine entries 704.5j-t, five new SbaAction variants, seven SbaEnvironment seams; 2 rules questions |
+| 05-sba | #42 | Independent Tester | Opus 5.5 | 1 | done | 87 new spec tests pass; workspace 3983 passed | three existing tests corrected for the new 704.5q finding (R10, not weakened) |
+| 05-sba | #42 | rules-researcher | Sonnet 5.5 | 2 | done | - | 704.5q+r overlap: CR silent, larger amount per kind (matches code); battle-Aura: unattach first, graveyard next check (code wrong) |
+| 05-sba | #42 | Fixer (classifier T1) | Sonnet 5.5 | 1 | done | fmt, clippy clean; core 1097 passed both configs; fineprint-core 98.85 %; guard, cr check ok | battle-Aura no longer illegal under 704.5m in the first check; 704.5q/r decision recorded |
