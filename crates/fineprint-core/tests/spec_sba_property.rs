@@ -478,63 +478,162 @@ fn req_sba_001_property_world_rule() {
     }
 }
 
-// REQ-SBA-001, CR 704.5j: (c) after a legend pass answered with any candidate, each
-// (controller, name) group keeps exactly one permanent, the chosen one.
+/// Name pool of the legend property (CR 201.2a: a legend gets 0, 1 or 2 of these).
+const PROPERTY_NAMES: [&str; 4] = ["test.name_x", "test.name_y", "test.name_z", "test.name_w"];
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.5j, 201.2a, 101.4, 613.1b: (c) after a legend pass the
+// survivors of each component are a maximal independent set. Seeded boards: 2 or 3 players
+// with a random turn order and active player; legends with random name sets (0-2 names from a
+// pool of 4), random owners and stored controllers, some under a layer 2 control effect. Per
+// evaluated controller the components (connected by "shares a name", at least one edge) are
+// asked once each, in APNAP order then lowest id, with the contract's request shape; each is
+// answered with a random valid survivor set or the default; the battlefield survivors equal the
+// chosen set, every other member went to its owner's graveyard, isolated legends stay.
+// (PR #214 round 1, F7: this property asserted "each (controller, name) group keeps exactly
+// one"; the brief's T2 replaces it with "survivors of each component are a maximal independent
+// set".)
 #[test]
 fn req_sba_001_property_legend_rule() {
+    let mut removed_somewhere = 0;
+    let mut multi_survivor = 0;
+    let mut non_clique = 0;
+    let mut defaults = 0;
     for seed in 0..SEEDS {
         let mut g = Lcg::new(seed ^ 0x1E6);
-        let mut s = Sim::new();
-        let mut members: BTreeMap<(PlayerId, &str), Vec<ObjectId>> = BTreeMap::new();
-        for _ in 0..(2 + g.below(8)) {
-            let owner = g.pick(&[P1, P2]);
-            let controller = g.pick(&[P1, P2]);
-            let name = g.pick(&LEGEND_NAMES);
-            let id = s.legend(owner, controller, name);
-            members.entry((controller, name)).or_default().push(id);
+        let n_players = 2 + usize::try_from(g.below(2)).expect("fits");
+        let mut s = Sim::with_players(n_players);
+        let mut order: Vec<PlayerId> = s.game.turn_order().to_vec();
+        // A seeded shuffle of the turn order and a random active player.
+        for i in (1..order.len()).rev() {
+            let j = usize::try_from(g.below(i as u64 + 1)).expect("fits");
+            order.swap(i, j);
         }
-        let groups = members.values().filter(|v| v.len() >= 2).count();
+        let active = g.pick(&order);
+        s.set_turn(&order, active);
+        let pos = order.iter().position(|p| *p == active).expect("in order");
+        let apnap: Vec<PlayerId> = (0..order.len())
+            .map(|k| order[(pos + k) % order.len()])
+            .collect();
+
+        let mut evaluated: BTreeMap<ObjectId, PlayerId> = BTreeMap::new();
+        let mut all_names = NameMap::new();
+        let mut effect = 1;
+        for _ in 0..(2 + g.below(8)) {
+            let owner = g.pick(&order);
+            let stored = g.pick(&order);
+            let count = g.pick(&[0u64, 1, 1, 1, 2, 2]);
+            let mut names: Vec<&str> = Vec::new();
+            for _ in 0..count {
+                let n = g.pick(&PROPERTY_NAMES);
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+            let id = s.legend_named(owner, stored, &names);
+            let mut ctrl = stored;
+            if g.chance(1, 5) {
+                ctrl = g.pick(&order);
+                s.gain_control(effect, id, ctrl);
+                effect += 1;
+            }
+            evaluated.insert(id, ctrl);
+            all_names.insert(id, name_set(&names));
+        }
+
+        // The oracle: components per evaluated controller, in APNAP then lowest-id order.
+        let mut expected: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+        for p in &apnap {
+            let mine: NameMap = all_names
+                .iter()
+                .filter(|(id, _)| evaluated[*id] == *p)
+                .map(|(id, n)| (*id, n.clone()))
+                .collect();
+            for comp in conflict_components(&mine) {
+                expected.push((*p, comp));
+            }
+        }
+        let in_component: BTreeSet<ObjectId> = expected
+            .iter()
+            .flat_map(|(_, c)| c.iter().copied())
+            .collect();
+        let expected_findings: Vec<_> = in_component
+            .iter()
+            .map(|id| finding("704.5j", obj(*id)))
+            .collect();
+        assert_eq!(s.check(), expected_findings, "seed {seed}");
+
         let mut ga = Lcg::new(seed);
-        let r = drive_sba(s, move |_, req| random_keep(&mut ga, req));
+        let names_for_answers = all_names.clone();
+        let mut used_default = 0;
+        let r = drive_sba(s, |_, req| {
+            let comp = candidates(req);
+            if ga.chance(1, 4) {
+                used_default += 1;
+                return req.default_on_timeout.clone();
+            }
+            let valid = all_survivor_sets(&comp, &names_for_answers);
+            let i = usize::try_from(ga.below(valid.len() as u64)).expect("fits");
+            survivors(&valid[i])
+        });
+        defaults += used_default;
         assert_eq!(
             r.requests.len(),
-            groups,
-            "seed {seed}: one request per group"
+            expected.len(),
+            "seed {seed}: one request per component"
         );
-        let chosen: BTreeSet<ObjectId> = r
-            .answers
-            .iter()
-            .flat_map(|a| match a {
-                ChoiceResponse::SubmitObjectSelection { objects } => objects.clone(),
+        assert_eq!(r.outcome().findings, expected_findings, "seed {seed}");
+        let mut removed = 0;
+        for ((req, (p, comp)), answer) in r.requests.iter().zip(&expected).zip(&r.answers) {
+            assert_component_request(req, *p, comp, &all_names);
+            if !is_clique(comp, &all_names) {
+                non_clique += 1;
+            }
+            let chosen: Vec<ObjectId> = match answer {
+                fineprint_core::choice::ChoiceResponse::SubmitObjectSelection { objects } => {
+                    let mut o = objects.clone();
+                    o.sort();
+                    o
+                }
                 other => panic!("seed {seed}: unexpected answer {other:?}"),
-            })
-            .collect();
-        for ((controller, _), ids) in &members {
-            let left: Vec<ObjectId> = ids
+            };
+            let left: Vec<ObjectId> = comp
                 .iter()
                 .copied()
                 .filter(|id| r.after.on_battlefield(*id))
                 .collect();
-            assert_eq!(left.len(), 1, "seed {seed}: {ids:?}");
-            if ids.len() >= 2 {
-                assert!(
-                    chosen.contains(&left[0]),
-                    "seed {seed}: the chosen one stays"
-                );
-                let req = r
-                    .requests
-                    .iter()
-                    .find(|q| candidates(q).contains(&ids[0]))
-                    .expect("asked");
-                assert_legend_request(req, *controller, ids);
+            assert_eq!(left, chosen, "seed {seed}: survivors are the chosen set");
+            assert!(
+                is_valid_survivor_set(comp, &all_names, &left),
+                "seed {seed}: survivors {left:?} of {comp:?} are a maximal independent set"
+            );
+            if left.len() > 1 {
+                multi_survivor += 1;
             }
-            for id in ids {
-                if *id != left[0] {
-                    assert_to_owners_graveyard(&r, *id, ZoneChangeCause::StateBasedAction);
-                }
+            for id in comp.iter().filter(|id| !left.contains(id)) {
+                assert_to_owners_graveyard(&r, *id, ZoneChangeCause::StateBasedAction);
+                removed += 1;
             }
         }
+        for id in all_names.keys().filter(|id| !in_component.contains(id)) {
+            assert_still_on_battlefield(&r, *id);
+        }
+        assert_eq!(
+            r.moves().len(),
+            removed,
+            "seed {seed}: only the removed move"
+        );
+        if removed > 0 {
+            removed_somewhere += 1;
+            assert_eq!(r.nonempty_batches().len(), 1, "seed {seed}: one event");
+        }
     }
+    assert!(removed_somewhere > 0, "some iteration removes a legend");
+    assert!(
+        multi_survivor > 0,
+        "some component keeps more than one object"
+    );
+    assert!(non_clique > 0, "some component is not a clique");
+    assert!(defaults > 0, "some request is answered with its default");
 }
 
 // REQ-SBA-001, CR 704.5q: (d) a permanent with a +1/+1 and b -1/-1 counters keeps exactly
