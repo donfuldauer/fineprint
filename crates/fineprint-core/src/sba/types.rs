@@ -475,8 +475,7 @@ pub struct SbaOutcome {
     /// detected, whether or not it was performed.
     pub findings: Vec<SbaFinding>,
     /// The batches the replacement bus executed (zone changes, counter removals and unattach
-    /// events), in execution order: the main batch, then the follow-up batch for objects whose
-    /// move a replacement effect prevented (empty if nothing occurred).
+    /// events) for the pass's ONE batch, in execution order (empty if nothing occurred).
     pub executed: Vec<ExecutedBatch>,
     /// The players who lost the game in this pass, ascending.
     pub lost_players: Vec<PlayerId>,
@@ -486,10 +485,13 @@ pub struct SbaOutcome {
     /// The objects that ceased to exist (CR 704.5d, CR 704.5e), ascending. For an object a
     /// replacement effect of the pass moved before it ceased, this is its new id (CR 400.7).
     pub ceased: Vec<ObjectId>,
-    /// The permanents that became unattached and stayed on the battlefield (CR 704.5n,
-    /// CR 704.5p), ascending: each through a `GameEvent::Unattach` event in
-    /// [`SbaOutcome::executed`]. A permanent that leaves the battlefield or ceases in the pass
-    /// is not listed; one whose move a replacement effect prevented is (it stays).
+    /// The permanents that became unattached and remain on the battlefield (CR 704.5n,
+    /// CR 704.5p), ascending: each was unattached by a `GameEvent::Unattach` event in
+    /// [`SbaOutcome::executed`] and is still on the battlefield as the same object at the END
+    /// of the pass. A permanent whose unattach event ran but that left the battlefield in the
+    /// same pass (its own state-based move, or a replacement effect that moved it) is not
+    /// listed, though its event stays in `executed`; one whose move a replacement effect
+    /// prevented is listed (it stays).
     pub unattached: Vec<ObjectId>,
     /// The dungeon cards their owners removed from the game (CR 704.5t, CR 309.7), ascending.
     /// Removing a dungeon is not a zone change: no `ZoneChange` event, nothing in `executed`.

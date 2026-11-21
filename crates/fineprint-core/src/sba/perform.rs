@@ -15,7 +15,7 @@ use super::registry::{
 use super::types::{LOST_THE_GAME, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject};
 use crate::choice::{
     ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceReason,
-    ChoiceResponse, ChoiceType, PendingChoiceRequest,
+    ChoiceResponse, ChoiceType, PendingChoiceRequest, RequestId,
 };
 use crate::events::{
     CounterTarget, EventBatch, EventContext, EventError, EventState, ExecutedBatch, GameEvent,
@@ -190,28 +190,28 @@ impl Plan {
 ///   the group size minus 1). The answer is the set of survivors and must be a maximal set of
 ///   members no two of which have the same name; on timeout the greedy such set by ascending
 ///   id. Every other member is moved with the batch below.
-/// - **Moves** (CR 704.5f-704.5k, CR 704.5m, CR 704.5s): ONE batch with one
-///   `ZoneChange` to the owner's graveyard per object, cause
-///   [`ZoneChangeCause::StateBasedAction`] ([`ZoneChangeCause::Sacrifice`] for a Saga its
-///   controller sacrifices, CR 704.5s, even if another entry also moves it), and one
-///   `RemoveCounters` event per object and counter kind (CR 704.5q, CR 704.5r), ascending
-///   object id then kind (an object with several findings moves once), submitted through
-///   [`process_batch`] with `sba` true: replacement effects see the merged same-object group
-///   (CR 704.7) and last known information of every moved object is captured before any move
-///   (CR 704.8), then one `Unattach` event per permanent that becomes unattached (CR 704.5n,
-///   CR 704.5p, CR 701.3d), ascending id, submitted after every zone change and counter
-///   removal. The bus executes the events that are not zone changes before the zone changes
-///   (its reconcile order), and the batch captures last known information before any of its
-///   events, so records and the look-back of "becomes unattached" triggers (CR 603.10c) see
-///   the attachments from before the pass. Each remains on the battlefield and is reported
-///   in [`SbaOutcome::unattached`] if it was still attached. An object with a planned move or
-///   ceasing has no counters removed and no unattach event in this batch.
-/// - **Prevented moves** (CR 704.3, CR 704.5q, CR 704.5r, CR 704.5n, CR 704.5p): an object
-///   whose planned move did not take place (a replacement effect kept it on the battlefield
-///   under the same id) gets its counter removals and its unattach event in ONE follow-up
-///   [`process_batch`] call (`sba` true) right after the main batch, in the same forms and
-///   order, with the amounts from the check snapshot. An object that left the battlefield
-///   (to any zone) gets nothing.
+/// - **The one batch** (CR 704.3, CR 704.7, CR 704.8): every move, counter removal and
+///   unattach event of the pass is in ONE [`process_batch`] call with `sba` true, in this
+///   order: one `ZoneChange` to the owner's graveyard per moving object (CR 704.5f-704.5k,
+///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedAction`]
+///   ([`ZoneChangeCause::Sacrifice`] for a Saga its controller sacrifices, CR 704.5s, even if
+///   another entry also moves it; an object with several findings moves once); then one
+///   `RemoveCounters` event per object and counter kind (CR 704.5q, CR 704.5r), ascending id
+///   then kind; then one `Unattach` event per attachment that becomes unattached (CR 704.5n,
+///   CR 704.5p, CR 701.3d; one event even if both entries apply), ascending id. Counter
+///   removals and unattach events are emitted for EVERY applicable permanent, including one
+///   that also moves in the pass; only an object that ceases to exist and a dungeon removed
+///   from the game get none (decision "#42 FP-041 — One SBA batch: moves, counter removals and
+///   unattach events"). Replacement effects see the merged same-object group (CR 704.7) and
+///   are judged against the state before the event; the bus executes every event that is not
+///   a zone change before every zone change, and captures last known information of every
+///   object before any event runs (CR 704.8), so an attachment whose host leaves in the same
+///   pass gets exactly one `Unattach` event against its attachment from before the pass (the
+///   host's zone change then has nothing to unattach), and the look-back of "becomes
+///   unattached" triggers (CR 603.10c) sees it. Counters left on an object that moves get no
+///   removal event (CR 122.2). An unattached permanent is reported in
+///   [`SbaOutcome::unattached`] only if it is still on the battlefield as the same object at
+///   the end of the pass.
 /// - **Removing a dungeon from the game** (CR 704.5t, CR 309.7): like ceasing to exist below
 ///   (no zone change, last known information captured), reported in
 ///   [`SbaOutcome::removed_from_game`].
@@ -238,7 +238,7 @@ impl Plan {
 /// every successful call, for every creature (indestructible and phased-out ones included).
 ///
 /// [`SbaOutcome::performed`] is `true` exactly when the pass changed the game state: a move, a
-/// counter removal or an unattach event occurred (in either batch), an object ceased to exist
+/// counter removal or an unattach event occurred, an object ceased to exist
 /// or was removed from the game, a player lost, or the replacement registry changed
 /// (for example a one-use effect was consumed). A finding whose only move a replacement
 /// skipped is reported in [`SbaOutcome::findings`] but is not performed; the heartbeat
@@ -248,9 +248,10 @@ impl Plan {
 /// [`BusInterrupt::Pending`] when a player must choose a replacement effect or the legend-rule
 /// survivors (propagate it to the [`ChoiceSession`](crate::choice::ChoiceSession), which
 /// re-runs the pass from the base state); [`BusInterrupt::Error`] on a failure, including a
-/// legend-rule answer that is not a maximal set of candidates no two of which have the same
-/// name ([`ChoiceError::Procedure`]). In both cases every component of `ctx` (both batches
-/// included), the replacement registry and the flags of `env` are exactly as before the call.
+/// legend-rule answer that is not a selection or not a maximal set of candidates no two of
+/// which have the same name ([`ChoiceError::Invalid`] with the request's id, which a
+/// [`ChoiceSession`](crate::choice::ChoiceSession) rejects without recording, the request
+/// staying pending). In both cases every component of `ctx`, the replacement registry and the flags of `env` are exactly as before the call.
 pub fn perform_all(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
@@ -370,51 +371,50 @@ fn perform_findings(
     }
     // Ceasing wins over a move of the same object.
     moving.retain(|o, _| !ceasing.contains_key(o));
-    // Every CR 704.5n / 704.5p finding, for the follow-up batch and the outcome.
-    let unattach_findings = unattaching.clone();
-    // A move or ceasing wins over unattaching and counter removal in the main batch (decision
-    // #42 FP-041); a prevented move gets them in the follow-up batch.
-    let leaves = |o: &ObjectId| moving.contains_key(o) || ceasing.contains_key(o);
-    unattaching.retain(|o| !leaves(o));
     // CR 704.5t: an object that ceases to exist (CR 704.5d, CR 704.5e) only ceases.
     dungeons.retain(|o| !ceasing.contains_key(o));
+    // CR 704.3: every applicable state-based action is performed in the one event, so a
+    // permanent that also moves still gets its counter removals and its unattach event
+    // (decision "#42 FP-041 — One SBA batch: moves, counter removals and unattach events").
+    // Only an object that ceases to exist or a dungeon removed from the game gets none.
+    let excluded = |o: &ObjectId| ceasing.contains_key(o) || dungeons.contains(o);
+    // CR 701.3d, CR 603.10c: one unattach event per attachment (the set merges a CR 704.5n and
+    // a CR 704.5p finding of one attachment).
+    unattaching.retain(|o| !excluded(o));
 
-    // CR 704.3, CR 704.7: one batch, ascending object id, then counter kind.
-    let mut batch_events: BTreeMap<ObjectId, Vec<GameEvent>> = BTreeMap::new();
-    for (&object, &cause) in &moving {
-        batch_events
-            .entry(object)
-            .or_default()
-            .push(GameEvent::ZoneChange {
-                object,
-                // CR 704.5f-704.5k, CR 704.5m, CR 704.5s: the owner's graveyard (CR 400.3).
-                request: MoveRequest::new(ZoneKind::Graveyard),
-                cause,
-            });
-    }
+    // CR 704.3, CR 704.7: one batch. Zone changes ascending object id, then counter removals
+    // ascending object id then kind, then unattach events ascending id.
+    let mut moves: Vec<GameEvent> = moving
+        .iter()
+        .map(|(&object, &cause)| GameEvent::ZoneChange {
+            object,
+            // CR 704.5f-704.5k, CR 704.5m, CR 704.5s: the owner's graveyard (CR 400.3).
+            request: MoveRequest::new(ZoneKind::Graveyard),
+            cause,
+        })
+        .collect();
     for (&object, removals) in &plan.counter_removals {
-        if leaves(&object) || dungeons.contains(&object) {
+        if excluded(&object) {
             continue;
         }
         for (kind, &amount) in removals {
             if amount > 0 {
-                // CR 704.5q, CR 704.5r, CR 122.3
-                batch_events
-                    .entry(object)
-                    .or_default()
-                    .push(GameEvent::RemoveCounters {
-                        target: CounterTarget::Object(object),
-                        kind: kind.clone(),
-                        amount,
-                    });
+                // CR 704.5q, CR 704.5r, CR 122.3 (CR 122.2: counters left on an object that
+                // moves simply cease to exist; they get no removal event).
+                moves.push(GameEvent::RemoveCounters {
+                    target: CounterTarget::Object(object),
+                    kind: kind.clone(),
+                    amount,
+                });
             }
         }
     }
-    let mut moves: Vec<GameEvent> = batch_events.into_values().flatten().collect();
-    // CR 704.5n, CR 704.5p, CR 701.3d: unattached, it remains on the battlefield. After every
-    // zone change and counter removal of the batch, ascending id: the batch captures last
-    // known information before any event runs, so every record and the look-back of "becomes
-    // unattached" triggers (CR 603.10c) see the attachments from before the pass (CR 704.8).
+    // CR 704.5n, CR 704.5p, CR 701.3d: unattached, it remains on the battlefield. The bus
+    // executes every event that is not a zone change before every zone change of the batch,
+    // and captures last known information before any event runs, so the unattach event of an
+    // attachment whose host (or which itself) leaves in this pass finds the attachment from
+    // before the pass, and the look-back of "becomes unattached" triggers (CR 603.10c) sees it
+    // (CR 704.8). The host's zone change then has nothing left to unattach: one event per pair.
     moves.extend(
         unattaching
             .iter()
@@ -440,22 +440,6 @@ fn perform_findings(
             choices,
         )?;
         executed = report.executed;
-        // CR 704.3, CR 704.5q, CR 704.5r, CR 704.5n, CR 704.5p: an object whose planned move a
-        // replacement effect prevented (still on the battlefield under the same id; CR 400.7:
-        // an object that moved has a new id) still gets its counter removals and its unattach.
-        // They cannot be in the main batch (the executor rejects events for an object moved
-        // earlier in the batch), so they follow in one batch, from the check snapshot's plan.
-        let follow_up = prevented_move_events(ctx, &moving, plan, &unattach_findings);
-        if !follow_up.is_empty() {
-            let report = process_batch(
-                ctx,
-                replacements,
-                &EventBatch::from_events(follow_up),
-                true,
-                choices,
-            )?;
-            executed.extend(report.executed);
-        }
     }
 
     // CR 400.7: a replacement effect of the batch may have moved a ceasing object; follow
@@ -540,6 +524,10 @@ fn perform_findings(
                 .leave(id)
                 .map_err(|e| BusInterrupt::Error(BusError::Event(EventError::from(e))))?;
         }
+        // A dungeon removed from the game (CR 704.5t) should go outside the game and stay
+        // available to a later venture (CR 309.2a, CR 400.11, CR 701.49c); retiring it here is
+        // a placeholder until the dungeon outside-the-game pool lands (issue #215, decision
+        // "#42 FP-041 — Removing a dungeon from the game").
         ctx.zones
             .cease_to_exist(id)
             .map_err(|e| BusInterrupt::Error(BusError::Event(EventError::from(e))))?;
@@ -552,12 +540,20 @@ fn perform_findings(
     ceased.sort_unstable();
     removed_from_game.sort_unstable();
 
-    // CR 704.5n, CR 704.5p: the permanents an unattach event of either batch unattached.
+    // CR 704.5n, CR 704.5p: "It remains on the battlefield": the permanents an unattach event
+    // of the batch unattached that are still on the battlefield as the same object at the end
+    // of the pass (decision #42 FP-041, D2). The event itself stays in `executed` either way.
     let unattached: Vec<ObjectId> = executed
         .iter()
         .flat_map(|b| &b.events)
         .filter_map(|ev| match ev.instance.event() {
-            GameEvent::Unattach { attachment } if unattach_findings.contains(attachment) => {
+            GameEvent::Unattach { attachment }
+                if unattaching.contains(attachment)
+                    && ctx
+                        .zones
+                        .object(*attachment)
+                        .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
+            {
                 Some(*attachment)
             }
             _ => None,
@@ -591,49 +587,6 @@ fn perform_findings(
     })
 }
 
-/// CR 704.5q, CR 704.5r, CR 704.5n, CR 704.5p: the follow-up events of the objects whose
-/// planned move did not take place (still on the battlefield under the same id after the main
-/// batch): their counter removals (ascending id, then kind), then their unattach events
-/// (ascending id), as in the main batch.
-fn prevented_move_events(
-    ctx: &EventContext<'_>,
-    moving: &BTreeMap<ObjectId, ZoneChangeCause>,
-    plan: &Plan,
-    unattach_findings: &BTreeSet<ObjectId>,
-) -> Vec<GameEvent> {
-    let stayed: Vec<ObjectId> = moving
-        .keys()
-        .copied()
-        .filter(|&id| {
-            ctx.zones
-                .object(id)
-                .is_some_and(|r| r.zone == ZoneId::Battlefield)
-        })
-        .collect();
-    let mut events = Vec::new();
-    for &object in &stayed {
-        let Some(removals) = plan.counter_removals.get(&object) else {
-            continue;
-        };
-        for (kind, &amount) in removals {
-            if amount > 0 {
-                events.push(GameEvent::RemoveCounters {
-                    target: CounterTarget::Object(object),
-                    kind: kind.clone(),
-                    amount,
-                });
-            }
-        }
-    }
-    events.extend(
-        stayed
-            .iter()
-            .filter(|id| unattach_findings.contains(id))
-            .map(|&attachment| GameEvent::Unattach { attachment }),
-    );
-    events
-}
-
 /// CR 704.5j, CR 201.2a: asks the controller of `group` which permanents stay, as ONE
 /// `SELECT_OBJECTS_FROM_ZONE` choice: candidates the group ascending, min 1, max 1 for a group
 /// whose members all have the same name and otherwise the group size minus 1; on timeout the
@@ -641,13 +594,14 @@ fn prevented_move_events(
 ///
 /// # Errors
 /// [`BusInterrupt::Pending`] until answered; [`BusInterrupt::Error`] with
-/// [`ChoiceError::Procedure`] if the answer is not a valid survivor set.
+/// [`ChoiceError::Invalid`] (this request's id) if the answer is not a valid survivor set.
 fn ask_legend_choice(
     choices: &mut ChoiceContext<'_>,
     group: &LegendGroup,
 ) -> Result<Vec<ObjectId>, BusInterrupt> {
+    let request_id = choices.next_request_id();
     let request = PendingChoiceRequest {
-        request_id: choices.next_request_id(),
+        request_id,
         chooser: group.controller,
         choice_type: ChoiceType::SelectObjectsFromZone,
         reason: ChoiceReason {
@@ -672,21 +626,31 @@ fn ask_legend_choice(
             candidates: group.members.clone(),
         },
     };
-    legend_survivors(group, choices.ask(request)?)
+    legend_survivors(group, request_id, choices.ask(request)?)
 }
 
-/// CR 704.5j, CR 201.2a: the permanents of `group` the answer `response` keeps.
+/// CR 704.5j, CR 201.2a: the permanents of `group` the answer `response` to request
+/// `request_id` keeps.
 ///
 /// # Errors
-/// [`BusInterrupt::Error`] with [`ChoiceError::Procedure`] if the answer is not a selection, or
-/// not a maximal set of candidates no two of which have the same name
-/// ([`LegendGroup::check_survivors`]).
+/// [`BusInterrupt::Error`] with [`ChoiceError::Invalid`] naming `request_id` if the answer is
+/// not a selection, or not a maximal set of candidates no two of which have the same name
+/// ([`LegendGroup::check_survivors`]). The procedure-level validation convention of decision
+/// "#28 FP-027 — Card-name validation is structural": converted to an
+/// [`Interrupt`](crate::choice::Interrupt), the error keeps its class, so
+/// [`ChoiceSession::submit`](crate::choice::ChoiceSession::submit) rejects the answer without
+/// recording it and the request stays pending.
 pub(super) fn legend_survivors(
     group: &LegendGroup,
+    request_id: RequestId,
     response: ChoiceResponse,
 ) -> Result<Vec<ObjectId>, BusInterrupt> {
-    let protocol =
-        |message: String| BusInterrupt::Error(BusError::Choice(ChoiceError::Procedure(message)));
+    let protocol = |explanation: String| {
+        BusInterrupt::Error(BusError::Choice(ChoiceError::Invalid {
+            request_id,
+            explanation,
+        }))
+    };
     match response {
         ChoiceResponse::SubmitObjectSelection { objects } => {
             group.check_survivors(&objects).map_err(|m| {
