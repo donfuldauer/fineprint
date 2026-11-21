@@ -483,3 +483,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 05-sba | #42 (PR #214 CR round 3) | work-classifier | Sonnet 5.5 | 1 | routed | - | Fixer T2 Opus (H6 feasibility), Tester T1 Sonnet |
 | 05-sba | #42 (PR #214 CR round 3) | Fixer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace 4062 both configs; core 98.85 %; guard, cr check ok | H4 unattached from every executed Unattach; H6 planned unattach submitted first (residual case added to #180); N1 id-order twin |
 | 05-sba | #42 (PR #214 CR round 3) | Independent Tester | Sonnet 5.5 | 1 | done | workspace 4068 both configs; core 98.85 %; guard, cr check ok | H5 exact Tap of Y; H4, H6 black-box tests |
+| 05-sba | #42 (PR #214 CR round 3) | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy clean; workspace 4068 passed both configs; fineprint-core 98.85 %; guard, cr check ok | head 675e780; one process_batch per pass; no weakened tests; later commit is this run-log row only |
