@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar. Merging an issue/ branch starts a fresh session for the next issue (§8)."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', 'Work on the next issue' (the merge-triggered scheduled task's prompt), or similar. Merging an issue/ branch starts a fresh session for the next issue (§8)."
 ---
 
 # work-issue
@@ -15,16 +15,10 @@ threads.
 
 ## 1. Load and check the issue
 
-0. **No issue number** ("the next ready issue"):
+0. **No issue number** ("the next ready issue", "the next issue", "Work on the next issue"):
    - **Finish unblocking first.** A merge starts this session (§8), sometimes before the
-     merging session reaches §7 step 3, and a session can end before finishing it. List every
-     open `work-unit` issue labelled `blocked`
-     (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
-     paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1).
-     For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
-     §7 step 3's rule, unblock it as §7 step 3 does (including its exceptions), naming the
-     blocker that closed last. Also leave `blocked` alone on an issue with no blockers: a person
-     set that hold.
+     merging session reaches §7 step 3, and a session can end before finishing it. So run §7
+     step 3's sweep, with its exceptions, before choosing.
    - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
@@ -36,9 +30,12 @@ threads.
    - If none qualifies, tell the user why and stop.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
-   `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
-   Without an issue number, exclude this candidate instead and continue with the next one under
-   step 0.
+   `status:blocked-failure`: a person must clear that label before it is claimed. If it is
+   labelled `blocked`: with no blockers at all (`issues/<N>/dependencies/blocked_by` empty), a
+   person set that hold, so stop and say so; otherwise run step 2's check, and if every blocker
+   is satisfied the label is stale, so unblock the issue as §7 step 3 does (label change and
+   comment) and continue; if not, stop as step 2 says. Without an issue number, exclude this
+   candidate instead and continue with the next one under step 0.
 2. **Dependencies.** The "Depends on" section lists `#numbers`; GitHub's "blocked by" links
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
@@ -129,7 +126,10 @@ One branch, one PR, one issue.
 4. Every later step for this issue (agents' working directory, commits, pushes, checks) runs
    inside that worktree. It is removed in §7.
 
-If the session may push only to an assigned branch, use it and note that in the PR.
+The branch is always `issue/<N>-<short-slug>`: the next session starts only when an `issue/`
+branch merges (§8). If the session may push only to an assigned branch, use it, and say in the PR
+body that the chain will not continue from this merge: the owner restarts it with the scheduled
+task's "Run now".
 
 ## 3. Route and execute
 
@@ -200,15 +200,28 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 1. Merge with a merge commit:
    `gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`.
 2. The repository deletes merged branches automatically; check it did.
-3. **Unblock dependents.** For each issue this one blocks
-   (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
-   closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
-   its `blocked` label with `ready`: add `ready` first, then remove `blocked`, so the issue is
-   never without both. Comment "Unblocked by #<N> (PR #<P>)" unless an "Unblocked by" comment is
-   already there. Skip an issue that no longer carries `blocked`: the next session may already
-   have unblocked it (§1 step 0). Skip one that also carries `status:blocked-failure`: a person
-   must clear that hold (the plan sets `blocked` only from dependencies; other holds use
-   `status:blocked-failure`, PROCESS.md P7).
+3. **Unblock dependents (the sweep).** List every open `work-unit` issue labelled `blocked`
+   (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
+   paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1),
+   not only the issues `#<N>` blocks: a blocker cancelled in favour of a replacement issue is
+   satisfied when the replacement merges, and the replacement's own "blocking" list does not name
+   the waiting issue. For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all
+   are satisfied (§1 step 2, replacements included):
+   - Re-read the issue's labels immediately before changing them. Skip it if `blocked` is gone
+     (the next session may already have unblocked it, §1 step 0) or `status:blocked-failure` is
+     present (a person must clear that hold, PROCESS.md P7).
+   - Add `ready` first, then remove `blocked`, each as a single-label call
+     (`POST issues/<B>/labels`, `DELETE issues/<B>/labels/blocked`), so the issue is never
+     without both and no other label is rewritten. If `ready` is already there, only remove
+     `blocked`.
+   - Comment "Unblocked by #<D> (PR #<P>)", naming the blocker whose merged PR satisfied it last
+     (`#<N>` itself, a replacement, or another blocker) and that PR, unless a comment with that
+     exact text (same blocker, same PR) is already there; an "Unblocked by" comment from an
+     earlier unblock does not count. If no such issue and PR can be identified, change the labels
+     without a comment and say so in the RUN_LOG row.
+
+   Leave `blocked` on an issue with no blockers at all: a person set that hold (the plan sets
+   `blocked` from dependencies; other holds use `status:blocked-failure`, PROCESS.md P7).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
    and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
@@ -224,8 +237,9 @@ into `main` from `issue/` branches starts a fresh session that works on the next
 session does nothing to hand off: never call `create_session`, `fire_trigger` or
 `update_trigger` to chain. A session started by another session asks a person to approve every
 remote-session tool call, and a session can neither fire nor edit a task it did not create. The
-chain runs until no issue is ready, or until a session ends without merging; the owner then
-restarts it with the task's "Run now".
+chain runs until no issue is ready, or until a session ends without merging an `issue/` branch;
+the owner then restarts it with the task's "Run now". If the task does not exist or is disabled,
+nothing starts. See DECISIONS.md "Self-chaining — next session starts from a merged issue/ PR".
 
 ## Never
 
