@@ -332,6 +332,8 @@ impl World {
 impl Transactional for World {
     fn state_hash(&self) -> Digest {
         let mut bytes = encode_to_vec(&self.game.state_hash());
+        // REQ-CORE-006: the id generator is part of the state a rollback must restore.
+        bytes.extend(encode_to_vec(&self.ids.last_issued()));
         bytes.extend(encode_to_vec(&self.zones));
         bytes.extend(encode_to_vec(&self.permanents));
         bytes.extend(encode_to_vec(&self.memories));
@@ -503,7 +505,12 @@ fn registry_shape() {
 #[test]
 fn default_environment_answers() {
     struct Plain;
-    impl SbaEnvironment for Plain {}
+    impl SbaEnvironment for Plain {
+        fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+            BTreeSet::new()
+        }
+        fn clear_deathtouch_damaged(&mut self) {}
+    }
     let mut env = Plain;
     let o = ObjectId::new(1);
     assert_eq!(env.variant(), GameVariant::Standard);
@@ -1121,10 +1128,8 @@ fn choice_suspension_and_replay() {
     assert!(out.performed);
     assert_eq!(out.lost_players, [p(2)]);
     assert_eq!(out.ceased, [token]);
-    assert!(matches!(
-        run.state.zone_of_card(card),
-        Some(ZoneId::Hand(_) | ZoneId::Exile)
-    ));
+    // Answer 0 applies effect 1 (exile) first; effect 2 (hand) then still applies, last.
+    assert_eq!(run.state.zone_of_card(card), Some(ZoneId::Hand(p(1))));
     assert!(run.state.env.deathtouch.is_empty());
     assert!(run.state.events.empty_library_draws().is_empty());
 
@@ -1140,9 +1145,12 @@ fn choice_suspension_and_replay() {
     let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
     assert!(matches!(session.status(), Status::Pending(_)));
 
-    // A different answer is equally reproducible.
+    // A different answer: effect 2 (hand) first, then effect 1 (exile) last; equally
+    // reproducible.
     let other = drive(&w, &[1]);
+    assert_eq!(other.state.zone_of_card(card), Some(ZoneId::Exile));
     assert_eq!(other.hash, drive(&w, &[1]).hash);
+    assert_ne!(other.hash, run.hash);
 }
 
 // REQ-SBA-001: a bus error leaves every component, the replacement registry and the
@@ -1313,4 +1321,418 @@ fn phased_out_mixed_board_one_batch() {
             .object(in_c)
             .is_none_or(|r| r.zone != ZoneId::Battlefield)
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1 (PR #207)
+// ---------------------------------------------------------------------------------------------
+
+/// A matcher for the SBA move of `object` (cause `StateBasedAction`).
+fn sba_move_of(object: ObjectId) -> EventMatcher {
+    let mut matcher = EventMatcher::new(BusEventKind::ZoneChange);
+    matcher.affected_object = Some(object);
+    matcher.cause = Some(ZoneChangeCause::StateBasedAction);
+    matcher
+}
+
+/// A zone change of `object` to `kind` with `cause`.
+fn zone_change(object: ObjectId, kind: ZoneKind, cause: ZoneChangeCause) -> GameEvent {
+    GameEvent::ZoneChange {
+        object,
+        request: MoveRequest::new(kind),
+        cause,
+    }
+}
+
+/// A world with a 0-toughness creature `a` (CR 704.5f) whose SBA move is replaced by
+/// `Instead([a to graveyard, other to kind])`. Returns the world and `a`.
+fn instead_world(w: &mut World, other: ObjectId, kind: ZoneKind) -> ObjectId {
+    let a = w.creature(1, 0);
+    w.registry
+        .add(ReplacementEffect::new(
+            e(10),
+            sba_move_of(a),
+            Action::Instead(vec![
+                zone_change(a, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+                zone_change(other, kind, ZoneChangeCause::Other),
+            ]),
+        ))
+        .unwrap();
+    a
+}
+
+/// The new id an executed batch of `out` gave `old` (one move).
+fn moved_id(out: &SbaOutcome, old: ObjectId) -> ObjectId {
+    out.executed
+        .iter()
+        .flat_map(|b| &b.events)
+        .find_map(|ev| match ev.outcome {
+            Outcome::ZoneChange(m) if m.old == old => Some(m.new),
+            _ => None,
+        })
+        .expect("the object was not moved")
+}
+
+// REQ-SBA-001, CR 704.5e, CR 704.3, CR 400.7: a card copy in exile with a 704.5e finding, moved
+// to the hand by an Instead replacement of another member's SBA move, ceases in the same pass
+// under its new id; nothing of it is left. Deterministic, and a Pending pass (a choice between
+// two replacements) rolls back fully (asserted inside the procedure).
+#[test]
+fn moved_card_copy_ceases_in_the_same_pass() {
+    let mut w = World::new();
+    let copy = w.create(1, ZoneKind::Exile, creature("test.copy_moved", 1));
+    let copy_card = w.card_of(copy);
+    w.env.card_copies = BTreeSet::from([copy]);
+    let a = instead_world(&mut w, copy, ZoneKind::Hand);
+    let a_card = w.card_of(a);
+    let run = drive(&w, &[]);
+    let out = run.out.as_ref().unwrap();
+    let new = moved_id(out, copy);
+    assert_ne!(new, copy);
+    assert_eq!(out.ceased, [new]);
+    assert!(!out.ceased.contains(&copy));
+    assert!(run.state.zones.object(new).is_none());
+    assert!(run.state.zones.object(copy).is_none());
+    assert_eq!(run.state.zones.object_of_card(copy_card), None);
+    assert_eq!(
+        run.state.zone_of_card(a_card),
+        Some(ZoneId::Graveyard(p(1)))
+    );
+    assert!(out.performed);
+    // Deterministic.
+    let again = drive(&w, &[]);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+
+    // With a competing replacement the pass suspends first (rolled back), then completes.
+    let mut chosen = w.clone();
+    chosen
+        .registry
+        .add(ReplacementEffect::new(
+            e(11),
+            sba_move_of(a),
+            Action::Modify(Modification::SetDestination(ZoneKind::Exile)),
+        ))
+        .unwrap();
+    let run = drive(&chosen, &[0]);
+    assert_eq!(run.asked, 1);
+    let out = run.out.as_ref().unwrap();
+    let new = moved_id(out, copy);
+    assert_eq!(out.ceased, [new]);
+    assert_eq!(run.state.zones.object_of_card(copy_card), None);
+    assert_eq!(drive(&chosen, &[0]).hash, run.hash);
+}
+
+// REQ-SBA-001, CR 704.5e, CR 707.10a: a card copy moved onto the battlefield by such an Instead
+// is no longer out of place and stays.
+#[test]
+fn moved_card_copy_onto_battlefield_stays() {
+    let mut w = World::new();
+    let copy = w.create(1, ZoneKind::Exile, creature("test.copy_to_bf", 1));
+    let copy_card = w.card_of(copy);
+    w.env.card_copies = BTreeSet::from([copy]);
+    instead_world(&mut w, copy, ZoneKind::Battlefield);
+    let out = pass(&mut w);
+    assert!(out.ceased.is_empty());
+    let new = moved_id(&out, copy);
+    assert_eq!(w.zones.object(new).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(w.zones.object_of_card(copy_card), Some(new));
+}
+
+// REQ-SBA-001, CR 704.5d, CR 111.7: a token in the graveyard named by such an Instead (to exile)
+// ceases in the same pass. The event executor never moves a token that has left the battlefield
+// (CR 111.8, events/exec.rs), so the token keeps its id and ceases under it; a token is never
+// moved before it ceases.
+#[test]
+fn token_named_by_instead_ceases_in_the_same_pass() {
+    let mut w = World::new();
+    let t = w.token();
+    let card = w.card_of(t);
+    let gy = w.move_to(t, ZoneKind::Graveyard);
+    instead_world(&mut w, gy, ZoneKind::Exile);
+    let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(out.executed[0].events.len(), 1);
+    assert_eq!(out.ceased, [gy]);
+    assert_eq!(w.zones.object_of_card(card), None);
+    // REQ-CORE-003: its last known information in the graveyard is kept.
+    assert_eq!(w.lki.get(gy).unwrap().zone(), ZoneId::Graveyard(p(1)));
+}
+
+// REQ-SBA-001, CR 704.5e, CR 723.3c: an exempt card copy moved by such an Instead stays.
+#[test]
+fn moved_exempt_copy_stays() {
+    let mut w = World::new();
+    let copy = w.create(1, ZoneKind::Exile, creature("test.copy_exempt", 1));
+    let card = w.card_of(copy);
+    w.env.card_copies = BTreeSet::from([copy]);
+    w.env.exempt = BTreeSet::from([copy]);
+    instead_world(&mut w, copy, ZoneKind::Hand);
+    let out = pass(&mut w);
+    assert!(out.ceased.is_empty());
+    let new = moved_id(&out, copy);
+    assert_eq!(w.zones.object(new).unwrap().zone, ZoneId::Hand(p(1)));
+    assert_eq!(w.zones.object_of_card(card), Some(new));
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f: a persistent Skip of the only move performs nothing: the
+// finding is reported, `performed` is false and the state is unchanged.
+#[test]
+fn skipped_move_is_not_performed() {
+    let mut w = World::new();
+    let c = w.creature(1, 0);
+    w.registry
+        .add(ReplacementEffect::new(e(1), sba_move_of(c), Action::Skip))
+        .unwrap();
+    let before = w.state_hash();
+    let out = pass(&mut w);
+    assert!(!out.performed);
+    assert_eq!(
+        out.findings,
+        [SbaFinding {
+            entry_id: "704.5f",
+            subject: obj(c)
+        }]
+    );
+    assert!(out.executed.is_empty());
+    assert_eq!(w.state_hash(), before);
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f: a one-use Skip changes the registry (performed); the next
+// pass moves the creature.
+#[test]
+fn one_use_skip_is_performed_then_the_move_happens() {
+    let mut w = World::new();
+    let c = w.creature(1, 0);
+    let card = w.card_of(c);
+    w.registry
+        .add(
+            ReplacementEffect::new(e(1), sba_move_of(c), Action::Skip).with_shield(Shield::Uses(1)),
+        )
+        .unwrap();
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert!(out.executed.is_empty());
+    assert!(w.registry.is_empty());
+    assert_eq!(w.zones.object(c).unwrap().zone, ZoneId::Battlefield);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5a, CR 704.5d: a pass whose only effect is a lost player, or a
+// ceased object, is performed.
+#[test]
+fn loss_only_and_cease_only_passes_are_performed() {
+    let mut w = World::new();
+    w.set_life(1, 0);
+    let out = pass(&mut w);
+    assert!(out.performed && out.executed.is_empty() && out.ceased.is_empty());
+    assert_eq!(out.lost_players, [p(1)]);
+
+    let mut w = World::new();
+    let t = w.token();
+    let gy = w.move_to(t, ZoneKind::Graveyard);
+    let out = pass(&mut w);
+    assert!(out.performed && out.executed.is_empty() && out.lost_players.is_empty());
+    assert_eq!(out.ceased, [gy]);
+}
+
+/// A layer environment that delegates to a snapshot but declines every `eval_value`.
+struct NoEval(Snapshot);
+
+impl LayerEnvironment for NoEval {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.0.objects()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.0.base(id)
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        LayerEnvironment::counters(&self.0, id)
+    }
+
+    fn matches(&self, _: &ObjectSelectorAST, _: &MatchContext<'_>) -> bool {
+        false
+    }
+
+    fn eval_value(&self, _: &fineprint_dsl::card::ValueExpressionAST, _: ObjectId) -> Option<i64> {
+        None
+    }
+}
+
+// REQ-SBA-001, CR 613.4, CR 704.5f, CR 704.5g: the final toughness is read from the evaluated
+// literal, so an environment that declines `eval_value` still sees 704.5f and 704.5g.
+#[test]
+fn toughness_read_without_eval_value() {
+    let mut w = World::new();
+    let zero = w.creature(1, 0);
+    let lethal = w.creature(1, 2);
+    w.damage(lethal, 2);
+    let env = NoEval(w.snapshot());
+    let registry = SbaRegistry::standard();
+    let snap = w.snapshot();
+    let ctx = EventContext {
+        game: &mut w.game,
+        zones: &mut w.zones,
+        ids: &mut w.ids,
+        permanents: &mut w.permanents,
+        memories: &mut w.memories,
+        lki: &mut w.lki,
+        events: &mut w.events,
+        provider: &snap,
+    };
+    let findings = check(&registry, &ctx, &w.effects, &env, &w.env);
+    assert_eq!(
+        findings,
+        [
+            SbaFinding {
+                entry_id: "704.5f",
+                subject: obj(zero)
+            },
+            SbaFinding {
+                entry_id: "704.5g",
+                subject: obj(lethal)
+            }
+        ]
+    );
+}
+
+// REQ-SBA-001, CR 704.5h, CR 702.12b, CR 702.2b: the deathtouch window closes at every check,
+// even for an indestructible creature; after losing indestructible it is not destroyed by the
+// stale flag.
+#[test]
+fn deathtouch_window_closes_for_indestructible() {
+    let mut w = World::new();
+    let mut c = creature("test.indestructible_x_2", 2);
+    c.abilities.push(keyword("indestructible"));
+    let id = w.create(1, ZoneKind::Battlefield, c);
+    w.env.deathtouch = BTreeSet::from([id]);
+    let out = pass(&mut w);
+    assert!(out.findings.is_empty());
+    assert!(w.env.deathtouch.is_empty());
+    assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
+    // It loses indestructible.
+    let card = w.card_of(id);
+    w.chars.get_mut(&card).unwrap().abilities.clear();
+    let out = pass(&mut w);
+    assert!(!out.performed);
+    assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
+}
+
+// REQ-SBA-001, REQ-CORE-003, CR 704.5e, CR 608.2h: a battlefield spell copy (creature and
+// noncreature) that ceases keeps its last known information: owner, zone, characteristics,
+// counters and permanent state; no ZoneChange is added; a Pending pass rolls the LKI back too
+// (asserted inside the procedure).
+#[test]
+fn ceasing_battlefield_copy_captures_lki() {
+    let mut w = World::new();
+    let body = w.create(2, ZoneKind::Battlefield, creature("test.copy_lki", 3));
+    let art = w.create(
+        1,
+        ZoneKind::Battlefield,
+        noncreature("test.copy_lki_artifact", "Artifact"),
+    );
+    w.counters(body, "+1/+1", 2);
+    w.env.spell_copies = BTreeSet::from([body, art]);
+    let run = drive(&w, &[]);
+    let out = run.out.as_ref().unwrap();
+    assert_eq!(out.ceased, [body, art]);
+    assert!(out.executed.is_empty());
+    let lki = run.state.lki.get(body).unwrap();
+    assert_eq!(lki.owner(), p(2));
+    assert_eq!(lki.zone(), ZoneId::Battlefield);
+    assert!(lki.characteristics().names.contains("test.copy_lki"));
+    assert_eq!(lki.counters().get("+1/+1"), Some(&2));
+    assert!(lki.permanent().is_some());
+    let lki = run.state.lki.get(art).unwrap();
+    assert_eq!(lki.owner(), p(1));
+    assert!(lki.characteristics().card_types.contains("Artifact"));
+    assert!(lki.permanent().is_some());
+
+    // With a replacement choice on another member's move: Pending first, then the same LKI.
+    let mut w2 = w.clone();
+    let c = w2.creature(1, 0);
+    for (n, to) in [(1, ZoneKind::Exile), (2, ZoneKind::Hand)] {
+        w2.registry
+            .add(ReplacementEffect::new(
+                e(n),
+                sba_move_of(c),
+                Action::Modify(Modification::SetDestination(to)),
+            ))
+            .unwrap();
+    }
+    let run = drive(&w2, &[0]);
+    assert_eq!(run.asked, 1);
+    assert_eq!(
+        run.state.lki.get(body).unwrap().counters().get("+1/+1"),
+        Some(&2)
+    );
+}
+
+// REQ-SBA-001, REQ-CORE-003, CR 704.5d: a token in the graveyard that ceases keeps its last
+// known information in the graveyard; an object the provider does not know still ceases, with
+// no record.
+#[test]
+fn ceasing_token_lki_and_unknown_object() {
+    let mut w = World::new();
+    let t = w.token();
+    let gy = w.move_to(t, ZoneKind::Graveyard);
+    let unknown = w.create(1, ZoneKind::Graveyard, creature("test.copy_unknown", 1));
+    w.env.card_copies = BTreeSet::from([unknown]);
+    let card = w.card_of(unknown);
+    w.chars.remove(&card);
+    let out = pass(&mut w);
+    let mut expected = vec![gy, unknown];
+    expected.sort();
+    assert_eq!(out.ceased, expected);
+    assert!(out.executed.is_empty());
+    let lki = w.lki.get(gy).unwrap();
+    assert_eq!(lki.zone(), ZoneId::Graveyard(p(1)));
+    assert_eq!(lki.owner(), p(1));
+    assert!(lki.characteristics().names.contains("test.token_1_1"));
+    assert!(w.lki.get(unknown).is_none());
+    assert!(w.zones.object(unknown).is_none());
+}
+
+// REQ-SBA-001, REQ-CORE-003: a pass without ceasing objects captures no extra LKI.
+#[test]
+fn no_ceasing_no_extra_lki() {
+    let mut w = World::new();
+    w.set_life(1, 0);
+    w.creature(1, 2);
+    pass(&mut w);
+    assert!(w.lki.is_empty());
+}
+
+// REQ-SBA-001, REQ-CORE-006: the all-or-nothing snapshot of a pass restores every component,
+// the object-id generator included (the world digest encodes it): a rollback that forgot the
+// generator would let the next creation issue a different id.
+#[test]
+fn saved_snapshot_restores_the_id_generator() {
+    let mut w = World::new();
+    w.creature(1, 2);
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    {
+        let mut ctx = EventContext {
+            game: &mut w.game,
+            zones: &mut w.zones,
+            ids: &mut w.ids,
+            permanents: &mut w.permanents,
+            memories: &mut w.memories,
+            lki: &mut w.lki,
+            events: &mut w.events,
+            provider: &snap,
+        };
+        let saved = Saved::take(&ctx);
+        ctx.ids.issue().unwrap();
+        ctx.ids.issue().unwrap();
+        saved.restore(&mut ctx);
+    }
+    assert_eq!(w.state_hash(), before);
+    let mut issued = w.ids.clone();
+    assert_eq!(issued.issue().unwrap(), ObjectId::new(2));
 }

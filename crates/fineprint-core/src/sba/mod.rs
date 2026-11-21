@@ -35,6 +35,8 @@
 #![deny(missing_docs)]
 
 mod perform;
+#[cfg(test)]
+use perform::Saved;
 mod registry;
 mod types;
 

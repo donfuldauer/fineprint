@@ -418,9 +418,13 @@ impl Zones {
 
     /// The object `id` ceases to exist (REQ-SBA-001, CR 704.5d, CR 704.5e, CR 111.7,
     /// CR 707.10a): it and its record are removed entirely and its card is returned. Unlike
-    /// [`Zones::send_outside`], the card is put into no outside-the-game pool, and it is no
-    /// longer present anywhere, so a later object can be created for the same card. This is
-    /// not a zone change (no new id is issued).
+    /// [`Zones::send_outside`], the card is put into no outside-the-game pool. This is not a
+    /// zone change (no new id is issued) and captures no last known information (the caller
+    /// does that before calling).
+    ///
+    /// The returned `CardId` is RETIRED: card ids are never reused within a match
+    /// (REQ-CORE-002), so a caller must not create another object for it. `Zones` does not yet
+    /// enforce this (it would accept such an object); enforcement is a known follow-up.
     ///
     /// # Errors
     /// [`ZoneError::UnknownObject`]; the container is then unchanged.
