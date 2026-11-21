@@ -7022,7 +7022,8 @@ only for an object with one or more chapter abilities (`saga_final_chapter`),
 `dungeons_at_bottommost_room() -> BTreeSet<ObjectId>` default empty (`bottommost_dungeons`) and
 `room_ability_pending(dungeon)` default false (`room_pending`). Names, supertypes, card types,
 subtypes and counters are read from the evaluated characteristics and
-`LayerEnvironment::counters`; controllers and attachments from `Permanents`. The engine itself
+`LayerEnvironment::counters`; controllers from the layer evaluation (CR 613.1b, see "#42 FP-041
+— Legend rule: conflict graph, maximal independent set"); attachments from `Permanents`. The engine itself
 checks the structural part of CR 704.5m (not attached, attached to itself, target gone, player
 left, Aura that is a creature or a battle); `aura_can_enchant` answers only the enchant ability
 and other applicable effects (CR 303.4c). A negative counter limit counts as 0; several limits for
@@ -7038,59 +7039,87 @@ these seams with engine state. Every answer is a pure function of caller state (
 outside the owned paths and contracts of this unit, R1/R2); hard-coding "no limits / no sagas"
 without a seam (rejected: the entries could not be tested or used).
 
-## #42 FP-041 — Legend rule: check reports every member, perform asks one choice per group
+## #42 FP-041 — Legend rule: conflict graph, maximal independent set
 
-**Decision.** Legendary, evaluated, phased-in, named permanents are grouped per controller (from
-the permanent container) into connected components of "share at least one name" (CR 201.2a). A
-nameless object matches nothing (CR 201.2a, CR 708.2a). `check` is pure and cannot ask, so it
-reports EVERY member of each group of two or more as a CR 704.5j finding. `perform_all` asks, before
-any state change (including consuming the empty-library flag), one `SELECT_OBJECTS_FROM_ZONE`
-choice per group in ascending order of each group's lowest id: chooser the controller, reason
-`CR 704.5j` with no source, min = max = 1, candidates and enumerated options the group ascending,
-`default_on_timeout` the lowest id. The chosen permanent stays; every other member is a move to
-its owner's graveyard with cause `StateBasedAction` in the one batch. Names that overlap
-non-transitively inside one controller (A {X, Y}, B {Y}, C {X}) form ONE group (connected
-components), and the controller keeps one of the three. An answer that is not exactly one
-candidate (the session normally rejects it first) is `BusInterrupt::Error(BusError::Choice(
-ChoiceError::Procedure(..)))`, the error kind the bus uses for other unexpected answers.
+**Decision.** (Revised in PR #214 review round 1; replaces "keep exactly one per connected
+component".) The vertices are the evaluated, phased-in, named legendary battlefield permanents,
+grouped by their EVALUATED controller (`Evaluated::controller` after layer 2, CR 613.1b; the
+`Permanents` controller only if the evaluation names none). Within one controller an edge joins
+two permanents that have at least one name in common (CR 201.2a; a nameless object matches
+nothing, CR 201.2a, CR 708.2a). "Same name" is pairwise, not an equivalence. Every connected
+component with at least one edge is ONE group; isolated vertices are never asked. `check` is pure
+and reports EVERY member of every group as a CR 704.5j finding. `perform_all` asks, before any
+state change (including consuming the empty-library flag), one `SELECT_OBJECTS_FROM_ZONE` choice
+per group (order: see "#42 FP-041 — F3 APNAP then lowest id"): chooser the controller, reason
+`CR 704.5j` with no source, candidates and enumerated options the group ascending, min = 1, and
+max = 1 when every pair of members shares a name (a clique, which includes the usual one-name
+group and a cyclic overlap such as {X, Y}, {Y, Z}, {X, Z}), otherwise max = group size - 1. The
+answer `SubmitObjectSelection { objects }` is the SURVIVOR set and is valid exactly when it is a
+MAXIMAL independent set of the component: every id a candidate, no duplicate, no two selected
+sharing a name, and every unselected candidate sharing a name with at least one selected one.
+`default_on_timeout` is the greedy maximal independent set by ascending id (take the lowest id,
+then each next id that shares no name with one already taken). Every unselected member is a move
+to its owner's graveyard with cause `StateBasedAction` in the one batch. For A {X, Y}, B {Y},
+C {X} under one controller the valid answers are {A} and {B, C}; {A, B}, {B} alone and {} are
+rejected; the default is {A} (A < B < C). An invalid answer (the session rejects counts outside
+min..max and non-candidates first) is `BusInterrupt::Error(BusError::Choice(
+ChoiceError::Procedure(..)))` with nothing changed. For a clique the request and outcome are
+exactly the former ones (min = max = 1, default the lowest id).
 
-**Rationale.** CR 704.5j (same controller only; that player chooses; the rest go in the single
-event), SRS choice row "SELECT_OBJECTS_FROM_ZONE ... legend rule". Asking first keeps the
-existing restore-on-`Pending` contract trivially true. Connected components give one choice per
-overlapping cluster, a deterministic and finite procedure; after the pass no two same-named
-legends of one controller remain, which no pairwise-group alternative guarantees in one pass.
+**Rationale.** CR 704.5j, CR 201.2a; the rules-researcher (PR #214 round 1): the legal end states
+of the A/B/C case are {A} or {B, C}, no two survivors may share a name, and the CR gives no
+official example for overlapping names, so the algorithm is recorded here. A maximal independent
+set is exactly a set of survivors in which no two share a name and every removed permanent
+shares a name with a survivor (it really was in conflict), which is what "chooses one of them,
+and the rest are put into their owners' graveyards" yields however the overlapping choices are
+sequenced. One ask per component keeps all choices before any change (restore-on-`Pending`
+stays trivially true), is always satisfiable (the greedy default), and after the pass no two
+same-named legends of one controller remain. CR 613.1b / CR 110.2: the controller is the one
+after control-changing effects. SRS choice row "SELECT_OBJECTS_FROM_ZONE ... legend rule".
 
-**Alternatives.** One choice per name (rejected: an object with two names would be in two groups
-and could be both kept and lost); asking the active player (rejected: CR 704.5j says "that
-player"); keeping the newest automatically (rejected: invents a rule).
+**Alternatives.** Connected component, keep exactly one (rejected by review: forbids the legal
+{B, C}); the researcher's iterative "lowest violating legend and its overlap set" asks (rejected:
+several sequential asks per controller, each depending on the previous answer, for the same end
+states); one choice per name (rejected: an object with two names would be in two groups and could
+be both kept and lost); asking the active player (rejected: CR 704.5j says "that player");
+keeping the newest automatically (rejected: invents a rule); the stored `Permanents` controller
+(rejected: ignores layer-2 control changes).
 
 ## #42 FP-041 — Mixed results: move wins over unattach and counter removal; Sacrifice cause
 
-**Decision.** Within one pass: ceasing to exist wins over a move (as before); a move or ceasing
-wins over unattaching (CR 704.5n, CR 704.5p) and counter removal (CR 704.5q, CR 704.5r): such an
-object gets no `detach` and no `RemoveCounters` event, though every finding is still reported.
-An object with a CR 704.5s finding and another move finding moves once with
-`ZoneChangeCause::Sacrifice`. When CR 704.5q and CR 704.5r both remove counters of one kind from
-one object, one event removes the larger of the two amounts (the result equals applying 704.5q
-and then 704.5r). Counter removals are `RemoveCounters` events in the same `process_batch` call
-(`sba = true`) as the moves, ascending object id then kind. Unattaching is done after the batch
-and after every LKI capture through `Permanents::detach`, so every record shows the
-attachments from before the pass (CR 704.8); `SbaOutcome::unattached` lists only permanents that
-were still attached (a host that left in the batch already unattached them). A dungeon removed
-from the game (CR 704.5t) uses the ceasing path (`Zones::cease_to_exist`, LKI captured from the
-pre-pass state) but is reported in `removed_from_game`, not `ceased`; if it also ceases by
-CR 704.5d/e it is reported as ceased.
+**Decision.** (Updated in PR #214 review round 1.) Within one pass: ceasing to exist wins over a
+move (as before); for an object that actually leaves the battlefield, a move or ceasing wins over
+unattaching (CR 704.5n, CR 704.5p) and counter removal (CR 704.5q, CR 704.5r): such an object
+gets no `Unattach` and no `RemoveCounters` event, though every finding is still reported. An
+object whose planned move did NOT take place (a replacement effect kept it on the battlefield
+under the same id) still gets its counter removals and its unattach, in a follow-up batch (see
+"#42 FP-041 — F1 follow-up batch (CR 704.3 simultaneity vs engine batching)"). An object with a
+CR 704.5s finding and another move finding moves once with `ZoneChangeCause::Sacrifice`. When
+CR 704.5q and CR 704.5r both remove counters of one kind from one object, one event removes the
+larger of the two amounts (the result equals applying 704.5q and then 704.5r). Counter removals
+are `RemoveCounters` events and unattaching is one `GameEvent::Unattach` per permanent (see
+"#42 FP-041 — F2 unattach events and the 704.5p inference"), all in the same `process_batch`
+call (`sba = true`) as the moves: zone changes and counter removals ascending object id then
+kind, then the unattach events ascending id. The batch captures last known information before
+any of its events, so every record shows the attachments from before the pass (CR 704.8);
+`SbaOutcome::unattached` lists the permanents an `Unattach` event of the pass actually
+unattached. A dungeon removed from the game (CR 704.5t) uses the ceasing path
+(`Zones::cease_to_exist`, LKI captured from the pre-pass state) but is reported in
+`removed_from_game`, not `ceased`; if it also ceases by CR 704.5d/e it is reported as ceased.
 
 **Rationale.** CR 704.3 (one simultaneous event), CR 704.8 (LKI from before the pass). A
 permanent leaving the battlefield is unattached by leaving anyway, and its counters cease with
-it, so the extra actions would only add unobservable or failing events. Sacrifice is the more
-specific description of what happens to the Saga (CR 715.4) and lets sacrifice-matching effects
-see it. Taking the larger counter amount never removes more counters than either rule demands.
+it, so the extra actions would only add unobservable or failing events; a permanent that stays
+must still have them performed (PR #214 review). Sacrifice is the more specific description of
+what happens to the Saga (CR 715.4) and lets sacrifice-matching effects see it. Taking the larger
+counter amount never removes more counters than either rule demands.
 
 **Alternatives.** Summing the two counter amounts (rejected: removes more than either rule
-requires; noted as a rules question to the Orchestrator); unattaching before the batch (rejected:
-the LKI of a dying host would lose its attachments); a separate batch for counters (rejected:
-CR 704.3 single event).
+requires; noted as a rules question to the Orchestrator); unattaching through `Permanents::detach`
+after the batch (rejected in PR #214: no event, so "becomes unattached" triggers never saw it);
+dropping the removals and unattach of an object whose move was prevented (rejected in PR #214:
+the state-based actions were never performed, and the check might not repeat); a separate
+batch for counters of objects that do leave (rejected: CR 704.3 single event).
 
 ## #42 FP-041 — Other judgement calls (Aura and battle, unknown targets, phasing)
 
@@ -7133,3 +7162,94 @@ would remove 2 of +1/+1, so events are (+1/+1, 3) and (-1/-1, 3), final 0 +1/+1 
 
 **Alternatives.** Summing the amounts (rejected: it removes more than either rule requires);
 applying 704.5r first (rejected: order-dependent).
+
+## #42 FP-041 — F3 APNAP then lowest id
+
+**Decision.** The CR 704.5j asks are ordered by the APNAP rank of the group's (evaluated)
+controller (CR 101.4: the active player, then the turn order from the active player; computed
+inside the sba module from `GameState::turn_order` and `TurnInfo::active_player` as
+`Bus::player_order` does, the bus being private; players not in the turn order last, by id;
+an empty turn order means all players ascending), then, within one controller, by the group's
+lowest object id. All asks happen before any state change; all moves go in one batch after every
+answer.
+
+**Rationale.** CR 101.4 (different players choose in APNAP order, then the actions happen
+simultaneously), CR 101.4b (a later player knows the earlier choices: the requests are asked in
+that order); CR 101.4c leaves the order of one player's several choices to that player, and the
+rules-researcher accepts a deterministic order as an implementation choice: lowest id is the
+existing tie-break (R3).
+
+**Alternatives.** Lowest id across players (rejected by review: breaks CR 101.4); asking the
+controller to order their own groups (rejected: an extra choice with no effect on the end state,
+since every move waits for all answers).
+
+## #42 FP-041 — F1 follow-up batch (CR 704.3 simultaneity vs engine batching)
+
+**Decision.** The main SBA batch keeps every planned move (CR 704.5a-m, 704.5s, legend losers).
+After it, every object with a planned move that is still on the battlefield under the SAME id
+(`Zones::object(id)` is on the battlefield; an object that moved anywhere, the battlefield
+included, has a new id, CR 400.7) gets its CR 704.5q / 704.5r `RemoveCounters` events (ascending
+id, then kind, amounts from the check snapshot) and then its CR 704.5n / 704.5p `Unattach`
+events (ascending id) in ONE follow-up `process_batch(.., sba = true)` call in the same
+`perform_all` pass. Objects that actually left get nothing. The follow-up batch is part of
+`SbaOutcome::executed` and makes the pass performed; `Pending` or an error in it restores the
+whole pass (the saved state covers both batches). Its events come from the pre-pass plan
+(CR 704.8); nothing in it leaves a zone, so it captures no last known information.
+
+**Rationale.** CR 704.3 performs all applicable state-based actions as one event, but the events
+executor rejects (`UnknownObject`) an event naming an object that an earlier event of the same
+batch moved, and the engine only knows after the bus ran whether a replacement effect prevented
+a move. A follow-up batch is the smallest engine-side approximation: the prevented object's
+actions still happen in the same pass, from the same snapshot, and replacement effects see them.
+
+**Alternatives.** Putting the removals and unattach in the main batch for every object
+(rejected: `UnknownObject` for the objects that did move); dropping them (rejected by review:
+state-based actions not performed and the check possibly not repeated); waiting for the next
+check (rejected: `performed` could be false, so there might be no next check).
+
+## #42 FP-041 — F2 unattach events and the 704.5p inference
+
+**Decision.** CR 704.5n and CR 704.5p unattach through `GameEvent::Unattach { attachment }`
+events in the main `process_batch` call (after the zone changes and counter removals,
+ascending id; the follow-up batch for prevented moves likewise), no longer through a direct
+`Permanents::detach`. The events executor detaches (once); the trigger normaliser turns each
+into an `EventKind::Unattached` occurrence (CR 603.2), and the batch captures last known
+information before any of its events, so look-back (CR 603.10c, CR 704.8) sees the attachments
+from before the pass. The bus executes the non-zone-change events of a batch before its zone
+changes (its own reconcile order), so an attached permanent whose host dies in the same pass is
+unattached by its event before the host moves, and is listed in `SbaOutcome::unattached`. The
+704.5p unattachment of creatures, battles and other non-Aura/Equipment/Fortification permanents
+emits the same event.
+
+**Rationale.** CR 701.3d defines "becomes unattached" for Auras, Equipment and Fortifications;
+CR 603.10c makes such triggers look back in time. Applying the same event to the 704.5p
+permanents is an INFERENCE beyond CR 701.3d's wording (rules-researcher, PR #214 round 1): it
+treats every state-based unattachment alike and lets a future trigger on any attached permanent
+see it; a trigger that only cares about Auras, Equipment and Fortifications filters by type.
+Phasing (CR 702.26j) is not involved: the SBA path never phases anything.
+
+**Alternatives.** Keeping the direct detach (rejected by review: triggers never see it);
+emitting events only for 704.5n (rejected: two control paths for one action, and the 704.5p
+case would still be invisible to triggers).
+
+## #42 FP-041 — F5 equipment_can_attach seam
+
+**Decision.** `SbaEnvironment::equipment_can_attach(attachment, target) -> bool`, default
+`true`, with the public field `StoredSbaEnvironment::illegal_equipment_targets:
+BTreeSet<(ObjectId, AttachTarget)>` (default empty; the stored environment answers
+`!contains`). Under CR 704.5n an attached Equipment or Fortification whose target permanent is
+judged (on the battlefield, phased in, evaluable) is illegal when the type check fails (as
+before) OR `equipment_can_attach` is false: it becomes unattached and stays on the battlefield.
+A phased-out target is still not checked (CR 702.26b); an attachment to a player is illegal
+anyway.
+
+**Rationale.** CR 702.16d: protection makes Equipment and Fortifications with the stated
+quality unattach as a state-based action; CR 301.5b / 301.5c: an object that "can't be equipped"
+by it is illegal. The state model has no protection or "can't be equipped" data yet, so, like
+`aura_can_enchant` (CR 303.4c), the caller supplies the answer; the heartbeat and
+layer-integration units replace the seam with engine state (SRS lists an attachment-legality
+predicate in the protection bundle).
+
+**Alternatives.** Reading protection from evaluated abilities now (rejected: no quality matching
+exists in the state model, R4 forbids a special case); folding it into `aura_can_enchant`
+(rejected: different rule, different consequence: graveyard versus unattach).
