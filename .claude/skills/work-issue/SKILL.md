@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar; add 'and self-chain' to have the backstop scheduled task start a fresh session for the next issue after merging."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', or similar. Merging an issue/ branch starts a fresh session for the next issue (§8)."
 ---
 
 # work-issue
@@ -15,12 +15,17 @@ threads.
 
 ## 1. Load and check the issue
 
-0. **Self-chain flag.** Set `SELF_CHAIN` to true only if the prompt that started this work asks
-   for it in some form ("and self-chain", "chain to the next issue", "keep going in a new
-   session"). Otherwise it is false, and §8 does nothing. A request to work an issue is not a
-   request to chain.
-   **No issue number** ("the next ready issue"):
-   - **Resume abandoned work first.** Candidates are open issues labelled `in-progress` (a closed
+0. **No issue number** ("the next ready issue"):
+   - **Finish unblocking first.** A merge starts this session (§8), sometimes before the
+     merging session reaches §7 step 3, and a session can end before finishing it. List every
+     open `work-unit` issue labelled `blocked`
+     (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
+     paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1).
+     For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
+     §7 step 3's rule, unblock it as §7 step 3 does (including its exceptions), naming the
+     blocker that closed last. Also leave `blocked` alone on an issue with no blockers: a person
+     set that hold.
+   - **Resume abandoned work next.** Candidates are open issues labelled `in-progress` (a closed
      issue that still carries the label is skipped) and your open PRs. Neither may belong to an issue labelled `status:blocked-failure` or `blocked`; those
      wait for a person. One is abandoned only if it has no governing claim (step 4): no claim
      comment on it names a live session.
@@ -28,7 +33,7 @@ threads.
    - **Otherwise** list ready issues as `run-plan` §1 does and take the lowest `FP-NNN` whose
      owned paths overlap no active issue.
    - Claim it with step 4. If the claim loses, pick the next candidate.
-   - If none qualifies, tell the user why and stop (no chaining).
+   - If none qualifies, tell the user why and stop.
 1. `gh api repos/donfuldauer/fineprint/issues/<N>` — title, body, labels, state, milestone.
    Stop if it is closed, if it is not a work unit (no `Plan ID` line), or if it is labelled
    `status:blocked-failure` or `blocked`: a person must clear that label before it is claimed.
@@ -65,8 +70,7 @@ threads.
       Read the ID from the environment, not from `get_session`:
       `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"`. Only if that variable is unset,
       call `get_session` with no argument. Call `get_session` on another session only to check
-      whether a claim that isn't yours is live (DECISIONS.md "Self-chaining — handoff through the
-      backstop scheduled task").
+      whether a claim that isn't yours is live.
    2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
       delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
@@ -199,54 +203,32 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
 3. **Unblock dependents.** For each issue this one blocks
    (`issues/<N>/dependencies/blocking`), if all of its blockers are now satisfied (§1 step 2:
    closed as completed by a merged PR, or replaced by issues a comment on the blocker names), replace
-   its `blocked` label with `ready` and comment "Unblocked by #<N> (PR #<P>)".
+   its `blocked` label with `ready`: add `ready` first, then remove `blocked`, so the issue is
+   never without both. Comment "Unblocked by #<N> (PR #<P>)" unless an "Unblocked by" comment is
+   already there. Skip an issue that no longer carries `blocked`: the next session may already
+   have unblocked it (§1 step 0). Skip one that also carries `status:blocked-failure`: a person
+   must clear that hold (the plan sets `blocked` only from dependencies; other holds use
+   `status:blocked-failure`, PROCESS.md P7).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
    and delete this session's claim comment.
 5. Remove the issue's worktree from the main checkout: `git worktree remove
    ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
    in plan order.
-7. If `SELF_CHAIN` is true, go to §8.
+7. Do nothing to start the next session (§8).
 
-## 8. Self-chain (only when `SELF_CHAIN` is true)
+## 8. Next session
 
-Run this only after a merge in §7. Do not run it if the issue ended `blocked`, or if no issue is
-now ready; say why in the final message instead.
-
-The successor is always started by the backstop scheduled task, never by this session: fire the
-task, and it starts a fresh session. Never call `create_session` to chain. A session started by
-another session asks a person to approve every remote-session tool call, while a session started
-by the scheduled task does not (DECISIONS.md "Self-chaining — handoff through the backstop
-scheduled task"). There is no depth limit: the chain runs until no issue is ready.
-
-1. **Find the task.** Call `list_triggers` and take the enabled task named
-   `Fine Print: next ready issue (backstop)`. If none exists or it is disabled, post no marker,
-   say so in the final message (a person must restore it), and end the turn.
-2. **Check for an earlier attempt.** Read the merged issue's comments for a marker from this
-   session (step 3).
-   - "Self-chain: handed off" or "Self-chain: handoff failed" (final): fire nothing more; end
-     the turn.
-   - "Self-chain: handing off" (pending): an earlier attempt stopped before confirming, so it
-     may or may not have fired. Fire again as in step 3, reusing this marker instead of posting
-     a new one. Firing twice is safe: if the first run started a session, the second run finds
-     it as a live chain in its step 1 and stops. Don't infer the earlier outcome from the task's
-     `last_run`: a scheduled run is indistinguishable from a fired one, and a scheduled run may
-     have stopped because this session was still live.
-   - No marker: go on to step 3.
-3. Post the pending marker on the merged issue: "Self-chain: handing off to the backstop
-   scheduled task (session <this session's ID>)." Then call `fire_trigger` with the task's ID and
-   the text `Handoff: session <this session's ID> merged #<N> and fired this run. In step 1,
-   ignore that session.`
-4. If `fire_trigger` succeeds, edit the marker to the confirmed text: "Self-chain: handed off to
-   the backstop scheduled task (session <this session's ID>)." If it fails, edit the marker to
-   "Self-chain: handoff failed (session <this session's ID>): <reason>; the next scheduled run
-   picks up the chain." and say the same in the final message. A retry does not fire again
-   after a failure.
-5. End the turn. Fire once per merge, and again only to retry a pending marker (step 2). Never
-   chain from a session whose prompt did not ask for it.
+The merge starts the next session. A scheduled task with a GitHub trigger on pull requests merged
+into `main` from `issue/` branches starts a fresh session that works on the next issue. This
+session does nothing to hand off: never call `create_session`, `fire_trigger` or
+`update_trigger` to chain. A session started by another session asks a person to approve every
+remote-session tool call, and a session can neither fire nor edit a task it did not create. The
+chain runs until no issue is ready, or until a session ends without merging; the owner then
+restarts it with the task's "Run now".
 
 ## Never
 
-Self-chain unless the starting prompt asked for it; start an issue whose dependencies are open; push to `main`; merge with a failing required check
+Start a session to chain to the next issue; start an issue whose dependencies are open; push to `main`; merge with a failing required check
 or an unresolved thread; skip, ignore or weaken a test; put card data in the repository (R5);
 quote CR rules from memory (R6).
