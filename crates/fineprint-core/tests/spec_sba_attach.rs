@@ -404,3 +404,304 @@ fn req_sba_001_attach_all_three_in_one_pass() {
     assert_eq!(r.outcome().unattached, vec![cr, eq]);
     assert_eq!(r.nonempty_batches().len(), 1);
 }
+
+// =============================================================================================
+// PR #214 round 1: F5 (Equipment/Fortification legality seam, CR 704.5n, 702.16d) and F2
+// (every SBA unattach is an executed `Unattach` event, CR 701.3d, 603.10c)
+// =============================================================================================
+
+#[path = "spec_triggers_support.rs"]
+mod tsupport;
+
+use fineprint_core::events::GameEvent;
+use fineprint_core::sba::{SbaEnvironment, StoredSbaEnvironment};
+use fineprint_core::triggers::{LookBackKind, StateView, events_from_batch, look_back_kind};
+use fineprint_dsl::ability::EventKind;
+
+// REQ-SBA-001, CR 704.5n, 702.16d (F5): an Equipment attached to a creature listed with it in
+// `illegal_equipment_targets` (the stand-in for protection) becomes unattached, stays on the
+// battlefield and is listed in `unattached`; an Equipment on another creature not in the set
+// stays attached.
+#[test]
+fn req_sba_001_704_5n_f5_illegal_equipment_target_unattached() {
+    let mut s = Sim::new();
+    let warded = s.creature(P2, "test.vanilla_2_2", 2, 2);
+    let other = s.creature(P1, "test.vanilla_3_3", 3, 3);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    let control = s.permanent(P1, P1, equipment_chars("test.equipment_b"));
+    s.attach_to(eq, warded);
+    s.attach_to(control, other);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(warded)));
+    assert_eq!(s.check(), vec![finding("704.5n", obj(eq))]);
+    let r = run_sba(s);
+    assert_eq!(r.outcome().findings, vec![finding("704.5n", obj(eq))]);
+    assert_unattached(&r, eq);
+    assert_eq!(r.outcome().unattached, vec![eq]);
+    assert_untouched(&r, control);
+    assert_eq!(
+        r.after.permanents.attached_to(control),
+        Some(AttachTarget::Permanent(other))
+    );
+    assert_still_on_battlefield(&r, warded);
+    assert!(r.moves().is_empty(), "nothing changes zones");
+}
+
+// REQ-SBA-001, CR 704.5n, 702.16d (F5): a Fortification on a land listed with it in
+// `illegal_equipment_targets` becomes unattached and stays; a Fortification on another land
+// stays attached.
+#[test]
+fn req_sba_001_704_5n_f5_illegal_fortification_target_unattached() {
+    let mut s = Sim::new();
+    let land = s.permanent(P1, P1, land_chars("test.land_a"));
+    let land2 = s.permanent(P1, P1, land_chars("test.land_b"));
+    let fort = s.permanent(P2, P2, fortification_chars("test.fortification_a"));
+    let fort2 = s.permanent(P2, P2, fortification_chars("test.fortification_b"));
+    s.attach_to(fort, land);
+    s.attach_to(fort2, land2);
+    s.env
+        .illegal_equipment_targets
+        .insert((fort, AttachTarget::Permanent(land)));
+    assert_eq!(s.check(), vec![finding("704.5n", obj(fort))]);
+    let r = run_sba(s);
+    assert_unattached(&r, fort);
+    assert_untouched(&r, fort2);
+    assert_eq!(r.outcome().unattached, vec![fort]);
+}
+
+// REQ-SBA-001, CR 704.5n, 702.16d (F5): a pair only matters for its own attachment and its
+// current target: an Equipment on a legal creature stays when the set lists a different
+// attachment id for that creature, or the same Equipment with a different target.
+#[test]
+fn req_sba_001_704_5n_f5_pair_is_per_attachment_and_target() {
+    let mut s = Sim::new();
+    let c = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let c2 = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    let unrelated = s.permanent(P1, P1, equipment_chars("test.equipment_b"));
+    s.attach_to(eq, c);
+    s.env
+        .illegal_equipment_targets
+        .insert((unrelated, AttachTarget::Permanent(c)));
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(c2)));
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Player(P1)));
+    assert!(s.check().is_empty());
+    let r = run_sba(s);
+    assert!(!r.outcome().performed);
+    assert_untouched(&r, eq);
+    assert_untouched(&r, unrelated);
+    assert!(r.outcome().unattached.is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n (F5): an unattached Equipment is untouched even with pairs listed for
+// it.
+#[test]
+fn req_sba_001_704_5n_f5_unattached_equipment_untouched() {
+    let mut s = Sim::new();
+    let c = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(c)));
+    assert!(s.check().is_empty());
+    let r = run_sba(s);
+    assert!(!r.outcome().performed);
+    assert_untouched(&r, eq);
+    assert_eq!(r.after.permanents.attached_to(eq), None);
+}
+
+// REQ-SBA-001, CR 704.5n, 702.26b (F5): an Equipment whose (illegal-pair) target is phased out
+// is still skipped: it stays attached and nothing is found.
+#[test]
+fn req_sba_001_704_5n_f5_phased_out_target_still_skipped() {
+    let mut s = Sim::new();
+    let c = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, c);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(c)));
+    s.phase_out(c);
+    assert!(s.check().is_empty());
+    let r = run_sba(s);
+    assert!(!r.outcome().performed);
+    assert_untouched(&r, eq);
+}
+
+// REQ-SBA-001, CR 704.5n, 702.16d (F5): the seam itself: `SbaEnvironment::equipment_can_attach`
+// on `StoredSbaEnvironment` is true by default and false exactly for the listed pairs.
+#[test]
+fn req_sba_001_704_5n_f5_stored_environment_seam() {
+    let a = oid(10);
+    let b = oid(11);
+    let t = AttachTarget::Permanent(oid(20));
+    let default = StoredSbaEnvironment::default();
+    assert!(default.illegal_equipment_targets.is_empty());
+    assert!(default.equipment_can_attach(a, t));
+    assert!(default.equipment_can_attach(a, AttachTarget::Player(P1)));
+    let env = StoredSbaEnvironment {
+        illegal_equipment_targets: [(a, t), (b, AttachTarget::Player(P2))]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    assert!(!env.equipment_can_attach(a, t));
+    assert!(!env.equipment_can_attach(b, AttachTarget::Player(P2)));
+    assert!(env.equipment_can_attach(b, t));
+    assert!(env.equipment_can_attach(a, AttachTarget::Player(P2)));
+    assert!(env.equipment_can_attach(a, AttachTarget::Permanent(oid(21))));
+}
+
+/// A board for F2: an Equipment attached to a player (704.5n), a creature attached to a host
+/// (704.5p), a 0-toughness creature (704.5f, moved) and a creature with +1/+1 and -1/-1
+/// counters (704.5q). Returns the board, the equipment, the attached creature, its host, the
+/// 0-toughness creature and the counter creature. `eq_first` puts the Equipment's id first.
+fn f2_board(eq_first: bool) -> (Sim, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut s = Sim::new();
+    let host = s.creature(P1, "test.vanilla_3_3", 3, 3);
+    let (eq, cr) = if eq_first {
+        let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+        let cr = s.creature(P2, "test.vanilla_1_1", 1, 1);
+        (eq, cr)
+    } else {
+        let cr = s.creature(P2, "test.vanilla_1_1", 1, 1);
+        let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+        (eq, cr)
+    };
+    s.attach(eq, AttachTarget::Player(P2));
+    s.attach_to(cr, host);
+    let zero = s.creature(P2, "test.vanilla_2_0", 2, 0);
+    let pt = s.creature(P1, "test.vanilla_4_4", 4, 4);
+    s.counters(pt, "+1/+1", 2);
+    s.counters(pt, "-1/-1", 1);
+    (s, eq, cr, host, zero, pt)
+}
+
+// REQ-SBA-001, CR 704.5n, 704.5p, 701.3d, 704.3 (F2): a pass that unattaches an Equipment and a
+// creature and moves another object executes exactly one `GameEvent::Unattach` per unattached
+// object, in ascending id order among the Unattach events (their absolute position relative to
+// other events is set by the replacement bus, outside this unit); `unattached` stays ascending; the container shows both detached. Both id orders.
+#[test]
+fn req_sba_001_f2_unattach_events_executed() {
+    for eq_first in [true, false] {
+        let (s, eq, cr, host, zero, pt) = f2_board(eq_first);
+        let r = run_sba(s);
+        let o = r.outcome();
+        assert!(o.performed);
+        let mut both = vec![eq, cr];
+        both.sort();
+        assert_eq!(o.unattached, both, "ascending");
+        assert_eq!(unattach_events(&r), both, "one Unattach each, ascending id");
+        assert!(
+            executed_events(&r).iter().any(|e| matches!(
+                e,
+                GameEvent::ZoneChange { object, .. } if *object == zero
+            )),
+            "the move is executed in the same pass"
+        );
+        assert_eq!(r.nonempty_batches().len(), 1, "one batch (CR 704.3)");
+        assert_to_owners_graveyard(&r, zero, ZoneChangeCause::StateBasedAction);
+        assert_eq!(r.after.counter(pt, "+1/+1"), 1);
+        // The former targets (CR 603.10c looks back to them) and the detached container.
+        assert_eq!(
+            r.before.permanents.attached_to(eq),
+            Some(AttachTarget::Player(P2))
+        );
+        assert_eq!(
+            r.before.permanents.attached_to(cr),
+            Some(AttachTarget::Permanent(host))
+        );
+        assert_unattached(&r, eq);
+        assert_unattached(&r, cr);
+        assert!(
+            !r.after
+                .permanents
+                .attachments_of(AttachTarget::Player(P2))
+                .contains(&eq),
+            "the player no longer lists the Equipment"
+        );
+        assert!(
+            !r.after
+                .permanents
+                .attachments_of(AttachTarget::Permanent(host))
+                .contains(&cr),
+            "the host no longer lists the creature"
+        );
+    }
+}
+
+// REQ-SBA-001, CR 704.5n (F2): a pass whose only result is one unattach executes exactly that
+// one `Unattach` event, in one batch, and the event layer's log holds it.
+#[test]
+fn req_sba_001_f2_unattach_only_pass_is_one_event() {
+    let mut s = Sim::new();
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach(eq, AttachTarget::Player(P2));
+    let r = run_sba(s);
+    assert_eq!(
+        executed_events(&r),
+        vec![GameEvent::Unattach { attachment: eq }]
+    );
+    let batches = r.nonempty_batches();
+    assert_eq!(batches.len(), 1);
+    let logged = r
+        .after
+        .events
+        .log()
+        .batches()
+        .last()
+        .expect("logged")
+        .clone();
+    assert_eq!(&logged, &batches[0]);
+    assert_unattached(&r, eq);
+}
+
+// REQ-SBA-001, CR 704.5n, 704.5p, 603.10c (F2): a trigger of kind `Unattached` matches the
+// SBA's Unattach events: the normalised batch has one `Unattached` occurrence per unattached
+// object (subject = that object), the matcher kind is a look-back kind (CR 603.10c), and
+// `detect` with a registration listed in the pre-event view fires once per unattached object.
+#[test]
+fn req_sba_001_f2_unattached_trigger_matches() {
+    let (s, eq, cr, ..) = f2_board(true);
+    let r = run_sba(s);
+    let batch = r.nonempty_batches()[0].clone();
+    let normalised = events_from_batch(&batch);
+    let unattached: Vec<_> = normalised
+        .iter()
+        .filter(|t| t.kinds.contains(&EventKind::Unattached))
+        .collect();
+    let mut both = vec![eq, cr];
+    both.sort();
+    assert_eq!(
+        unattached
+            .iter()
+            .map(|t| t.subject_pre.expect("subject"))
+            .collect::<Vec<_>>(),
+        both
+    );
+    assert_eq!(
+        look_back_kind(&tsupport::m(EventKind::Unattached)),
+        Some(LookBackKind::Unattached)
+    );
+    let env = tsupport::FakeEnv::new()
+        .with_pre(tsupport::reg(
+            900,
+            P1,
+            tsupport::ability(
+                "test.on_unattached",
+                tsupport::subj_obj(tsupport::m(EventKind::Unattached)),
+            ),
+        ))
+        .accept(StateView::PreEvent, &[eq.get(), cr.get()]);
+    let fired = tsupport::run(&env, &normalised);
+    assert_eq!(
+        fired.len(),
+        2,
+        "one trigger per unattached object: {fired:?}"
+    );
+}
