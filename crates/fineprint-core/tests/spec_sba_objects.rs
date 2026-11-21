@@ -13,10 +13,10 @@ mod support;
 use std::collections::BTreeMap;
 
 use fineprint_base::ids::ObjectId;
-use fineprint_core::events::ZoneChangeCause;
+use fineprint_core::events::{CounterTarget, GameEvent, ZoneChangeCause};
 use fineprint_core::layers::keyword_counter_ability;
-use fineprint_core::replacement::ReplacementEffect;
-use fineprint_core::zones::{ZoneId, ZoneKind};
+use fineprint_core::replacement::{Action, BusEventKind, EventMatcher, ReplacementEffect};
+use fineprint_core::zones::{MoveRequest, ZoneId, ZoneKind};
 use support::*;
 
 /// Asserts that `old` left the battlefield for its owner's graveyard through one SBA move.
@@ -543,4 +543,68 @@ fn req_sba_001_704_8_lki_from_before_the_pass() {
             assert!(e.lki_captured, "{e:?}");
         }
     }
+}
+
+// REQ-SBA-001, REQ-CORE-003, CR 704.8, 704.5f, 704.5g: LKI is captured before the pass, not
+// just before each move. A (toughness 0) and B (2/2, 3 damage, a +1/+1 counter) are found in
+// one pass; an Instead on A's SBA move first removes B's +1/+1 counter, then moves A. B leaves
+// after that removal, yet its LKI still holds the counter: a per-move capture would record no
+// counter and fail this test.
+#[test]
+fn req_sba_001_704_8_lki_captured_before_an_earlier_batch_member_changes_it() {
+    let mut s = Sim::new();
+    let a = s.creature(P1, "test.vanilla_1_0", 1, 0);
+    let b = s.creature(P2, "test.vanilla_2_2", 2, 2);
+    s.counters(b, "+1/+1", 1);
+    s.damage(b, 3);
+    s.add_replacement(ReplacementEffect::new(
+        eid(1),
+        EventMatcher {
+            affected_object: Some(a),
+            cause: Some(ZoneChangeCause::StateBasedAction),
+            ..EventMatcher::new(BusEventKind::ZoneChange)
+        },
+        Action::Instead(vec![
+            GameEvent::RemoveCounters {
+                target: CounterTarget::Object(b),
+                kind: "+1/+1".into(),
+                amount: 1,
+            },
+            GameEvent::ZoneChange {
+                object: a,
+                request: MoveRequest::new(ZoneKind::Graveyard),
+                cause: ZoneChangeCause::StateBasedAction,
+            },
+        ]),
+    ));
+    assert_eq!(
+        s.check(),
+        vec![finding("704.5f", obj(a)), finding("704.5g", obj(b))]
+    );
+    let r = run_sba(s);
+    assert_eq!(
+        r.outcome().findings,
+        vec![finding("704.5f", obj(a)), finding("704.5g", obj(b))]
+    );
+    assert_died(&r, a);
+    assert_died(&r, b);
+    // The removal really happened in the pass, before B's move.
+    let removed = r
+        .outcome()
+        .executed
+        .iter()
+        .flat_map(|batch| batch.events.iter())
+        .any(|e| matches!(e.instance.event(), GameEvent::RemoveCounters { .. }));
+    assert!(removed, "the Instead removed B's counter in the same pass");
+    let lb = r.after.lki.get(b).expect("LKI of b");
+    assert_eq!(lb.zone(), ZoneId::Battlefield);
+    assert_eq!(lb.owner(), P2);
+    assert_eq!(
+        lb.counters().get("+1/+1"),
+        Some(&1),
+        "B's LKI is from before the pass (CR 704.8)"
+    );
+    let la = r.after.lki.get(a).expect("LKI of a");
+    assert_eq!(la.zone(), ZoneId::Battlefield);
+    assert_eq!(la.owner(), P1);
 }
