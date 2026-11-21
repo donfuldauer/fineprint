@@ -13,10 +13,11 @@
 //! changes nothing. [`perform_all`] checks, then performs every result simultaneously as one
 //! event: the graveyard moves as ONE batch through the replacement bus with CR 704.7 merging
 //! (CR 704.8: last known information from before the pass), together with the counter
-//! removals (CR 704.5q, CR 704.5r); the legend-rule choices (CR 704.5j), asked before anything
-//! changes; ceasing to exist (CR 704.5d, CR 704.5e); removing a completed dungeon from the game
-//! (CR 704.5t); unattaching (CR 704.5n, CR 704.5p); and the [`LOST_THE_GAME`] designation
-//! (CR 704.5a-704.5c). The loop
+//! removals (CR 704.5q, CR 704.5r) and the unattach events (CR 704.5n, CR 704.5p); a follow-up
+//! batch for objects whose move a replacement effect prevented; the legend-rule choices
+//! (CR 704.5j), asked in APNAP order (CR 101.4) before anything changes; ceasing to exist
+//! (CR 704.5d, CR 704.5e); removing a completed dungeon from the game (CR 704.5t); and the
+//! [`LOST_THE_GAME`] designation (CR 704.5a-704.5c). The loop
 //! of CR 704.3 (repeat while something was performed, then put waiting triggers on the stack)
 //! belongs to the heartbeat.
 //!
@@ -26,11 +27,12 @@
 //! is the number of loyalty counters the layer environment reports (CR 306.5c); damage marked
 //! and token marks come from the object markers; copies of spells and cards, the CR 723.3c
 //! exemption, deathtouch damage, the game variant, how long each world permanent has had the
-//! world supertype (CR 704.5k), Aura legality by enchant ability (CR 704.5m), counter limits
+//! world supertype (CR 704.5k), Aura legality by enchant ability (CR 704.5m), Equipment and
+//! Fortification legality by effects such as protection (CR 704.5n, CR 702.16d), counter limits
 //! (CR 704.5r), Saga chapter data (CR 704.5s) and completed dungeons (CR 704.5t) come from the
-//! caller's [`SbaEnvironment`]. Names, supertypes, subtypes and counters are evaluated
-//! characteristics and the layer environment's counters; controllers and attachments come from
-//! the permanent container.
+//! caller's [`SbaEnvironment`]. Names, supertypes, subtypes, counters and controllers
+//! (CR 613.1b) are evaluated characteristics and the layer environment's counters; attachments
+//! come from the permanent container.
 //!
 //! **Not modelled here.** Regeneration (CR 701.8c), the Two-Headed Giant team checks
 //! (CR 704.6a, CR 704.6b), the entries after CR 704.5t, and choosing a winner or a draw
@@ -43,7 +45,9 @@
 
 mod perform;
 #[cfg(test)]
-use perform::{Saved, legend_kept};
+use perform::{Saved, legend_survivors};
+#[cfg(test)]
+use registry::LegendGroup;
 mod registry;
 #[cfg(test)]
 use registry::target_self_or_gone;
