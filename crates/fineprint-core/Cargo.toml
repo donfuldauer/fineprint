@@ -23,6 +23,7 @@ full-recompute = []
 # Benchmark harness (REQ-NFR-009); exact pin, no plotters or rayon (docs/DECISIONS.md
 # "#36 FP-035 — criterion pin").
 criterion = { version = "=0.8.2", default-features = false }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "layers_recompute"
