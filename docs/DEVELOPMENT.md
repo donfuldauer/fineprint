@@ -19,6 +19,26 @@ itself is the set of GitHub issues labelled `work-unit` (milestones M1-M3). Proc
   crate), REQ-ARCH-003 (crate and artifact naming), REQ-NFR-012 (MPL-2.0 in every package and
   header in every source file).
 
+### Cloud agent environment
+
+- Fresh Antigravity cloud VMs automatically run `.agents/environment.json` →
+  `.agents/setup-env.sh` from the repository root (idempotent and safe to re-run with
+  `bash .agents/setup-env.sh`).
+- `.agents/setup-env.sh` ensures the pinned Rust toolchain from `rust-toolchain.toml` is installed
+  with `rustfmt`, `clippy`, `llvm-tools`, and the `wasm32-unknown-unknown` target; installs
+  `cargo-llvm-cov` at the exact version pinned in `.github/workflows/ci.yml` (prebuilt Linux binary
+  with `cargo install --locked` fallback); installs any missing Linux prerequisites
+  (`build-essential`, `pkg-config`, `curl`, `ca-certificates`, `python3`, `jq`, `git`); persists
+  Cargo's bin directory in `~/.bashrc` for non-interactive shells; and warms the locked Cargo cache
+  for the root workspace and `spikes/bindings`.
+- Each issue works in its own git worktree `../fineprint-issue-<N>` (`work-issue` skill §2), or
+  directly on a branch inside the checkout when a cloud sandbox restricts sibling directories and
+  only one issue runs in the VM.
+- Agent instructions and definitions are shared across Claude Code and Gemini / Antigravity:
+  `AGENTS.md` is canonical (imported by `CLAUDE.md` and `GEMINI.md`), `.claude/agents/` and
+  `.claude/skills/` hold the canonical prompts and skill procedures, and `.agents/agents/` and
+  `.agents/skills/` provide Antigravity / Gemini adapters plus `pr-watch`.
+
 ## Workspace and crate map
 
 | Crate | Path | Role | Depends on |

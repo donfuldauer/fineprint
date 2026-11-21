@@ -5,7 +5,7 @@ title: "FP-XXX: <title>"
 labels: ["work-unit", "blocked"]
 ---
 
-> **Plan ID:** FP-XXX · **Phase:** <n — name> · **Milestone:** <M1|M2|M3> · **Expected tier:** <T1 (Sonnet 5.5) | T2 (Opus 5.5)>
+> **Plan ID:** FP-XXX · **Phase:** <n — name> · **Milestone:** <M1|M2|M3> · **Expected tier:** <T1 (Sonnet 5.5 / Flash) | T2 (Opus 5.5 / Pro)>
 
 ## Summary
 
@@ -37,4 +37,4 @@ labels: ["work-unit", "blocked"]
 <constraints, related decisions, out of scope>
 
 ---
-To work this issue, start a Claude Code session on this repository and say **"Start work on issue #<n>"** (`work-issue` skill).
+To work this issue, start a Claude Code or Gemini / Antigravity session on this repository and say **"Start work on issue #<n>"** (`work-issue` skill).
