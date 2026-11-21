@@ -433,6 +433,38 @@ fn req_fmt_001_copies() {
 }
 
 #[test]
+fn req_fmt_001_restricted_basic_land_not_exempt() {
+    // REQ-FMT-001: a Restricted entry takes precedence over the basic-land exemption.
+    let mut cat = catalog();
+    cat.0.insert(
+        "test.basic_r".into(),
+        CardFacts {
+            is_basic_land: true,
+            ..facts(SupportStatus::Verified)
+        },
+    );
+    let ls = Lists(vec![list(&[("test.basic_r", Legality::Restricted)])]);
+    let f = fmt();
+    assert!(f.deck.basic_land_exempt);
+    let r = validate_deck(
+        &deck(&[("test.basic_r", 2), ("test.basic", 2)], &[]),
+        &f,
+        &cat,
+        &ls,
+    );
+    assert_eq!(codes(&r.errors), [DeckIssueCode::TooManyCopies]);
+    assert_eq!(r.errors[0].card_def_id.as_deref(), Some("test.basic_r"));
+    // One copy is fine; unrestricted basics above max_copies stay exempt.
+    let ok = validate_deck(
+        &deck(&[("test.basic_r", 1), ("test.basic", 30)], &[]),
+        &f,
+        &cat,
+        &ls,
+    );
+    assert!(ok.valid);
+}
+
+#[test]
 fn req_fmt_001_ban_list() {
     let f = fmt();
     let r = run(&deck(&[("test.card_a", 3), ("test.card_b", 1)], &[]), &f);

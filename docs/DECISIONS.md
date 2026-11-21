@@ -6973,7 +6973,9 @@ FormatConfig (match creation/API) does both; the Orchestrator files a follow-up 
 **Decision.** `PolicyAction` has no Allow. `min_support_status` only distinguishes VERIFIED from
 the rest (AutoParsed rejected under VERIFIED; Partial/Unsupported are governed only by their own
 `on_*` action). Copies are counted per cardDefId over main+sideboard combined. An id absent from a
-ban list is LEGAL; Restricted means at most 1 copy. Digital-only cards are rejected when the
+ban list is LEGAL; Restricted means at most 1 copy, and a Restricted entry takes precedence over
+the basic-land exemption (house rule / format policy: the CR is silent on restriction; CR 100.2a
+exempts basic lands only from the four-copy limit). Digital-only cards are rejected when the
 extension is disabled OR `allowDigitalOnly` is false. `enforceColorIdentity` is stored but not
 enforced (commanders deferred, REQ-FMT-002). `FirstTurnDrawRule` / `TimeoutPolicy` variants beyond
 the SRS examples (NEVER_SKIP, ALWAYS_SKIP, AUTO_PASS, GAME_LOSS) are house-rule values. `maxMain`
