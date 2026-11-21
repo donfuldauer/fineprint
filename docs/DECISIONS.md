@@ -6829,3 +6829,11 @@ every context component and the replacement registry are as before the call.
 
 **Alternatives.** Consuming only when a finding applies (rejected: a stale flag would make a
 player lose at a later check).
+
+## #41 FP-040 — Phased-out permanents and the state-based actions
+
+**Decision:** 704.5f-704.5i evaluate only phased-in permanents (`SbaView::new` skips battlefield objects whose `Permanents` status has `phased_out`; an object with no `Permanents` entry counts as phased in). 704.5d/e stay by zone, so phased-out tokens and card copies on the battlefield survive. Marked damage, counters and the deathtouch flag are neither cleared on phase-out nor reset on phase-in; the deathtouch flag is still consumed by each successful pass, even for a phased-out creature.
+
+**Rationale:** CR 702.26b ("treated as though it does not exist"), CR 702.26d (phasing is not a zone change; tokens continue to exist; counters remain), and CR 704.5 has no phased-out wording.
+
+**Alternatives:** checking phased-out permanents (rejected: contradicts 702.26b); making 704.5d/e skip phased-out objects (rejected: 702.26d says tokens continue to exist while phased out).
