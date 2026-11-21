@@ -6799,14 +6799,24 @@ never moved by the event executor (`events/exec.rs` leaves it in its current zon
 named by an `Instead` keeps its id and ceases under it. The object kind (token, spell copy, card copy)
 persists across a move by an effect: the same end state as the repeated check, independent of
 the caller re-keying its environment. A ceasing object still in the permanent container also
-leaves it. LKI is captured (REQ-CORE-003: the object leaves its zone) by `perform_all` right
-before removal, with exile as the pseudo-destination of `capture_lki_on_move` (so a record is
+leaves it. LKI is captured (REQ-CORE-003: the object leaves its zone) by `perform_all` before
+the first removal of the pass, with exile as the pseudo-destination of `capture_lki_on_move` (so a record is
 stored from any zone, a token already in a graveyard included), counters from the object
 markers and attachments from the permanent container (as the event executor does); an object
 the provider does not know gets no record and still ceases; no `ZoneChange` is emitted;
-`cease_to_exist` itself captures nothing. The capture happens after the move batch, per object,
-not before it: capturing a ceasing object that an `Instead` then moves would make the bus fail
-with `AlreadyCaptured`, losing the whole pass. A ceasing object is never itself a batch member,
+`cease_to_exist` itself captures nothing. The capture happens after the move batch, for every
+ceasing object, before the first removal (a removal unattaches what is attached to the removed
+object, which would change a later object's record; CR 704.3, CR 704.8), not before the batch:
+capturing a ceasing object that an `Instead` then moves would make the bus fail with
+`AlreadyCaptured`, losing the whole pass. The state the record reads is nevertheless that of
+before the batch (CR 704.8): when the pass has both moves and ceasing objects, `perform_all`
+snapshots (clones) the permanent container and the object markers before the batch, writes
+nothing into the live LKI store, and captures each ceasing object the batch did not move from
+that snapshot (so a host that dies in the batch does not erase the attachment of a ceasing
+copy attached to it). An object the batch moved and that then ceases under its new id is
+captured from the live state, as the object in the zone it ceases from (the snapshot knows only
+the old id); this and the characteristics read from the caller's provider, which `perform_all`
+cannot snapshot, are the known limits. A ceasing object is never itself a batch member,
 and only a battlefield spell copy among them is a permanent, whose state a batch can change only
 through a replacement effect, so the record is the object as it last existed when it left; an
 object the batch moved that then ceases under its new id gets a record for the new id as well.
@@ -6827,6 +6837,8 @@ pre-pass capture).
 
 Amended in PR #207 review round 1: follow-the-move cessation, LKI of ceasing objects, the
 retired-CardId contract.
+Amended in PR #207 review round 2: all ceasing LKI is captured before any removal, from the
+pre-batch state for objects the batch did not move.
 
 ## #41 FP-040 — Two-Headed Giant gating
 

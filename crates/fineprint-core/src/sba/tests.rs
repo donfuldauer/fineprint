@@ -26,7 +26,7 @@ use crate::layers::{
 };
 use crate::memory::{CharacteristicsProvider, LkiStore, MemoryTable};
 use crate::objects::Characteristics;
-use crate::permanent::Permanents;
+use crate::permanent::{AttachTarget, Permanents};
 use crate::replacement::{
     Action, BusError, BusEventKind, BusInterrupt, EventMatcher, Modification, ReplacementEffect,
     ReplacementRegistry, Shield,
@@ -1735,4 +1735,46 @@ fn saved_snapshot_restores_the_id_generator() {
     assert_eq!(w.state_hash(), before);
     let mut issued = w.ids.clone();
     assert_eq!(issued.issue().unwrap(), ObjectId::new(2));
+}
+
+// REQ-SBA-001, REQ-CORE-003, CR 704.8, CR 704.5e: two battlefield spell copies cease in one pass;
+// the host A (lower id) is removed first, yet the record of B (higher id, attached to A) keeps its
+// attachment and the record of A lists B, because every record is captured before any removal.
+#[test]
+fn ceasing_copies_capture_all_lki_before_any_removal() {
+    let mut w = World::new();
+    let a = w.create(1, ZoneKind::Battlefield, creature("test.copy_host", 3));
+    let b = w.create(1, ZoneKind::Battlefield, creature("test.copy_attached", 3));
+    assert!(a < b);
+    w.permanents.attach(b, AttachTarget::Permanent(a)).unwrap();
+    assert_eq!(w.permanents.attachments_of(AttachTarget::Permanent(a)), [b]);
+    w.env.spell_copies = BTreeSet::from([a, b]);
+    let out = pass(&mut w);
+    assert_eq!(out.ceased, [a, b]);
+    assert!(out.executed.is_empty());
+    assert_eq!(w.lki.get(a).unwrap().attached_here(), [b]);
+    assert_eq!(
+        w.lki.get(b).unwrap().permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(a))
+    );
+}
+
+// REQ-SBA-001, REQ-CORE-003, CR 704.8, CR 704.5f, CR 704.5e: the host A dies by a state-based
+// action in the move batch while the attached spell copy B ceases in the same pass; the batch
+// unattaches B, yet B's record keeps its attachment (derived from the state before any of the
+// actions), and A's record lists B.
+#[test]
+fn ceasing_copy_lki_keeps_attachment_when_host_dies_in_batch() {
+    let mut w = World::new();
+    let a = w.create(1, ZoneKind::Battlefield, creature("test.dying_host", 0));
+    let b = w.create(1, ZoneKind::Battlefield, creature("test.copy_on_host", 3));
+    w.permanents.attach(b, AttachTarget::Permanent(a)).unwrap();
+    w.env.spell_copies = BTreeSet::from([b]);
+    let out = pass(&mut w);
+    assert_eq!(out.ceased, [b]);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        w.lki.get(b).unwrap().permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(a))
+    );
 }
