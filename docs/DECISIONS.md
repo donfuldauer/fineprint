@@ -6945,3 +6945,44 @@ the distinction is available from `SbaOutcome.findings` (entry ids 704.5g/704.5h
 
 **Alternatives.** Implementing them here (rejected: outside the owned paths, and the graveyard
 ordering belongs to every simultaneous move, not only to state-based actions).
+
+## #45 FP-044 — CardCatalog and BanListSource traits
+
+**Decision.** `validate_deck` takes a `CardCatalog` (support status, digital-only, basic-land
+facts per card id) and a `BanListSource` as trait objects. The API unit that registers the card
+database implements them.
+
+**Rationale.** No card database registry exists yet, and this unit must not depend on one.
+
+**Alternatives.** Depending on `CardDefinitionDSL` directly (rejected: needs full definitions
+with hashes for every check).
+
+## #45 FP-044 — ZonesConfig::free_graveyard_reorder stays
+
+**Decision.** The "moves to FormatConfig" note in "#19 FP-018 — Zones API" (b) is not done here.
+`ZonesConfig::free_graveyard_reorder` stays where it is. The same holds for the engine-level undo
+(RewindToSnapshot) gate noted under the txn snapshot entry. The unit that builds Zones from a
+FormatConfig (match creation/API) does both; the Orchestrator files a follow-up issue.
+
+**Rationale.** `zones/` is outside this unit's owned paths, and SRS §11.1 has no such member.
+
+**Alternatives.** Editing `zones/` here (rejected: R1).
+
+## #45 FP-044 — Policy semantics
+
+**Decision.** `PolicyAction` has no Allow. `min_support_status` only distinguishes VERIFIED from
+the rest (AutoParsed rejected under VERIFIED; Partial/Unsupported are governed only by their own
+`on_*` action). Copies are counted per cardDefId over main+sideboard combined. An id absent from a
+ban list is LEGAL; Restricted means at most 1 copy. Digital-only cards are rejected when the
+extension is disabled OR `allowDigitalOnly` is false. `enforceColorIdentity` is stored but not
+enforced (commanders deferred, REQ-FMT-002). `FirstTurnDrawRule` / `TimeoutPolicy` variants beyond
+the SRS examples (NEVER_SKIP, ALWAYS_SKIP, AUTO_PASS, GAME_LOSS) are house-rule values. `maxMain`
+null means no maximum. The preset ban-list version 2026-11-10 is the SRS example version and
+preset ids are placeholders for data the client supplies. `BanListRef::parse` rejects only empty
+parts and `/` or `@` inside parts (whitespace is not rejected).
+
+**Rationale.** REQ-ING-008 (the engine never silently runs an incomplete card), REQ-FMT-004, and
+SRS §11.1.
+
+**Alternatives.** An Allow action (rejected: contradicts REQ-ING-008); trimming whitespace in
+refs (rejected: not in the pinned contract).
