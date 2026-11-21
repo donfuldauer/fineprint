@@ -498,9 +498,11 @@ fn req_sba_001_704_5j_f7_non_transitive_both_end_states() {
     }
 }
 
-// REQ-SBA-001, CR 704.5j, 201.2a (F7): invalid survivor sets are rejected and nothing is
-// mutated: {A,B} (share Y), {B} alone (C shares no name with B: not maximal), {C} alone (B
-// shares no name with C: not maximal), {} (empty), a duplicate id and a non-candidate id.
+// REQ-SBA-001, CR 704.5j, 201.2a (F7; round 2 D3): invalid survivor sets are rejected as a
+// correctable choice error (`ChoiceError::Invalid` for the pending request, which stays pending)
+// and nothing is mutated: {A,B} (share Y), {B} alone (C shares no name with B: not maximal), {C}
+// alone (B shares no name with C: not maximal), {} (empty), a duplicate id and a non-candidate
+// id.
 #[test]
 fn req_sba_001_704_5j_f7_non_transitive_invalid_answers_rejected() {
     let (mut s, [a, b, c], names) = non_transitive();
@@ -833,4 +835,205 @@ fn req_sba_001_704_5j_f4_evaluated_controller_decides_apnap() {
     assert_to_owners_graveyard(&r, t1, ZoneChangeCause::StateBasedAction);
     assert_to_owners_graveyard(&r, o1, ZoneChangeCause::StateBasedAction);
     assert_eq!(r.nonempty_batches().len(), 1);
+}
+
+// =============================================================================================
+// PR #214 round 2: G5 / D3 (an invalid legend answer is a correctable choice error)
+// =============================================================================================
+
+use fineprint_core::choice::{ChoiceError, ChoiceResponse};
+
+/// Submits `bad` to the pending request of `session` and asserts contract item 7 (D3, CR
+/// 704.5j): `Err(ChoiceError::Invalid { request_id })` with the pending id; the SAME request
+/// (same id, same candidates) stays pending; `answers()` and the state are unchanged.
+fn reject_in_session<F>(
+    session: &mut ChoiceSession<Sim, SbaOut, F>,
+    base: &Snap,
+    bad: ChoiceResponse,
+) where
+    F: Fn(
+        &mut Sim,
+        &mut fineprint_core::choice::ChoiceContext<'_>,
+    ) -> Result<SbaOut, fineprint_core::choice::Interrupt>,
+{
+    let req = session.pending().cloned().expect("a request is pending");
+    let answers = session.answers().to_vec();
+    let hash = session.state_hash();
+    match session.submit(req.request_id, bad.clone()) {
+        Err(ChoiceError::Invalid {
+            request_id,
+            explanation,
+        }) => {
+            assert_eq!(
+                request_id, req.request_id,
+                "{bad:?}: the pending request's id"
+            );
+            assert!(!explanation.is_empty());
+        }
+        other => panic!("{bad:?}: expected Err(ChoiceError::Invalid), got {other:?}"),
+    }
+    let still = session.pending().expect("the request stays pending");
+    assert_eq!(still, &req, "{bad:?}: the same request");
+    assert_eq!(still.request_id, req.request_id);
+    assert_eq!(candidates(still), candidates(&req));
+    assert_eq!(
+        session.answers(),
+        answers.as_slice(),
+        "{bad:?}: nothing recorded"
+    );
+    assert_eq!(session.state_hash(), hash, "{bad:?}");
+    assert_eq!(
+        &session.base().snap(),
+        base,
+        "{bad:?}: the state is unchanged"
+    );
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.5j, 201.2a (G5, D3): A={X,Y}, B={Y}, C={X}: the answer {B}
+// passes the basic checks (one candidate, within max 2) but is not a valid survivor set (C shares
+// no name with B, so it is not maximal): `submit` fails with `ChoiceError::Invalid` carrying the
+// pending request's id; the same request stays pending, nothing is recorded and the state is
+// unchanged; answering {B,C} to the SAME request then completes the pass: A goes to its owner's
+// graveyard, B and C stay.
+#[test]
+fn req_sba_001_704_5j_g5_invalid_answer_is_correctable() {
+    let (s, [a, b, c], names) = non_transitive();
+    let base = s.snap();
+    let mut session = ChoiceSession::start(s, call_sba).expect("starts");
+    let req = session.pending().cloned().expect("pending");
+    assert_component_request(&req, P1, &[a, b, c], &names);
+    reject_in_session(&mut session, &base, survivors(&[b]));
+    assert!(session.answers().is_empty());
+    session
+        .submit(req.request_id, survivors(&[b, c]))
+        .expect("a valid answer to the same request");
+    match session.status() {
+        Status::Done {
+            state,
+            output: Ok(o),
+        } => {
+            assert!(o.performed);
+            assert!(state.on_battlefield(b));
+            assert!(state.on_battlefield(c));
+            assert!(state.zones.object(a).is_none(), "A left");
+            assert_eq!(state.zone_of(a), None);
+            let gy = state
+                .zones
+                .len(fineprint_core::zones::ZoneId::Graveyard(P1));
+            assert_eq!(gy, 1, "A in its owner's (P1's) graveyard");
+        }
+        _ => panic!("expected a completed pass"),
+    }
+    assert_eq!(session.answers(), &[survivors(&[b, c])]);
+}
+
+// REQ-SBA-001, CR 704.5j, 201.2a (G5, D3): one session rejects, in turn, {A,B} (share Y), {}
+// (empty), a duplicate id, a non-candidate and an answer of the wrong type; each keeps the same
+// request pending with nothing recorded and the state unchanged; a valid {A} then completes the
+// pass (B and C to their owners' graveyards).
+#[test]
+fn req_sba_001_704_5j_g5_rejections_then_valid() {
+    let (mut s, [a, b, c], _) = non_transitive();
+    let outsider = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let base = s.snap();
+    let mut session = ChoiceSession::start(s, call_sba).expect("starts");
+    let req = session.pending().cloned().expect("pending");
+    for bad in [
+        survivors(&[b]),
+        survivors(&[a, b]),
+        survivors(&[]),
+        survivors(&[a, a]),
+        survivors(&[b, c, c]),
+        survivors(&[outsider]),
+        survivors(&[a, outsider]),
+        select(0),
+    ] {
+        reject_in_session(&mut session, &base, bad);
+        assert!(session.answers().is_empty());
+    }
+    session
+        .submit(req.request_id, survivors(&[a]))
+        .expect("a valid answer");
+    match session.status() {
+        Status::Done {
+            state,
+            output: Ok(o),
+        } => {
+            assert!(o.performed);
+            assert!(state.on_battlefield(a));
+            assert!(state.on_battlefield(outsider));
+            assert!(state.zones.object(b).is_none());
+            assert!(state.zones.object(c).is_none());
+            // B is owned by P2, C by P1.
+            for p in [P1, P2] {
+                assert_eq!(
+                    state.zones.len(fineprint_core::zones::ZoneId::Graveyard(p)),
+                    1,
+                    "{p:?}'s graveyard"
+                );
+            }
+        }
+        _ => panic!("expected a completed pass"),
+    }
+}
+
+// REQ-SBA-001, CR 704.5j, 101.4, 101.4b (G5, D3): two players: P1 (active) answers its request
+// validly; P2 then submits an invalid survivor set: rejected with `ChoiceError::Invalid` for P2's
+// request; P1's accepted answer stays recorded; P2's request stays pending; the state is
+// unchanged; a valid answer by P2 completes the pass.
+#[test]
+fn req_sba_001_704_5j_g5_second_player_invalid_keeps_first_answer() {
+    let mut s = Sim::new();
+    let p1a = s.legend(P1, P1, "test.legend_a");
+    let p1b = s.legend(P1, P1, "test.legend_a");
+    let mut ids = Vec::new();
+    for n in [
+        &["test.name_x", "test.name_y"][..],
+        &["test.name_y"][..],
+        &["test.name_x"][..],
+    ] {
+        ids.push(s.legend_named(P2, P2, n));
+    }
+    let (qa, qb, qc) = (ids[0], ids[1], ids[2]);
+    s.set_turn(&[P1, P2], P1);
+    let base = s.snap();
+    let mut session = ChoiceSession::start(s, call_sba).expect("starts");
+    let first = session.pending().cloned().expect("P1's request");
+    assert_legend_request(&first, P1, &[p1a, p1b]);
+    session
+        .submit(first.request_id, keep(p1b))
+        .expect("P1's valid answer");
+    let second = session.pending().cloned().expect("P2's request");
+    assert_eq!(second.chooser, P2);
+    assert_eq!(candidates(&second), vec![qa, qb, qc]);
+    for bad in [survivors(&[qc]), survivors(&[qa, qb]), survivors(&[])] {
+        reject_in_session(&mut session, &base, bad);
+        assert_eq!(
+            session.answers(),
+            &[keep(p1b)],
+            "P1's answer stays recorded"
+        );
+        assert_eq!(
+            session.pending().map(|r| r.request_id),
+            Some(second.request_id)
+        );
+    }
+    session
+        .submit(second.request_id, survivors(&[qb, qc]))
+        .expect("P2's valid answer");
+    match session.status() {
+        Status::Done {
+            state,
+            output: Ok(o),
+        } => {
+            assert!(o.performed);
+            assert!(state.on_battlefield(p1b));
+            assert!(state.zones.object(p1a).is_none());
+            assert!(state.on_battlefield(qb));
+            assert!(state.on_battlefield(qc));
+            assert!(state.zones.object(qa).is_none());
+        }
+        _ => panic!("expected a completed pass"),
+    }
+    assert_eq!(session.answers(), &[keep(p1b), survivors(&[qb, qc])]);
 }
