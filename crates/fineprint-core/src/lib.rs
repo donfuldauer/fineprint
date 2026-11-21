@@ -24,6 +24,8 @@ pub mod objects;
 pub mod permanent;
 /// The replacement and prevention bus: collection, precedence tiers, choice, shields, child events (REQ-EVENT-001).
 pub mod replacement;
+/// State-based actions: the data-driven registry of CR 704.5a-704.5i and the simultaneous check-and-perform pass (REQ-SBA-001).
+pub mod sba;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
 /// Trigger detection: look-back classification, event matching, intervening-if, trigger limits and the waiting-trigger queue (REQ-EVENT-002).
