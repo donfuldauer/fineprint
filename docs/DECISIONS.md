@@ -875,6 +875,9 @@ pick work independently).
 
 ## Self-chaining — handoff through the backstop scheduled task
 
+**Superseded** by "Self-chaining — next session starts from a merged issue/ PR" below:
+`fire_trigger` is refused for a task the session did not create.
+
 **Context (2026-11-20).** Self-chaining used `create_session`, so each session started the next.
 That ran without prompts while the chain descended from a session the owner started. After the
 chain broke, the backstop scheduled task restarted it. From then on every session descended from a
@@ -907,6 +910,44 @@ same issue. A run that finds another live chain stops, so at most one chain surv
 **Alternatives.** Keep `create_session` and approve each handoff (rejected: the chain is meant to
 run unattended). Have the owner restart the chain by hand after every break (rejected: the
 backstop exists to do that).
+
+## Self-chaining — next session starts from a merged issue/ PR
+
+**Context (2026-11-21).** The `fire_trigger` handoff above failed in its first use (issue #40,
+PR #202): a session may fire only scheduled tasks it created, and the backstop was created in the
+web UI. PR #205 moved the start of the next session to a scheduled task with a GitHub trigger on
+pull requests merged into `main` from `issue/` branches. The kilohertz-pinball repository made the
+same change (its PR #143); its CodeRabbit rounds added unblocking rules that are adopted here.
+
+**Decision.**
+- A session never starts its successor; the merge of an `issue/` branch does (`work-issue` §8).
+  A session on another branch says in its PR that the chain will not continue from that merge.
+- The next session can start before the merging session finishes unblocking, so `work-issue`
+  §1 step 0 runs the same sweep as §7 step 3 before choosing an issue.
+- The sweep covers every open `work-unit` issue labelled `blocked`, not only the merged issue's
+  "blocking" list, so a blocker replaced by another issue is caught when the replacement merges.
+- Before changing labels the sweep re-reads them and skips an issue that lost `blocked` or gained
+  `status:blocked-failure`. It adds `ready` and then removes `blocked` with single-label REST
+  calls, so the issue is never without both and no other label is rewritten.
+- The "Unblocked by #<D> (PR #<P>)" comment names the blocker whose merged PR satisfied it last,
+  is posted once, and is omitted (with a RUN_LOG note) when none can be identified.
+- `blocked` on an issue with no blockers is a person's hold: the sweep leaves it, and an explicit
+  "work on #N" request stops on it. On an explicit request, a `blocked` label whose blockers are
+  all satisfied is stale and is replaced with `ready`.
+
+**Rationale.** The merge trigger needs no handoff code, so no remote-session approvals, no marker
+comments and no depth limit. The sweep makes unblocking independent of which session finishes
+first.
+
+**Accepted risk.** A person could add `status:blocked-failure` between the re-read and the label
+calls. The window is seconds long, adding `ready` never removes the hold label, and P7 sets that
+label only on an issue a session was working, not on a `blocked` one. (kilohertz-pinball accepts
+a wider version of this race because its MCP tools only replace the full label list; fineprint
+uses label-level `gh` calls.)
+
+**Alternatives.** The `fire_trigger` handoff (rejected: refused for tasks the session did not
+create). `create_session` chaining (rejected: approval prompts). Unblocking only from
+`issues/<N>/dependencies/blocking` (rejected: misses replacement-covered blockers).
 
 ## CI — PR load
 
