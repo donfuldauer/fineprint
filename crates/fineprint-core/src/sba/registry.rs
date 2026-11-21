@@ -13,6 +13,7 @@ use fineprint_base::ids::{ObjectId, PlayerId};
 use super::types::{GameVariant, LOST_THE_GAME, SbaEnvironment, SbaSubject};
 use crate::events::EventState;
 use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate};
+use crate::permanent::Permanents;
 use crate::state::{GameState, PlayerState};
 use crate::zones::{ZoneId, Zones};
 
@@ -72,17 +73,26 @@ fn has_keyword(abilities: &[fineprint_dsl::card::AbilityAST], keyword: &str) -> 
 
 impl<'a> SbaView<'a> {
     /// Takes the snapshot: every battlefield object is evaluated through the layers once.
-    /// Objects the layer environment does not know (or cannot evaluate) are skipped.
+    /// Objects the layer environment does not know (or cannot evaluate) are skipped, and so are
+    /// phased-out permanents: CR 702.26b treats them as though they do not exist, so the object
+    /// entries CR 704.5f-704.5i never see them. CR 704.5d and CR 704.5e iterate by zone
+    /// (CR 702.26d: phasing is not a zone change) and are unaffected. An object with no entry in
+    /// `phasing` is treated as phased in.
     pub(super) fn new(
         game: &'a GameState,
         zones: &'a Zones,
         events: &'a EventState,
+        phasing: &Permanents,
         effects: &ContinuousEffects,
         layer_env: &dyn LayerEnvironment,
         env: &'a dyn SbaEnvironment,
     ) -> SbaView<'a> {
         let mut permanents = BTreeMap::new();
         for id in zones.contents(ZoneId::Battlefield) {
+            // CR 702.26b
+            if phasing.get(id).is_some_and(|p| p.status().phased_out) {
+                continue;
+            }
             // CR 613.1, CR 613.4: the characteristics after every layer.
             let Ok(evaluated) = evaluate(effects, layer_env, id) else {
                 continue;
