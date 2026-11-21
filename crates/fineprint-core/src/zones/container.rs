@@ -416,6 +416,20 @@ impl Zones {
         Ok(record.card)
     }
 
+    /// The object `id` ceases to exist (REQ-SBA-001, CR 704.5d, CR 704.5e, CR 111.7,
+    /// CR 707.10a): it and its record are removed entirely and its card is returned. Unlike
+    /// [`Zones::send_outside`], the card is put into no outside-the-game pool, and it is no
+    /// longer present anywhere, so a later object can be created for the same card. This is
+    /// not a zone change (no new id is issued).
+    ///
+    /// # Errors
+    /// [`ZoneError::UnknownObject`]; the container is then unchanged.
+    pub fn cease_to_exist(&mut self, id: ObjectId) -> Result<CardId, ZoneError> {
+        let record = self.record(id)?;
+        self.remove_object(record);
+        Ok(record.card)
+    }
+
     fn insert_outside(&mut self, owner: PlayerId, pool: OutsidePool, card: CardId) {
         let players = Arc::make_mut(&mut self.players);
         if let Some(pz) = players.get_mut(&owner) {
