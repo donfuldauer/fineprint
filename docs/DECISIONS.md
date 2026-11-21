@@ -6988,3 +6988,128 @@ SRS §11.1.
 
 **Alternatives.** An Allow action (rejected: contradicts REQ-ING-008); trimming whitespace in
 refs (rejected: not in the pinned contract).
+
+## #42 FP-041 — World rule: the time with the world supertype is a caller-supplied stamp
+
+**Decision.** CR 704.5k compares how long each permanent "has had the world supertype", not
+when it entered the battlefield. `SbaEnvironment::world_supertype_since(object) -> u64` returns a
+caller-supplied monotonic stamp of when the object last gained the supertype (default 0;
+`StoredSbaEnvironment::world_since`, a missing object answers 0). A LARGER stamp means it gained
+the supertype later, so it has had it for a SHORTER time. Among the evaluated, phased-in world
+permanents, if exactly one holds the largest stamp, every other one is a finding; if two or more
+hold it, all world permanents are findings. A single world permanent never goes. No choice, no
+APNAP or timestamp tie-break. The default 0 therefore ties everything: a caller that does not
+supply stamps sees every world permanent go when two or more exist.
+
+**Rationale.** CR 704.5k and CR 205.4b (a permanent can gain the supertype after it entered);
+the state model records no "gained a supertype" time, and the object timestamp is not that
+measure. A stamp keyed by object id lasts one zone residency (CR 400.7), like the other seams.
+
+**Alternatives.** The object's entry timestamp (rejected: wrong measure when the supertype is
+granted later); the layer-system timestamp of the effect granting "World" (rejected: no such
+query exists yet and a printed supertype has no effect timestamp); default "newest wins by id"
+(rejected: an invented tie-break the CR forbids).
+
+## #42 FP-041 — New SbaEnvironment seams for CR 704.5k-704.5t
+
+**Decision.** Seven defaulted methods are added to `SbaEnvironment` (additive; every existing
+implementor compiles unchanged), each with a matching public field of `StoredSbaEnvironment`:
+`world_supertype_since` (`world_since`), `aura_can_enchant(aura, target) -> bool` default true
+(`illegal_aura_targets`, the illegal pairs), `counter_limits(object) -> BTreeMap<String, i64>`
+default empty (`counter_limits`), `saga_final_chapter(object) -> Option<i64>` default None, Some
+only for an object with one or more chapter abilities (`saga_final_chapter`),
+`chapter_ability_pending(object)` default false (`chapter_pending`),
+`dungeons_at_bottommost_room() -> BTreeSet<ObjectId>` default empty (`bottommost_dungeons`) and
+`room_ability_pending(dungeon)` default false (`room_pending`). Names, supertypes, card types,
+subtypes and counters are read from the evaluated characteristics and
+`LayerEnvironment::counters`; controllers and attachments from `Permanents`. The engine itself
+checks the structural part of CR 704.5m (not attached, attached to itself, target gone, player
+left, Aura that is a creature or a battle); `aura_can_enchant` answers only the enchant ability
+and other applicable effects (CR 303.4c). A negative counter limit counts as 0; several limits for
+one kind are the caller's to reduce (the map holds one N per kind, the smallest applies).
+
+**Rationale.** The state model has no enchant-ability legality, no "can't have more than N
+counters" ability data, no chapter-ability or room-ability trigger tracking, no venture marker
+and no supertype-gain time yet. Following "#41 FP-040 — The SbaEnvironment seam", facts the
+state does not hold come from a caller seam; the heartbeat and layer-integration units replace
+these seams with engine state. Every answer is a pure function of caller state (REQ-CORE-001).
+
+**Alternatives.** Adding these facts to `GameState` or the permanent container now (rejected:
+outside the owned paths and contracts of this unit, R1/R2); hard-coding "no limits / no sagas"
+without a seam (rejected: the entries could not be tested or used).
+
+## #42 FP-041 — Legend rule: check reports every member, perform asks one choice per group
+
+**Decision.** Legendary, evaluated, phased-in, named permanents are grouped per controller (from
+the permanent container) into connected components of "share at least one name" (CR 201.2a). A
+nameless object matches nothing (CR 201.2a, CR 708.2a). `check` is pure and cannot ask, so it
+reports EVERY member of each group of two or more as a CR 704.5j finding. `perform_all` asks, before
+any state change (including consuming the empty-library flag), one `SELECT_OBJECTS_FROM_ZONE`
+choice per group in ascending order of each group's lowest id: chooser the controller, reason
+`CR 704.5j` with no source, min = max = 1, candidates and enumerated options the group ascending,
+`default_on_timeout` the lowest id. The chosen permanent stays; every other member is a move to
+its owner's graveyard with cause `StateBasedAction` in the one batch. Names that overlap
+non-transitively inside one controller (A {X, Y}, B {Y}, C {X}) form ONE group (connected
+components), and the controller keeps one of the three. An answer that is not exactly one
+candidate (the session normally rejects it first) is `BusInterrupt::Error(BusError::Choice(
+ChoiceError::Procedure(..)))`, the error kind the bus uses for other unexpected answers.
+
+**Rationale.** CR 704.5j (same controller only; that player chooses; the rest go in the single
+event), SRS choice row "SELECT_OBJECTS_FROM_ZONE ... legend rule". Asking first keeps the
+existing restore-on-`Pending` contract trivially true. Connected components give one choice per
+overlapping cluster, a deterministic and finite procedure; after the pass no two same-named
+legends of one controller remain, which no pairwise-group alternative guarantees in one pass.
+
+**Alternatives.** One choice per name (rejected: an object with two names would be in two groups
+and could be both kept and lost); asking the active player (rejected: CR 704.5j says "that
+player"); keeping the newest automatically (rejected: invents a rule).
+
+## #42 FP-041 — Mixed results: move wins over unattach and counter removal; Sacrifice cause
+
+**Decision.** Within one pass: ceasing to exist wins over a move (as before); a move or ceasing
+wins over unattaching (CR 704.5n, CR 704.5p) and counter removal (CR 704.5q, CR 704.5r): such an
+object gets no `detach` and no `RemoveCounters` event, though every finding is still reported.
+An object with a CR 704.5s finding and another move finding moves once with
+`ZoneChangeCause::Sacrifice`. When CR 704.5q and CR 704.5r both remove counters of one kind from
+one object, one event removes the larger of the two amounts (the result equals applying 704.5q
+and then 704.5r). Counter removals are `RemoveCounters` events in the same `process_batch` call
+(`sba = true`) as the moves, ascending object id then kind. Unattaching is done after the batch
+and after every LKI capture through `Permanents::detach`, so every record shows the
+attachments from before the pass (CR 704.8); `SbaOutcome::unattached` lists only permanents that
+were still attached (a host that left in the batch already unattached them). A dungeon removed
+from the game (CR 704.5t) uses the ceasing path (`Zones::cease_to_exist`, LKI captured from the
+pre-pass state) but is reported in `removed_from_game`, not `ceased`; if it also ceases by
+CR 704.5d/e it is reported as ceased.
+
+**Rationale.** CR 704.3 (one simultaneous event), CR 704.8 (LKI from before the pass). A
+permanent leaving the battlefield is unattached by leaving anyway, and its counters cease with
+it, so the extra actions would only add unobservable or failing events. Sacrifice is the more
+specific description of what happens to the Saga (CR 715.4) and lets sacrifice-matching effects
+see it. Taking the larger counter amount never removes more counters than either rule demands.
+
+**Alternatives.** Summing the two counter amounts (rejected: removes more than either rule
+requires; noted as a rules question to the Orchestrator); unattaching before the batch (rejected:
+the LKI of a dying host would lose its attachments); a separate batch for counters (rejected:
+CR 704.3 single event).
+
+## #42 FP-041 — Other judgement calls (Aura and battle, unknown targets, phasing)
+
+**Decision.** (1) An attached Aura that is also a battle is illegal under CR 704.5m (graveyard),
+like an Aura that is a creature (CR 303.4d); its CR 704.5p finding (CR 310.10) is not performed
+because the move wins. (2) An Equipment that is also a Fortification is legal on a creature or a
+land. (3) An attachment whose target permanent is on the battlefield but cannot be evaluated by
+the layer environment is not judged by CR 704.5n (existing "skip what cannot be evaluated"
+policy). (4) An attachment to a phased-out permanent is not checked by CR 704.5m, 704.5n or
+704.5p (CR 702.26b); a phased-out permanent is never a legend-group member, world permanent,
+counter holder or Saga for these entries. (5) A player who has the `LOST_THE_GAME` designation or
+is not in the game counts as having left the game for CR 303.4c. (6) The container refuses
+self-attachment, so "attached to itself" is checked defensively by
+`target_self_or_gone` and unit-tested there.
+
+**Rationale.** CR 310.10 says a battle can't be attached even if it is also an Aura, and an
+illegally attached Aura goes to the graveyard (CR 704.5m); either order ends in the graveyard,
+and the one-pass graveyard result avoids a needless repeat. The rest follows the decisions of
+#41 FP-040 on phasing and unevaluable objects.
+
+**Alternatives.** (1) Unattach only, then graveyard on the next check as "not attached"
+(rejected: same end state, one more pass, and an observable unattached Aura in between).
