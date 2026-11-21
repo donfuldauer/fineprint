@@ -301,13 +301,15 @@ fn perform_findings(
     // object's record. Captured after the batch, not before it: capturing before the batch would
     // make the bus fail with `AlreadyCaptured` if an `Instead` moved the object (decision #41
     // FP-040).
-    let live = (pre_batch.is_none() || targets.iter().any(|&(_, moved)| moved))
-        .then(|| (ctx.permanents.clone(), ctx.events.markers().clone()));
+    let live = (!targets.is_empty()
+        && (pre_batch.is_none() || targets.iter().any(|&(_, moved)| moved)))
+    .then(|| (ctx.permanents.clone(), ctx.events.markers().clone()));
     for &(id, moved) in &targets {
         let (permanents, markers) = match (&pre_batch, &live, moved) {
             (Some(pre), _, false) => pre,
             (_, Some(now), _) => now,
-            // `live` is built whenever `pre_batch` is `None` or an object moved.
+            // `live` is built whenever `targets` is not empty and `pre_batch` is `None` or an
+            // object moved.
             _ => continue,
         };
         capture_ceasing_lki(ctx, id, permanents, markers)?;
