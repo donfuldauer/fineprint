@@ -3,13 +3,14 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! Property tests for the SBA pass over seeded random boards (REQ-SBA-001, REQ-TEST-001,
-//! REQ-TURN-001; CR 704.3, 704.5a-704.5i, 704.7). The generator is a fixed-seed LCG (R3: no
+//! REQ-TURN-001, REQ-CORE-001; CR 704.3, 704.5a-704.5i, 704.5j, 704.5k, 704.5m, 704.5n,
+//! 704.5p, 704.5q, 704.5r, 704.5s, 704.5t, 704.7). The generator is a fixed-seed LCG (R3: no
 //! system randomness). Black-box: written from the work-item brief only.
 
 #[path = "spec_sba_support.rs"]
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_core::sba::SbaSubject;
@@ -166,6 +167,18 @@ fn req_sba_001_property_pass_invariants() {
         let mut losers: BTreeSet<PlayerId> = BTreeSet::new();
         for f in &o.findings {
             match f.subject {
+                // CR 704.5q (added by FP-041): a creature with both +1/+1 and -1/-1 counters
+                // loses N of each; it leaves only if a 704.5d-i finding also names it.
+                SbaSubject::Object(id) if f.entry_id == "704.5q" => {
+                    assert!(r.before.counter(id, "+1/+1") > 0, "seed {seed}: {f:?}");
+                    assert!(r.before.counter(id, "-1/-1") > 0, "seed {seed}: {f:?}");
+                    if r.after.zones.object(id).is_some() {
+                        assert!(
+                            r.after.counter(id, "+1/+1") == 0 || r.after.counter(id, "-1/-1") == 0,
+                            "seed {seed}: {f:?} left both kinds"
+                        );
+                    }
+                }
                 SbaSubject::Object(id) => {
                     objects.insert(id);
                     assert!(r.after.zones.object(id).is_none(), "seed {seed}: {f:?}");
@@ -209,9 +222,10 @@ fn req_sba_001_property_pass_invariants() {
         sorted.dedup();
         assert_eq!(sorted, o.ceased, "seed {seed}: ceased ascending");
         assert!(r.nonempty_batches().len() <= 1, "seed {seed}");
+        // A batch holds the moves and (CR 704.5q) the counter removals of the pass.
         assert_eq!(
             r.nonempty_batches().len(),
-            usize::from(!moved.is_empty()),
+            usize::from(!moved.is_empty() || !counter_removals(&r).is_empty()),
             "seed {seed}"
         );
 
@@ -268,5 +282,378 @@ fn req_sba_001_property_check_pure() {
         assert_eq!(a, b, "seed {seed}");
         assert_eq!(s.snap(), before, "seed {seed}");
         assert_eq!(s.state_hash(), hash, "seed {seed}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR 704.5j-704.5t (FP-041)
+// ---------------------------------------------------------------------------------------------
+
+use fineprint_core::choice::{ChoiceResponse, PendingChoiceRequest};
+use fineprint_core::events::ZoneChangeCause;
+use fineprint_core::permanent::AttachTarget;
+
+const LEGEND_NAMES: [&str; 3] = ["test.legend_a", "test.legend_b", "test.legend_c"];
+
+/// A random board for `seed` exercising 704.5a-704.5t together: creatures (some with toughness
+/// 0 or below), legends, world permanents, Auras, Equipment, Fortifications, other attached
+/// permanents, +1/+1 and -1/-1 counters, counter limits, Sagas and dungeons, some phased out.
+fn random_new_board(seed: u64) -> Sim {
+    let mut g = Lcg::new(seed.wrapping_mul(31).wrapping_add(7));
+    let mut s = Sim::with_players(2 + usize::try_from(g.below(2)).expect("fits"));
+    let players: Vec<PlayerId> = s.game.turn_order().to_vec();
+    let mut hosts: Vec<ObjectId> = Vec::new();
+    let mut lands: Vec<ObjectId> = Vec::new();
+    let mut world_stamp = 0;
+    for _ in 0..(3 + g.below(14)) {
+        let owner = g.pick(&players);
+        let controller = if g.chance(1, 4) {
+            g.pick(&players)
+        } else {
+            owner
+        };
+        match g.below(11) {
+            0 | 1 => {
+                let t = g.range(-1, 3);
+                let id = s.permanent(owner, controller, creature_chars("test.vanilla_1_x", 1, t));
+                hosts.push(id);
+            }
+            2 => {
+                let id = s.permanent(owner, controller, land_chars("test.land_a"));
+                lands.push(id);
+            }
+            3 => {
+                let name = g.pick(&LEGEND_NAMES);
+                s.legend(owner, controller, name);
+            }
+            4 => {
+                world_stamp += g.below(2);
+                s.world(owner, controller, "test.world_a", Some(world_stamp));
+            }
+            5 => {
+                let id = s.permanent(owner, controller, aura_chars("test.aura_a"));
+                match g.below(3) {
+                    0 if !hosts.is_empty() => s.attach_to(id, g.pick(&hosts)),
+                    1 => s.attach(id, AttachTarget::Player(g.pick(&players))),
+                    _ => {}
+                }
+            }
+            6 => {
+                let c = if g.chance(1, 2) {
+                    equipment_chars("test.equipment_a")
+                } else {
+                    fortification_chars("test.fortification_a")
+                };
+                let id = s.permanent(owner, controller, c);
+                match g.below(4) {
+                    0 if !hosts.is_empty() => s.attach_to(id, g.pick(&hosts)),
+                    1 if !lands.is_empty() => s.attach_to(id, g.pick(&lands)),
+                    2 => s.attach(id, AttachTarget::Player(g.pick(&players))),
+                    _ => {}
+                }
+            }
+            7 => {
+                let id = s.permanent(owner, controller, artifact_chars("test.artifact_a"));
+                if g.chance(1, 2) && !hosts.is_empty() {
+                    s.attach_to(id, g.pick(&hosts));
+                }
+                if g.chance(1, 2) {
+                    s.counters(id, "charge", g.range(1, 4));
+                    s.limit(id, "charge", g.range(0, 3));
+                }
+            }
+            8 => {
+                let id = s.permanent(owner, controller, creature_chars("test.vanilla_4_4", 4, 4));
+                hosts.push(id);
+                let plus = g.range(0, 3);
+                let minus = g.range(0, 3);
+                if plus > 0 {
+                    s.counters(id, "+1/+1", plus);
+                }
+                if minus > 0 {
+                    s.counters(id, "-1/-1", minus);
+                }
+            }
+            9 => {
+                let last = if g.chance(4, 5) {
+                    Some(g.range(1, 3))
+                } else {
+                    None
+                };
+                let id = s.saga(owner, controller, last, g.range(0, 4));
+                if g.chance(1, 5) {
+                    s.env.chapter_pending.insert(id);
+                }
+            }
+            _ => {
+                let id = s.dungeon(owner, g.chance(2, 3));
+                if g.chance(1, 5) {
+                    s.env.room_pending.insert(id);
+                }
+            }
+        }
+    }
+    // Phase out a few battlefield permanents.
+    for id in s.permanents.ids() {
+        if g.chance(1, 10) {
+            s.phase_out(id);
+        }
+    }
+    if g.chance(1, 4) {
+        let p = g.pick(&players);
+        s.set_life(p, 0);
+    }
+    s
+}
+
+/// Answers a legend request with the candidate picked by `g`.
+fn random_keep(g: &mut Lcg, req: &PendingChoiceRequest) -> ChoiceResponse {
+    let c = candidates(req);
+    let i = usize::try_from(g.below(c.len() as u64)).expect("fits");
+    keep(c[i])
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, 704.5j-704.5t: (a) the same inputs and answers give an
+// identical outcome, state hash and final state twice.
+#[test]
+fn req_sba_001_property_new_entries_deterministic() {
+    for seed in 0..SEEDS {
+        let run = |seed| {
+            let mut g = Lcg::new(seed + 1000);
+            drive_sba(random_new_board(seed), move |_, req| {
+                random_keep(&mut g, req)
+            })
+        };
+        let a = run(seed);
+        let b = run(seed);
+        assert_eq!(a.result, b.result, "seed {seed}");
+        assert_eq!(a.hash, b.hash, "seed {seed}");
+        assert_eq!(a.answers, b.answers, "seed {seed}");
+        assert_eq!(a.after.snap(), b.after.snap(), "seed {seed}");
+        assert_eq!(a.after.state_hash(), b.after.state_hash(), "seed {seed}");
+    }
+}
+
+// REQ-SBA-001, CR 704.5k: (b) the world rule keeps 0 or 1 world permanents: the one with the
+// unique largest stamp, or none on a tie; the result never depends on which id holds which
+// stamp (the stamps reversed over the ids give the same count, and the survivor is again the
+// holder of the largest stamp).
+#[test]
+fn req_sba_001_property_world_rule() {
+    for seed in 0..SEEDS {
+        let mut g = Lcg::new(seed ^ 0x77);
+        let n = usize::try_from(2 + g.below(4)).expect("fits");
+        let stamps: Vec<u64> = (0..n).map(|_| g.below(4)).collect();
+        let owners: Vec<PlayerId> = (0..n).map(|_| g.pick(&[P1, P2])).collect();
+        let max = *stamps.iter().max().expect("nonempty");
+        let unique = stamps.iter().filter(|x| **x == max).count() == 1;
+        let mut kept_counts = Vec::new();
+        for order in [stamps.clone(), stamps.iter().rev().copied().collect()] {
+            let mut s = Sim::new();
+            let ids: Vec<ObjectId> = order
+                .iter()
+                .zip(&owners)
+                .map(|(stamp, owner)| s.world(*owner, *owner, "test.world_a", Some(*stamp)))
+                .collect();
+            let r = run_sba(s);
+            let kept: Vec<ObjectId> = ids
+                .iter()
+                .copied()
+                .filter(|id| r.after.on_battlefield(*id))
+                .collect();
+            assert!(kept.len() <= 1, "seed {seed}: kept {kept:?}");
+            assert_eq!(kept.len(), usize::from(unique), "seed {seed}: {order:?}");
+            if let Some(k) = kept.first() {
+                let i = ids.iter().position(|x| x == k).expect("present");
+                assert_eq!(order[i], max, "seed {seed}: the newest stays");
+            }
+            for id in &ids {
+                if !kept.contains(id) {
+                    assert_to_owners_graveyard(&r, *id, ZoneChangeCause::StateBasedAction);
+                }
+            }
+            kept_counts.push(kept.len());
+        }
+        assert_eq!(kept_counts[0], kept_counts[1], "seed {seed}");
+    }
+}
+
+// REQ-SBA-001, CR 704.5j: (c) after a legend pass answered with any candidate, each
+// (controller, name) group keeps exactly one permanent, the chosen one.
+#[test]
+fn req_sba_001_property_legend_rule() {
+    for seed in 0..SEEDS {
+        let mut g = Lcg::new(seed ^ 0x1E6);
+        let mut s = Sim::new();
+        let mut members: BTreeMap<(PlayerId, &str), Vec<ObjectId>> = BTreeMap::new();
+        for _ in 0..(2 + g.below(8)) {
+            let owner = g.pick(&[P1, P2]);
+            let controller = g.pick(&[P1, P2]);
+            let name = g.pick(&LEGEND_NAMES);
+            let id = s.legend(owner, controller, name);
+            members.entry((controller, name)).or_default().push(id);
+        }
+        let groups = members.values().filter(|v| v.len() >= 2).count();
+        let mut ga = Lcg::new(seed);
+        let r = drive_sba(s, move |_, req| random_keep(&mut ga, req));
+        assert_eq!(
+            r.requests.len(),
+            groups,
+            "seed {seed}: one request per group"
+        );
+        let chosen: BTreeSet<ObjectId> = r
+            .answers
+            .iter()
+            .flat_map(|a| match a {
+                ChoiceResponse::SubmitObjectSelection { objects } => objects.clone(),
+                other => panic!("seed {seed}: unexpected answer {other:?}"),
+            })
+            .collect();
+        for ((controller, _), ids) in &members {
+            let left: Vec<ObjectId> = ids
+                .iter()
+                .copied()
+                .filter(|id| r.after.on_battlefield(*id))
+                .collect();
+            assert_eq!(left.len(), 1, "seed {seed}: {ids:?}");
+            if ids.len() >= 2 {
+                assert!(
+                    chosen.contains(&left[0]),
+                    "seed {seed}: the chosen one stays"
+                );
+                let req = r
+                    .requests
+                    .iter()
+                    .find(|q| candidates(q).contains(&ids[0]))
+                    .expect("asked");
+                assert_legend_request(req, *controller, ids);
+            }
+            for id in ids {
+                if *id != left[0] {
+                    assert_to_owners_graveyard(&r, *id, ZoneChangeCause::StateBasedAction);
+                }
+            }
+        }
+    }
+}
+
+// REQ-SBA-001, CR 704.5q: (d) a permanent with a +1/+1 and b -1/-1 counters keeps exactly
+// |a - b| counters of the larger kind and none of the smaller.
+#[test]
+fn req_sba_001_property_plus_minus_annihilate() {
+    for a in 0..6 {
+        for b in 0..6 {
+            let mut s = Sim::new();
+            let id = s.permanent(P1, P1, artifact_chars("test.artifact_a"));
+            if a > 0 {
+                s.counters(id, "+1/+1", a);
+            }
+            if b > 0 {
+                s.counters(id, "-1/-1", b);
+            }
+            let r = run_sba(s);
+            let (pa, pb) = (r.after.counter(id, "+1/+1"), r.after.counter(id, "-1/-1"));
+            if a > 0 && b > 0 {
+                assert_eq!(r.outcome().findings, vec![finding("704.5q", obj(id))]);
+                assert_eq!((pa, pb), ((a - b).max(0), (b - a).max(0)), "{a}/{b}");
+            } else {
+                assert!(r.outcome().findings.is_empty(), "{a}/{b}");
+                assert_eq!((pa, pb), (a, b), "{a}/{b}");
+            }
+        }
+    }
+}
+
+// REQ-SBA-001, CR 704.3, 704.5a-704.5t: (e) every findings list (from `check` and from the
+// pass) is in registry order then subject order, and the pass reports what `check` found.
+#[test]
+fn req_sba_001_property_findings_order() {
+    let mut nonempty = 0;
+    for seed in 0..SEEDS {
+        let mut s = random_new_board(seed);
+        let checked = s.check();
+        assert_findings_ordered(&checked);
+        let mut g = Lcg::new(seed);
+        let r = drive_sba(s, move |_, req| random_keep(&mut g, req));
+        assert_findings_ordered(&r.outcome().findings);
+        assert_eq!(r.outcome().findings, checked, "seed {seed}");
+        assert_eq!(r.outcome().performed, !checked.is_empty(), "seed {seed}");
+        for list in [&r.outcome().unattached, &r.outcome().removed_from_game] {
+            let mut sorted = list.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(&sorted, list, "seed {seed}: ascending");
+        }
+        let new_entries = checked
+            .iter()
+            .filter(|f| NEW_ENTRY_IDS.contains(&f.entry_id))
+            .count();
+        if new_entries > 0 {
+            nonempty += 1;
+        }
+    }
+    assert!(
+        nonempty > SEEDS / 2,
+        "the generator exercises the new entries ({nonempty})"
+    );
+}
+
+// REQ-SBA-001, CR 704.3, 704.5f, 704.5j, 704.5n, 704.5q: (f) one `perform_all` handles a
+// toughness-0 creature, a legend pair, an unattach and a counter removal together, in one
+// event, whatever the creation order.
+#[test]
+fn req_sba_001_property_mixed_pass_simultaneous() {
+    let orders: [[usize; 4]; 4] = [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]];
+    for order in orders {
+        let mut s = Sim::new();
+        let mut zero = None;
+        let mut legends = Vec::new();
+        let mut eq = None;
+        let mut pt = None;
+        for role in order {
+            match role {
+                0 => zero = Some(s.creature(P1, "test.vanilla_2_0", 2, 0)),
+                1 => {
+                    legends.push(s.legend(P1, P1, "test.legend_a"));
+                    legends.push(s.legend(P2, P1, "test.legend_a"));
+                }
+                2 => {
+                    let id = s.permanent(P2, P2, equipment_chars("test.equipment_a"));
+                    s.attach(id, AttachTarget::Player(P1));
+                    eq = Some(id);
+                }
+                _ => {
+                    let id = s.creature(P2, "test.vanilla_2_2", 2, 2);
+                    s.counters(id, "+1/+1", 2);
+                    s.counters(id, "-1/-1", 1);
+                    pt = Some(id);
+                }
+            }
+        }
+        let (zero, eq, pt) = (zero.unwrap(), eq.unwrap(), pt.unwrap());
+        let kept = legends[1];
+        let r = drive_sba(s, |_, _| keep(kept));
+        assert_eq!(r.requests.len(), 1, "{order:?}");
+        let o = r.outcome();
+        assert!(o.performed);
+        assert_findings_ordered(&o.findings);
+        let ids: Vec<&str> = o.findings.iter().map(|f| f.entry_id).collect();
+        assert_eq!(
+            ids,
+            vec!["704.5f", "704.5j", "704.5j", "704.5n", "704.5q"],
+            "{order:?}"
+        );
+        assert_to_owners_graveyard(&r, zero, ZoneChangeCause::StateBasedAction);
+        assert_to_owners_graveyard(&r, legends[0], ZoneChangeCause::StateBasedAction);
+        assert_still_on_battlefield(&r, kept);
+        assert_eq!(o.unattached, vec![eq]);
+        assert_eq!(r.after.permanents.attached_to(eq), None);
+        assert_eq!(r.after.counter(pt, "+1/+1"), 1);
+        assert_eq!(r.after.counter(pt, "-1/-1"), 0);
+        assert_eq!(
+            r.nonempty_batches().len(),
+            1,
+            "one event (CR 704.3): {order:?}"
+        );
     }
 }

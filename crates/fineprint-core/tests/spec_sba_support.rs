@@ -25,7 +25,8 @@ use fineprint_base::encode::CanonicalEncode;
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
 use fineprint_core::choice::{
-    ChoiceContext, ChoiceResponse, ChoiceSession, Interrupt, PendingChoiceRequest, Status,
+    ChoiceContext, ChoicePayload, ChoiceResponse, ChoiceSession, ChoiceType, Interrupt,
+    PendingChoiceRequest, Status,
 };
 use fineprint_core::events::{
     CounterTarget, DamageTarget, EventContext, EventState, ExecutedBatch, ExecutedEvent, GameEvent,
@@ -37,7 +38,7 @@ use fineprint_core::layers::{
 };
 use fineprint_core::memory::{CharacteristicsProvider, LkiStore, MemoryTable};
 use fineprint_core::objects::Characteristics;
-use fineprint_core::permanent::Permanents;
+use fineprint_core::permanent::{AttachTarget, Permanents};
 use fineprint_core::replacement::{BusError, BusInterrupt, ReplacementEffect, ReplacementRegistry};
 use fineprint_core::sba::{
     GameVariant, LOST_THE_GAME, SbaEnvironment, SbaFinding, SbaOutcome, SbaRegistry, SbaSubject,
@@ -73,10 +74,25 @@ pub fn eid(n: u64) -> EffectId {
     EffectId::new(n)
 }
 
-/// Every SBA entry id of this unit, in registry order (CR 704.5a-704.5i).
-pub const ENTRY_IDS: [&str; 9] = [
+/// Every SBA entry id, in registry order (CR 704.5a-704.5i, 704.5j, 704.5k, 704.5m, 704.5n,
+/// 704.5p, 704.5q, 704.5r, 704.5s, 704.5t). The CR has no 704.5l and no 704.5o.
+pub const ENTRY_IDS: [&str; 18] = [
     "704.5a", "704.5b", "704.5c", "704.5d", "704.5e", "704.5f", "704.5g", "704.5h", "704.5i",
+    "704.5j", "704.5k", "704.5m", "704.5n", "704.5p", "704.5q", "704.5r", "704.5s", "704.5t",
 ];
+
+/// The entry ids added for CR 704.5j-704.5t, in registry order.
+pub const NEW_ENTRY_IDS: [&str; 9] = [
+    "704.5j", "704.5k", "704.5m", "704.5n", "704.5p", "704.5q", "704.5r", "704.5s", "704.5t",
+];
+
+/// The registry position of `entry_id` (panics on an unknown id).
+pub fn entry_index(entry_id: &str) -> usize {
+    ENTRY_IDS
+        .iter()
+        .position(|e| *e == entry_id)
+        .unwrap_or_else(|| panic!("unknown entry id {entry_id:?}"))
+}
 
 // ---------------------------------------------------------------------------------------------
 // DSL placeholder values (as in the layers spec-test helpers)
@@ -298,6 +314,21 @@ pub struct TestSbaEnv {
     pub exempt: BTreeSet<ObjectId>,
     pub deathtouch: BTreeSet<ObjectId>,
     pub clear_calls: u64,
+    /// CR 704.5k: the stamp at which each object gained the world supertype (larger = later
+    /// = shorter time); missing = 0.
+    pub world_since: BTreeMap<ObjectId, u64>,
+    /// CR 704.5m, 303.4c: `(aura, target)` pairs its enchant ability makes illegal.
+    pub illegal_aura_targets: BTreeSet<(ObjectId, AttachTarget)>,
+    /// CR 704.5r: per object, the "can't have more than N counters of kind" limits.
+    pub counter_limits: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    /// CR 704.5s, 715.2d: final chapter numbers of objects with chapter abilities.
+    pub saga_final_chapter: BTreeMap<ObjectId, i64>,
+    /// CR 704.5s: Sagas that are the source of a triggered chapter ability not yet gone.
+    pub chapter_pending: BTreeSet<ObjectId>,
+    /// CR 704.5t: dungeons whose venture marker is on the bottommost room.
+    pub bottommost_dungeons: BTreeSet<ObjectId>,
+    /// CR 704.5t: dungeons that are the source of a triggered room ability not yet gone.
+    pub room_pending: BTreeSet<ObjectId>,
 }
 
 impl Default for TestSbaEnv {
@@ -309,6 +340,13 @@ impl Default for TestSbaEnv {
             exempt: BTreeSet::new(),
             deathtouch: BTreeSet::new(),
             clear_calls: 0,
+            world_since: BTreeMap::new(),
+            illegal_aura_targets: BTreeSet::new(),
+            counter_limits: BTreeMap::new(),
+            saga_final_chapter: BTreeMap::new(),
+            chapter_pending: BTreeSet::new(),
+            bottommost_dungeons: BTreeSet::new(),
+            room_pending: BTreeSet::new(),
         }
     }
 }
@@ -338,6 +376,37 @@ impl SbaEnvironment for TestSbaEnv {
         self.deathtouch.clear();
         self.clear_calls += 1;
     }
+
+    fn world_supertype_since(&self, object: ObjectId) -> u64 {
+        self.world_since.get(&object).copied().unwrap_or(0)
+    }
+
+    fn aura_can_enchant(&self, aura: ObjectId, target: AttachTarget) -> bool {
+        !self.illegal_aura_targets.contains(&(aura, target))
+    }
+
+    fn counter_limits(&self, object: ObjectId) -> BTreeMap<String, i64> {
+        self.counter_limits
+            .get(&object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn saga_final_chapter(&self, object: ObjectId) -> Option<i64> {
+        self.saga_final_chapter.get(&object).copied()
+    }
+
+    fn chapter_ability_pending(&self, object: ObjectId) -> bool {
+        self.chapter_pending.contains(&object)
+    }
+
+    fn dungeons_at_bottommost_room(&self) -> BTreeSet<ObjectId> {
+        self.bottommost_dungeons.clone()
+    }
+
+    fn room_ability_pending(&self, dungeon: ObjectId) -> bool {
+        self.room_pending.contains(&dungeon)
+    }
 }
 
 impl TestSbaEnv {
@@ -359,6 +428,41 @@ impl TestSbaEnv {
             }
         }
         out.extend(self.clear_calls.to_le_bytes());
+        out.extend((self.world_since.len() as u64).to_le_bytes());
+        for (id, since) in &self.world_since {
+            out.extend(id.get().to_le_bytes());
+            out.extend(since.to_le_bytes());
+        }
+        out.extend((self.illegal_aura_targets.len() as u64).to_le_bytes());
+        for (aura, target) in &self.illegal_aura_targets {
+            out.extend(aura.get().to_le_bytes());
+            out.extend(bytes(target));
+        }
+        out.extend((self.counter_limits.len() as u64).to_le_bytes());
+        for (id, limits) in &self.counter_limits {
+            out.extend(id.get().to_le_bytes());
+            out.extend((limits.len() as u64).to_le_bytes());
+            for (kind, n) in limits {
+                out.extend((kind.len() as u64).to_le_bytes());
+                out.extend(kind.as_bytes());
+                out.extend(n.to_le_bytes());
+            }
+        }
+        out.extend((self.saga_final_chapter.len() as u64).to_le_bytes());
+        for (id, n) in &self.saga_final_chapter {
+            out.extend(id.get().to_le_bytes());
+            out.extend(n.to_le_bytes());
+        }
+        for s in [
+            &self.chapter_pending,
+            &self.bottommost_dungeons,
+            &self.room_pending,
+        ] {
+            out.extend((s.len() as u64).to_le_bytes());
+            for id in s {
+                out.extend(id.get().to_le_bytes());
+            }
+        }
     }
 }
 
@@ -1007,4 +1111,299 @@ impl Lcg {
         let i = usize::try_from(self.below(items.len() as u64)).expect("fits");
         items[i]
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR 704.5j-704.5t: synthetic permanents, attachments, counters, Sagas and dungeons
+// ---------------------------------------------------------------------------------------------
+
+/// Characteristics with the given names, supertypes, card types and subtypes (no P/T).
+pub fn typed(
+    names: &[&str],
+    supertypes: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> Characteristics {
+    Characteristics {
+        names: set(names),
+        supertypes: set(supertypes),
+        subtypes: set(subtypes),
+        ..blank("test.placeholder", types)
+    }
+}
+
+/// A creature with the given names, supertypes and subtypes and literal P/T.
+pub fn typed_creature(
+    names: &[&str],
+    supertypes: &[&str],
+    subtypes: &[&str],
+    p: i64,
+    t: i64,
+) -> Characteristics {
+    Characteristics {
+        power: Some(lit(p)),
+        toughness: Some(lit(t)),
+        ..typed(names, supertypes, &["Creature"], subtypes)
+    }
+}
+
+/// A legendary 2/2 creature named `name` (CR 704.5j).
+pub fn legend_chars(name: &str) -> Characteristics {
+    typed_creature(&[name], &["Legendary"], &[], 2, 2)
+}
+
+/// A world enchantment named `name` (CR 704.5k).
+pub fn world_chars(name: &str) -> Characteristics {
+    typed(&[name], &["World"], &["Enchantment"], &[])
+}
+
+/// An Aura enchantment named `name` (CR 704.5m).
+pub fn aura_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Enchantment"], &["Aura"])
+}
+
+/// An Equipment artifact named `name` (CR 704.5n).
+pub fn equipment_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Artifact"], &["Equipment"])
+}
+
+/// A Fortification artifact named `name` (CR 704.5n).
+pub fn fortification_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Artifact"], &["Fortification"])
+}
+
+/// A land named `name`.
+pub fn land_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Land"], &[])
+}
+
+/// A plain (non-Equipment, non-Fortification) artifact named `name`.
+pub fn artifact_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Artifact"], &[])
+}
+
+/// A battle named `name` (CR 704.5p, 310.10).
+pub fn battle_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Battle"], &[])
+}
+
+/// A Saga enchantment named `name` (CR 704.5s).
+pub fn saga_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Enchantment"], &["Saga"])
+}
+
+/// A dungeon card named `name` (CR 704.5t, 309.2c).
+pub fn dungeon_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Dungeon"], &[])
+}
+
+impl Sim {
+    /// A battlefield permanent with characteristics `c`, owned by `owner`, controlled by
+    /// `controller`.
+    pub fn permanent(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        c: Characteristics,
+    ) -> ObjectId {
+        self.create_controlled(ZoneKind::Battlefield, owner, Some(controller), c)
+    }
+
+    /// A legendary 2/2 creature named `name` owned by `owner`, controlled by `controller`.
+    pub fn legend(&mut self, owner: PlayerId, controller: PlayerId, name: &str) -> ObjectId {
+        self.permanent(owner, controller, legend_chars(name))
+    }
+
+    /// A world enchantment owned by `owner`, controlled by `controller`, that gained the world
+    /// supertype at stamp `since` (`None`: no stamp recorded, read as 0).
+    pub fn world(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        name: &str,
+        since: Option<u64>,
+    ) -> ObjectId {
+        let id = self.permanent(owner, controller, world_chars(name));
+        if let Some(stamp) = since {
+            self.env.world_since.insert(id, stamp);
+        }
+        id
+    }
+
+    /// Attaches permanent `id` to `target` in the permanents container (test setup).
+    pub fn attach(&mut self, id: ObjectId, target: AttachTarget) {
+        self.permanents.attach(id, target).expect("attach succeeds");
+        assert_eq!(self.permanents.attached_to(id), Some(target));
+    }
+
+    /// Attaches permanent `id` to permanent `target`.
+    pub fn attach_to(&mut self, id: ObjectId, target: ObjectId) {
+        self.attach(id, AttachTarget::Permanent(target));
+    }
+
+    /// Phases permanent `id` out (CR 702.26b).
+    pub fn phase_out(&mut self, id: ObjectId) {
+        self.permanents
+            .set_phased_out(id, true)
+            .expect("a permanent on the battlefield");
+    }
+
+    /// Records a "can't have more than `n` counters of `kind`" limit on `id` (CR 704.5r).
+    pub fn limit(&mut self, id: ObjectId, kind: &str, n: i64) {
+        self.env
+            .counter_limits
+            .entry(id)
+            .or_default()
+            .insert(kind.to_owned(), n);
+    }
+
+    /// A Saga owned by `owner`, controlled by `controller`, with final chapter number `last`
+    /// (`None`: no chapter abilities) and `lore` lore counters.
+    pub fn saga(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        last: Option<i64>,
+        lore: i64,
+    ) -> ObjectId {
+        let id = self.permanent(owner, controller, saga_chars("test.saga_a"));
+        if let Some(n) = last {
+            self.env.saga_final_chapter.insert(id, n);
+        }
+        if lore > 0 {
+            self.counters(id, "lore", lore);
+        }
+        id
+    }
+
+    /// A dungeon card owned by `owner` in the command zone; `bottommost` puts it in
+    /// `dungeons_at_bottommost_room`.
+    pub fn dungeon(&mut self, owner: PlayerId, bottommost: bool) -> ObjectId {
+        let id = self.create(ZoneKind::Command, owner, dungeon_chars("test.dungeon_a"));
+        assert_eq!(
+            self.zones.object(id).expect("created").zone,
+            ZoneId::Command
+        );
+        if bottommost {
+            self.env.bottommost_dungeons.insert(id);
+        }
+        id
+    }
+
+    /// The counter count of `kind` on `id` in the event-layer markers.
+    pub fn counter(&self, id: ObjectId, kind: &str) -> i64 {
+        self.events.markers().counter(id, kind)
+    }
+
+    /// Copies the marker counts of every kind the layer environment knows for each object
+    /// still in a zone back into the layer environment and the provider (after a pass removed
+    /// counters).
+    pub fn sync_counters(&mut self) {
+        let ids: Vec<ObjectId> = self.layer.counters.keys().copied().collect();
+        for id in ids {
+            if self.zones.object(id).is_none() {
+                continue;
+            }
+            let kinds: Vec<String> = self.layer.counters[&id].keys().cloned().collect();
+            for kind in kinds {
+                let n = self.events.markers().counter(id, &kind);
+                self.layer
+                    .counters
+                    .entry(id)
+                    .or_default()
+                    .insert(kind.clone(), n);
+                self.provider.set_counter(id, &kind, n);
+            }
+        }
+    }
+}
+
+/// `SubmitObjectSelection { objects: [id] }`: the answer keeping `id` (CR 704.5j).
+pub fn keep(id: ObjectId) -> ChoiceResponse {
+    ChoiceResponse::SubmitObjectSelection { objects: vec![id] }
+}
+
+/// The candidates of a `SelectObjectsFromZone` request (panics on another payload).
+pub fn candidates(req: &PendingChoiceRequest) -> Vec<ObjectId> {
+    match &req.payload {
+        ChoicePayload::SelectObjectsFromZone { candidates } => candidates.clone(),
+        other => panic!("expected a SelectObjectsFromZone payload, got {other:?}"),
+    }
+}
+
+/// Asserts the shape of a legend-rule request (CR 704.5j): chooser, type, bounds, candidates,
+/// reason and default (lowest id).
+pub fn assert_legend_request(req: &PendingChoiceRequest, chooser: PlayerId, group: &[ObjectId]) {
+    let mut sorted = group.to_vec();
+    sorted.sort();
+    assert_eq!(req.chooser, chooser, "the group's controller chooses");
+    assert_eq!(req.choice_type, ChoiceType::SelectObjectsFromZone);
+    assert_eq!(req.min, 1);
+    assert_eq!(req.max, 1);
+    assert_eq!(req.reason.cr, "CR 704.5j");
+    assert_eq!(candidates(req), sorted, "candidates ascending");
+    assert_eq!(
+        req.default_on_timeout,
+        keep(sorted[0]),
+        "default keeps the lowest id"
+    );
+}
+
+/// Every executed `RemoveCounters` on an object, as `(object, kind, amount)`, in order.
+pub fn counter_removals(r: &SbaRun) -> Vec<(ObjectId, String, i64)> {
+    r.outcome()
+        .executed
+        .iter()
+        .flat_map(|b| b.events.iter())
+        .filter_map(|e| match e.instance.event() {
+            GameEvent::RemoveCounters {
+                target: CounterTarget::Object(id),
+                kind,
+                amount,
+            } => Some((*id, kind.clone(), *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts that `old` left the battlefield through exactly one move of this pass with `cause`,
+/// to its owner's graveyard.
+pub fn assert_to_owners_graveyard(r: &SbaRun, old: ObjectId, cause: ZoneChangeCause) {
+    let owner = r.before.zones.object(old).expect("existed").owner;
+    assert!(r.after.zones.object(old).is_none(), "{old:?} left");
+    let moves: Vec<_> = r.moves().into_iter().filter(|m| m.0 == old).collect();
+    assert_eq!(moves.len(), 1, "{old:?} moved exactly once");
+    let (_, new, kind, c) = moves[0];
+    assert_eq!(kind, ZoneKind::Graveyard);
+    assert_eq!(c, cause, "{old:?} cause");
+    assert_eq!(
+        r.after.zones.object(new).expect("moved object").zone,
+        ZoneId::Graveyard(owner),
+        "{old:?} went to its owner's graveyard"
+    );
+}
+
+/// Asserts that `id` is still on the battlefield after `r`, unmoved.
+pub fn assert_still_on_battlefield(r: &SbaRun, id: ObjectId) {
+    assert!(
+        r.after.on_battlefield(id),
+        "{id:?} stayed on the battlefield"
+    );
+    assert!(r.moved_to(id).is_none(), "{id:?} did not move");
+    assert!(!r.outcome().ceased.contains(&id), "{id:?} did not cease");
+}
+
+/// Asserts `findings` are in registry order, then subject order, without duplicates.
+pub fn assert_findings_ordered(findings: &[SbaFinding]) {
+    let keys: Vec<(usize, SbaSubject)> = findings
+        .iter()
+        .map(|f| (entry_index(f.entry_id), f.subject))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        keys, sorted,
+        "findings in registry order then subject order"
+    );
 }
