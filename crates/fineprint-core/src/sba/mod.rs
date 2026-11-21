@@ -13,8 +13,8 @@
 //! changes nothing. [`perform_all`] checks, then performs every result simultaneously as one
 //! event: the graveyard moves as ONE batch through the replacement bus with CR 704.7 merging
 //! (CR 704.8: last known information from before the pass), together with the counter
-//! removals (CR 704.5q, CR 704.5r) and the unattach events (CR 704.5n, CR 704.5p); a follow-up
-//! batch for objects whose move a replacement effect prevented; the legend-rule choices
+//! removals (CR 704.5q, CR 704.5r) and the unattach events (CR 704.5n, CR 704.5p) of every
+//! applicable permanent, including one that also moves; the legend-rule choices
 //! (CR 704.5j), asked in APNAP order (CR 101.4) before anything changes; ceasing to exist
 //! (CR 704.5d, CR 704.5e); removing a completed dungeon from the game (CR 704.5t); and the
 //! [`LOST_THE_GAME`] designation (CR 704.5a-704.5c). The loop

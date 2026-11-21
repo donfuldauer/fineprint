@@ -18,7 +18,7 @@ use fineprint_dsl::expr::ObjectSelectorAST;
 use super::*;
 use crate::choice::{
     ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse,
-    ChoiceSession, ChoiceType, Interrupt, PendingChoiceRequest, Status,
+    ChoiceSession, ChoiceType, Interrupt, PendingChoiceRequest, RequestId, Status,
 };
 use crate::events::{
     CounterTarget, DamageTarget, EventContext, EventState, GameEvent, Outcome, ZoneChangeCause,
@@ -359,7 +359,10 @@ impl Transactional for World {
 type Out = Result<SbaOutcome, BusError>;
 
 /// The procedure body: one `perform_all` pass over `w`. A pending choice or an error asserts
-/// that the world is exactly as before the call, then propagates.
+/// that the world is exactly as before the call, then propagates. An invalid answer
+/// (`ChoiceError::Invalid`, the procedure-level validation of decision "#28 FP-027 — Card-name
+/// validation is structural") propagates as a host procedure does, through
+/// `Interrupt::from`, so the session rejects it; every other error is the run's output.
 fn run_pass(w: &mut World, ch: &mut ChoiceContext<'_>) -> Result<Out, Interrupt> {
     let before = w.state_hash();
     let snap = w.snapshot();
@@ -396,6 +399,9 @@ fn run_pass(w: &mut World, ch: &mut ChoiceContext<'_>) -> Result<Out, Interrupt>
         }
         Err(BusInterrupt::Error(err)) => {
             assert_eq!(w.state_hash(), before, "a failed pass changed the world");
+            if matches!(err, BusError::Choice(ChoiceError::Invalid { .. })) {
+                return Err(Interrupt::from(BusInterrupt::Error(err)));
+            }
             Ok(Err(err))
         }
     }
@@ -936,7 +942,10 @@ fn several(order: &[u8]) -> (World, [CardId; 3]) {
 // 0-loyalty planeswalker, a token in the graveyard and a 0-life player are handled in ONE pass:
 // one outcome, the moves in ONE executed batch, LKI of every dying permanent from before the pass
 // (the +1/+1 counter of the creature killed by -1/-1 counters is in its LKI). The same creature
-// is also a CR 704.5q finding, but it moves, so no counter is removed from it.
+// is also a CR 704.5q finding: although it moves, its counter removal (N = 1 of each) is in the
+// SAME batch (CR 704.3: every applicable SBA in one event; decision "#42 FP-041 — One SBA batch:
+// moves, counter removals and unattach events"), executed before the zone changes, with no
+// look-back: its last known information still shows every counter.
 #[test]
 fn several_sbas_are_one_event() {
     let (mut w, cards) = several(&[0, 1, 2, 3]);
@@ -951,8 +960,34 @@ fn several_sbas_are_one_event() {
     assert_eq!(out.executed.len(), 1);
     assert_eq!(w.events.log().len(), log_before + 1);
     let batch = &out.executed[0];
-    assert_eq!(batch.events.len(), 3);
-    for ev in &batch.events {
+    assert_eq!(batch.events.len(), 5);
+    let (moves, removals) = batch_shape(&out);
+    assert_eq!(moves.len(), 3);
+    assert!(
+        moves
+            .iter()
+            .all(|&(_, cause)| cause == ZoneChangeCause::StateBasedAction)
+    );
+    let zero = moves
+        .iter()
+        .map(|&(o, _)| o)
+        .find(|&o| w.lki.get(o).is_some_and(|r| r.card() == cards[0]))
+        .expect("the zero-toughness creature moved");
+    assert_eq!(
+        removals,
+        [(zero, "+1/+1".to_owned(), 1), (zero, "-1/-1".to_owned(), 1)]
+    );
+    assert!(unattach_events(&out).is_empty());
+    // The bus executes the counter removals before the zone changes.
+    assert!(matches!(
+        batch.events[0].instance.event(),
+        GameEvent::RemoveCounters { .. }
+    ));
+    assert!(matches!(
+        batch.events[1].instance.event(),
+        GameEvent::RemoveCounters { .. }
+    ));
+    for ev in &batch.events[2..] {
         assert!(ev.lki_captured);
         let Outcome::ZoneChange(m) = ev.outcome else {
             panic!("not a zone change");
@@ -2118,16 +2153,38 @@ fn on_battlefield(w: &World, ids: &[ObjectId]) -> Vec<ObjectId> {
         .collect()
 }
 
-/// Asserts that answering `answer` to the only legend-rule request of `w` is rejected with a
-/// procedure error and changes nothing (also asserted inside the procedure).
-fn assert_legend_answer_rejected(w: &World, answer: &[ObjectId]) {
-    let (run, asked) = drive_answers(w, &[select(answer)]);
-    assert_eq!(asked.len(), 1);
-    assert!(
-        matches!(run.out, Err(BusError::Choice(ChoiceError::Procedure(_)))),
-        "{answer:?} accepted"
-    );
-    assert_eq!(run.hash, w.state_hash());
+/// The pass procedure as a function pointer.
+type PassProcedure = fn(&mut World, &mut ChoiceContext<'_>) -> Result<Out, Interrupt>;
+
+/// A choice session over one pass.
+type PassSession = ChoiceSession<World, Out, PassProcedure>;
+
+/// Asserts that answering `answer` to the only legend-rule request of `w` is rejected by
+/// `ChoiceSession::submit` with `ChoiceError::Invalid` naming that request, records nothing and
+/// leaves the same request pending with the state unchanged (also asserted inside the
+/// procedure); returns the session for a corrected answer (REQ-SBA-001, CR 704.5j; decision
+/// #42 FP-041, round 2).
+fn assert_legend_answer_rejected(w: &World, answer: &[ObjectId]) -> PassSession {
+    let procedure: PassProcedure = run_pass;
+    let mut session = ChoiceSession::start(w.clone(), procedure).unwrap();
+    let pending = session.pending().expect("a legend-rule request").clone();
+    let err = session
+        .submit(pending.request_id, select(answer))
+        .expect_err("an invalid survivor set was accepted");
+    match err {
+        ChoiceError::Invalid {
+            request_id,
+            explanation,
+        } => {
+            assert_eq!(request_id, pending.request_id, "{answer:?}");
+            assert!(!explanation.is_empty());
+        }
+        other => panic!("{answer:?}: {other:?}"),
+    }
+    assert_eq!(session.pending(), Some(&pending), "{answer:?}");
+    assert!(session.answers().is_empty(), "{answer:?}");
+    assert_eq!(session.state_hash(), w.state_hash());
+    session
 }
 
 // REQ-SBA-001, CR 704.5j, CR 201.2a: names that overlap non-transitively (A {X, Y}, B {Y},
@@ -2243,7 +2300,7 @@ fn sba_704_5j_path_and_isolated_legends() {
 }
 
 // REQ-SBA-001, CR 704.5j: a legend-rule answer that is not a maximal set of candidates without
-// two of the same name is a protocol error (the session itself rejects counts outside min..max
+// two of the same name is an invalid answer to that request (the session itself rejects counts outside min..max
 // and non-candidates before they reach the pass).
 #[test]
 fn sba_704_5j_selection_protocol() {
@@ -2255,7 +2312,8 @@ fn sba_704_5j_selection_protocol() {
     };
     assert!(pair.is_clique());
     assert_eq!(pair.max_survivors(), 1);
-    assert_eq!(legend_survivors(&pair, select(&[b])).unwrap(), [b]);
+    let rid = RequestId::new(7);
+    assert_eq!(legend_survivors(&pair, rid, select(&[b])).unwrap(), [b]);
     // A {X, Y}, B {Y}, C {X}.
     let overlap = LegendGroup {
         controller: p(1),
@@ -2269,8 +2327,11 @@ fn sba_704_5j_selection_protocol() {
     assert!(!overlap.is_clique());
     assert_eq!(overlap.max_survivors(), 2);
     assert_eq!(overlap.default_survivors(), [a]);
-    assert_eq!(legend_survivors(&overlap, select(&[a])).unwrap(), [a]);
-    assert_eq!(legend_survivors(&overlap, select(&[b, c])).unwrap(), [b, c]);
+    assert_eq!(legend_survivors(&overlap, rid, select(&[a])).unwrap(), [a]);
+    assert_eq!(
+        legend_survivors(&overlap, rid, select(&[b, c])).unwrap(),
+        [b, c]
+    );
     let bad_cases: [(&LegendGroup, ChoiceResponse); 9] = [
         (&pair, select(&[])),
         (&pair, select(&[a, b])),
@@ -2283,10 +2344,13 @@ fn sba_704_5j_selection_protocol() {
         (&overlap, select(&[ObjectId::new(9)])),
     ];
     for (group, bad) in bad_cases {
-        let err = legend_survivors(group, bad).unwrap_err();
+        // REQ-SBA-001, CR 704.5j: the procedure-level validation error names the request
+        // (decision #28 FP-027 convention; decision #42 FP-041, round 2).
+        let err = legend_survivors(group, rid, bad).unwrap_err();
         assert!(matches!(
             err,
-            BusInterrupt::Error(BusError::Choice(ChoiceError::Procedure(_)))
+            BusInterrupt::Error(BusError::Choice(ChoiceError::Invalid { request_id, .. }))
+                if request_id == rid
         ));
     }
     // The session refuses a selection of two in a same-name pair (max 1).
@@ -2661,16 +2725,24 @@ fn sba_704_5p_cannot_be_attached() {
     assert!(!pass(&mut w).performed);
 }
 
-// REQ-SBA-001, CR 704.5p, CR 704.8: an attached creature that also dies in the pass is moved,
-// not unattached; its last known information keeps the attachment.
+// REQ-SBA-001, CR 704.3, CR 704.5p, CR 704.8, CR 701.3d: an attached creature that also dies in
+// the pass is moved AND gets its one unattach event in the same batch (decision "#42 FP-041 —
+// One SBA batch: moves, counter removals and unattach events"); it is not reported as unattached
+// (it left the battlefield); its last known information keeps the attachment.
 #[test]
-fn sba_704_5p_move_wins_over_unattach() {
+fn sba_704_5p_moving_attachment_is_unattached_in_the_same_event() {
     let mut w = World::new();
     let host = w.creature(1, 3);
     let c = w.creature(1, 0);
     w.attach(c, AttachTarget::Permanent(host));
     assert_eq!(w.found(obj(c)), ["704.5f", "704.5p"]);
     let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [c]);
+    assert_eq!(
+        batch_shape(&out),
+        (vec![(c, ZoneChangeCause::StateBasedAction)], vec![])
+    );
     assert!(out.unattached.is_empty());
     assert_eq!(
         w.lki.get(c).unwrap().permanent().unwrap().attached_to(),
@@ -3226,8 +3298,12 @@ fn property_legend_rule() {
 
 // REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 704.5p: a creature with toughness 0, both
 // counter kinds and attached to a permanent, whose graveyard move a Skip replacement prevents,
-// stays on the battlefield and still gets its counter removals (N of each) and its unattach in
-// the same pass (a follow-up batch); the pass is performed.
+// stays on the battlefield and gets its counter removals (N of each) and its unattach in the
+// SAME single batch as its (skipped) move (decision "#42 FP-041 — One SBA batch: moves, counter
+// removals and unattach events"); the pass is performed. Control: without the Skip the creature
+// leaves, and its counter removals and its unattach are still in that one batch (CR 704.3),
+// executed before the move, so its last known information keeps every counter and the
+// attachment (CR 704.8; no look-back for counters, CR 122.2).
 #[test]
 fn prevented_move_still_removes_counters_and_unattaches() {
     let build = || {
@@ -3258,34 +3334,47 @@ fn prevented_move_still_removes_counters_and_unattaches() {
             vec![(c, "+1/+1".to_owned(), 2), (c, "-1/-1".to_owned(), 2)]
         )
     );
+    assert_eq!(unattach_events(&out), [c]);
     // The unattach follows the counter removals.
     let events: Vec<&GameEvent> = out.executed[0]
         .events
         .iter()
         .map(|ev| ev.instance.event())
         .collect();
+    assert_eq!(events.len(), 3);
     assert!(matches!(events.last(), Some(GameEvent::Unattach { attachment }) if *attachment == c));
 
-    // Control: without the Skip the creature leaves; no counter removal or unattach event.
-    let (mut w, _, c) = build();
+    // Control: without the Skip the creature leaves; same single batch.
+    let (mut w, host, c) = build();
     let card = w.card_of(c);
     let out = pass(&mut w);
     assert!(out.performed);
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(out.executed.len(), 1);
     assert_eq!(
         batch_shape(&out),
-        (vec![(c, ZoneChangeCause::StateBasedAction)], vec![])
+        (
+            vec![(c, ZoneChangeCause::StateBasedAction)],
+            vec![(c, "+1/+1".to_owned(), 2), (c, "-1/-1".to_owned(), 2)]
+        )
     );
-    assert!(unattach_events(&out).is_empty());
+    assert_eq!(unattach_events(&out), [c]);
     assert!(out.unattached.is_empty());
+    let lki = w.lki.get(c).unwrap();
+    assert_eq!(lki.counters().get("+1/+1"), Some(&2));
+    assert_eq!(lki.counters().get("-1/-1"), Some(&3));
+    assert_eq!(
+        lki.permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(host))
+    );
 }
 
-// REQ-SBA-001, CR 704.3, CR 616.1: the follow-up batch of a prevented move goes through the
-// replacement bus: a choice between two replacements of a follow-up counter removal suspends
-// the WHOLE pass with nothing changed (main batch included; asserted inside the procedure), and
-// the replayed pass finishes it.
+// REQ-SBA-001, CR 704.3, CR 616.1: the counter removals of a creature whose move a Skip
+// prevents are in the one batch, through the replacement bus: a choice between two replacements
+// of each counter removal suspends the WHOLE pass with nothing changed (asserted inside the
+// procedure), and the replayed pass finishes it in ONE executed batch.
 #[test]
-fn prevented_move_follow_up_choice_restores_the_whole_pass() {
+fn replacement_choice_in_the_one_batch_restores_the_whole_pass() {
     let mut w = World::new();
     let host = w.creature(1, 3);
     let c = w.creature(1, 0);
@@ -3304,11 +3393,15 @@ fn prevented_move_follow_up_choice_restores_the_whole_pass() {
             .add(ReplacementEffect::new(e(id), matcher, Action::Skip))
             .unwrap();
     }
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    assert!(matches!(session.status(), Status::Pending(_)));
+    assert_eq!(session.state_hash(), before);
     let run = drive(&w, &[0, 0]);
     assert_eq!(run.asked, 2);
     let out = run.out.unwrap();
     assert!(out.performed);
-    assert_eq!(out.executed.len(), 2);
+    assert_eq!(out.executed.len(), 1);
     assert_eq!(
         run.state.zone_of_card(other_card),
         Some(ZoneId::Graveyard(p(2)))
@@ -3322,10 +3415,11 @@ fn prevented_move_follow_up_choice_restores_the_whole_pass() {
     assert_eq!(run.state.permanents.attached_to(c), None);
 }
 
-// REQ-SBA-001, CR 704.5f, CR 704.5q, CR 400.7: a move replaced into another zone (Instead: to
-// exile) is a departure: the object gets no follow-up events.
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 704.5p, CR 400.7: a move replaced into
+// another zone (Instead: to exile) is still one batch with the creature's counter removals and
+// its unattach, executed before the move; the creature is not reported as unattached (it left).
 #[test]
-fn replaced_move_elsewhere_gets_no_follow_up() {
+fn replaced_move_elsewhere_is_in_the_one_batch() {
     let mut w = World::new();
     let host = w.creature(1, 3);
     let c = w.creature(1, 0);
@@ -3346,9 +3440,22 @@ fn replaced_move_elsewhere_gets_no_follow_up() {
         .unwrap();
     let out = pass(&mut w);
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
-    assert!(batch_shape(&out).1.is_empty());
-    assert!(unattach_events(&out).is_empty());
     assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        batch_shape(&out),
+        (
+            vec![(c, ZoneChangeCause::StateBasedAction)],
+            vec![(c, "+1/+1".to_owned(), 1), (c, "-1/-1".to_owned(), 1)]
+        )
+    );
+    assert_eq!(unattach_events(&out), [c]);
+    assert!(out.unattached.is_empty());
+    let lki = w.lki.get(c).unwrap();
+    assert_eq!(lki.counters().get("+1/+1"), Some(&1));
+    assert_eq!(
+        lki.permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(host))
+    );
 }
 
 // REQ-SBA-001, CR 704.5n, CR 704.5p, CR 701.3d, CR 603.10c, CR 603.2, CR 704.8: an Equipment on
@@ -3613,4 +3720,512 @@ fn sba_704_5n_marked_pair_with_phased_out_target_is_not_checked() {
     w.env.illegal_equipment_targets = BTreeSet::from([(eq, AttachTarget::Permanent(host))]);
     w.phase(host, true);
     assert!(w.found_by("704.5n").is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 2 (PR #214): one SBA batch (decision "#42 FP-041 — One SBA batch: moves, counter
+// removals and unattach events")
+// ---------------------------------------------------------------------------------------------
+
+/// A matcher for the counter removal of `kind` from `object`.
+fn remove_counters_of(object: ObjectId, kind: &str) -> EventMatcher {
+    let mut m = EventMatcher::new(BusEventKind::RemoveCounters);
+    m.affected_object = Some(object);
+    m.counter_kind = Some(kind.to_owned());
+    m
+}
+
+/// X (base toughness 0) and Y (toughness 3) each with one +1/+1 and one -1/-1 counter; a Skip
+/// on removing X's +1/+1 counter that requires Y to have a +1/+1 counter; with `skip_move`, a
+/// Skip on X's SBA move too.
+fn eligibility_world(skip_move: bool) -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let x = w.creature(1, if skip_move { 0 } else { 2 });
+    let y = w.creature(1, 3);
+    for id in [x, y] {
+        w.counters(id, "+1/+1", 1);
+        w.counters(id, "-1/-1", 1);
+    }
+    if skip_move {
+        w.registry
+            .add(ReplacementEffect::new(e(1), sba_move_of(x), Action::Skip))
+            .unwrap();
+    }
+    let mut m = remove_counters_of(x, "+1/+1");
+    m.requires_counter = Some((y, "+1/+1".to_owned()));
+    w.registry
+        .add(ReplacementEffect::new(e(2), m, Action::Skip))
+        .unwrap();
+    (w, x, y)
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 614.1 (G1): replacement eligibility of the
+// counter removal of a creature whose move a Skip prevents is judged against the state before
+// the one event: Y has its +1/+1 counter before the event, so the Skip on X's +1/+1 removal
+// applies although Y's counters are removed in the same event. X ends with exactly one +1/+1
+// counter and no -1/-1 counter (1/0); Y with none.
+#[test]
+fn prevented_move_counter_removal_eligibility_is_judged_before_the_event() {
+    let (mut w, x, y) = eligibility_world(true);
+    assert_eq!(w.found(obj(x)), ["704.5f", "704.5q"]);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(w.zones.object(x).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!((w.counter(x, "+1/+1"), w.counter(x, "-1/-1")), (1, 0));
+    assert_eq!((w.counter(y, "+1/+1"), w.counter(y, "-1/-1")), (0, 0));
+    assert!(w.registry.get(e(2)).is_some());
+}
+
+// REQ-SBA-001, CR 704.5q, CR 614.1 (G1 control): the same Skip when X does not move: one batch,
+// same result.
+#[test]
+fn counter_removal_eligibility_is_judged_before_the_event_control() {
+    let (mut w, x, y) = eligibility_world(false);
+    assert_eq!(w.found(obj(x)), ["704.5q"]);
+    let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!((w.counter(x, "+1/+1"), w.counter(x, "-1/-1")), (1, 0));
+    assert_eq!((w.counter(y, "+1/+1"), w.counter(y, "-1/-1")), (0, 0));
+}
+
+/// X with one +1/+1 and one -1/-1 counter (base toughness 0 with `skip_move`, then its move is
+/// Skipped; otherwise 2) and Y (toughness 0, dies in the pass); X's +1/+1 removal is replaced
+/// by tapping Y.
+fn retired_instead_world(skip_move: bool) -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let x = w.creature(1, if skip_move { 0 } else { 2 });
+    let y = w.creature(1, 0);
+    w.counters(x, "+1/+1", 1);
+    w.counters(x, "-1/-1", 1);
+    if skip_move {
+        w.registry
+            .add(ReplacementEffect::new(e(1), sba_move_of(x), Action::Skip))
+            .unwrap();
+    }
+    w.registry
+        .add(ReplacementEffect::new(
+            e(2),
+            remove_counters_of(x, "+1/+1"),
+            Action::Instead(vec![GameEvent::Tap { object: y }]),
+        ))
+        .unwrap();
+    (w, x, y)
+}
+
+/// Whether `out` executed a `Tap` of `object`.
+fn tapped_in(out: &SbaOutcome, object: ObjectId) -> bool {
+    out.executed
+        .iter()
+        .flat_map(|b| &b.events)
+        .any(|ev| matches!(ev.instance.event(), GameEvent::Tap { object: o } if *o == object))
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 614.1 (G2): an Instead on the counter removal
+// of a creature whose move is Skipped names Y, which dies in the same pass. In the one batch
+// (one bus call) the pass completes: Y is tapped as part of the event (before the zone changes)
+// and then put into its owner's graveyard; X keeps its +1/+1 counter and loses its -1/-1
+// counter.
+#[test]
+fn prevented_move_instead_naming_a_dying_object_completes() {
+    let (w, x, y) = retired_instead_world(true);
+    let y_card = w.card_of(y);
+    let run = drive(&w, &[]);
+    let out = run.out.expect("the pass failed");
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert!(tapped_in(&out, y));
+    assert_eq!(
+        run.state.zone_of_card(y_card),
+        Some(ZoneId::Graveyard(p(1)))
+    );
+    assert_eq!(run.state.zones.object(x).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(
+        (run.state.counter(x, "+1/+1"), run.state.counter(x, "-1/-1")),
+        (1, 0)
+    );
+}
+
+// REQ-SBA-001, CR 704.5q, CR 614.1 (G2 control): the same Instead when X does not move.
+#[test]
+fn instead_naming_a_dying_object_completes_control() {
+    let (w, x, y) = retired_instead_world(false);
+    let y_card = w.card_of(y);
+    let run = drive(&w, &[]);
+    let out = run.out.expect("the pass failed");
+    assert_eq!(out.executed.len(), 1);
+    assert!(tapped_in(&out, y));
+    assert_eq!(
+        run.state.zone_of_card(y_card),
+        Some(ZoneId::Graveyard(p(1)))
+    );
+    assert_eq!(
+        (run.state.counter(x, "+1/+1"), run.state.counter(x, "-1/-1")),
+        (1, 0)
+    );
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.8 (design check of the one batch): ZoneChange X, ZoneChange Y,
+// both counter removals of X, Unattach X and an Instead(Tap Y) on X's +1/+1 removal, in ONE
+// bus batch: the bus executes the events that are not zone changes first and completes; X's
+// last known information (captured before the batch) still shows its counters and attachment.
+#[test]
+fn design_same_object_side_events_in_one_batch() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let x = w.creature(1, 0);
+    let y = w.creature(1, 0);
+    w.counters(x, "+1/+1", 1);
+    w.counters(x, "-1/-1", 1);
+    w.attach(x, AttachTarget::Permanent(host));
+    w.registry
+        .add(ReplacementEffect::new(
+            e(2),
+            remove_counters_of(x, "+1/+1"),
+            Action::Instead(vec![GameEvent::Tap { object: y }]),
+        ))
+        .unwrap();
+    let events = vec![
+        zone_change(x, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        zone_change(y, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        GameEvent::RemoveCounters {
+            target: CounterTarget::Object(x),
+            kind: "+1/+1".into(),
+            amount: 1,
+        },
+        GameEvent::RemoveCounters {
+            target: CounterTarget::Object(x),
+            kind: "-1/-1".into(),
+            amount: 1,
+        },
+        GameEvent::Unattach { attachment: x },
+    ];
+    let procedure = move |w: &mut World,
+                          ch: &mut ChoiceContext<'_>|
+          -> Result<Result<usize, BusError>, Interrupt> {
+        let snap = w.snapshot();
+        let World {
+            game,
+            zones,
+            ids,
+            permanents,
+            memories,
+            lki,
+            events: evs,
+            registry,
+            ..
+        } = w;
+        let mut ctx = EventContext {
+            game,
+            zones,
+            ids,
+            permanents,
+            memories,
+            lki,
+            events: evs,
+            provider: &snap,
+        };
+        match crate::replacement::process_batch(
+            &mut ctx,
+            registry,
+            &crate::events::EventBatch::from_events(events.clone()),
+            true,
+            ch,
+        ) {
+            Ok(r) => Ok(Ok(r.executed.iter().map(|b| b.events.len()).sum())),
+            Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+            Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+        }
+    };
+    let session = ChoiceSession::start(w.clone(), procedure).unwrap();
+    let Status::Done { state, output } = session.status() else {
+        panic!("pending");
+    };
+    // Two moves, the -1/-1 removal, the Tap (instead of the +1/+1 removal) and the unattach.
+    assert_eq!(output.clone().expect("the batch failed"), 5);
+    let lki = state.lki.get(x).unwrap();
+    assert_eq!(lki.counters().get("+1/+1"), Some(&1));
+    assert_eq!(lki.counters().get("-1/-1"), Some(&1));
+    assert_eq!(
+        lki.permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(host))
+    );
+}
+
+/// A host (toughness 0, dies) and creature X (toughness 0) attached to it; with `skip_move` a
+/// Skip on X's SBA move.
+fn host_leaves_world(skip_move: bool) -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let host = w.creature(1, 0);
+    let x = w.creature(1, 0);
+    w.attach(x, AttachTarget::Permanent(host));
+    if skip_move {
+        w.registry
+            .add(ReplacementEffect::new(e(1), sba_move_of(x), Action::Skip))
+            .unwrap();
+    }
+    (w, host, x)
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5p, CR 701.3d, CR 603.10c, CR 704.8 (G9): X is attached to a
+// host that leaves in the same pass and X's own move is Skipped: X stays and gets exactly ONE
+// Unattach event, against its attachment from before the pass (executed before the host's
+// zone change, so the host leaving unattaches nothing more); X is detached and reported in
+// `unattached`; the host's last known information still lists X.
+#[test]
+fn attachment_of_a_leaving_host_is_unattached_once() {
+    let (mut w, host, x) = host_leaves_world(true);
+    assert_eq!(w.found(obj(x)), ["704.5f", "704.5p"]);
+    let host_card = w.card_of(host);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(out.unattached, [x]);
+    assert_eq!(unattach_events(&out), [x]);
+    assert_eq!(
+        batch_shape(&out),
+        (vec![(host, ZoneChangeCause::StateBasedAction)], vec![])
+    );
+    assert_eq!(w.zones.object(x).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(w.permanents.attached_to(x), None);
+    assert_eq!(w.zone_of_card(host_card), Some(ZoneId::Graveyard(p(1))));
+    assert_eq!(w.lki.get(host).unwrap().attached_here(), [x]);
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5p, CR 701.3d (G9 control): without the Skip, X and its host
+// both leave; X still has exactly one Unattach event (no extra event from either zone change)
+// and is not reported (it left the battlefield).
+#[test]
+fn attachment_and_host_leaving_together_unattach_once() {
+    let (mut w, host, x) = host_leaves_world(false);
+    let cards = [w.card_of(host), w.card_of(x)];
+    let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [x]);
+    assert_eq!(out.executed[0].events.len(), 3);
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (host, ZoneChangeCause::StateBasedAction),
+            (x, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+    assert!(out.unattached.is_empty());
+    for card in cards {
+        assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    }
+    assert_eq!(
+        w.lki.get(x).unwrap().permanent().unwrap().attached_to(),
+        Some(AttachTarget::Permanent(host))
+    );
+}
+
+/// An Equipment attached to player 2 (CR 704.5n) and a creature D with toughness 0; with
+/// `exile_it`, D's SBA move is replaced by D's move plus the Equipment's move to exile.
+fn equipment_leaves_world(exile_it: bool) -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(eq, AttachTarget::Player(p(2)));
+    let d = w.creature(1, 0);
+    if exile_it {
+        w.registry
+            .add(ReplacementEffect::new(
+                e(1),
+                sba_move_of(d),
+                Action::Instead(vec![
+                    zone_change(d, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+                    zone_change(eq, ZoneKind::Exile, ZoneChangeCause::Other),
+                ]),
+            ))
+            .unwrap();
+    }
+    (w, eq, d)
+}
+
+// REQ-SBA-001, CR 704.5n (G6): an Equipment unattached by its Unattach event and then moved to
+// exile by an unrelated replacement in the same pass is not in `unattached` (it did not remain
+// on the battlefield); its Unattach event stays in `executed`.
+#[test]
+fn unattached_lists_only_objects_still_on_the_battlefield() {
+    let (mut w, eq, _) = equipment_leaves_world(true);
+    let card = w.card_of(eq);
+    let out = pass(&mut w);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
+    assert_eq!(unattach_events(&out), [eq]);
+    assert!(out.unattached.is_empty());
+
+    // Control: the Equipment stays and is listed.
+    let (mut w, eq, _) = equipment_leaves_world(false);
+    let out = pass(&mut w);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(out.unattached, [eq]);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+}
+
+// REQ-SBA-001, CR 704.5j, CR 201.2a, CR 101.4b (G5): an invalid survivor set ({B} for A {X, Y},
+// B {Y}, C {X}) is rejected by `ChoiceSession::submit` with `ChoiceError::Invalid` naming the
+// pending request; nothing is recorded and the same request stays pending, so the player can
+// answer again: {B, C} completes the pass with A removed and B, C kept. A non-selection answer
+// is rejected the same way.
+#[test]
+fn invalid_legend_answer_is_rejected_and_can_be_corrected() {
+    let mut w = World::new();
+    let a = w.create_controlled(1, 1, legendary(&["test.legend_x", "test.legend_y"]));
+    let b = w.create_controlled(1, 1, legendary(&["test.legend_y"]));
+    let c = w.create_controlled(1, 1, legendary(&["test.legend_x"]));
+    let a_card = w.card_of(a);
+    let mut session = assert_legend_answer_rejected(&w, &[b]);
+    let pending = session.pending().unwrap().clone();
+
+    // A non-selection answer: rejected, still pending, nothing recorded.
+    let err = session
+        .submit(
+            pending.request_id,
+            ChoiceResponse::SelectReplacement { index: 0 },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, ChoiceError::Invalid { request_id, .. } if request_id == pending.request_id)
+    );
+    assert_eq!(session.pending(), Some(&pending));
+    assert!(session.answers().is_empty());
+
+    // The corrected answer to the SAME request.
+    session.submit(pending.request_id, select(&[b, c])).unwrap();
+    assert_eq!(session.answers(), [select(&[b, c])]);
+    let Status::Done { state, output } = session.status() else {
+        panic!("not done");
+    };
+    let out = output.clone().unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [(a, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(on_battlefield(state, &[a, b, c]), [b, c]);
+    assert_eq!(state.zone_of_card(a_card), Some(ZoneId::Graveyard(p(1))));
+}
+
+// REQ-SBA-001, CR 704.5j (G5): the conversion of a bus interrupt into a choice interrupt keeps
+// a choice error's class and fields (`Invalid` with its request id and explanation); a bus
+// error that is not a choice error still becomes `ChoiceError::Procedure`.
+#[test]
+fn bus_choice_error_keeps_its_class_through_interrupt_conversion() {
+    let invalid = ChoiceError::Invalid {
+        request_id: RequestId::new(3),
+        explanation: "test explanation".to_owned(),
+    };
+    match Interrupt::from(BusInterrupt::Error(BusError::Choice(invalid.clone()))) {
+        Interrupt::Error(e) => assert_eq!(e, invalid),
+        Interrupt::Pending(_) => panic!("pending"),
+    }
+    match Interrupt::from(BusInterrupt::Error(BusError::Choice(
+        ChoiceError::NotPending,
+    ))) {
+        Interrupt::Error(e) => assert_eq!(e, ChoiceError::NotPending),
+        Interrupt::Pending(_) => panic!("pending"),
+    }
+    let event = BusError::Event(crate::events::EventError::Overflow);
+    match Interrupt::from(BusInterrupt::Error(event.clone())) {
+        Interrupt::Error(ChoiceError::Procedure(m)) => assert_eq!(m, event.to_string()),
+        other => panic!("{other:?}"),
+    }
+}
+
+// REQ-SBA-001, CR 704.5n, CR 702.16d, CR 301.5c (G4): an Equipment on a creature the layer
+// environment cannot evaluate, in a pair the environment marks illegal, becomes unattached (the
+// mark is asked before the target's facts); unmarked, the same Equipment is not judged.
+#[test]
+fn sba_704_5n_marked_pair_with_unevaluable_target_is_unattached() {
+    let build = |marked: bool| {
+        let mut w = World::new();
+        let host = w.creature(1, 3);
+        let eq = w.create(1, ZoneKind::Battlefield, equipment());
+        w.attach(eq, AttachTarget::Permanent(host));
+        let card = w.card_of(host);
+        w.chars.remove(&card);
+        if marked {
+            w.env.illegal_equipment_targets = BTreeSet::from([(eq, AttachTarget::Permanent(host))]);
+        }
+        (w, eq)
+    };
+    let (mut w, eq) = build(true);
+    assert_eq!(w.found_by("704.5n"), [eq]);
+    let out = pass(&mut w);
+    assert_eq!(out.unattached, [eq]);
+    assert_eq!(w.permanents.attached_to(eq), None);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+
+    let (mut w, _) = build(false);
+    assert!(w.found_by("704.5n").is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n, CR 301.5, CR 301.6 (G3): an artifact that is both an Equipment and a
+// Fortification must satisfy both restrictions: on a nonland creature and on a noncreature land
+// it becomes unattached; on a permanent that is both a creature and a land it stays attached.
+// A plain Equipment on a creature and a plain Fortification on a land stay attached.
+#[test]
+fn sba_704_5n_equipment_fortification_needs_a_creature_land() {
+    let both = || {
+        with_subtypes(
+            noncreature("test.equipment_fortification", "Artifact"),
+            &["Equipment", "Fortification"],
+        )
+    };
+    let mut creature_land = creature("test.creature_land", 3);
+    creature_land.card_types = set(&["Creature", "Land"]);
+    let mut w = World::new();
+    let nonland_creature = w.creature(1, 3);
+    let land = w.create(1, ZoneKind::Battlefield, noncreature("test.land", "Land"));
+    let cl = w.create(1, ZoneKind::Battlefield, creature_land);
+    let on_creature = w.create(1, ZoneKind::Battlefield, both());
+    let on_land = w.create(1, ZoneKind::Battlefield, both());
+    let on_both = w.create(1, ZoneKind::Battlefield, both());
+    let plain_eq = w.create(1, ZoneKind::Battlefield, equipment());
+    let plain_fort = w.create(1, ZoneKind::Battlefield, fortification());
+    w.attach(on_creature, AttachTarget::Permanent(nonland_creature));
+    w.attach(on_land, AttachTarget::Permanent(land));
+    w.attach(on_both, AttachTarget::Permanent(cl));
+    w.attach(plain_eq, AttachTarget::Permanent(nonland_creature));
+    w.attach(plain_fort, AttachTarget::Permanent(land));
+    assert_eq!(w.found_by("704.5n"), [on_creature, on_land]);
+    let out = pass(&mut w);
+    assert_eq!(out.unattached, [on_creature, on_land]);
+    for id in [on_creature, on_land] {
+        assert_eq!(w.permanents.attached_to(id), None);
+        assert_eq!(w.zones.object(id).unwrap().zone, ZoneId::Battlefield);
+    }
+    assert_eq!(
+        w.permanents.attached_to(on_both),
+        Some(AttachTarget::Permanent(cl))
+    );
+    assert_eq!(
+        w.permanents.attached_to(plain_eq),
+        Some(AttachTarget::Permanent(nonland_creature))
+    );
+    assert_eq!(
+        w.permanents.attached_to(plain_fort),
+        Some(AttachTarget::Permanent(land))
+    );
+    assert!(w.check().is_empty());
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3: the one-batch pass is deterministic: run twice from
+// equal inputs (moves, counter removals of a moving and a staying permanent, unattach events of
+// a staying attachment whose host leaves, replacements), it gives equal outcomes and states.
+#[test]
+fn one_batch_pass_is_deterministic() {
+    let (mut w, _, _) = host_leaves_world(true);
+    let q = w.creature(2, 0);
+    w.counters(q, "+1/+1", 2);
+    w.counters(q, "-1/-1", 3);
+    let s = w.creature(2, 5);
+    w.counters(s, "+1/+1", 1);
+    w.counters(s, "-1/-1", 2);
+    let first = drive(&w, &[]);
+    let second = drive(&w, &[]);
+    assert_eq!(first.out, second.out);
+    assert_eq!(first.hash, second.hash);
+    let out = first.out.unwrap();
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
 }
