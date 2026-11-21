@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', 'Work on the next issue' (the merge-triggered scheduled task's prompt), or similar. Merging an issue/ branch starts a fresh session for the next issue (§8)."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', 'Work on the next issue' (the merge-triggered scheduled task's prompt), or similar. Merging an issue/ branch starts a fresh session for the next issue (§8) when a GitHub-triggered automation is configured."
 ---
 
 # work-issue
@@ -9,9 +9,11 @@ You are the **Orchestrator** (PROCESS.md P5) for exactly one GitHub issue. The i
 of work and its own spec; the plan is the set of `work-unit` issues, never a repository file. You route, spawn, commit, open the PR, drive
 review, merge and log. You write no product code and review no code (R9).
 
-Repository: `donfuldauer/fineprint`. In Claude Code web sessions GitHub GraphQL is unavailable:
-use REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review
-threads.
+Repository: `donfuldauer/fineprint`. Use the official `gh` CLI (`gh issue`, `gh pr`, `gh run`,
+`gh api`, with explicit paging on list/search endpoints when a proxy blocks `--paginate`) or GitHub
+MCP tools when configured. In Claude Code web sessions where GitHub GraphQL is unavailable, use
+REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review threads
+(PROCESS.md P1 "Working with GitHub").
 
 ## 1. Load and check the issue
 
@@ -53,9 +55,13 @@ threads.
    increase over time, so there are no ties. A claim posted after yours always has a higher ID and
    can never supersede a claim that has already passed its check: that claim's session saw every
    lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
-   on it that names a live session (`get_session` reports `working` or `blocked`). There is no
+   on it that is not released and names a live session (when `get_session` is available, it reports
+   `working` or `blocked`; in harnesses without a session-status tool, such as Gemini / Antigravity,
+   treat any unreleased/undeleted claim from another session as live unless the owner confirms it
+   is abandoned). There is no
    time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
-   claim. A claim stops counting only when its session ends or deletes it, and a session deletes
+   claim. A claim stops counting only when its session ends, deletes it, or edits it to start with
+   `Released:`, and a session deletes (or edits to `Released: <reason>` if delete is unavailable)
    its own claim whenever it loses (step 4), marks the issue blocked (§4) or finishes (§7).
    Resuming abandoned work writes no separate record: claims from ended sessions are never live,
    so they cannot govern, and the lowest-ID live claim still wins among sessions resuming at the
@@ -64,12 +70,16 @@ threads.
    order and listed as soon as they are created: observed behaviour that GitHub does not document
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID.
-      Read the ID from the environment, not from `get_session`:
-      `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"`. Only if that variable is unset,
-      call `get_session` with no argument. Call `get_session` on another session only to check
-      whether a claim that isn't yours is live.
-   2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
-      delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
+      In Claude Code, read the ID from the environment, not from `get_session`:
+      `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"` (only if that variable is unset,
+      call `get_session` with no argument; call `get_session` on another session only to check
+      whether a claim that isn't yours is live). In Gemini / Antigravity, include the
+      conversation/session ID and UTC timestamp.
+   2. Re-read **all** the issue's comments (`gh api -X GET repos/donfuldauer/fineprint/issues/<N>/comments -F per_page=100 -F page=<P>`,
+      paged explicitly with `P = 1, 2, …` until a page returns fewer than 100 items, never relying
+      on the default 30-item page), its labels and its state. Only compare claim IDs after the full
+      comment set has been fetched. Your claim loses, and you
+      delete it (or edit it to `Released: <reason>`), if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
       qualifies as the candidate step 0 chose it as: a ready candidate must still carry `ready`
       and must not have gained `in-progress` from another session; an abandoned candidate must
@@ -111,39 +121,50 @@ threads.
 
 ## 2. Branch
 
-Each issue gets its own git worktree, so issues running in parallel never share a working tree.
-One branch, one PR, one issue.
+Each issue gets its own git worktree, so issues running in parallel never share a working tree
+(if a sandbox restricts sibling directories and only one issue runs in the VM, use the
+single-checkout fallback below). One branch, one PR, one issue.
 
 1. `git fetch origin`. Look for an existing branch and worktree for the issue: `git branch -a
    --list "*issue/<N>-*"` and `git worktree list`.
-2. **Found (a restart).** Resume it; never reset it to `origin/main`. Reuse the worktree if it
-   exists, otherwise `git worktree add ../fineprint-issue-<N> <branch>` (for a remote-only
-   branch, `git worktree add -b <branch> ../fineprint-issue-<N> origin/<branch>`). In the
-   worktree, if the remote branch exists, `git merge --ff-only origin/<branch>`. Read the issue
-   comments and the branch's commits, and continue from the step they show was reached.
-3. **Not found.** `git worktree add -B issue/<N>-<short-slug> ../fineprint-issue-<N>
-   origin/main`.
+2. **Found (a restart).** Resume it; never reset it to `origin/main`.
+   - *Worktree:* reuse the worktree if it exists, otherwise `git worktree add ../fineprint-issue-<N> <branch>`
+     (for a remote-only branch, `git worktree add -b <branch> ../fineprint-issue-<N> origin/<branch>`).
+     In the worktree, if the remote branch exists, `git merge --ff-only origin/<branch>`.
+   - *Single-checkout fallback:* if the local branch exists, `git checkout <branch>`; for a
+     remote-only branch, `git checkout -b <branch> origin/<branch>`. If the remote branch exists,
+     `git merge --ff-only origin/<branch>`.
+   Read the issue comments and the branch's commits, and continue from the step they show was
+   reached.
+3. **Not found.**
+   - *Worktree:* `git worktree add -B issue/<N>-<short-slug> ../fineprint-issue-<N> origin/main`.
+   - *Single-checkout fallback:* `git checkout -B issue/<N>-<short-slug> origin/main`.
 4. Every later step for this issue (agents' working directory, commits, pushes, checks) runs
-   inside that worktree. It is removed in §7.
+   inside that worktree (or directly in the checkout for the single-checkout fallback). If a
+   worktree was created, it is removed in §7.
 
-The branch is always `issue/<N>-<short-slug>`: the next session starts only when an `issue/`
-branch merges (§8). If the session may push only to an assigned branch, use it, and say in the PR
-body that the chain will not continue from this merge: the owner restarts it with the scheduled
-task's "Run now".
+The branch is always `issue/<N>-<short-slug>`: when GitHub-triggered session chaining is enabled,
+the next session starts only when an `issue/` branch merges (§8). If the session may push only to
+an assigned branch, use it, and say in the PR body that the chain will not continue from this
+merge: the owner restarts it with the scheduled task's "Run now".
 
 ## 3. Route and execute
 
-1. Read the account's usage limits once and set `FABLE_ALLOWANCE` (`sufficient`,
-   `insufficient` or `unknown`).
-2. Spawn `work-classifier` with: the full issue body, its number and URL, the
-   branch, and `FABLE_ALLOWANCE`. For a `type:feature` or `type:binding` issue ask for **two**
-   briefs: Implementer and Independent Tester (owned paths disjoint). For `type:fixtures`, one
-   `fixture-author` brief. For `type:infra`, `type:toolchain`, `type:client` and `type:docs`,
-   an Implementer brief whose TESTS REQUIRED include the issue's acceptance tests.
+1. Set `FABLE_ALLOWANCE` (Claude Code) or T3 availability (Gemini / Antigravity) (`sufficient`,
+   `insufficient` or `unknown`; PROCESS.md P4). In Claude Code, read the account's usage limits
+   once (unknown means no Fable); on Gemini / Antigravity, it is `sufficient` when the active plan
+   and quota support T3 and no rate limit, throttling or fallback is reported.
+2. Spawn `work-classifier` (via Claude Code's `Agent` tool or Antigravity's `invoke_subagent` /
+   `define_subagent`, PROCESS.md P5) with: the full issue body, its number and URL, the
+   branch, and `FABLE_ALLOWANCE` / T3 availability. For a `type:feature` or `type:binding` issue
+   ask for **two** briefs: Implementer and Independent Tester (owned paths disjoint). For
+   `type:fixtures`, one `fixture-author` brief. For `type:infra`, `type:toolchain`, `type:client`
+   and `type:docs`, an Implementer brief whose TESTS REQUIRED include the issue's acceptance tests.
 3. `needs-rules` → one `rules-researcher` call with all questions, then call the classifier
    again with the answers. SRS discrepancies are recorded in `docs/DECISIONS.md`; the proposed SRS edit is a P8 line in `docs/HUMAN_QUEUE.md`.
-4. Spawn the agents the classifier names with the briefs verbatim and its models as `model`
-   overrides; Implementer and Independent Tester in parallel.
+4. Spawn the agents the classifier names with the briefs verbatim and its model tier overrides
+   (keeping `inherit` in Antigravity if the harness policy requires it); Implementer and
+   Independent Tester in parallel.
 5. Agent reports with `rules questions` → rules-researcher → classifier follow-up brief.
    `engine gaps` or `requests outside owned paths` that this issue cannot absorb become a
    **new GitHub issue** (labelled like this one, "Depends on" filled in) linked from the PR.
@@ -153,43 +174,53 @@ task's "Run now".
 ## 4. Log and verify
 
 First add the run-log row(s) for this issue to `docs/RUN_LOG.md` (phase = the issue's `phase:` label, work
-item = `#<N>`) and commit, so the verified commit is the one the PR opens on. Any later fix
+item = `#<N>`, T3 / Fable notes in Notes) and commit, so the verified commit is the one the PR opens on. Any later fix
 commit updates the row and is verified again.
 
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/RUN_LOG.md` row, and stop.
+(label `status:blocked-failure`, remove `in-progress`, delete or release this session's claim comment), comment the account, add a `docs/RUN_LOG.md` row, and stop.
 
 ## 5. Open the PR
 
 1. Check the head is the commit the work-verifier last passed. Push:
    `git -c push.negotiate=true push -u origin <branch>`.
-2. Create the PR with REST (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f
-   head=<branch> -f base=main -F body=@<file>`). The body follows
-   `.github/pull_request_template.md`, starts with `Closes #<N>`, and fills every section
-   (write "not applicable" with a reason rather than leaving one empty: CodeRabbit checks it).
-3. Reply-to-review readiness: watch the PR. If the session can subscribe to PR activity, do so.
-   Otherwise schedule a check-in with `send_later` (about 10 minutes) and end the turn with a
-   one-line status; never sleep-poll in a loop. Repeat check-ins until the PR merges.
+2. Create the PR with `gh pr create --base main --head <branch> --title … --body-file <file>` or
+   REST (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f head=<branch> -f base=main
+   -F body=@<file>`). The body follows `.github/pull_request_template.md`, starts with
+   `Closes #<N>`, and fills every section (write "not applicable" with a reason rather than leaving
+   one empty: CodeRabbit checks it). Bot names go in backticks.
+3. Watch the PR:
+   - **Claude Code:** if the session can subscribe to PR activity (`subscribe_pr_activity`), do so.
+     Otherwise schedule a check-in with `send_later` (about 10 minutes) and end the turn with a
+     one-line status; repeat check-ins until the PR merges.
+   - **Gemini / Antigravity:** run the `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`), which
+     schedules non-blocking check-ins (`/schedule` or a single async background check-in), responds
+     to CodeRabbit findings, resolves review threads itself, and drives the PR to CodeRabbit
+     approval and green CI checks.
+   Never sleep-poll in a foreground loop.
 
 ## 6. Review rounds
 
 Each CodeRabbit review round (or push) is one batch, handled with the `triage` skill's §2
 procedure and PROCESS.md P6:
 
-- Read: `pulls/<P>/reviews`, `pulls/<P>/comments`, `issues/<P>/comments` (CodeRabbit's summary
-  and pre-merge checks), `pulls/<P>/ccr/review_threads`, and the head commit's check runs.
+- Read: `gh pr view` / `gh pr checks` / `gh api graphql` (for review threads), or REST
+  `pulls/<P>/reviews`, `pulls/<P>/comments`, `issues/<P>/comments` (CodeRabbit's summary and
+  pre-merge checks), `pulls/<P>/ccr/review_threads`, and the head commit's check runs.
 - Every finding gets exactly one disposition (Fixed / Not a defect / Deferred) recorded as a
   reply (`pulls/<P>/comments/<id>/replies`), reason and evidence first.
-- Resolve with `POST pulls/<P>/ccr/comments/<comment_id>/resolve`. Never resolve an unfixed
+- Resolve with GraphQL `resolveReviewThread` via `gh api graphql`, `resolve_review_thread`, or the
+  REST route `POST pulls/<P>/ccr/comments/<comment_id>/resolve`. Never resolve an unfixed
   security issue (including any redaction or forking leak) or a verified unfixed correctness
   defect.
 - Failed pre-merge checks (for example the description check) are fixed by editing the PR body
-  (`PATCH pulls/<P>`).
+  (`gh pr edit <P> --body-file <file>` or `PATCH pulls/<P>`).
 - CI failures go through the same loop (investigator if the cause is unclear).
 - If CodeRabbit has not reviewed the head commit, post `@coderabbitai review` once; at most two
   more asks, then the RUN_LOG row of P6 step 4.
+- When CodeRabbit's approval is all that is missing, post `@coderabbitai approve` (P6 step 3).
 
 ## 7. Merge
 
@@ -198,7 +229,8 @@ reviewed the head with no outstanding change request, every thread replied to an
 branch up to date with `main`, last work-verifier result `pass` for the head):
 
 1. Merge with a merge commit:
-   `gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`.
+   `gh pr merge <P> --merge --match-head-commit <head>` or REST
+   (`gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`).
 2. The repository deletes merged branches automatically; check it did.
 3. **Unblock dependents (the sweep).** List every open `work-unit` issue labelled `blocked`
    (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
@@ -223,23 +255,25 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    Leave `blocked` on an issue with no blockers at all: a person set that hold (the plan sets
    `blocked` from dependencies; other holds use `status:blocked-failure`, PROCESS.md P7).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
-   and delete this session's claim comment.
-5. Remove the issue's worktree from the main checkout: `git worktree remove
-   ../fineprint-issue-<N>`.
+   and delete (or edit to `Released: merged in PR #<P>`) this session's claim comment.
+5. Remove the issue's worktree from the main checkout (if a worktree was used):
+   `git worktree remove ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
    in plan order.
 7. Do nothing to start the next session (§8).
 
 ## 8. Next session
 
-The merge starts the next session. A scheduled task with a GitHub trigger on pull requests merged
-into `main` from `issue/` branches starts a fresh session that works on the next issue. This
-session does nothing to hand off: never call `create_session`, `fire_trigger` or
-`update_trigger` to chain. A session started by another session asks a person to approve every
-remote-session tool call, and a session can neither fire nor edit a task it did not create. The
-chain runs until no issue is ready, or until a session ends without merging an `issue/` branch;
-the owner then restarts it with the task's "Run now". If the task does not exist or is disabled,
-nothing starts. See DECISIONS.md "Self-chaining — next session starts from a merged issue/ PR".
+In **Claude Code**, a scheduled task with a GitHub trigger on pull requests merged into `main` from
+`issue/` branches starts a fresh session that works on the next issue. This session does nothing to
+hand off: never call `create_session`, `fire_trigger` or `update_trigger` to chain. A session
+started by another session asks a person to approve every remote-session tool call, and a session
+can neither fire nor edit a task it did not create. The chain runs until no issue is ready, or
+until a session ends without merging an `issue/` branch; the owner then restarts it with the task's
+"Run now". In **Gemini / Antigravity**, there is no native GitHub-merge webhook trigger; start the
+next session manually (or use a persistent polling `/automation` job or `/run-plan`). If no
+scheduled task exists or it is disabled, nothing starts automatically. See DECISIONS.md
+"Self-chaining — next session starts from a merged issue/ PR".
 
 ## Never
 
