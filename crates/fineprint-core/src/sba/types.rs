@@ -486,9 +486,12 @@ pub struct SbaOutcome {
     /// replacement effect of the pass moved before it ceased, this is its new id (CR 400.7).
     pub ceased: Vec<ObjectId>,
     /// The permanents that became unattached and remain on the battlefield (CR 704.5n,
-    /// CR 704.5p), ascending: each was unattached by a `GameEvent::Unattach` event in
-    /// [`SbaOutcome::executed`] and is still on the battlefield as the same object at the END
-    /// of the pass. A permanent whose unattach event ran but that left the battlefield in the
+    /// CR 704.5p, CR 701.3d), ascending, without duplicates: the attachment of every
+    /// `GameEvent::Unattach` event of the batch that occurred (it is in
+    /// [`SbaOutcome::executed`]; an unattach that found nothing attached is no event), planned
+    /// by the pass or produced by a replacement effect (for example an `Instead` of another
+    /// event of the batch), that is still on the battlefield as the same object at the END of
+    /// the pass. A permanent whose unattach event ran but that left the battlefield in the
     /// same pass (its own state-based move, or a replacement effect that moved it) is not
     /// listed, though its event stays in `executed`; one whose move a replacement effect
     /// prevented is listed (it stays).

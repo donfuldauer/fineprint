@@ -3335,14 +3335,15 @@ fn prevented_move_still_removes_counters_and_unattaches() {
         )
     );
     assert_eq!(unattach_events(&out), [c]);
-    // The unattach follows the counter removals.
+    // The unattach precedes the counter removals (it is submitted first, decision "#42 FP-041 —
+    // Planned unattach and pre-pass host (round 3)").
     let events: Vec<&GameEvent> = out.executed[0]
         .events
         .iter()
         .map(|ev| ev.instance.event())
         .collect();
     assert_eq!(events.len(), 3);
-    assert!(matches!(events.last(), Some(GameEvent::Unattach { attachment }) if *attachment == c));
+    assert!(matches!(events.first(), Some(GameEvent::Unattach { attachment }) if *attachment == c));
 
     // Control: without the Skip the creature leaves; same single batch.
     let (mut w, host, c) = build();
@@ -3460,9 +3461,10 @@ fn replaced_move_elsewhere_is_in_the_one_batch() {
 
 // REQ-SBA-001, CR 704.5n, CR 704.5p, CR 701.3d, CR 603.10c, CR 603.2, CR 704.8: an Equipment on
 // a player (704.5n) and a creature attached to a host that dies in the same pass (704.5p) become
-// unattached through one Unattach event each, ascending id, submitted after the zone changes
-// and counter removals of the same ONE batch. The bus executes the events that are not zone
-// changes first (counter removals and unattaches name live objects), then the moves; the batch
+// unattached through one Unattach event each, ascending id, submitted before the zone changes
+// and counter removals of the same ONE batch (round 3, H6). The bus executes the events that are
+// not zone changes first, in submission order (unattaches, then counter removals; they name live
+// objects), then the moves; the batch
 // captures last known information before any of its events, so the dying host's record still
 // lists the creature attached to it (look-back). The trigger normalisation sees an Unattached
 // occurrence for each.
@@ -3496,10 +3498,10 @@ fn unattach_events_in_the_batch_reach_triggers_with_look_back() {
     assert_eq!(
         kinds,
         [
-            ("counters", q),
-            ("counters", q),
             ("unattach", eq),
             ("unattach", cr),
+            ("counters", q),
+            ("counters", q),
             ("move", dying)
         ]
     );
@@ -3737,11 +3739,17 @@ fn remove_counters_of(object: ObjectId, kind: &str) -> EventMatcher {
 
 /// X (base toughness 0) and Y (toughness 3) each with one +1/+1 and one -1/-1 counter; a Skip
 /// on removing X's +1/+1 counter that requires Y to have a +1/+1 counter; with `skip_move`, a
-/// Skip on X's SBA move too.
-fn eligibility_world(skip_move: bool) -> (World, ObjectId, ObjectId) {
+/// Skip on X's SBA move too. With `y_first`, Y is created before X (Y has the lower object id).
+fn eligibility_world(skip_move: bool, y_first: bool) -> (World, ObjectId, ObjectId) {
     let mut w = World::new();
-    let x = w.creature(1, if skip_move { 0 } else { 2 });
-    let y = w.creature(1, 3);
+    let x_toughness = if skip_move { 0 } else { 2 };
+    let (x, y) = if y_first {
+        let y = w.creature(1, 3);
+        (w.creature(1, x_toughness), y)
+    } else {
+        let x = w.creature(1, x_toughness);
+        (x, w.creature(1, 3))
+    };
     for id in [x, y] {
         w.counters(id, "+1/+1", 1);
         w.counters(id, "-1/-1", 1);
@@ -3766,7 +3774,7 @@ fn eligibility_world(skip_move: bool) -> (World, ObjectId, ObjectId) {
 // counter and no -1/-1 counter (1/0); Y with none.
 #[test]
 fn prevented_move_counter_removal_eligibility_is_judged_before_the_event() {
-    let (mut w, x, y) = eligibility_world(true);
+    let (mut w, x, y) = eligibility_world(true, false);
     assert_eq!(w.found(obj(x)), ["704.5f", "704.5q"]);
     let out = pass(&mut w);
     assert!(out.performed);
@@ -3777,11 +3785,31 @@ fn prevented_move_counter_removal_eligibility_is_judged_before_the_event() {
     assert!(w.registry.get(e(2)).is_some());
 }
 
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5q, CR 614.1 (G1, id-order twin): the same fixture
+// with Y created before X (Y has the lower object id, so Y's counter removals are submitted
+// before X's): the result does not depend on the id order. The Skip on X's +1/+1 removal
+// applies, X ends 1/0 and Y 0/0.
+#[test]
+fn prevented_move_counter_removal_eligibility_is_judged_before_the_event_y_lower_id() {
+    let (mut w, x, y) = eligibility_world(true, true);
+    assert!(y < x);
+    assert_eq!(w.found(obj(x)), ["704.5f", "704.5q"]);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(w.zones.object(x).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!((w.counter(x, "+1/+1"), w.counter(x, "-1/-1")), (1, 0));
+    assert_eq!((w.counter(y, "+1/+1"), w.counter(y, "-1/-1")), (0, 0));
+    // The Skip applied: X's +1/+1 counter removal is not among the executed events.
+    assert!(!batch_shape(&out).1.contains(&(x, "+1/+1".to_owned(), 1)));
+    assert!(w.registry.get(e(2)).is_some());
+}
+
 // REQ-SBA-001, CR 704.5q, CR 614.1 (G1 control): the same Skip when X does not move: one batch,
 // same result.
 #[test]
 fn counter_removal_eligibility_is_judged_before_the_event_control() {
-    let (mut w, x, y) = eligibility_world(false);
+    let (mut w, x, y) = eligibility_world(false, false);
     assert_eq!(w.found(obj(x)), ["704.5q"]);
     let out = pass(&mut w);
     assert_eq!(out.executed.len(), 1);
@@ -4228,4 +4256,164 @@ fn one_batch_pass_is_deterministic() {
     let out = first.out.unwrap();
     assert!(out.performed);
     assert_eq!(out.executed.len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 3 (PR #214)
+// ---------------------------------------------------------------------------------------------
+
+/// Equipment `eq` attached to a creature it may legally equip (no CR 704.5n finding) and a
+/// creature D (toughness 0) whose SBA move a replacement turns into `Instead([ZoneChange D,
+/// Unattach eq])`, plus `ZoneChange eq` to exile with `eq_leaves`.
+fn replacement_unattach_world(eq_leaves: bool) -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(eq, AttachTarget::Permanent(host));
+    let d = w.creature(1, 0);
+    let mut instead = vec![
+        zone_change(d, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        GameEvent::Unattach { attachment: eq },
+    ];
+    if eq_leaves {
+        instead.push(zone_change(eq, ZoneKind::Exile, ZoneChangeCause::Other));
+    }
+    w.registry
+        .add(ReplacementEffect::new(
+            e(1),
+            sba_move_of(d),
+            Action::Instead(instead),
+        ))
+        .unwrap();
+    (w, eq, d)
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d, CR 614.1 (round 3, H4): an Unattach event that a
+// replacement effect of the batch produced (an `Instead` of D's SBA move) for an Equipment the
+// pass did not plan to unattach (its attachment is legal) is listed in `unattached`: it became
+// unattached and remains on the battlefield. Its event is in `executed`.
+#[test]
+fn unattached_lists_an_unattach_produced_by_a_replacement() {
+    let (mut w, eq, d) = replacement_unattach_world(false);
+    assert!(w.found_by("704.5n").is_empty());
+    let d_card = w.card_of(d);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(w.permanents.attached_to(eq), None);
+    assert_eq!(out.unattached, [eq]);
+    assert_eq!(w.zone_of_card(d_card), Some(ZoneId::Graveyard(p(1))));
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d, CR 614.1 (round 3, H4 control): the same replacement also
+// moves the Equipment to exile in the same pass: its Unattach event is in `executed`, but it did
+// not remain on the battlefield, so it is not listed.
+#[test]
+fn unattached_omits_a_replacement_unattach_whose_attachment_left() {
+    let (mut w, eq, _) = replacement_unattach_world(true);
+    let card = w.card_of(eq);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(out.unattached.is_empty());
+}
+
+/// Equipment `eq` attached to player 2 (illegal, CR 704.5n), a creature H2 it may legally equip,
+/// and a creature Q (toughness 3) with one +1/+1 and one -1/-1 counter (CR 704.5q). With
+/// `via_counters`, a replacement turns Q's +1/+1 removal into `Attach eq -> H2`; otherwise a
+/// creature D (toughness 0) dies and a replacement turns its SBA move into `Instead([ZoneChange D,
+/// Attach eq -> H2])`. Returns (world, eq, H2, Q).
+fn reattach_world(via_counters: bool) -> (World, ObjectId, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    let h2 = w.creature(1, 3);
+    let q = w.creature(1, 3);
+    w.counters(q, "+1/+1", 1);
+    w.counters(q, "-1/-1", 1);
+    w.attach(eq, AttachTarget::Player(p(2)));
+    let attach = GameEvent::Attach {
+        attachment: eq,
+        target: AttachTarget::Permanent(h2),
+    };
+    let effect = if via_counters {
+        ReplacementEffect::new(
+            e(1),
+            remove_counters_of(q, "+1/+1"),
+            Action::Instead(vec![attach]),
+        )
+    } else {
+        let d = w.creature(1, 0);
+        ReplacementEffect::new(
+            e(1),
+            sba_move_of(d),
+            Action::Instead(vec![
+                zone_change(d, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+                attach,
+            ]),
+        )
+    };
+    w.registry.add(effect).unwrap();
+    (w, eq, h2, q)
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5n, CR 701.3d, CR 614.1 (round 3, H6): a replacement turns a
+// counter removal of the same SBA event into attaching the illegally attached Equipment to a
+// new, legal host. The pass's planned Unattach clears only the link from before the pass: it
+// is executed before the replacement's Attach (the Unattach events are submitted first, and
+// the bus executes the events that are not zone changes in submission-lineage order), so the
+// Equipment ends attached to the NEW host. Exactly one Unattach event, one batch.
+#[test]
+fn replacement_reattach_from_a_counter_removal_keeps_the_new_host() {
+    let (mut w, eq, h2, q) = reattach_world(true);
+    assert_eq!(w.found_by("704.5n"), [eq]);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(
+        w.permanents.attached_to(eq),
+        Some(AttachTarget::Permanent(h2))
+    );
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+    // The replacement applied: Q's +1/+1 counter stays; its -1/-1 counter is removed.
+    assert_eq!((w.counter(q, "+1/+1"), w.counter(q, "-1/-1")), (1, 0));
+    // Its unattach event occurred and it remains on the battlefield (decision "#42 FP-041 —
+    // Planned unattach and pre-pass host (round 3)").
+    assert_eq!(out.unattached, [eq]);
+    assert!(w.found_by("704.5n").is_empty());
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5n, CR 701.3d, CR 614.1 (round 3, H6): the same when the Attach
+// comes from an `Instead` of another permanent's SBA move: the Equipment ends attached to the
+// new host.
+#[test]
+fn replacement_reattach_from_a_zone_change_keeps_the_new_host() {
+    let (mut w, eq, h2, _) = reattach_world(false);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(
+        w.permanents.attached_to(eq),
+        Some(AttachTarget::Permanent(h2))
+    );
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d (round 3, H6 control): the illegal link with no replacement
+// is still cleared by exactly one Unattach event; the Equipment stays on the battlefield.
+#[test]
+fn illegal_link_without_replacement_is_still_unattached_once() {
+    let (mut w, eq, _, q) = reattach_world(true);
+    w.registry = ReplacementRegistry::default();
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(w.permanents.attached_to(eq), None);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(out.unattached, [eq]);
+    assert_eq!((w.counter(q, "+1/+1"), w.counter(q, "-1/-1")), (0, 0));
 }
