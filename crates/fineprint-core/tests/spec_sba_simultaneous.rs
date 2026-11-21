@@ -598,3 +598,20 @@ fn req_sba_001_new_entries_active_in_two_headed_giant() {
     assert_eq!(new_ids(&r.outcome().findings), new_ids(&b));
     assert_eq!(r.outcome().removed_from_game, vec![thg.dungeon]);
 }
+
+// REQ-SBA-001, CR 704.5n, 704.5p, 701.3d, 704.3 (PR #214 round 1, F2): in the full pass the
+// Equipment and the attached creature each get exactly one executed `GameEvent::Unattach`,
+// in ascending id order among the Unattach events; no other object gets one; the pass is still one event.
+#[test]
+fn req_sba_001_f2_full_pass_unattach_events_last() {
+    let b = full_board(fineprint_core::sba::GameVariant::Standard, true);
+    let kept = b.legends[1];
+    let r = drive_sba(b.sim, |_, _| keep(kept));
+    let mut both = vec![b.eq, b.attached];
+    both.sort();
+    assert_eq!(r.outcome().unattached, both);
+    assert_eq!(unattach_events(&r), both, "one each, ascending id");
+    assert_eq!(r.nonempty_batches().len(), 1, "one event (CR 704.3)");
+    assert_eq!(r.after.permanents.attached_to(b.eq), None);
+    assert_eq!(r.after.permanents.attached_to(b.attached), None);
+}
