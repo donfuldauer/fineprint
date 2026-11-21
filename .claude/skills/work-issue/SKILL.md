@@ -18,8 +18,9 @@ threads.
 0. **No issue number** ("the next ready issue"):
    - **Finish unblocking first.** A merge starts this session (§8), sometimes before the
      merging session reaches §7 step 3, and a session can end before finishing it. List every
-     open `work-unit` issue labelled `blocked`, every page
-     (`gh api --paginate 'repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open'`).
+     open `work-unit` issue labelled `blocked`
+     (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
+     paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1).
      For each, read its blockers (`issues/<B>/dependencies/blocked_by`). If all are satisfied by
      §7 step 3's rule, unblock it as §7 step 3 does (including its exceptions), naming the
      blocker that closed last. Also leave `blocked` alone on an issue with no blockers: a person
