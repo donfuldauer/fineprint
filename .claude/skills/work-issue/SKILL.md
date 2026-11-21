@@ -215,8 +215,9 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
      without both and no other label is rewritten. If `ready` is already there, only remove
      `blocked`.
    - Comment "Unblocked by #<D> (PR #<P>)", naming the blocker whose merged PR satisfied it last
-     (`#<N>` itself, a replacement, or another blocker) and that PR, unless an "Unblocked by"
-     comment is already there. If no such issue and PR can be identified, change the labels
+     (`#<N>` itself, a replacement, or another blocker) and that PR, unless a comment with that
+     exact text (same blocker, same PR) is already there; an "Unblocked by" comment from an
+     earlier unblock does not count. If no such issue and PR can be identified, change the labels
      without a comment and say so in the RUN_LOG row.
 
    Leave `blocked` on an issue with no blockers at all: a person set that hold (the plan sets
