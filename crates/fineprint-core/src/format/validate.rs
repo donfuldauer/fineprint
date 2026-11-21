@@ -194,6 +194,7 @@ pub fn validate_deck(
     // Step 2.
     let main_total = main.values().fold(0u64, |a, c| a.saturating_add(*c));
     let side_total = side.values().fold(0u64, |a, c| a.saturating_add(*c));
+    // CR 100.2a (constructed minimum; configurable per format)
     if main_total < u64::from(format.deck.min_main) {
         all.push(issue(
             DeckIssueCode::MainTooSmall,
@@ -205,6 +206,7 @@ pub fn validate_deck(
             ),
         ));
     }
+    // no CR rule; format policy
     if let Some(m) = format.deck.max_main.filter(|m| main_total > u64::from(*m)) {
         all.push(issue(
             DeckIssueCode::MainTooLarge,
@@ -213,6 +215,7 @@ pub fn validate_deck(
             format!("main deck has {main_total} cards, maximum {m}"),
         ));
     }
+    // CR 100.4a (constructed sideboard limit; formats may modify, CR 100.4)
     if side_total > u64::from(format.deck.max_sideboard) {
         all.push(issue(
             DeckIssueCode::SideboardTooLarge,
@@ -272,12 +275,18 @@ pub fn validate_deck(
             .copied()
             .unwrap_or(0)
             .saturating_add(side.get(id).copied().unwrap_or(0));
+        // CR 100.2a copy limit (configurable per format, default 4); CR 100.4a: counted over
+        // deck and sideboard combined.
+        // no CR rule; format policy (CR 113.6n only acknowledges restricted cards); takes
+        // precedence over the basic-land exemption (DECISIONS)
         let limit = if restricted {
             1
         } else {
             u64::from(format.deck.max_copies)
         };
-        let exempt = format.deck.basic_land_exempt && facts.is_some_and(|f| f.is_basic_land);
+        // CR 100.2a, CR 205.4c (basic land = basic supertype). Restricted cards are never exempt.
+        let exempt =
+            !restricted && format.deck.basic_land_exempt && facts.is_some_and(|f| f.is_basic_land);
         if !exempt && total > limit {
             all.push(issue(
                 DeckIssueCode::TooManyCopies,
