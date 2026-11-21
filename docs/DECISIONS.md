@@ -930,7 +930,8 @@ same change (its PR #143); its CodeRabbit rounds added unblocking rules that are
   `status:blocked-failure`. It adds `ready` and then removes `blocked` with single-label REST
   calls, so the issue is never without both and no other label is rewritten.
 - The "Unblocked by #<D> (PR #<P>)" comment names the blocker whose merged PR satisfied it last,
-  is posted once, and is omitted (with a RUN_LOG note) when none can be identified.
+  is posted once per unblock (an earlier comment naming another blocker or PR does not suppress
+  it), and is omitted (with a RUN_LOG note) when none can be identified.
 - `blocked` on an issue with no blockers is a person's hold: the sweep leaves it, and an explicit
   "work on #N" request stops on it. On an explicit request, a `blocked` label whose blockers are
   all satisfied is stale and is replaced with `ready`.
