@@ -1653,7 +1653,9 @@ fn exception_400_7m_stub_is_not_implemented() {
 // ---------------------------------------------------------------------------------------------
 
 // REQ-SBA-001, CR 704.5d, CR 704.5e, CR 111.7: the object and its record are removed, the card
-// is returned, put into no outside pool, and a later object can be created for the same card.
+// is returned and put into no outside pool. The ceased CardId is retired (REQ-CORE-002: never
+// reused within a match); the last step pins only that the container does not yet reject it,
+// a known gap, not a supported use.
 #[test]
 fn cease_to_exist_removes_object_and_frees_card() {
     let mut z = two_players();
@@ -1680,7 +1682,7 @@ fn cease_to_exist_removes_object_and_frees_card() {
     }
     // Not a zone change: no id is issued.
     assert_eq!(ids, ids_before);
-    // The card is free again.
+    // Not yet enforced: the container accepts the retired card (a caller must not do this).
     let again = z
         .create_object(&mut ids, c(5), p(1), req(ZoneKind::Exile))
         .unwrap();

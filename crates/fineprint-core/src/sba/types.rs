@@ -49,11 +49,56 @@ pub struct SbaFinding {
 }
 
 /// What the state-based action check reads from the caller that the engine state does not
-/// hold yet (REQ-SBA-001). Every method has a default: a standard game with no copies, no
-/// exemption and no deathtouch damage.
+/// hold yet (REQ-SBA-001). Every method has a default (a standard game with no copies and no
+/// exemption) except the deathtouch pair [`SbaEnvironment::deathtouch_damaged`] and
+/// [`SbaEnvironment::clear_deathtouch_damaged`], which every implementation provides together.
 ///
 /// Every method must be a pure function of the caller's state (REQ-CORE-001). The heartbeat
 /// and layer-integration units replace these seams with engine state.
+///
+/// **One zone residency.** The copy, exemption and deathtouch answers are keyed by
+/// [`ObjectId`], and an object that changes zones becomes a new object with a new id
+/// (CR 400.7), so each answer lasts ONE zone residency. Within one
+/// [`perform_all`](super::perform_all) pass the engine follows the moves its own batch makes.
+/// Otherwise a caller whose state changes zones outside `perform_all`, or whose object survives
+/// a move made during a pass (for example a card copy moved onto the battlefield by a
+/// replacement effect), must re-key its environment to the new id before the next check. After
+/// a pass, [`SbaOutcome::ceased`] lists the ids that no longer exist and
+/// [`SbaOutcome::executed`] (each `Outcome::ZoneChange` with its `old` and `new` ids) tells it
+/// what to re-key. A copy of a permanent spell that resolves becomes a permanent, not a copy of
+/// a spell: the caller must stop answering `true` from
+/// [`SbaEnvironment::is_spell_copy`] for it.
+///
+/// An environment that does not track deathtouch still states the pair:
+///
+/// ```
+/// use std::collections::BTreeSet;
+/// use fineprint_base::ids::ObjectId;
+/// use fineprint_core::sba::SbaEnvironment;
+///
+/// struct NoDeathtouch;
+/// impl SbaEnvironment for NoDeathtouch {
+///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+///         BTreeSet::new()
+///     }
+///     fn clear_deathtouch_damaged(&mut self) {}
+/// }
+/// ```
+///
+/// Reporting deathtouch damage without the clear does not compile:
+///
+/// ```compile_fail,E0046
+/// use std::collections::BTreeSet;
+/// use fineprint_base::ids::ObjectId;
+/// use fineprint_core::sba::SbaEnvironment;
+///
+/// struct ReadOnly;
+/// impl SbaEnvironment for ReadOnly {
+///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+///         BTreeSet::new()
+///     }
+/// }
+/// ```
 pub trait SbaEnvironment {
     /// The game variant (CR 704.5c, CR 704.6). Default: [`GameVariant::Standard`].
     fn variant(&self) -> GameVariant {
@@ -80,19 +125,28 @@ pub trait SbaEnvironment {
 
     /// The objects that have been dealt damage (more than 0, CR 120.8) by a source with
     /// deathtouch since the last time state-based actions were checked (CR 704.5h, CR 702.2b).
-    /// Default: none.
-    fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
-        BTreeSet::new()
-    }
+    ///
+    /// Required, together with [`SbaEnvironment::clear_deathtouch_damaged`]: an environment
+    /// that reports an object here MUST forget it there. An environment that does not track
+    /// deathtouch returns an empty set (or uses [`StoredSbaEnvironment`], empty by default).
+    fn deathtouch_damaged(&self) -> BTreeSet<ObjectId>;
 
-    /// Forgets [`SbaEnvironment::deathtouch_damaged`]: called by
-    /// [`perform_all`](super::perform_all) after every successful pass, since the condition is
-    /// "since the last time state-based actions were checked" (CR 704.5h). Default: nothing.
-    fn clear_deathtouch_damaged(&mut self) {}
+    /// Forgets every object of [`SbaEnvironment::deathtouch_damaged`]. Required, together with
+    /// it. [`perform_all`](super::perform_all) calls it after EVERY successful pass, for every
+    /// creature, indestructible and phased-out ones included: the window "since the last time
+    /// state-based actions were checked" closes at every check (CR 704.5h). On
+    /// `BusInterrupt::Pending` or an error it is not called and the window is unchanged. An
+    /// environment that does not track deathtouch does nothing here.
+    fn clear_deathtouch_damaged(&mut self);
 }
 
 /// A plain [`SbaEnvironment`] whose answers are stored sets (REQ-SBA-001): for callers and
 /// tests that do not derive them from other state.
+///
+/// The sets are keyed by [`ObjectId`] and so last one zone residency (CR 400.7): the caller
+/// re-keys them after a zone change, as described on [`SbaEnvironment`] (from
+/// [`SbaOutcome::ceased`] and the `Outcome::ZoneChange` entries of [`SbaOutcome::executed`]),
+/// and removes a resolved permanent-spell copy from `spell_copies`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredSbaEnvironment {
     /// The game variant.
@@ -148,9 +202,15 @@ impl SbaEnvironment for StoredSbaEnvironment {
 /// The result of one [`perform_all`](super::perform_all) pass (REQ-SBA-001, CR 704.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SbaOutcome {
-    /// Whether any state-based action applied (`false` if there was no finding at all).
+    /// Whether the pass changed the game state (CR 704.3: "If any state-based actions are
+    /// performed as a result of a check, the check is repeated"): a move occurred, an object
+    /// ceased to exist, a player lost the game, or the replacement registry changed (for
+    /// example a one-use replacement effect was consumed). A finding whose only move a
+    /// replacement effect skipped is not performed. Consuming the empty-library-draw and
+    /// deathtouch flags alone does not count.
     pub performed: bool,
-    /// Every finding of the pass, in registry order, then subject order.
+    /// Every finding of the pass, in registry order, then subject order: what the check
+    /// detected, whether or not it was performed.
     pub findings: Vec<SbaFinding>,
     /// The batches the replacement bus executed for the zone changes, in execution order
     /// (empty if there was no move or nothing occurred).
@@ -160,6 +220,7 @@ pub struct SbaOutcome {
     /// For each player who lost in this pass, every entry id that applied to them, in registry
     /// order (CR 704.7: one loss per player).
     pub loss_reasons: BTreeMap<PlayerId, Vec<&'static str>>,
-    /// The objects that ceased to exist (CR 704.5d, CR 704.5e), ascending.
+    /// The objects that ceased to exist (CR 704.5d, CR 704.5e), ascending. For an object a
+    /// replacement effect of the pass moved before it ceased, this is its new id (CR 400.7).
     pub ceased: Vec<ObjectId>,
 }

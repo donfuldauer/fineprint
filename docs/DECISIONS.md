@@ -6730,11 +6730,27 @@ continuation, else 0, every candidate still offered (H3, item 5).
 `sba::SbaEnvironment`: whether an object is a copy of a spell or of a card (CR 704.5e), the
 CR 723.3c exemption, the set of objects dealt damage by a deathtouch source since the last check
 (CR 704.5h) and the game variant (CR 704.5c). Every method has a default (standard game, no
-copies, no deathtouch). Toughness, abilities, card types and loyalty come only from the caller's
+copies, no exemption), except the deathtouch pair `deathtouch_damaged` / `clear_deathtouch_damaged`,
+which has no default and is required together: an environment that reports an object MUST
+forget it in the clear, which `perform_all` calls after every successful pass (never on
+`Pending` or an error); an environment that does not track deathtouch returns an empty set and
+does nothing (or uses `StoredSbaEnvironment`, empty by default). Toughness, abilities, card types and loyalty come only from the caller's
 `ContinuousEffects` and `LayerEnvironment` (CR 613.1, CR 613.4, CR 306.5c), never from
 `GameState`. `StoredSbaEnvironment` is a plain stored implementation. Battlefield objects the
 layer environment cannot evaluate (any `LayerError`, typically `UnknownObject`) are skipped by
 the object entries, because the pinned `check` returns no error.
+
+The copy, exemption and deathtouch answers are keyed by `ObjectId` and therefore last ONE zone
+residency (CR 400.7: a moved object is a new object). Within one pass `perform_all` follows the
+moves of its own batch (see `Zones::cease_to_exist and the owned-path extension`). A caller
+whose state changes zones outside `perform_all`, or whose object survives a move made during a
+pass (for example a card copy moved onto the battlefield by a replacement effect), must re-key
+its environment to the new id before the next check; `SbaOutcome.ceased` and the
+`Outcome::ZoneChange` (old -> new) entries of `SbaOutcome.executed` say what to re-key. A
+resolved permanent-spell copy is a permanent, not a copy of a spell: the caller must stop
+answering `is_spell_copy` for it. This is documented on `SbaEnvironment` and
+`StoredSbaEnvironment`. Known follow-up: the engine holding copy status itself, so that no
+caller re-keying is needed.
 
 **Rationale.** Copies of spells, the deathtouch damage record, the variant and layer
 evaluation inside `GameState` (#183, #186) are owned by later units; the seam lets this unit
@@ -6742,7 +6758,13 @@ deliver the full CR 704.5a-704.5i semantics now and lets the heartbeat and layer
 units wire the facts without changing the registry.
 
 **Alternatives.** Adding copy and deathtouch markers to `events::ObjectMarkers` (rejected:
-outside the owned paths, R1); returning a `Result` from `check` (rejected: the API is pinned).
+outside the owned paths, R1); returning a `Result` from `check` (rejected: the API is pinned);
+a no-op default for the deathtouch clear (rejected in PR #207 review: an environment could
+report damage and never close the window, so a stale entry would destroy a creature at a later
+check after it lost indestructible).
+
+Amended in PR #207 review round 1: the deathtouch pair is required; the one-zone-residency
+contract and the caller's re-keying duty are stated.
 
 ## #41 FP-040 — Losing the game is a player designation
 
@@ -6761,11 +6783,34 @@ separate loser set outside `GameState` (rejected: not hashed, not part of rollba
 ## #41 FP-040 — Zones::cease_to_exist and the owned-path extension
 
 **Decision.** `Zones::cease_to_exist(id) -> Result<CardId, ZoneError>` removes the object and its
-record, returns its card, puts the card into no outside-the-game pool and issues no id; the card
-may later get a new object. `perform_all` calls it for CR 704.5d and CR 704.5e after the move
-batch, only for objects still present (a replacement may have moved one; the new object is
-checked by the next pass), and a ceasing object still in the permanent container also leaves it.
-No LKI is captured (not a zone change). The token mark (per card) and any Memory entry of the
+record, returns its card, puts the card into no outside-the-game pool and issues no id; the
+CardId is retired and must not be reused (match-scoped, REQ-CORE-002); enforcement (making the
+`Zones` container reject it, and/or retiring the token mark) is a known follow-up.
+`perform_all` calls it for CR 704.5d and CR 704.5e after the move batch. For each ceasing
+object it records why it ceases (token, CR 704.5d; copy of a spell or copy of a card,
+CR 704.5e). If the object is still present it ceases as before. If a replacement effect of the
+batch moved it, `perform_all` follows the executed `Outcome::ZoneChange` (old -> new) entries of
+every executed batch, chains included, to its final id and tests the reason again in the new
+zone (token: not the battlefield; spell copy: not the stack; card copy: neither the stack nor
+the battlefield; the CR 723.3c exemption read from the old id); if it still holds, the new
+object ceases in the same pass and its new id is in `SbaOutcome.ceased`, otherwise (for example
+a card copy moved onto the battlefield) it stays. A token that has left the battlefield is
+never moved by the event executor (`events/exec.rs` leaves it in its current zone), so a token
+named by an `Instead` keeps its id and ceases under it. The object kind (token, spell copy, card copy)
+persists across a move by an effect: the same end state as the repeated check, independent of
+the caller re-keying its environment. A ceasing object still in the permanent container also
+leaves it. LKI is captured (REQ-CORE-003: the object leaves its zone) by `perform_all` right
+before removal, with exile as the pseudo-destination of `capture_lki_on_move` (so a record is
+stored from any zone, a token already in a graveyard included), counters from the object
+markers and attachments from the permanent container (as the event executor does); an object
+the provider does not know gets no record and still ceases; no `ZoneChange` is emitted;
+`cease_to_exist` itself captures nothing. The capture happens after the move batch, per object,
+not before it: capturing a ceasing object that an `Instead` then moves would make the bus fail
+with `AlreadyCaptured`, losing the whole pass. A ceasing object is never itself a batch member,
+and only a battlefield spell copy among them is a permanent, whose state a batch can change only
+through a replacement effect, so the record is the object as it last existed when it left; an
+object the batch moved that then ceases under its new id gets a record for the new id as well.
+The token mark (per card) and any Memory entry of the
 object stay, since those containers belong to other modules. The brief extended this unit's
 owned paths (R1) to `zones/container.rs` and `zones/tests.rs` for exactly this method.
 
@@ -6773,7 +6818,15 @@ owned paths (R1) to `zones/container.rs` and `zones/tests.rs` for exactly this m
 a copy (CR 111.7, CR 707.10a): it ceases to exist.
 
 **Alternatives.** Ceasing before the move batch (rejected: an `Instead` replacement naming the
-object would then fail the whole pass with `UnknownObject`).
+object would then fail the whole pass with `UnknownObject`). Leaving a moved ceasing object to
+the next check (rejected in PR #207 review: CR 704.3 and CR 400.7 do not require it, but the
+caller's id-keyed environment would lose the copy status of the new object). Capturing LKI into
+a scratch `LkiStore` before the batch and merging it (rejected: `LkiStore` has no insertion API
+outside `memory/`, which this unit may not edit; a future change in `memory/` could allow strict
+pre-pass capture).
+
+Amended in PR #207 review round 1: follow-the-move cessation, LKI of ceasing objects, the
+retired-CardId contract.
 
 ## #41 FP-040 — Two-Headed Giant gating
 
@@ -6821,7 +6874,10 @@ granted or removed keyword must count).
 **Decision.** `perform_all` calls `SbaEnvironment::clear_deathtouch_damaged` after every
 successful pass and consumes `EventState::take_empty_library_draws` on every successful pass
 (before the move batch, so an empty-library draw caused by a replacement during the batch counts
-for the next check), whether or not anyone loses or dies. On `Pending` or an error, both flags,
+for the next check), whether or not anyone loses or dies. The deathtouch window closes at every
+check, for every creature, indestructible and phased-out ones included: an indestructible
+creature dealt deathtouch damage that survives a check is not destroyed by the stale entry
+after it later loses indestructible. On `Pending` or an error, both flags,
 every context component and the replacement registry are as before the call.
 
 **Rationale.** Both conditions are "since the last time state-based actions were checked"
@@ -6837,3 +6893,43 @@ player lose at a later check).
 **Rationale:** CR 702.26b ("treated as though it does not exist"), CR 702.26d (phasing is not a zone change; tokens continue to exist; counters remain), and CR 704.5 has no phased-out wording.
 
 **Alternatives:** checking phased-out permanents (rejected: contradicts 702.26b); making 704.5d/e skip phased-out objects (rejected: 702.26d says tokens continue to exist while phased out).
+
+## #41 FP-040 — performed means state changed
+
+**Decision.** `SbaOutcome.performed` is `true` exactly when the pass changed the game state: a
+move occurred (`executed` non-empty), an object ceased to exist, a player lost the game, or the
+replacement registry changed (for example a one-use replacement effect was consumed). A finding
+whose only move a replacement effect skipped is not performed, and consuming the empty-library
+and deathtouch flags alone does not count. `findings` stays the record of what the check
+detected. The heartbeat repeats the check while `performed`.
+
+**Rationale.** CR 704.3: "If any state-based actions are performed as a result of a check, the
+check is repeated". A persistent `Skip` on the only move left the state byte-identical, so a
+heartbeat repeating on "any finding" would never stop.
+
+**Alternatives.** `!findings.is_empty()` (rejected: the loop above); counting
+`BusReport.applications` (rejected: an application that changes nothing would still repeat the
+check, and a registry change is the observable effect).
+
+## #41 FP-040 — Known follow-ups from round 1 review
+
+**Decision.** Two review points are left to later units, not done in this unit. (1) The owner's
+choice of order for several cards entering one graveyard at the same time (CR 404.3: "If an
+effect or rule puts two or more cards into the same graveyard at the same time, the owner of
+those cards may arrange them in any order.") is a property of every simultaneous multi-card
+graveyard entry (the bus and zone-move layer, `events/` and `replacement/`) and is already
+listed as later work in `#19 FP-018 (f)`; until it lands `perform_all` keeps ascending
+`ObjectId` order with `Position::Top` (the ordering prompt is SRS §2.1 item 4, ORDER_CARDS).
+(2) CR 704.5g/704.5h destruction must be observable as "destroyed" by triggers (CR 701.8b: "The
+only ways a permanent can be destroyed are as a result of an effect that uses the word "destroy"
+or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or
+damage from a source with deathtouch (see rule 704.5h). ..."); this needs a `ZoneChange` cause
+or flag in `events/` and trigger normalization in `triggers/`, while shield counters stay
+inapplicable (CR 122.1c). Until then those moves use `ZoneChangeCause::StateBasedAction` and
+the distinction is available from `SbaOutcome.findings` (entry ids 704.5g/704.5h versus
+704.5f).
+
+**Rationale.** Both need changes in modules this unit does not own (R1).
+
+**Alternatives.** Implementing them here (rejected: outside the owned paths, and the graveyard
+ordering belongs to every simultaneous move, not only to state-based actions).

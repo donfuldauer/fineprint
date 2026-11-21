@@ -12,7 +12,7 @@ use fineprint_base::ids::{ObjectId, PlayerId};
 
 use super::types::{GameVariant, LOST_THE_GAME, SbaEnvironment, SbaSubject};
 use crate::events::EventState;
-use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate};
+use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, literal_of};
 use crate::permanent::Permanents;
 use crate::state::{GameState, PlayerState};
 use crate::zones::{ZoneId, Zones};
@@ -98,10 +98,9 @@ impl<'a> SbaView<'a> {
                 continue;
             };
             let c = &evaluated.characteristics;
-            let toughness = c
-                .toughness
-                .as_ref()
-                .and_then(|t| layer_env.eval_value(t, id));
+            // CR 613.4: the pipeline writes the final P/T as numeric literals; read the
+            // literal itself, not the environment's expression hook (which may decline it).
+            let toughness = c.toughness.as_ref().and_then(literal_of);
             // CR 306.5c: loyalty is the number of loyalty counters; none means 0.
             let loyalty = layer_env.counters(id).get("loyalty").copied().unwrap_or(0);
             permanents.insert(
