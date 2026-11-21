@@ -7201,10 +7201,11 @@ since every move waits for all answers).
 **Decision.** (PR #214 review round 2, the Orchestrator's "option (c)"; replaces the round-1
 section "F1 follow-up batch (CR 704.3 simultaneity vs engine batching)" and the round-1 rule
 "move wins over unattach and counter removal".) `perform_all` builds ONE batch and makes ONE
-`process_batch(.., sba = true)` call per pass: the zone changes (CR 704.5f-704.5k, CR 704.5m,
-CR 704.5s, legend losers) ascending object id, then the CR 704.5q / CR 704.5r `RemoveCounters`
-events ascending object id then kind (amounts from the check snapshot), then the CR 704.5n /
-CR 704.5p `Unattach` events ascending id, for EVERY applicable permanent, including a permanent
+`process_batch(.., sba = true)` call per pass: the CR 704.5n / CR 704.5p `Unattach` events
+ascending id (submitted first since review round 3, see "#42 FP-041 — Planned unattach and
+pre-pass host (round 3)"), then the zone changes (CR 704.5f-704.5k, CR 704.5m, CR 704.5s, legend
+losers) ascending object id, then the CR 704.5q / CR 704.5r `RemoveCounters` events ascending
+object id then kind (amounts from the check snapshot), for EVERY applicable permanent, including a permanent
 that also moves in the same pass. Only an object that ceases to exist (CR 704.5d, CR 704.5e; its
 ceasing path is unchanged) and a dungeon removed by CR 704.5t get no counter removal and no
 unattach event. There is no follow-up batch. Consequences:
@@ -7226,10 +7227,12 @@ unattach event. There is no follow-up batch. Consequences:
 - Counter removals of a permanent that also leaves are emitted (CR 704.3), with no look-back
   entry (CR 603.10 has none for counter removal); counters left on an object that moves get no
   removal event (CR 122.2: they "simply cease to exist").
-- `SbaOutcome::unattached` lists, ascending, only the permanents an `Unattach` event of the pass
-  unattached that are still on the battlefield as the same object at the END of the pass (CR
-  704.5n, CR 704.5p: "It remains on the battlefield"); the event stays in `executed` either way
-  (decision D2 of review round 2). `performed` is true whenever any event ran.
+- `SbaOutcome::unattached` lists, ascending, only the permanents unattached by every `Unattach`
+  event of the batch, planned or produced by a replacement (for example an `Instead` of another
+  event of the batch; review round 3, H4), that are still on the battlefield as the same object
+  at the END of the pass (CR 704.5n, CR 704.5p: "It remains on the battlefield"); an unattach
+  that found nothing attached is no event and lists nothing; the event stays in `executed`
+  either way (decision D2 of review round 2). `performed` is true whenever any event ran.
 - `Pending` or an error anywhere in the batch restores every component of the context, the
   replacement registry and the environment flags.
 
@@ -7310,8 +7313,8 @@ reported with its own class, and the conversion stays one arm).
 ## #42 FP-041 — F2 unattach events and the 704.5p inference
 
 **Decision.** CR 704.5n and CR 704.5p unattach through `GameEvent::Unattach { attachment }`
-events in the pass's one `process_batch` call (after the zone changes and counter removals,
-ascending id; see "#42 FP-041 — One SBA batch: moves, counter removals and unattach events"), no
+events in the pass's one `process_batch` call (submitted before the zone changes and counter
+removals since review round 3, ascending id; see "#42 FP-041 — One SBA batch: moves, counter removals and unattach events"), no
 longer through a direct
 `Permanents::detach`. The events executor detaches (once); the trigger normaliser turns each
 into an `EventKind::Unattached` occurrence (CR 603.2), and the batch captures last known
@@ -7319,7 +7322,8 @@ information before any of its events, so look-back (CR 603.10c, CR 704.8) sees t
 from before the pass. The bus executes the non-zone-change events of a batch before its zone
 changes (its own reconcile order), so an attached permanent whose host dies in the same pass is
 unattached by its event before the host moves, and is listed in `SbaOutcome::unattached` if it
-is still on the battlefield at the end of the pass. The
+is still on the battlefield at the end of the pass (`unattached` covers every Unattach event of
+the batch, planned or produced by a replacement; review round 3, H4). The
 704.5p unattachment of creatures, battles and other non-Aura/Equipment/Fortification permanents
 emits the same event.
 
@@ -7357,3 +7361,40 @@ predicate in the protection bundle).
 **Alternatives.** Reading protection from evaluated abilities now (rejected: no quality matching
 exists in the state model, R4 forbids a special case); folding it into `aura_can_enchant`
 (rejected: different rule, different consequence: graveyard versus unattach).
+
+## #42 FP-041 — Planned unattach and pre-pass host (round 3)
+
+**Decision.** (PR #214 review round 3, H6.) `GameEvent::Unattach { attachment }` names only the
+attachment and the events executor detaches whatever host is current when it runs, so a planned
+CR 704.5n / CR 704.5p unattach executed AFTER an `Attach` that a replacement effect made of
+another event of the same batch would clear the new link. `perform_all` now submits the batch's
+`Unattach` events FIRST (ascending id), then the zone changes, then the counter removals. The bus
+executes the events that are not zone changes in submission-lineage order (an `Instead`
+descendant at the position of the event it replaces, CR 614.6), so every planned unattach runs
+before an `Attach` produced by replacing a zone change or a counter removal of the batch: it
+clears the link from before the pass and the replacement's new link stays. Still one batch, one
+`Unattach` event per ending attachment, last known information captured before the batch, no new
+event type and no change outside `sba/`. Known limitation (judgement call, deferred): an
+`Attach` of attachment E produced by replacing the planned unattach of a LOWER-id attachment D in
+the same pass still executes before E's own planned unattach and is cleared by it; fixing that
+needs the unattach event to name the host it clears (a `GameEvent` / canonical-encoding / events
+executor change, an R2 contract change outside this unit). `SbaOutcome::unattached` still lists
+such a re-attached attachment (its unattach event occurred and it remains on the battlefield).
+
+**Rationale.** CR 614.1 (a replacement "completely or partially replace[s] that event with a
+different event") and CR 614.6 (the modified event occurs instead): the attachment a replacement
+makes is part of the one SBA event (CR 704.3), and the SBA's own action is to end the illegal
+attachment that existed when the check found it (CR 704.5n, CR 704.5p). Ordering inside the
+module is the only mechanism that needs no contract change. The only tests whose assertions
+changed are the two in-module tests that asserted the old submission order
+(`prevented_move_still_removes_counters_and_unattaches`,
+`unattach_events_in_the_batch_reach_triggers_with_look_back`); every spec test passes unchanged.
+
+**Alternatives.** A per-event guard in the bus (rejected: `process_batch` has none; adding one is a
+bus change outside this unit); detecting after the batch that the attachment's host changed and
+re-attaching directly (rejected: a state change outside the event system, no new timestamp, and
+the spurious `Unattach` event would stay in the log for triggers); a second batch after the main
+one (rejected: breaks the single SBA event, CR 704.3, REQ-SBA-001); omitting the planned unattach
+when some event of the batch re-attaches the attachment (rejected: replacements are applied
+inside `process_batch`, so this is unknown before the bus runs); an `Unattach` naming its host
+(rejected for this unit: R2 contract change; the residual case above is deferred to it).
