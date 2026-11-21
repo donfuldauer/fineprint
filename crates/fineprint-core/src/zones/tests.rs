@@ -1647,3 +1647,85 @@ fn exception_400_7m_stub_is_not_implemented() {
         ExceptionOutcome::NotImplemented(Exception400_7::M)
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ceasing to exist (#41 FP-040)
+// ---------------------------------------------------------------------------------------------
+
+// REQ-SBA-001, CR 704.5d, CR 704.5e, CR 111.7: the object and its record are removed, the card
+// is returned and put into no outside pool. The ceased CardId is retired (REQ-CORE-002: never
+// reused within a match); the last step pins only that the container does not yet reject it,
+// a known gap, not a supported use.
+#[test]
+fn cease_to_exist_removes_object_and_frees_card() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let gy = z
+        .create_object(&mut ids, c(5), p(1), req(ZoneKind::Graveyard))
+        .unwrap();
+    let other = z
+        .create_object(&mut ids, c(6), p(1), req(ZoneKind::Graveyard))
+        .unwrap();
+    let ids_before = ids.clone();
+    let card = z.cease_to_exist(gy).unwrap();
+    assert_eq!(card, c(5));
+    assert!(z.object(gy).is_none());
+    assert_eq!(z.object_of_card(c(5)), None);
+    assert_eq!(z.contents(ZoneId::Graveyard(p(1))), vec![other]);
+    assert_eq!(z.all_object_ids(), vec![other]);
+    for pool in [
+        OutsidePool::Sideboard,
+        OutsidePool::Lesson,
+        OutsidePool::Companion,
+    ] {
+        assert!(z.outside_cards(p(1), pool).is_empty());
+    }
+    // Not a zone change: no id is issued.
+    assert_eq!(ids, ids_before);
+    // Not yet enforced: the container accepts the retired card (a caller must not do this).
+    let again = z
+        .create_object(&mut ids, c(5), p(1), req(ZoneKind::Exile))
+        .unwrap();
+    assert!(again > other);
+    assert_eq!(z.object_of_card(c(5)), Some(again));
+}
+
+// REQ-SBA-001: an unknown id is an error and the container is unchanged.
+#[test]
+fn cease_to_exist_unknown_object_leaves_container_unchanged() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    z.create_object(&mut ids, c(1), p(2), req(ZoneKind::Battlefield))
+        .unwrap();
+    let saved = z.clone();
+    let bytes = encode_to_vec(&z);
+    assert_eq!(
+        z.cease_to_exist(ObjectId::new(999)),
+        Err(ZoneError::UnknownObject(ObjectId::new(999)))
+    );
+    assert_eq!(z, saved);
+    assert_eq!(encode_to_vec(&z), bytes);
+}
+
+// REQ-SBA-001, REQ-CORE-002: a clone sharing structure is not affected; ordered zones keep the
+// order of the remaining objects (CR 400.5).
+#[test]
+fn cease_to_exist_does_not_affect_clones() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let lib = fill_library(&mut z, &mut ids, p(1), 1, 3);
+    let stack = z
+        .create_object(&mut ids, c(10), p(2), req(ZoneKind::Stack))
+        .unwrap();
+    let saved = z.clone();
+    let bytes = encode_to_vec(&z);
+    let mut copy = z.clone();
+    copy.cease_to_exist(lib[1]).unwrap();
+    copy.cease_to_exist(stack).unwrap();
+    assert_eq!(copy.contents(ZoneId::Library(p(1))), vec![lib[0], lib[2]]);
+    assert!(copy.is_empty(ZoneId::Stack));
+    assert_eq!(z, saved);
+    assert_eq!(encode_to_vec(&z), bytes);
+    assert_eq!(z.contents(ZoneId::Library(p(1))), lib);
+    assert_eq!(z.contents(ZoneId::Stack), vec![stack]);
+}
