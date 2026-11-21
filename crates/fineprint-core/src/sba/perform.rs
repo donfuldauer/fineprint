@@ -40,7 +40,15 @@ pub fn check(
     layer_env: &dyn LayerEnvironment,
     env: &dyn SbaEnvironment,
 ) -> Vec<SbaFinding> {
-    let view = SbaView::new(ctx.game, ctx.zones, ctx.events, effects, layer_env, env);
+    let view = SbaView::new(
+        ctx.game,
+        ctx.zones,
+        ctx.events,
+        ctx.permanents,
+        effects,
+        layer_env,
+        env,
+    );
     let variant = env.variant();
     let mut findings = Vec::new();
     for entry in registry.entries() {

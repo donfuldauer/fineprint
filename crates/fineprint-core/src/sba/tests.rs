@@ -1173,3 +1173,144 @@ fn bus_error_rolls_back_everything() {
     assert_eq!(run.state.env.deathtouch, BTreeSet::from([c]));
     assert_eq!(run.state.events.empty_library_draws(), [p(1)]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phased-out permanents (CR 702.26b, CR 702.26d)
+// ---------------------------------------------------------------------------------------------
+
+impl World {
+    fn phase(&mut self, id: ObjectId, out: bool) {
+        self.permanents.set_phased_out(id, out).unwrap();
+    }
+}
+
+// REQ-SBA-001, CR 702.26b, CR 704.5f: a phased-out creature with toughness 0 is not checked;
+// once phased in, the same state is found and the creature is moved.
+#[test]
+fn phased_out_704_5f_toughness() {
+    let mut w = World::new();
+    let c = w.creature(1, 0);
+    w.phase(c, true);
+    assert!(w.check().is_empty());
+    let before = w.zones.clone();
+    assert!(!pass(&mut w).performed);
+    assert_eq!(w.zones, before);
+    w.phase(c, false);
+    assert_eq!(w.found(obj(c)), ["704.5f"]);
+    pass(&mut w);
+    assert!(
+        w.zones
+            .object(c)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+}
+
+// REQ-SBA-001, CR 702.26b, CR 702.26d, CR 704.5g: marked damage is neither cleared on phasing out
+// nor reset on phasing in.
+#[test]
+fn phased_out_704_5g_damage_kept() {
+    let mut w = World::new();
+    let c = w.creature(1, 2);
+    w.damage(c, 2);
+    w.phase(c, true);
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    assert_eq!(w.zones.object(c).unwrap().zone, ZoneId::Battlefield);
+    w.phase(c, false);
+    assert_eq!(w.found(obj(c)), ["704.5g"]);
+    assert!(pass(&mut w).performed);
+    assert!(
+        w.zones
+            .object(c)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+}
+
+// REQ-SBA-001, CR 702.26b, CR 704.5h: the deathtouch flag is not consulted while phased out and
+// is still consumed by a successful pass (decision #41 FP-040); a flag set after phasing in works.
+#[test]
+fn phased_out_704_5h_deathtouch() {
+    let mut w = World::new();
+    let c = w.creature(1, 4);
+    let other = w.creature(1, 0);
+    w.env.deathtouch = BTreeSet::from([c]);
+    w.phase(c, true);
+    assert!(w.check().iter().all(|f| f.subject != obj(c)));
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.zones.object(c).unwrap().zone, ZoneId::Battlefield);
+    assert!(
+        w.zones
+            .object(other)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+    assert!(w.env.deathtouch.is_empty());
+    w.phase(c, false);
+    assert!(w.check().is_empty());
+    w.env.deathtouch = BTreeSet::from([c]);
+    assert_eq!(w.found(obj(c)), ["704.5h"]);
+    pass(&mut w);
+    assert!(
+        w.zones
+            .object(c)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+}
+
+// REQ-SBA-001, CR 702.26b, CR 704.5i: a phased-out planeswalker with 0 loyalty is not checked.
+#[test]
+fn phased_out_704_5i_loyalty() {
+    let mut w = World::new();
+    let pw = w.create(
+        1,
+        ZoneKind::Battlefield,
+        noncreature("test.walker_0", "Planeswalker"),
+    );
+    w.phase(pw, true);
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    assert_eq!(w.zones.object(pw).unwrap().zone, ZoneId::Battlefield);
+    w.phase(pw, false);
+    assert_eq!(w.found(obj(pw)), ["704.5i"]);
+    assert!(pass(&mut w).performed);
+    assert!(
+        w.zones
+            .object(pw)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+}
+
+// REQ-SBA-001, CR 702.26d, CR 704.5d: a phased-out token on the battlefield does not cease to
+// exist; the same token in another zone does.
+#[test]
+fn phased_out_token_on_battlefield_survives() {
+    let mut w = World::new();
+    let t = w.token();
+    w.phase(t, true);
+    assert!(w.check().is_empty());
+    let out = pass(&mut w);
+    assert!(out.ceased.is_empty());
+    assert!(w.zones.object(t).is_some());
+    let gone = w.move_to(t, ZoneKind::Graveyard);
+    let out = pass(&mut w);
+    assert_eq!(out.ceased, [gone]);
+    assert!(w.zones.object(gone).is_none());
+}
+
+// REQ-SBA-001, CR 702.26b: on a mixed board only the phased-in creature is moved, in one batch.
+#[test]
+fn phased_out_mixed_board_one_batch() {
+    let mut w = World::new();
+    let out_c = w.creature(1, 0);
+    let in_c = w.creature(1, 0);
+    w.phase(out_c, true);
+    assert_eq!(w.check().len(), 1);
+    let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(w.zones.object(out_c).unwrap().zone, ZoneId::Battlefield);
+    assert!(
+        w.zones
+            .object(in_c)
+            .is_none_or(|r| r.zone != ZoneId::Battlefield)
+    );
+}
