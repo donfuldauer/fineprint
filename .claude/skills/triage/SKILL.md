@@ -13,7 +13,7 @@ task-executor and checked by the work-verifier. The fast path never routes T2 or
 
 - The item is a fix, a CodeRabbit finding, a docs/run-log/queue edit or a CI tweak (never a
   unit, an Independent Tester task, a fixture task, an investigation or a gate failure).
-- The tier is clearly T0 (Haiku 5.5) or T1 (Sonnet 5.5).
+- The tier is clearly T0 (Haiku 5.5 / Flash-Lite) or T1 (Sonnet 5.5 / Flash).
 - It touches one module, or docs only.
 - No contract change (PROCESS.md P3).
 - No change to rules evaluation outcomes: nothing in the priority heartbeat, layer evaluator,
@@ -45,8 +45,9 @@ work-classifier.
 4. Move any fast-path item that touches a file also touched by a classifier-bound item into the
    classifier batch. Send all classifier-bound items to ONE work-classifier call.
 5. Group the remaining fast-path items into one Fixer brief per (tier, module) group; all
-   docs-only items (`docs/`, `.claude/`, `CLAUDE.md`, `README.md`) form one docs group. Items of
-   different tiers on the same file go in one brief at the higher tier.
+   docs-only items (`docs/`, `.claude/`, `.agents/`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+   `README.md`) form one docs group. Items of different tiers on the same file go in one brief at
+   the higher tier.
 6. Spawn executors, in parallel when owned paths do not overlap.
 7. Run ONE work-verifier on the resulting head commit covering every item, whenever the round
    changed the head (a queue-only round uses the verifier's queue-only case). Skip it only when
@@ -55,13 +56,12 @@ work-classifier.
 
 ## 3. Fixer brief template
 
-A subset of `docs/BRIEF_TEMPLATE.md`. Pass it to the task-executor with the tier's model as the
-`model` override.
+A subset of `docs/BRIEF_TEMPLATE.md`. Pass it to the task-executor with the tier's model override.
 
 ```text
 WORK ITEM <id>: <title>          AGENT: task-executor
 ROLE: Fixer
-MODEL: <Haiku 5.5 | Sonnet 5.5>   TIER: T0 | T1
+MODEL: <Haiku 5.5 | Sonnet 5.5 | Flash-Lite | Flash>   TIER: T0 | T1
 BRANCH: <branch>   PR: <number>
 REQUIREMENT IDS: <REQ-… touched, or none>
 

@@ -14,9 +14,9 @@ no files.
 1. **The CR text of the rules baseline** named at the top of `docs/SRS.md`. Prefer a vendored copy
    in the git-ignored CR cache if one exists (the cache path is in `docs/DEVELOPMENT.md`; the CR is
    never committed, REQ-NFR-007). Otherwise fetch the official text linked from
-   `https://magic.wizards.com/en/rules` with WebFetch. If the only available text has a different
-   effective date than the baseline, say so in `baseline match` and flag any rule whose number or
-   text may differ.
+   `https://magic.wizards.com/en/rules` (with `WebFetch`, `curl`, or `cargo xtask cr fetch`). If
+   the only available text has a different effective date than the baseline, say so in
+   `baseline match` and flag any rule whose number or text may differ.
 2. **`docs/SRS.md`** for how Fine Print models the rule (requirement IDs, procedures, Appendix A
    errata).
 3. **Card questions:** the card's current Oracle text and rulings from Scryfall
