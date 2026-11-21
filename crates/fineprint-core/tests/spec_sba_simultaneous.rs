@@ -5,7 +5,7 @@
 //! Spec tests for performing all applicable SBAs simultaneously as one event, the CR 704.7
 //! object-level merge on the replacement bus, atomicity and replay of a pass suspended on a
 //! replacement choice, and the purity of `check` (REQ-SBA-001, REQ-TEST-001, REQ-TURN-001;
-//! CR 704.3, 704.4, 704.7, 704.8, 616.1). Black-box: written from the work-item brief only.
+//! CR 704.3, 704.4, 704.7, 704.8, 616.1, and 704.5j-704.5t together with 704.5a-704.5i). Black-box: written from the work-item brief only.
 
 #[path = "spec_sba_support.rs"]
 mod support;
@@ -447,4 +447,171 @@ fn req_sba_001_batch_members_are_sba_zone_changes() {
         .expect("logged")
         .clone();
     assert_eq!(&logged, batch);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR 704.5j-704.5t together with 704.5a-704.5i (FP-041)
+// ---------------------------------------------------------------------------------------------
+
+/// The roles of [`full_board`], by id.
+struct FullBoard {
+    sim: Sim,
+    token: ObjectId,
+    zero: ObjectId,
+    legends: [ObjectId; 2],
+    worlds: [ObjectId; 2],
+    aura: ObjectId,
+    eq: ObjectId,
+    attached: ObjectId,
+    pt: ObjectId,
+    limited: ObjectId,
+    saga: ObjectId,
+    dungeon: ObjectId,
+}
+
+/// One board with one result of each of 704.5d, 704.5f and 704.5j-704.5t (and 704.5a when
+/// `zero_life`), in `variant`.
+fn full_board(variant: fineprint_core::sba::GameVariant, zero_life: bool) -> FullBoard {
+    use fineprint_core::permanent::AttachTarget;
+    let mut s = Sim::new();
+    s.env.variant = variant;
+    let token = s.token(P2, ZoneKind::Graveyard);
+    let zero = s.creature(P1, "test.vanilla_2_0", 2, 0);
+    let legends = [
+        s.legend(P1, P1, "test.legend_a"),
+        s.legend(P2, P1, "test.legend_a"),
+    ];
+    let worlds = [
+        s.world(P1, P1, "test.world_a", Some(1)),
+        s.world(P2, P2, "test.world_b", Some(2)),
+    ];
+    let aura = s.permanent(P2, P2, aura_chars("test.aura_a"));
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach(eq, AttachTarget::Player(P2));
+    let host = s.creature(P2, "test.vanilla_3_3", 3, 3);
+    let attached = s.creature(P2, "test.vanilla_1_1", 1, 1);
+    s.attach_to(attached, host);
+    let pt = s.creature(P1, "test.vanilla_4_4", 4, 4);
+    s.counters(pt, "+1/+1", 1);
+    s.counters(pt, "-1/-1", 3);
+    let limited = s.permanent(P2, P2, artifact_chars("test.artifact_a"));
+    s.counters(limited, "charge", 3);
+    s.limit(limited, "charge", 1);
+    let saga = s.saga(P2, P1, Some(2), 2);
+    let dungeon = s.dungeon(P1, true);
+    if zero_life {
+        s.set_life(P2, 0);
+    }
+    FullBoard {
+        sim: s,
+        token,
+        zero,
+        legends,
+        worlds,
+        aura,
+        eq,
+        attached,
+        pt,
+        limited,
+        saga,
+        dungeon,
+    }
+}
+
+// REQ-SBA-001, REQ-TURN-001, CR 704.3, 704.5a, 704.5d, 704.5f, 704.5j, 704.5k, 704.5m, 704.5n,
+// 704.5p, 704.5q, 704.5r, 704.5s, 704.5t: one pass performs the old and the new results
+// together, in one event; findings are in registry order; the old results are unchanged.
+#[test]
+fn req_sba_001_old_and_new_entries_in_one_pass() {
+    let b = full_board(fineprint_core::sba::GameVariant::Standard, true);
+    let expected = vec![
+        finding("704.5a", SbaSubject::Player(P2)),
+        finding("704.5d", obj(b.token)),
+        finding("704.5f", obj(b.zero)),
+        finding("704.5j", obj(b.legends[0])),
+        finding("704.5j", obj(b.legends[1])),
+        finding("704.5k", obj(b.worlds[0])),
+        finding("704.5m", obj(b.aura)),
+        finding("704.5n", obj(b.eq)),
+        finding("704.5p", obj(b.attached)),
+        finding("704.5q", obj(b.pt)),
+        finding("704.5r", obj(b.limited)),
+        finding("704.5s", obj(b.saga)),
+        finding("704.5t", obj(b.dungeon)),
+    ];
+    let mut sim = b.sim.clone();
+    assert_eq!(sim.check(), expected);
+    let kept = b.legends[1];
+    let r = drive_sba(b.sim, |_, _| keep(kept));
+    let o = r.outcome();
+    assert_eq!(o.findings, expected);
+    assert!(o.performed);
+    assert_eq!(r.requests.len(), 1);
+    // Old results.
+    assert!(r.after.lost(P2));
+    assert_eq!(o.lost_players, vec![P2]);
+    assert_eq!(o.ceased, vec![b.token]);
+    assert_to_owners_graveyard(&r, b.zero, ZoneChangeCause::StateBasedAction);
+    // New results.
+    assert_still_on_battlefield(&r, kept);
+    assert_to_owners_graveyard(&r, b.legends[0], ZoneChangeCause::StateBasedAction);
+    assert_to_owners_graveyard(&r, b.worlds[0], ZoneChangeCause::StateBasedAction);
+    assert_still_on_battlefield(&r, b.worlds[1]);
+    assert_to_owners_graveyard(&r, b.aura, ZoneChangeCause::StateBasedAction);
+    assert_eq!(o.unattached, vec![b.eq, b.attached]);
+    assert_eq!(r.after.permanents.attached_to(b.eq), None);
+    assert_eq!(r.after.permanents.attached_to(b.attached), None);
+    assert_still_on_battlefield(&r, b.eq);
+    assert_still_on_battlefield(&r, b.attached);
+    assert_eq!(r.after.counter(b.pt, "+1/+1"), 0);
+    assert_eq!(r.after.counter(b.pt, "-1/-1"), 2);
+    assert_eq!(r.after.counter(b.limited, "charge"), 1);
+    assert_to_owners_graveyard(&r, b.saga, ZoneChangeCause::Sacrifice);
+    assert_eq!(o.removed_from_game, vec![b.dungeon]);
+    assert!(r.after.zones.object(b.dungeon).is_none());
+    assert_eq!(r.nonempty_batches().len(), 1, "one event (CR 704.3)");
+    assert_eq!(r.moves().len(), 5, "zero, legend, world, aura, saga");
+}
+
+// REQ-SBA-001, CR 704.5j, 704.5k, 704.5m, 704.5n, 704.5p, 704.5q, 704.5r, 704.5s, 704.5t:
+// every new entry is active in Two-Headed Giant: `check` and the pass report the same new
+// findings as in a standard game.
+#[test]
+fn req_sba_001_new_entries_active_in_two_headed_giant() {
+    use fineprint_core::sba::GameVariant;
+    let new_ids = |f: &[fineprint_core::sba::SbaFinding]| -> Vec<&'static str> {
+        f.iter()
+            .map(|x| x.entry_id)
+            .filter(|id| NEW_ENTRY_IDS.contains(id))
+            .collect()
+    };
+    let mut standard = full_board(GameVariant::Standard, false).sim;
+    let mut thg = full_board(GameVariant::TwoHeadedGiant, false);
+    let a = standard.check();
+    let b = thg.sim.check();
+    assert_eq!(a, b);
+    let mut seen: Vec<&str> = new_ids(&b);
+    seen.dedup();
+    assert_eq!(seen, NEW_ENTRY_IDS.to_vec());
+    let kept = thg.legends[0];
+    let r = drive_sba(thg.sim, |_, _| keep(kept));
+    assert_eq!(new_ids(&r.outcome().findings), new_ids(&b));
+    assert_eq!(r.outcome().removed_from_game, vec![thg.dungeon]);
+}
+
+// REQ-SBA-001, CR 704.5n, 704.5p, 701.3d, 704.3 (PR #214 round 1, F2): in the full pass the
+// Equipment and the attached creature each get exactly one executed `GameEvent::Unattach`,
+// in ascending id order among the Unattach events; no other object gets one; the pass is still one event.
+#[test]
+fn req_sba_001_f2_full_pass_unattach_events_last() {
+    let b = full_board(fineprint_core::sba::GameVariant::Standard, true);
+    let kept = b.legends[1];
+    let r = drive_sba(b.sim, |_, _| keep(kept));
+    let mut both = vec![b.eq, b.attached];
+    both.sort();
+    assert_eq!(r.outcome().unattached, both);
+    assert_eq!(unattach_events(&r), both, "one each, ascending id");
+    assert_eq!(r.nonempty_batches().len(), 1, "one event (CR 704.3)");
+    assert_eq!(r.after.permanents.attached_to(b.eq), None);
+    assert_eq!(r.after.permanents.attached_to(b.attached), None);
 }

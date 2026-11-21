@@ -829,6 +829,9 @@ impl From<BusInterrupt> for Interrupt {
     fn from(i: BusInterrupt) -> Interrupt {
         match i {
             BusInterrupt::Pending(r) => Interrupt::Pending(r),
+            // A choice error keeps its class (for example `ChoiceError::Invalid`, which a
+            // session rejects without recording the answer; decision #42 FP-041, round 2).
+            BusInterrupt::Error(BusError::Choice(e)) => Interrupt::Error(e),
             BusInterrupt::Error(e) => Interrupt::Error(ChoiceError::Procedure(e.to_string())),
         }
     }
