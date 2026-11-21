@@ -705,3 +705,130 @@ fn req_sba_001_f2_unattached_trigger_matches() {
         "one trigger per unattached object: {fired:?}"
     );
 }
+
+// =============================================================================================
+// PR #214 round 2: G3 (Equipment that is also a Fortification, D5) and G4 (an illegal pair
+// overrides an unevaluable target, D5)
+// =============================================================================================
+
+/// An artifact with both the Equipment and the Fortification subtypes (CR 301.5, 301.6).
+fn equipment_fortification_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Artifact"], &["Equipment", "Fortification"])
+}
+
+/// A 2/2 permanent that is both a creature and a land.
+fn creature_land_chars(name: &str) -> Characteristics {
+    Characteristics {
+        power: Some(lit(2)),
+        toughness: Some(lit(2)),
+        ..typed(&[name], &[], &["Creature", "Land"], &[])
+    }
+}
+
+// REQ-SBA-001, CR 704.5n, 301.5, 301.6 (G3, D5): an artifact that is both an Equipment and a
+// Fortification must satisfy both restrictions: attached to a nonland creature it becomes
+// unattached (one Unattach event, listed); attached to a noncreature land it becomes unattached;
+// attached to a permanent that is both a creature and a land it stays attached with no event.
+#[test]
+fn req_sba_001_704_5n_g3_equipment_fortification_needs_creature_land() {
+    let mut s = Sim::new();
+    let creature = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let land = s.permanent(P1, P1, land_chars("test.land_a"));
+    let both = s.permanent(P1, P1, creature_land_chars("test.creature_land_a"));
+    let on_creature = s.permanent(P1, P1, equipment_fortification_chars("test.equip_fort_a"));
+    let on_land = s.permanent(P1, P1, equipment_fortification_chars("test.equip_fort_b"));
+    let on_both = s.permanent(P1, P1, equipment_fortification_chars("test.equip_fort_c"));
+    s.attach_to(on_creature, creature);
+    s.attach_to(on_land, land);
+    s.attach_to(on_both, both);
+    assert_eq!(
+        s.check(),
+        vec![
+            finding("704.5n", obj(on_creature)),
+            finding("704.5n", obj(on_land))
+        ]
+    );
+    let r = run_sba(s);
+    assert_unattached(&r, on_creature);
+    assert_unattached(&r, on_land);
+    assert_untouched(&r, on_both);
+    assert_eq!(
+        r.after.permanents.attached_to(on_both),
+        Some(AttachTarget::Permanent(both))
+    );
+    assert_eq!(r.outcome().unattached, vec![on_creature, on_land]);
+    assert_eq!(unattach_events(&r), vec![on_creature, on_land]);
+    assert_eq!(unattach_count(&r, on_both), 0, "no event for the legal one");
+}
+
+// REQ-SBA-001, CR 704.5n, 301.5, 301.6 (G3 control): a plain Equipment on a creature, a plain
+// Fortification on a land and a plain Equipment on a creature land stay attached; nothing is
+// found or performed.
+#[test]
+fn req_sba_001_704_5n_g3_plain_subtypes_stay() {
+    let mut s = Sim::new();
+    let creature = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let land = s.permanent(P1, P1, land_chars("test.land_a"));
+    let both = s.permanent(P1, P1, creature_land_chars("test.creature_land_a"));
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    let fort = s.permanent(P1, P1, fortification_chars("test.fortification_a"));
+    let fort_both = s.permanent(P1, P1, fortification_chars("test.fortification_b"));
+    s.attach_to(eq, creature);
+    s.attach_to(fort, land);
+    s.attach_to(fort_both, both);
+    assert!(s.check().is_empty());
+    let r = run_sba(s);
+    assert!(!r.outcome().performed);
+    for id in [eq, fort, fort_both] {
+        assert_untouched(&r, id);
+    }
+    assert!(unattach_events(&r).is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n, 702.16d (G4, D5): an Equipment attached to a creature whose facts the
+// layer environment cannot evaluate (no base description; the creature is on the battlefield and
+// NOT phased out), with the exact pair in `illegal_equipment_targets`: the pair alone makes it
+// illegal: unattached, stays on the battlefield, one Unattach event, listed in `unattached`.
+#[test]
+fn req_sba_001_704_5n_g4_illegal_pair_with_unevaluable_target() {
+    let mut s = Sim::new();
+    let c = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, c);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(c)));
+    s.layer.bases.remove(&c);
+    assert!(s.on_battlefield(c));
+    assert!(
+        !s.permanents
+            .get(c)
+            .expect("a permanent")
+            .status()
+            .phased_out
+    );
+    assert!(s.check().contains(&finding("704.5n", obj(eq))));
+    let r = run_sba(s);
+    assert_unattached(&r, eq);
+    assert_eq!(r.outcome().unattached, vec![eq]);
+    assert_eq!(unattach_count(&r, eq), 1);
+}
+
+// REQ-SBA-001, CR 704.5n, 702.26b (G4, D5): the same unevaluable target, pair marked, but the
+// target is phased out: still skipped: the Equipment stays attached and nothing is found.
+#[test]
+fn req_sba_001_704_5n_g4_phased_out_unevaluable_target_skipped() {
+    let mut s = Sim::new();
+    let c = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, c);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(c)));
+    s.layer.bases.remove(&c);
+    s.phase_out(c);
+    assert!(!s.check().contains(&finding("704.5n", obj(eq))));
+    let r = run_sba(s);
+    assert_untouched(&r, eq);
+    assert_eq!(unattach_count(&r, eq), 0);
+}

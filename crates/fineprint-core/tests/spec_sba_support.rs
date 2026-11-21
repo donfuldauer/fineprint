@@ -25,8 +25,8 @@ use fineprint_base::encode::CanonicalEncode;
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
 use fineprint_core::choice::{
-    ChoiceContext, ChoicePayload, ChoiceResponse, ChoiceSession, ChoiceType, Interrupt,
-    PendingChoiceRequest, Status,
+    ChoiceContext, ChoiceError, ChoicePayload, ChoiceResponse, ChoiceSession, ChoiceType,
+    Interrupt, PendingChoiceRequest, Status,
 };
 use fineprint_core::events::{
     CounterTarget, DamageTarget, EventContext, EventState, ExecutedBatch, ExecutedEvent, GameEvent,
@@ -964,6 +964,12 @@ pub fn call_sba(s: &mut Sim, c: &mut ChoiceContext<'_>) -> Result<SbaOut, Interr
             );
             Err(Interrupt::Pending(p))
         }
+        // Contract item 7 (PR #214 round 2, D3): an invalid legend answer is a correctable
+        // choice error: it reaches the session as `Interrupt::Error`, so `submit` fails and the
+        // request stays pending. Every other bus error completes the pass with the error as data.
+        Err(BusInterrupt::Error(BusError::Choice(e @ ChoiceError::Invalid { .. }))) => {
+            Err(Interrupt::Error(e))
+        }
         Err(BusInterrupt::Error(e)) => Ok(Err(e)),
     }
 }
@@ -1516,24 +1522,17 @@ pub fn drive_answers(base: Sim, answers: &[ChoiceResponse]) -> SbaRun {
     r
 }
 
-/// How an invalid answer was rejected.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Rejected {
-    /// `ChoiceSession::submit` refused it (the protocol-error path); the session is unchanged.
-    AtSubmit(fineprint_core::choice::ChoiceError),
-    /// The pass ended with a bus error and an unchanged state.
-    AsOutput(BusError),
-}
-
 /// Starts a session over `base`, submits `prior` to the first requests (each must be
-/// accepted), then submits `bad` to the next pending request and asserts that it is rejected
-/// and nothing is mutated: either `submit` fails and the session (pending request, answers,
-/// state hash, base) is unchanged, or the pass ends with an error and the state equals `base`.
+/// accepted), then submits `bad` to the next pending request and asserts contract item 7 of
+/// PR #214 round 2 (D3, CR 704.5j): `ChoiceSession::submit` returns
+/// `Err(ChoiceError::Invalid { request_id, .. })` with `request_id` the pending request's id;
+/// nothing is recorded (`answers()` unchanged); the SAME request stays pending; the state
+/// (state hash and base) is unchanged. Returns the error.
 pub fn assert_answer_rejected(
     base: Sim,
     prior: &[ChoiceResponse],
     bad: ChoiceResponse,
-) -> Rejected {
+) -> ChoiceError {
     let base_snap = base.snap();
     let mut session = ChoiceSession::start(base, call_sba).expect("session starts");
     for a in prior {
@@ -1550,22 +1549,25 @@ pub fn assert_answer_rejected(
     let hash_before = session.state_hash();
     match session.submit(req.request_id, bad.clone()) {
         Err(e) => {
+            match &e {
+                ChoiceError::Invalid {
+                    request_id,
+                    explanation,
+                } => {
+                    assert_eq!(*request_id, req.request_id, "{bad:?}: the pending id");
+                    assert!(!explanation.is_empty(), "{bad:?}: an explanation");
+                }
+                other => panic!("{bad:?}: expected ChoiceError::Invalid, got {other:?}"),
+            }
             assert_eq!(session.pending(), Some(&req), "still pending: {bad:?}");
             assert_eq!(session.answers(), answers_before.as_slice());
             assert_eq!(session.state_hash(), hash_before, "{bad:?}");
             assert_eq!(session.base().snap(), base_snap, "{bad:?}");
-            Rejected::AtSubmit(e)
+            e
         }
         Ok(()) => match session.status() {
-            Status::Done {
-                state,
-                output: Err(e),
-            } => {
-                assert_eq!(state.snap(), base_snap, "nothing mutated by {bad:?}");
-                Rejected::AsOutput(e.clone())
-            }
             Status::Done { output, .. } => {
-                panic!("invalid answer {bad:?} to {req:?} was accepted: {output:?}")
+                panic!("invalid answer {bad:?} to {req:?} completed the session: {output:?}")
             }
             Status::Pending(next) => {
                 panic!("invalid answer {bad:?} to {req:?} was accepted; next: {next:?}")
@@ -1738,4 +1740,45 @@ pub fn assert_component_request(
         survivors(&greedy_survivors(&sorted, names)),
         "default: the greedy maximal independent set by ascending id"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR #214 round 2 (FP-041): one SBA batch (D1), replacement matchers on counter removals,
+// executed-event counts
+// ---------------------------------------------------------------------------------------------
+
+/// Matches a `RemoveCounters` of `kind` on `object` (on the replacement bus).
+pub fn remove_counters_of(
+    object: ObjectId,
+    kind: &str,
+) -> fineprint_core::replacement::EventMatcher {
+    use fineprint_core::replacement::{BusEventKind, EventMatcher};
+    EventMatcher {
+        affected_object: Some(object),
+        counter_kind: Some(kind.to_owned()),
+        ..EventMatcher::new(BusEventKind::RemoveCounters)
+    }
+}
+
+impl Sim {
+    /// Registers effect `n`: a persistent replacement with `matcher` and `action`.
+    pub fn replace(
+        &mut self,
+        n: u64,
+        matcher: fineprint_core::replacement::EventMatcher,
+        action: fineprint_core::replacement::Action,
+    ) {
+        self.add_replacement(
+            ReplacementEffect::new(eid(n), matcher, action)
+                .with_description(format!("test.replacement_{n}")),
+        );
+    }
+}
+
+/// The number of executed `Unattach` events naming `attachment`.
+pub fn unattach_count(r: &SbaRun, attachment: ObjectId) -> usize {
+    unattach_events(r)
+        .into_iter()
+        .filter(|a| *a == attachment)
+        .count()
 }
