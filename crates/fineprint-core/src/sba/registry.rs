@@ -857,15 +857,23 @@ fn illegal_equipment(view: &SbaView<'_>) -> Vec<SbaSubject> {
                     true
                 }
                 AttachTarget::Permanent(x) => {
-                    // A target the layer environment cannot evaluate is not judged.
+                    // CR 702.16d, CR 301.5c: protection and other effects that say the
+                    // permanent can't be equipped or fortified by it make the pair illegal.
+                    // Asked for the exact pair after the phased-out guard (`attachments`) and
+                    // before the target's facts, so a marked pair is unattached even when the
+                    // target cannot be evaluated (decision #42 FP-041, round 2).
+                    if !view.env.equipment_can_attach(*id, *target) {
+                        return true;
+                    }
+                    // A target the layer environment cannot evaluate is not judged further.
                     let Some(t) = view.permanents.get(&x) else {
                         return false;
                     };
-                    // CR 301.5: Equipment on a creature; CR 301.6: Fortification on a land.
-                    let legal = (f.equipment && t.creature) || (f.fortification && t.land);
-                    // CR 702.16d, CR 301.5c: protection and other effects that say the
-                    // permanent can't be equipped or fortified by it make it illegal too.
-                    !legal || !view.env.equipment_can_attach(*id, *target)
+                    // CR 301.5: an Equipment only on a creature; CR 301.6: a Fortification
+                    // only on a land. Each subtype's restriction applies, so an artifact that
+                    // is both is legal only on a permanent that is both (decision #42 FP-041).
+                    let legal = (!f.equipment || t.creature) && (!f.fortification || t.land);
+                    !legal
                 }
             }
         })

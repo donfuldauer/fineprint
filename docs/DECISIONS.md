@@ -7063,7 +7063,9 @@ to its owner's graveyard with cause `StateBasedAction` in the one batch. For A {
 C {X} under one controller the valid answers are {A} and {B, C}; {A, B}, {B} alone and {} are
 rejected; the default is {A} (A < B < C). An invalid answer (the session rejects counts outside
 min..max and non-candidates first) is `BusInterrupt::Error(BusError::Choice(
-ChoiceError::Procedure(..)))` with nothing changed. For a clique the request and outcome are
+ChoiceError::Invalid { request_id, explanation }))` naming the legend-rule request, with nothing
+changed; the session rejects it without recording it and the request stays pending (see "#42
+FP-041 — Invalid legend-rule answers are correctable choice errors"). For a clique the request and outcome are
 exactly the former ones (min = max = 1, default the lowest id).
 
 **Rationale.** CR 704.5j, CR 201.2a; the rules-researcher (PR #214 round 1): the legal end states
@@ -7085,41 +7087,33 @@ be both kept and lost); asking the active player (rejected: CR 704.5j says "that
 keeping the newest automatically (rejected: invents a rule); the stored `Permanents` controller
 (rejected: ignores layer-2 control changes).
 
-## #42 FP-041 — Mixed results: move wins over unattach and counter removal; Sacrifice cause
+## #42 FP-041 — Mixed results: ceasing wins over a move; Sacrifice cause; counter amounts
 
-**Decision.** (Updated in PR #214 review round 1.) Within one pass: ceasing to exist wins over a
-move (as before); for an object that actually leaves the battlefield, a move or ceasing wins over
-unattaching (CR 704.5n, CR 704.5p) and counter removal (CR 704.5q, CR 704.5r): such an object
-gets no `Unattach` and no `RemoveCounters` event, though every finding is still reported. An
-object whose planned move did NOT take place (a replacement effect kept it on the battlefield
-under the same id) still gets its counter removals and its unattach, in a follow-up batch (see
-"#42 FP-041 — F1 follow-up batch (CR 704.3 simultaneity vs engine batching)"). An object with a
-CR 704.5s finding and another move finding moves once with `ZoneChangeCause::Sacrifice`. When
-CR 704.5q and CR 704.5r both remove counters of one kind from one object, one event removes the
-larger of the two amounts (the result equals applying 704.5q and then 704.5r). Counter removals
-are `RemoveCounters` events and unattaching is one `GameEvent::Unattach` per permanent (see
-"#42 FP-041 — F2 unattach events and the 704.5p inference"), all in the same `process_batch`
-call (`sba = true`) as the moves: zone changes and counter removals ascending object id then
-kind, then the unattach events ascending id. The batch captures last known information before
-any of its events, so every record shows the attachments from before the pass (CR 704.8);
-`SbaOutcome::unattached` lists the permanents an `Unattach` event of the pass actually
-unattached. A dungeon removed from the game (CR 704.5t) uses the ceasing path
-(`Zones::cease_to_exist`, LKI captured from the pre-pass state) but is reported in
-`removed_from_game`, not `ceased`; if it also ceases by CR 704.5d/e it is reported as ceased.
+**Decision.** (Rewritten in PR #214 review round 2; the round-1 title was "Mixed results: move
+wins over unattach and counter removal; Sacrifice cause", and the rule "a move wins over
+unattaching and counter removal" is withdrawn, see "#42 FP-041 — One SBA batch: moves, counter
+removals and unattach events".) Within one pass: ceasing to exist wins over a move (as before),
+and an object that ceases to exist gets no `RemoveCounters` and no `Unattach` event. A permanent
+that moves (or whose move a replacement effect prevents or redirects) gets every other
+applicable action in the same batch: its counter removals (CR 704.5q, CR 704.5r) and its one
+unattach event (CR 704.5n, CR 704.5p). An object with a CR 704.5s finding and another move
+finding moves once with `ZoneChangeCause::Sacrifice`. When CR 704.5q and CR 704.5r both remove
+counters of one kind from one object, one event removes the larger of the two amounts (the
+result equals applying 704.5q and then 704.5r). A dungeon removed from the game (CR 704.5t) is
+handled as in "#42 FP-041 — Removing a dungeon from the game".
 
-**Rationale.** CR 704.3 (one simultaneous event), CR 704.8 (LKI from before the pass). A
-permanent leaving the battlefield is unattached by leaving anyway, and its counters cease with
-it, so the extra actions would only add unobservable or failing events; a permanent that stays
-must still have them performed (PR #214 review). Sacrifice is the more specific description of
-what happens to the Saga (CR 715.4) and lets sacrifice-matching effects see it. Taking the larger
-counter amount never removes more counters than either rule demands.
+**Rationale.** CR 704.3 (all applicable state-based actions performed simultaneously as a single
+event; REQ-SBA-001 "perform every applicable SBA simultaneously as one event"), CR 704.8 (LKI
+from before the pass). Sacrifice is the more specific description of what happens to the Saga
+(CR 715.4) and lets sacrifice-matching effects see it. Taking the larger counter amount never
+removes more counters than either rule demands.
 
 **Alternatives.** Summing the two counter amounts (rejected: removes more than either rule
 requires; noted as a rules question to the Orchestrator); unattaching through `Permanents::detach`
 after the batch (rejected in PR #214: no event, so "becomes unattached" triggers never saw it);
-dropping the removals and unattach of an object whose move was prevented (rejected in PR #214:
-the state-based actions were never performed, and the check might not repeat); a separate
-batch for counters of objects that do leave (rejected: CR 704.3 single event).
+"a move wins": no counter removal or unattach for a moving permanent (round 1; withdrawn in round
+2: CR 704.3 gives no exclusion of a permanent from a second applicable state-based action because
+another one moves it, and it forced the follow-up batch whose defects review round 2 found).
 
 ## #42 FP-041 — Other judgement calls (Aura and battle, unknown targets, phasing)
 
@@ -7127,13 +7121,22 @@ batch for counters of objects that do leave (rejected: CR 704.3 single event).
 CR 310.10 in the first check and stays on the battlefield. It is put into the graveyard by
 CR 704.5m as "not attached" in the next check (CR 704.3). If the object it is attached to is
 independently illegal (enchant ability, CR 303.4c), CR 704.5m also fires in the first check and
-the move wins over the unattach. Creature-Auras (CR 303.4d) are unchanged: graveyard in one
+both are performed in the one event (its unattach event, then its move; see "#42 FP-041 — One
+SBA batch: moves, counter removals and unattach events"). Creature-Auras (CR 303.4d) are unchanged: graveyard in one
 pass. The rules-researcher established this from CR 310.10, 704.5p, 704.5m and 303.4c: "illegal"
 in CR 704.5m is defined by the enchant ability and effects on the object it is attached to, not
-by the Aura's own types. (2) An Equipment that is also a Fortification is legal on a creature or a
-land. (3) An attachment whose target permanent is on the battlefield but cannot be evaluated by
-the layer environment is not judged by CR 704.5n (existing "skip what cannot be evaluated"
-policy). (4) An attachment to a phased-out permanent is not checked by CR 704.5m, 704.5n or
+by the Aura's own types. (2) (Revised in PR #214 review round 2.) Each subtype's restriction
+applies: an attached Equipment is legal only on a creature (CR 301.5), an attached Fortification
+only on a land (CR 301.6), so an artifact that is both an Equipment and a Fortification is legal
+only on a permanent that is both a creature and a land:
+`legal = (!is_equipment || target_is_creature) && (!is_fortification || target_is_land) &&
+equipment_can_attach(pair)`, "creature" and "land" read from the evaluated types. The CR has no
+rule for an object with both subtypes; this is the plain reading of both restrictions
+(rules-researcher, round 2). (3) An attachment whose target permanent is on the battlefield but
+cannot be evaluated by the layer environment is not judged by CR 704.5n's type check (existing
+"skip what cannot be evaluated" policy); a pair the environment marks illegal
+(`equipment_can_attach` false) is still unattached (see "#42 FP-041 — F5 equipment_can_attach
+seam"). (4) An attachment to a phased-out permanent is not checked by CR 704.5m, 704.5n or
 704.5p (CR 702.26b); a phased-out permanent is never a legend-group member, world permanent,
 counter holder or Saga for these entries. (5) A player who has the `LOST_THE_GAME` designation or
 is not in the game counts as having left the game for CR 303.4c. (6) The container refuses
@@ -7148,6 +7151,9 @@ Aura's effects between the two checks. The rest follows the decisions of
 
 **Alternatives.** (1) The former one-pass graveyard for a battle-Aura, treating it as illegal
 under CR 704.5m (rejected: contradicts CR 310.10 / 704.5p as established by the rules-researcher).
+(2) Legal on a creature OR a land (round 1; rejected in review round 2: an Equipment-Fortification
+on a nonland creature would stay attached although CR 301.6 says a Fortification "can't legally
+be attached to an object that isn't a land").
 
 ## #42 FP-041 — 704.5q and 704.5r on the same permanent and kind
 
@@ -7174,8 +7180,15 @@ lowest object id. All asks happen before any state change; all moves go in one b
 answer.
 
 **Rationale.** CR 101.4 (different players choose in APNAP order, then the actions happen
-simultaneously), CR 101.4b (a later player knows the earlier choices: the requests are asked in
-that order); CR 101.4c leaves the order of one player's several choices to that player, and the
+simultaneously). CR 101.4b ("A player knows the choices made by the previous players when
+making their choice") prescribes no mechanism (rules-researcher, round 2); asking in APNAP order
+only guarantees that every earlier choice exists before a later player is asked, it is not
+itself how the later player learns it. The mechanism: legend-rule requests are not hidden
+(`hidden: false`), so each accepted survivor set is public information, recorded in order and
+available as `ChoiceSession::answers()`; presenting the earlier players' accepted selections to
+the later chooser before they answer is owned by the wire-protocol unit #80 (FP-078). (Revised
+in PR #214 review round 2; the round-1 text said the request order was how the later player
+knows.) CR 101.4c leaves the order of one player's several choices to that player, and the
 rules-researcher accepts a deterministic order as an implementation choice: lowest id is the
 existing tie-break (R3).
 
@@ -7183,41 +7196,130 @@ existing tie-break (R3).
 controller to order their own groups (rejected: an extra choice with no effect on the end state,
 since every move waits for all answers).
 
-## #42 FP-041 — F1 follow-up batch (CR 704.3 simultaneity vs engine batching)
+## #42 FP-041 — One SBA batch: moves, counter removals and unattach events
 
-**Decision.** The main SBA batch keeps every planned move (CR 704.5a-m, 704.5s, legend losers).
-After it, every object with a planned move that is still on the battlefield under the SAME id
-(`Zones::object(id)` is on the battlefield; an object that moved anywhere, the battlefield
-included, has a new id, CR 400.7) gets its CR 704.5q / 704.5r `RemoveCounters` events (ascending
-id, then kind, amounts from the check snapshot) and then its CR 704.5n / 704.5p `Unattach`
-events (ascending id) in ONE follow-up `process_batch(.., sba = true)` call in the same
-`perform_all` pass. Objects that actually left get nothing. The follow-up batch is part of
-`SbaOutcome::executed` and makes the pass performed; `Pending` or an error in it restores the
-whole pass (the saved state covers both batches). Its events come from the pre-pass plan
-(CR 704.8); nothing in it leaves a zone, so it captures no last known information.
+**Decision.** (PR #214 review round 2, the Orchestrator's "option (c)"; replaces the round-1
+section "F1 follow-up batch (CR 704.3 simultaneity vs engine batching)" and the round-1 rule
+"move wins over unattach and counter removal".) `perform_all` builds ONE batch and makes ONE
+`process_batch(.., sba = true)` call per pass: the zone changes (CR 704.5f-704.5k, CR 704.5m,
+CR 704.5s, legend losers) ascending object id, then the CR 704.5q / CR 704.5r `RemoveCounters`
+events ascending object id then kind (amounts from the check snapshot), then the CR 704.5n /
+CR 704.5p `Unattach` events ascending id, for EVERY applicable permanent, including a permanent
+that also moves in the same pass. Only an object that ceases to exist (CR 704.5d, CR 704.5e; its
+ceasing path is unchanged) and a dungeon removed by CR 704.5t get no counter removal and no
+unattach event. There is no follow-up batch. Consequences:
+- The bus executes every event that is not a zone change before every zone change of the batch
+  (its reconcile order) and captures last known information of every object before any event
+  runs (CR 704.8), so a counter removal or unattach event for a permanent that also moves never
+  names a moved object, and the moving permanent's record still shows its counters and its
+  attachment.
+- Replacement effects are matched against the state before the event: eligibility such as
+  `requires_counter` is judged before sibling events of the pass (for example another
+  permanent's counter removal) change the state, and the ids the batch retires are tracked in one
+  bus call, so an `Instead` naming a permanent that dies in the same pass is handled like any
+  other same-batch event.
+- Exactly ONE `Unattach` event per attachment that ends in the pass: one per attachment even if
+  CR 704.5n and CR 704.5p both apply, and an attachment whose host also leaves gets its one event
+  against the attachment from before the pass (executed before the host's zone change, so the
+  host leaving, which clears attachments without an event, has nothing left to clear). The zone
+  change of a leaving attachment emits no extra `Unattach` (CR 701.3d, CR 603.10c).
+- Counter removals of a permanent that also leaves are emitted (CR 704.3), with no look-back
+  entry (CR 603.10 has none for counter removal); counters left on an object that moves get no
+  removal event (CR 122.2: they "simply cease to exist").
+- `SbaOutcome::unattached` lists, ascending, only the permanents an `Unattach` event of the pass
+  unattached that are still on the battlefield as the same object at the END of the pass (CR
+  704.5n, CR 704.5p: "It remains on the battlefield"); the event stays in `executed` either way
+  (decision D2 of review round 2). `performed` is true whenever any event ran.
+- `Pending` or an error anywhere in the batch restores every component of the context, the
+  replacement registry and the environment flags.
 
-**Rationale.** CR 704.3 performs all applicable state-based actions as one event, but the events
-executor rejects (`UnknownObject`) an event naming an object that an earlier event of the same
-batch moved, and the engine only knows after the bus ran whether a replacement effect prevented
-a move. A follow-up batch is the smallest engine-side approximation: the prevented object's
-actions still happen in the same pass, from the same snapshot, and replacement effects see them.
+**Rationale.** CR 704.3 ("performs all applicable state-based actions simultaneously as a single
+event") and REQ-SBA-001 ("perform every applicable SBA simultaneously as one event"); CR 704.8
+(LKI from before the state-based actions); CR 614.1 (replacement effects "watch for a particular
+event that would happen"). The round-1 premise, that the events executor rejects an event naming
+an object an earlier event of the batch moved, does not hold for SBA batches: the bus always
+executes the non-zone-change events first. The follow-up batch it motivated read replacement
+eligibility after the main batch had changed the state (review G1), started a second bus call
+without the first one's retired ids (G2) and lost the unattach event of an attachment whose host
+left in the main batch (G9). Two parts are JUDGEMENT CALLS where the CR is silent
+(rules-researcher, round 2), anchored on REQ-SBA-001 "one event": (1) replacement applicability
+for the parts of one SBA event is judged against the PRE-EVENT state (CR 704.3 + CR 614.1);
+(2) a permanent that leaves in the pass still gets its counter removals and unattach event in the
+same event (CR 704.3 gives no exclusion of a permanent from a second applicable SBA because
+another SBA moves it).
 
-**Alternatives.** Putting the removals and unattach in the main batch for every object
-(rejected: `UnknownObject` for the objects that did move); dropping them (rejected by review:
-state-based actions not performed and the check possibly not repeated); waiting for the next
-check (rejected: `performed` could be false, so there might be no next check).
+**Alternatives.** The round-1 follow-up batch for objects whose move was prevented (rejected in
+review round 2: G1, G2, G9 above); a follow-up batch sharing one bus context or propagating
+retired ids (rejected: still judges eligibility after the main batch, and needs bus changes
+outside this unit); dropping the removals and unattach of a moving permanent (rejected: CR 704.3,
+and the attachment of a leaving host would lose its event); waiting for the next check
+(rejected: `performed` could be false, so there might be no next check).
+
+## #42 FP-041 — Removing a dungeon from the game
+
+**Decision.** (PR #214 review round 2; G7 DEFERRED, behaviour unchanged.) The correct semantics:
+a dungeon card removed from the game by CR 704.5t (completing it, CR 309.7) goes OUTSIDE the game
+and stays available to a later venture (CR 309.2a: a player who ventures without a dungeon in the
+command zone "choose[s] a dungeon card they own from outside the game"; CR 400.11: outside the
+game is not a zone; CR 701.49c). Removal from the game is not ceasing to exist. The current code
+still uses the ceasing path: no zone change, last known information captured from the pre-pass
+state, then `Zones::cease_to_exist`, which retires its `CardId`; it is reported in
+`SbaOutcome::removed_from_game`, not `ceased` (if it also ceases by CR 704.5d/e it is reported as
+ceased). That retirement is the WRONG model, kept only as a placeholder: no venture
+implementation exists yet. The fix is a dedicated dungeon `OutsidePool` variant
+(`zones/types.rs`) moved through `Zones::send_outside` (`zones/container.rs`), an R2 contract
+change that lands as a separate contract-only PR; the Orchestrator filed it as issue #215
+(FP-159), which depends on the venture unit. The call site in `sba/perform.rs` carries a comment
+pointing here. The SBA side keeps no counter removal or unattach event for such a dungeon.
+
+**Rationale.** CR 309.2a, 309.7, 400.11, 701.49c (rules-researcher, round 2: the card goes outside
+the game and stays available to a later venture). Changing the zones contract is outside this
+unit's owned paths (R1, R2); until a venture exists, nothing can observe the difference.
+
+**Alternatives.** Sending the dungeon to an existing outside pool now (rejected: no dungeon pool
+variant exists and adding one is a contract change, R2); keeping the ceasing model as final
+(rejected: contradicts CR 309.2a / 701.49c).
+
+## #42 FP-041 — Invalid legend-rule answers are correctable choice errors
+
+**Decision.** (PR #214 review round 2.) A legend-rule answer that passes the session's own
+validation (count within min..max, candidates only) but is not a selection or not a maximal
+independent survivor set is rejected by the procedure with `BusInterrupt::Error(BusError::Choice(
+ChoiceError::Invalid { request_id, explanation }))`, `request_id` the id of the legend-rule
+request just asked (deterministic: `ChoiceContext::next_request_id` at that ask). The conversion
+`impl From<BusInterrupt> for Interrupt` keeps a choice error's class: `BusError::Choice(e)`
+becomes `Interrupt::Error(e)`; every other bus error still becomes
+`Interrupt::Error(ChoiceError::Procedure(..))`. A host procedure that propagates the interrupt
+therefore makes `ChoiceSession::submit` return the `Invalid` error without recording the answer,
+and the same request stays pending for a corrected answer. `perform_all` restores everything on
+the error as before.
+
+**Rationale.** The FP-027 convention ("#28 FP-027 — Card-name validation is structural"):
+procedure-level validation returns `Interrupt::Error(ChoiceError::Invalid { request_id,
+explanation })` and must not re-ask. With the former `Procedure` error the run completed with an
+error output, so `submit` recorded the invalid answer and closed the session (review G5). Any
+other choice error that crosses the bus (for example `Divergence` or `RequestIdMismatch` from an
+ask inside a replacement choice) now also keeps its class instead of being flattened to
+`Procedure`; the session rejects it unchanged either way.
+
+**Alternatives.** Re-asking the same request inside the procedure (rejected: the session would
+record the invalid answer as accepted); a dedicated SBA error type (rejected: the session already
+has the right error class); converting only `Invalid` (rejected: every choice error is better
+reported with its own class, and the conversion stays one arm).
 
 ## #42 FP-041 — F2 unattach events and the 704.5p inference
 
 **Decision.** CR 704.5n and CR 704.5p unattach through `GameEvent::Unattach { attachment }`
-events in the main `process_batch` call (after the zone changes and counter removals,
-ascending id; the follow-up batch for prevented moves likewise), no longer through a direct
+events in the pass's one `process_batch` call (after the zone changes and counter removals,
+ascending id; see "#42 FP-041 — One SBA batch: moves, counter removals and unattach events"), no
+longer through a direct
 `Permanents::detach`. The events executor detaches (once); the trigger normaliser turns each
 into an `EventKind::Unattached` occurrence (CR 603.2), and the batch captures last known
 information before any of its events, so look-back (CR 603.10c, CR 704.8) sees the attachments
 from before the pass. The bus executes the non-zone-change events of a batch before its zone
 changes (its own reconcile order), so an attached permanent whose host dies in the same pass is
-unattached by its event before the host moves, and is listed in `SbaOutcome::unattached`. The
+unattached by its event before the host moves, and is listed in `SbaOutcome::unattached` if it
+is still on the battlefield at the end of the pass. The
 704.5p unattachment of creatures, battles and other non-Aura/Equipment/Fortification permanents
 emits the same event.
 
@@ -7237,11 +7339,13 @@ case would still be invisible to triggers).
 **Decision.** `SbaEnvironment::equipment_can_attach(attachment, target) -> bool`, default
 `true`, with the public field `StoredSbaEnvironment::illegal_equipment_targets:
 BTreeSet<(ObjectId, AttachTarget)>` (default empty; the stored environment answers
-`!contains`). Under CR 704.5n an attached Equipment or Fortification whose target permanent is
-judged (on the battlefield, phased in, evaluable) is illegal when the type check fails (as
-before) OR `equipment_can_attach` is false: it becomes unattached and stays on the battlefield.
-A phased-out target is still not checked (CR 702.26b); an attachment to a player is illegal
-anyway.
+`!contains`). Under CR 704.5n an attached Equipment or Fortification on a phased-in
+battlefield permanent is illegal when `equipment_can_attach` is false for that exact pair, or,
+when the target can be evaluated, when the type check fails: it becomes unattached and stays on
+the battlefield. (Revised in PR #214 review round 2: the pair is asked after the phased-out guard
+and BEFORE the target's facts are looked up, so a marked pair is unattached even when the layer
+environment cannot evaluate the target.) A phased-out target is still not checked
+(CR 702.26b); an attachment to a player is illegal anyway.
 
 **Rationale.** CR 702.16d: protection makes Equipment and Fortifications with the stated
 quality unattach as a state-based action; CR 301.5b / 301.5c: an object that "can't be equipped"
