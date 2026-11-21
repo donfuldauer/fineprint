@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fineprint_base::ids::{ObjectId, PlayerId};
 
 use crate::events::ExecutedBatch;
+use crate::permanent::AttachTarget;
 
 /// The player designation that marks a player who has lost the game (REQ-SBA-001, CR 704.5a,
 /// CR 704.5b, CR 704.5c). Its value is `DesignationValue::Flag`. No game-loss event exists yet,
@@ -35,7 +36,7 @@ pub enum GameVariant {
 pub enum SbaSubject {
     /// A player (CR 704.5a, CR 704.5b, CR 704.5c).
     Player(PlayerId),
-    /// An object (CR 704.5d-704.5i).
+    /// An object (CR 704.5d-704.5t).
     Object(ObjectId),
 }
 
@@ -49,8 +50,10 @@ pub struct SbaFinding {
 }
 
 /// What the state-based action check reads from the caller that the engine state does not
-/// hold yet (REQ-SBA-001). Every method has a default (a standard game with no copies and no
-/// exemption) except the deathtouch pair [`SbaEnvironment::deathtouch_damaged`] and
+/// hold yet (REQ-SBA-001). Every method has a default (a standard game with no copies, no
+/// exemption, every world permanent stamped 0, every Aura attachment legal, no counter limits,
+/// no Saga chapter abilities, no pending chapter or room abilities and no completed dungeon)
+/// except the deathtouch pair [`SbaEnvironment::deathtouch_damaged`] and
 /// [`SbaEnvironment::clear_deathtouch_damaged`], which every implementation provides together.
 ///
 /// Every method must be a pure function of the caller's state (REQ-CORE-001). The heartbeat
@@ -123,6 +126,165 @@ pub trait SbaEnvironment {
         false
     }
 
+    /// When `object` last gained the world supertype (CR 704.5k, CR 205.4b), as a
+    /// caller-supplied monotonic stamp: a LARGER stamp means it gained the supertype LATER, so
+    /// it has had the supertype for a SHORTER time. Default: `0` (every world permanent tied).
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert_eq!(Plain.world_supertype_since(ObjectId::new(1)), 0);
+    /// ```
+    fn world_supertype_since(&self, object: ObjectId) -> u64 {
+        let _ = object;
+        0
+    }
+
+    /// Whether Aura `aura` may enchant `target` as defined by its enchant ability and other
+    /// applicable effects (CR 704.5m, CR 303.4c). The engine itself checks the rest of
+    /// CR 704.5m (not attached, attached to itself, a target that left the battlefield or a
+    /// player who left the game, an Aura that is also a creature). Default: `true`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::permanent::AttachTarget;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(Plain.aura_can_enchant(ObjectId::new(1), AttachTarget::Player(PlayerId::new(1))));
+    /// ```
+    fn aura_can_enchant(&self, aura: ObjectId, target: AttachTarget) -> bool {
+        let _ = (aura, target);
+        true
+    }
+
+    /// The limits "can't have more than N counters of a kind on it" of `object`'s abilities
+    /// (CR 704.5r): counter kind to N (N >= 0; a negative N counts as 0). Default: none.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(Plain.counter_limits(ObjectId::new(1)).is_empty());
+    /// ```
+    fn counter_limits(&self, object: ObjectId) -> BTreeMap<String, i64> {
+        let _ = object;
+        BTreeMap::new()
+    }
+
+    /// The final chapter number of `object` (CR 704.5s, CR 715.2d: the greatest value among
+    /// its chapter abilities), `Some` ONLY if it has one or more chapter abilities; `None` if
+    /// it has none (then CR 704.5s does not apply). Default: `None`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert_eq!(Plain.saga_final_chapter(ObjectId::new(1)), None);
+    /// ```
+    fn saga_final_chapter(&self, object: ObjectId) -> Option<i64> {
+        let _ = object;
+        None
+    }
+
+    /// Whether `object` is the source of a chapter ability that has triggered but not yet left
+    /// the stack (CR 704.5s). Default: `false`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(!Plain.chapter_ability_pending(ObjectId::new(1)));
+    /// ```
+    fn chapter_ability_pending(&self, object: ObjectId) -> bool {
+        let _ = object;
+        false
+    }
+
+    /// The dungeon cards (objects in the command zone, CR 309.2c) on whose bottommost room
+    /// their owner's venture marker is (CR 704.5t). The engine ignores ids that are not
+    /// objects in the command zone. Default: none.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(Plain.dungeons_at_bottommost_room().is_empty());
+    /// ```
+    fn dungeons_at_bottommost_room(&self) -> BTreeSet<ObjectId> {
+        BTreeSet::new()
+    }
+
+    /// Whether dungeon card `dungeon` is the source of a room ability that has triggered but
+    /// not yet left the stack (CR 704.5t). Default: `false`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::ObjectId;
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(!Plain.room_ability_pending(ObjectId::new(1)));
+    /// ```
+    fn room_ability_pending(&self, dungeon: ObjectId) -> bool {
+        let _ = dungeon;
+        false
+    }
+
     /// The objects that have been dealt damage (more than 0, CR 120.8) by a source with
     /// deathtouch since the last time state-based actions were checked (CR 704.5h, CR 702.2b).
     ///
@@ -159,6 +321,25 @@ pub struct StoredSbaEnvironment {
     pub exempt: BTreeSet<ObjectId>,
     /// The objects dealt damage by a deathtouch source since the last check.
     pub deathtouch: BTreeSet<ObjectId>,
+    /// When each object last gained the world supertype (CR 704.5k; larger = later); a
+    /// missing object answers 0.
+    pub world_since: BTreeMap<ObjectId, u64>,
+    /// The (Aura, target) pairs that are illegal (CR 704.5m, CR 303.4c); every other pair is
+    /// legal.
+    pub illegal_aura_targets: BTreeSet<(ObjectId, AttachTarget)>,
+    /// The counter limits of each object (CR 704.5r): counter kind to N.
+    pub counter_limits: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    /// The final chapter number of each object with one or more chapter abilities
+    /// (CR 704.5s, CR 715.2d).
+    pub saga_final_chapter: BTreeMap<ObjectId, i64>,
+    /// The objects that are the source of a chapter ability that has triggered but not yet
+    /// left the stack (CR 704.5s).
+    pub chapter_pending: BTreeSet<ObjectId>,
+    /// The dungeon cards whose owner's venture marker is on the bottommost room (CR 704.5t).
+    pub bottommost_dungeons: BTreeSet<ObjectId>,
+    /// The dungeon cards that are the source of a room ability that has triggered but not yet
+    /// left the stack (CR 704.5t).
+    pub room_pending: BTreeSet<ObjectId>,
 }
 
 impl Default for StoredSbaEnvironment {
@@ -169,6 +350,13 @@ impl Default for StoredSbaEnvironment {
             card_copies: BTreeSet::new(),
             exempt: BTreeSet::new(),
             deathtouch: BTreeSet::new(),
+            world_since: BTreeMap::new(),
+            illegal_aura_targets: BTreeSet::new(),
+            counter_limits: BTreeMap::new(),
+            saga_final_chapter: BTreeMap::new(),
+            chapter_pending: BTreeSet::new(),
+            bottommost_dungeons: BTreeSet::new(),
+            room_pending: BTreeSet::new(),
         }
     }
 }
@@ -190,6 +378,37 @@ impl SbaEnvironment for StoredSbaEnvironment {
         self.exempt.contains(&object)
     }
 
+    fn world_supertype_since(&self, object: ObjectId) -> u64 {
+        self.world_since.get(&object).copied().unwrap_or(0)
+    }
+
+    fn aura_can_enchant(&self, aura: ObjectId, target: AttachTarget) -> bool {
+        !self.illegal_aura_targets.contains(&(aura, target))
+    }
+
+    fn counter_limits(&self, object: ObjectId) -> BTreeMap<String, i64> {
+        self.counter_limits
+            .get(&object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn saga_final_chapter(&self, object: ObjectId) -> Option<i64> {
+        self.saga_final_chapter.get(&object).copied()
+    }
+
+    fn chapter_ability_pending(&self, object: ObjectId) -> bool {
+        self.chapter_pending.contains(&object)
+    }
+
+    fn dungeons_at_bottommost_room(&self) -> BTreeSet<ObjectId> {
+        self.bottommost_dungeons.clone()
+    }
+
+    fn room_ability_pending(&self, dungeon: ObjectId) -> bool {
+        self.room_pending.contains(&dungeon)
+    }
+
     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
         self.deathtouch.clone()
     }
@@ -203,8 +422,9 @@ impl SbaEnvironment for StoredSbaEnvironment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SbaOutcome {
     /// Whether the pass changed the game state (CR 704.3: "If any state-based actions are
-    /// performed as a result of a check, the check is repeated"): a move occurred, an object
-    /// ceased to exist, a player lost the game, or the replacement registry changed (for
+    /// performed as a result of a check, the check is repeated"): a move or a counter removal
+    /// occurred, an object ceased to exist, was removed from the game or became unattached, a
+    /// player lost the game, or the replacement registry changed (for
     /// example a one-use replacement effect was consumed). A finding whose only move a
     /// replacement effect skipped is not performed. Consuming the empty-library-draw and
     /// deathtouch flags alone does not count.
@@ -223,4 +443,10 @@ pub struct SbaOutcome {
     /// The objects that ceased to exist (CR 704.5d, CR 704.5e), ascending. For an object a
     /// replacement effect of the pass moved before it ceased, this is its new id (CR 400.7).
     pub ceased: Vec<ObjectId>,
+    /// The permanents that became unattached and stayed on the battlefield (CR 704.5n,
+    /// CR 704.5p), ascending. A permanent that also moves or ceases in the pass is not listed.
+    pub unattached: Vec<ObjectId>,
+    /// The dungeon cards their owners removed from the game (CR 704.5t, CR 309.7), ascending.
+    /// Removing a dungeon is not a zone change: no `ZoneChange` event, nothing in `executed`.
+    pub removed_from_game: Vec<ObjectId>,
 }
