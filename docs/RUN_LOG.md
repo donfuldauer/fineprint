@@ -487,3 +487,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 08-dsl-runtime | #57 | work-classifier | Sonnet 5.5 | 1 | routed | - | Implementer + Independent Tester, T2 Opus; blast radius module; no Fable (allowance unknown) |
 | 08-dsl-runtime | #57 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace 4177 passed (full-recompute); guard ok; coverage not measured locally (no llvm-cov) | new `interp` module behind `InterpEnv`; 40 unit tests; 3 DECISIONS entries |
 | 08-dsl-runtime | #57 | Independent Tester | Opus 5.5 | 1 | done | 69 spec tests passed; fmt, clippy clean; guard ok | 7 spec_interp_* suites incl. property and i128 MATH model |
+| 08-dsl-runtime | #57 | work-verifier | Sonnet 5.5 | 1 | pass | fmt, clippy clean; 40 interp unit + 69 spec tests passed; interp lines 100 % (expr, resolve, types); guard ok | head 2316576; owned paths clean; no float/HashMap/unwrap/`as` in interp; later commit is this run-log row only |
