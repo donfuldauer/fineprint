@@ -192,13 +192,20 @@ impl Plan {
 ///   id. Every other member is moved with the batch below.
 /// - **The one batch** (CR 704.3, CR 704.7, CR 704.8): every move, counter removal and
 ///   unattach event of the pass is in ONE [`process_batch`] call with `sba` true, in this
-///   order: one `ZoneChange` to the owner's graveyard per moving object (CR 704.5f-704.5k,
+///   order: one `Unattach` event per attachment that becomes unattached (CR 704.5n,
+///   CR 704.5p, CR 701.3d; one event even if both entries apply), ascending id; then one
+///   `ZoneChange` to the owner's graveyard per moving object (CR 704.5f-704.5k,
 ///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedAction`]
 ///   ([`ZoneChangeCause::Sacrifice`] for a Saga its controller sacrifices, CR 704.5s, even if
 ///   another entry also moves it; an object with several findings moves once); then one
 ///   `RemoveCounters` event per object and counter kind (CR 704.5q, CR 704.5r), ascending id
-///   then kind; then one `Unattach` event per attachment that becomes unattached (CR 704.5n,
-///   CR 704.5p, CR 701.3d; one event even if both entries apply), ascending id. Counter
+///   then kind. The unattach events come first so that the bus, which executes the events
+///   that are not zone changes in submission order (a replacement's `Instead` events at the
+///   position of the event they replace, CR 614.6), executes each planned unattach before an
+///   `Attach` that a replacement effect makes of a later event of the batch: the planned
+///   unattach clears the link from before the pass, not such a new link (decision "#42 FP-041
+///   — Planned unattach and pre-pass host (round 3)"; known limitation: an `Attach` produced
+///   by replacing an EARLIER unattach event of the batch is still cleared). Counter
 ///   removals and unattach events are emitted for EVERY applicable permanent, including one
 ///   that also moves in the pass; only an object that ceases to exist and a dungeon removed
 ///   from the game get none (decision "#42 FP-041 — One SBA batch: moves, counter removals and
@@ -209,9 +216,10 @@ impl Plan {
 ///   pass gets exactly one `Unattach` event against its attachment from before the pass (the
 ///   host's zone change then has nothing to unattach), and the look-back of "becomes
 ///   unattached" triggers (CR 603.10c) sees it. Counters left on an object that moves get no
-///   removal event (CR 122.2). An unattached permanent is reported in
-///   [`SbaOutcome::unattached`] only if it is still on the battlefield as the same object at
-///   the end of the pass.
+///   removal event (CR 122.2). [`SbaOutcome::unattached`] lists the attachment of every
+///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
+///   (for example an `Instead` of another event of the batch), if it is still on the
+///   battlefield as the same object at the end of the pass.
 /// - **Removing a dungeon from the game** (CR 704.5t, CR 309.7): like ceasing to exist below
 ///   (no zone change, last known information captured), reported in
 ///   [`SbaOutcome::removed_from_game`].
@@ -382,17 +390,34 @@ fn perform_findings(
     // a CR 704.5p finding of one attachment).
     unattaching.retain(|o| !excluded(o));
 
-    // CR 704.3, CR 704.7: one batch. Zone changes ascending object id, then counter removals
-    // ascending object id then kind, then unattach events ascending id.
-    let mut moves: Vec<GameEvent> = moving
+    // CR 704.3, CR 704.7: one batch. Unattach events ascending id, then zone changes ascending
+    // object id, then counter removals ascending object id then kind.
+    // CR 704.5n, CR 704.5p, CR 701.3d: unattached, it remains on the battlefield. The bus
+    // executes every event that is not a zone change before every zone change of the batch,
+    // and captures last known information before any event runs, so the unattach event of an
+    // attachment whose host (or which itself) leaves in this pass finds the attachment from
+    // before the pass, and the look-back of "becomes unattached" triggers (CR 603.10c) sees it
+    // (CR 704.8). The host's zone change then has nothing left to unattach: one event per pair.
+    // The unattach events are submitted FIRST: the bus executes the events that are not zone
+    // changes in submission order, an `Instead` descendant at the position of the event it
+    // replaces (CR 614.6), so each planned unattach clears the link from before the pass, and
+    // an `Attach` a replacement makes of a later event of the batch (a zone change or a counter
+    // removal) is not cleared by it (decision "#42 FP-041 — Planned unattach and pre-pass host
+    // (round 3)").
+    let mut moves: Vec<GameEvent> = unattaching
         .iter()
-        .map(|(&object, &cause)| GameEvent::ZoneChange {
-            object,
-            // CR 704.5f-704.5k, CR 704.5m, CR 704.5s: the owner's graveyard (CR 400.3).
-            request: MoveRequest::new(ZoneKind::Graveyard),
-            cause,
-        })
+        .map(|&attachment| GameEvent::Unattach { attachment })
         .collect();
+    moves.extend(
+        moving
+            .iter()
+            .map(|(&object, &cause)| GameEvent::ZoneChange {
+                object,
+                // CR 704.5f-704.5k, CR 704.5m, CR 704.5s: the owner's graveyard (CR 400.3).
+                request: MoveRequest::new(ZoneKind::Graveyard),
+                cause,
+            }),
+    );
     for (&object, removals) in &plan.counter_removals {
         if excluded(&object) {
             continue;
@@ -409,17 +434,6 @@ fn perform_findings(
             }
         }
     }
-    // CR 704.5n, CR 704.5p, CR 701.3d: unattached, it remains on the battlefield. The bus
-    // executes every event that is not a zone change before every zone change of the batch,
-    // and captures last known information before any event runs, so the unattach event of an
-    // attachment whose host (or which itself) leaves in this pass finds the attachment from
-    // before the pass, and the look-back of "becomes unattached" triggers (CR 603.10c) sees it
-    // (CR 704.8). The host's zone change then has nothing left to unattach: one event per pair.
-    moves.extend(
-        unattaching
-            .iter()
-            .map(|&attachment| GameEvent::Unattach { attachment }),
-    );
 
     // CR 704.8: the batch may change the state (a removed permanent unattaches what is attached
     // to it). The permanent state and markers of an object that only ceases (or a dungeon
@@ -540,19 +554,21 @@ fn perform_findings(
     ceased.sort_unstable();
     removed_from_game.sort_unstable();
 
-    // CR 704.5n, CR 704.5p: "It remains on the battlefield": the permanents an unattach event
-    // of the batch unattached that are still on the battlefield as the same object at the end
-    // of the pass (decision #42 FP-041, D2). The event itself stays in `executed` either way.
+    // CR 704.5n, CR 704.5p, CR 701.3d: "It remains on the battlefield": the permanents that
+    // every Unattach event of the batch, planned or produced by a replacement, unattached and
+    // that are still on the battlefield as the same object at the end of the pass (decision
+    // #42 FP-041, D2). An unattach that found nothing attached is no event (the bus records
+    // only events that occurred), and an executed one reports `Outcome::Applied`. The event
+    // itself stays in `executed` either way.
     let unattached: Vec<ObjectId> = executed
         .iter()
         .flat_map(|b| &b.events)
-        .filter_map(|ev| match ev.instance.event() {
-            GameEvent::Unattach { attachment }
-                if unattaching.contains(attachment)
-                    && ctx
-                        .zones
-                        .object(*attachment)
-                        .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
+        .filter_map(|ev| match (ev.instance.event(), ev.outcome) {
+            (GameEvent::Unattach { attachment }, Outcome::Applied)
+                if ctx
+                    .zones
+                    .object(*attachment)
+                    .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
             {
                 Some(*attachment)
             }
