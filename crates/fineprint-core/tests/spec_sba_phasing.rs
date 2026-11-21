@@ -5,8 +5,16 @@
 //! Spec tests for phased-out permanents and the state-based actions (REQ-SBA-001; CR 702.26b,
 //! 702.26d, 704.5d, 704.5f, 704.5g, 704.5h, 704.5i). Black-box: written from the work-item
 //! brief only. A phased-out permanent is treated as though it does not exist (CR 702.26b), so
-//! 704.5f-704.5i ignore it; marked damage, counters and the deathtouch flag stay while it is
-//! phased out (CR 702.26d), so the SBAs apply again once it phases in.
+//! 704.5f-704.5i ignore it; marked damage and counters stay while it is phased out
+//! (CR 702.26d), so 704.5f, 704.5g and 704.5i apply again once it phases in.
+//!
+//! The deathtouch flag (CR 704.5h, 702.2b: dealt deathtouch damage "since the last time
+//! state-based actions were checked") is different, and the tests separate two cases:
+//! - **phasing alone** (no completed SBA check while it is phased out, only the pure `check`):
+//!   the flag is kept, and 704.5h applies once the creature phases in;
+//! - **an intervening completed check** (a `perform_all` pass while it is phased out, even one
+//!   that performs nothing): that check closes the window and consumes the flag, so after
+//!   phasing in 704.5h does not apply until the creature is dealt deathtouch damage again.
 
 #[path = "spec_sba_support.rs"]
 mod support;
@@ -128,9 +136,10 @@ fn req_sba_001_phasing_704_5g_ignored_while_phased_out() {
     assert_died(&r, a);
 }
 
-// REQ-SBA-001, CR 704.5h, 702.26b, 702.26d: a phased-out 3-toughness creature flagged as dealt
-// deathtouch damage has no finding; phased in with the flag still set, 704.5h finds it and it
-// is destroyed.
+// REQ-SBA-001, CR 704.5h, 702.2b, 702.26b, 702.26d: a phased-out 3-toughness creature flagged
+// as dealt deathtouch damage has no finding. The idle pass over it is an intervening completed
+// check: it consumes the flag, so phased in (flag NOT re-set) 704.5h does not apply and a pass
+// leaves the creature. A new deathtouch hit then makes 704.5h apply and it is destroyed.
 #[test]
 fn req_sba_001_phasing_704_5h_ignored_while_phased_out() {
     let mut s = Sim::new();
@@ -140,18 +149,37 @@ fn req_sba_001_phasing_704_5h_ignored_while_phased_out() {
     phase(&mut s, a, true);
     assert_eq!(s.check(), vec![]);
     let r = assert_idle_pass(&s, a);
+    assert!(
+        r.after.env.deathtouch.is_empty(),
+        "the completed check consumed the flag"
+    );
+    assert_eq!(r.after.env.clear_calls, s.env.clear_calls + 1);
     let mut s = r.after;
-    // A pass clears the flag (clear_deathtouch_damaged); set it again for the phased-in step.
-    s.env.deathtouch.insert(a);
+
+    // Phased in after the intervening check, without a new hit: no 704.5h.
     phase(&mut s, a, false);
+    no_finding_for(&mut s, a);
+    assert_eq!(s.check(), vec![]);
+    let r = run_sba(s);
+    assert!(!r.outcome().performed, "nothing qualifies");
+    assert!(r.outcome().findings.is_empty());
+    assert!(r.after.on_battlefield(a), "{a:?} stayed on the battlefield");
+    assert!(r.moved_to(a).is_none());
+    let mut s = r.after;
+
+    // A new deathtouch hit (one more damage, flag set again): 704.5h applies.
+    s.damage(a, 1);
+    s.env.deathtouch.insert(a);
     assert_eq!(s.check(), vec![finding("704.5h", obj(a))]);
     let r = run_sba(s);
+    assert!(r.outcome().performed);
     assert_eq!(r.outcome().findings, vec![finding("704.5h", obj(a))]);
     assert_died(&r, a);
 }
 
-// REQ-SBA-001, CR 704.5h, 702.26b: `check` does not clear the deathtouch flag, so the same
-// phased-out creature is found by 704.5h once phased in without re-setting the flag.
+// REQ-SBA-001, CR 704.5h, 702.26b, 702.26d: phasing alone (no intervening completed check, only
+// the pure `check`, which does not clear the deathtouch flag): the same phased-out creature is
+// found by 704.5h once phased in without re-setting the flag, and a pass destroys it.
 #[test]
 fn req_sba_001_phasing_704_5h_check_keeps_flag() {
     let mut s = Sim::new();
@@ -160,8 +188,12 @@ fn req_sba_001_phasing_704_5h_check_keeps_flag() {
     s.env.deathtouch.insert(a);
     phase(&mut s, a, true);
     no_finding_for(&mut s, a);
+    assert!(s.env.deathtouch.contains(&a), "check keeps the flag");
     phase(&mut s, a, false);
     assert_eq!(s.check(), vec![finding("704.5h", obj(a))]);
+    let r = run_sba(s);
+    assert_eq!(r.outcome().findings, vec![finding("704.5h", obj(a))]);
+    assert_died(&r, a);
 }
 
 // REQ-SBA-001, CR 704.5i, 702.26b, 702.26d: a phased-out planeswalker with no loyalty counters
