@@ -5,7 +5,7 @@
 //! Spec tests for the object SBAs 704.5d-704.5i, indestructible, the shield counter and the
 //! last known information of permanents leaving through SBAs (REQ-SBA-001, REQ-TEST-001;
 //! CR 704.5d, 704.5e, 704.5f, 704.5g, 704.5h, 704.5i, 704.8, 702.12b, 702.2b, 122.1c, 111.7,
-//! 111.8, 707.10a, 723.3c, 306.5c). Black-box: written from the work-item brief only.
+//! 111.8, 707.10a, 723.3c, 306.5c, 704.5q). Black-box: written from the work-item brief only.
 
 #[path = "spec_sba_support.rs"]
 mod support;
@@ -211,8 +211,9 @@ fn req_sba_001_704_5f_computed_toughness_from_layer_effect() {
     assert_stayed(&r, b);
 }
 
-// REQ-SBA-001, CR 704.5f, 122.1a: P/T counters count: a 1/1 with two -1/-1 counters dies, a 1/1
-// with one +1/+1 and one -1/-1 counter stays.
+// REQ-SBA-001, CR 704.5f, 122.1a, 704.5q: P/T counters count: a 1/1 with two -1/-1 counters
+// dies, a 1/1 with one +1/+1 and one -1/-1 counter stays (and, since FP-041, 704.5q removes
+// one counter of each kind from it in the same pass).
 #[test]
 fn req_sba_001_704_5f_toughness_from_counters() {
     let mut s = Sim::new();
@@ -221,10 +222,15 @@ fn req_sba_001_704_5f_toughness_from_counters() {
     let b = s.creature(P1, "test.vanilla_1_1", 1, 1);
     s.counters(b, "+1/+1", 1);
     s.counters(b, "-1/-1", 1);
-    assert_eq!(s.check(), vec![finding("704.5f", obj(a))]);
+    assert_eq!(
+        s.check(),
+        vec![finding("704.5f", obj(a)), finding("704.5q", obj(b))]
+    );
     let r = run_sba(s);
     assert_died(&r, a);
     assert_stayed(&r, b);
+    assert_eq!(r.after.counter(b, "+1/+1"), 0);
+    assert_eq!(r.after.counter(b, "-1/-1"), 0);
 }
 
 // REQ-SBA-001, CR 704.5f, 704.5g: toughness 0 with damage marked is 704.5f only (704.5g needs
@@ -515,9 +521,14 @@ fn req_sba_001_704_8_lki_from_before_the_pass() {
     s.damage(b, 2);
     assert!(s.lki.get(a).is_none());
     let r = run_sba(s);
+    // CR 704.5q (FP-041) also names `a`, which has both kinds of P/T counters.
     assert_eq!(
         r.outcome().findings,
-        vec![finding("704.5f", obj(a)), finding("704.5g", obj(b))]
+        vec![
+            finding("704.5f", obj(a)),
+            finding("704.5g", obj(b)),
+            finding("704.5q", obj(a))
+        ]
     );
     assert_died(&r, a);
     assert_died(&r, b);
@@ -537,12 +548,18 @@ fn req_sba_001_704_8_lki_from_before_the_pass() {
     assert_eq!(lb.zone(), ZoneId::Battlefield);
     assert_eq!(lb.controller(), Some(P2));
     assert!(lb.permanent().is_some());
-    // Every executed move captured LKI.
+    // Every executed move captured LKI. (Only zone changes: whether the 704.5q removal on `a`,
+    // which also leaves in this pass, appears as an event is left open by the FP-041 brief.)
+    let mut moves = 0;
     for batch in &r.outcome().executed {
         for e in &batch.events {
-            assert!(e.lki_captured, "{e:?}");
+            if matches!(e.instance.event(), GameEvent::ZoneChange { .. }) {
+                assert!(e.lki_captured, "{e:?}");
+                moves += 1;
+            }
         }
     }
+    assert_eq!(moves, 2);
 }
 
 // REQ-SBA-001, REQ-CORE-003, CR 704.8, 704.5f, 704.5g: LKI is captured before the pass, not
