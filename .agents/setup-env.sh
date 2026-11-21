@@ -27,15 +27,29 @@ export PATH="$CARGO_BIN_DIR:$PATH"
 # ---------------------------------------------------------------------------
 # 1. Non-interactive ~/.bashrc persistence
 # ---------------------------------------------------------------------------
-# Non-interactive command shells source ~/.bashrc via BASH_ENV; remove any
-# early-return guard and persist Cargo's bin directory on PATH idempotently.
-if [ -f "$HOME/.bashrc" ]; then
-  sed -i '/case \$- in/,/esac/d' "$HOME/.bashrc" 2>/dev/null || true
-fi
+# Non-interactive command shells source ~/.bashrc via BASH_ENV; ensure Cargo's
+# bin directory is exported before any interactive-shell guard while preserving
+# both single-line and multiline guards and all existing configuration.
 touch "$HOME/.bashrc"
 
 PATH_EXPORT="export PATH=\"${CARGO_BIN_DIR}:\$PATH\""
-grep -qxF "$PATH_EXPORT" "$HOME/.bashrc" || echo "$PATH_EXPORT" >> "$HOME/.bashrc"
+HAS_EARLY_PATH=$(awk -v target="$PATH_EXPORT" '
+  $0 == target { found = 1; exit }
+  /(^|[;&|[:space:]])return([;&|[:space:]]|$)/ { exit }
+  END { print (found ? 1 : 0) }
+' "$HOME/.bashrc")
+
+if [ "$HAS_EARLY_PATH" -ne 1 ]; then
+  TMP_BASHRC=$(mktemp "$HOME/.bashrc.tmp.XXXXXX")
+  trap 'rm -f "$TMP_BASHRC"' EXIT
+  cp -p "$HOME/.bashrc" "$TMP_BASHRC"
+  {
+    printf '%s\n' "$PATH_EXPORT"
+    grep -vxF "$PATH_EXPORT" "$HOME/.bashrc" || true
+  } > "$TMP_BASHRC"
+  mv "$TMP_BASHRC" "$HOME/.bashrc"
+  trap - EXIT
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Linux system packages (build tools, curl for `cargo xtask cr fetch`,
