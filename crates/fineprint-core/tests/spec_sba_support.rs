@@ -219,11 +219,14 @@ pub fn modify_pt_effect(targets: &[ObjectId], p: i64, t: i64, ts: u64) -> Contin
 // ---------------------------------------------------------------------------------------------
 
 /// A characteristics provider with per-object characteristics and counters and a fallback.
+/// A retired id (one [`TestProvider::forget`] dropped: it left its zone or ceased to exist,
+/// CR 400.7) is described by nothing, not even the fallback.
 #[derive(Clone, Debug, Default)]
 pub struct TestProvider {
     fallback: RefCell<Option<Characteristics>>,
     chars: RefCell<BTreeMap<ObjectId, Characteristics>>,
     counters: RefCell<BTreeMap<ObjectId, BTreeMap<String, i64>>>,
+    retired: RefCell<BTreeSet<ObjectId>>,
 }
 
 impl TestProvider {
@@ -237,6 +240,26 @@ impl TestProvider {
         self.chars.borrow_mut().insert(id, c);
     }
 
+    /// Drops the fallback: an object with no characteristics of its own is then undescribed.
+    pub fn clear_fallback(&self) {
+        *self.fallback.borrow_mut() = None;
+    }
+
+    /// Retires `id`: drops its characteristics and counters; afterwards `characteristics(id)` is
+    /// `None` and `counters(id)` is empty.
+    pub fn forget(&self, id: ObjectId) {
+        self.chars.borrow_mut().remove(&id);
+        self.counters.borrow_mut().remove(&id);
+        self.retired.borrow_mut().insert(id);
+    }
+
+    /// Every id with its own characteristics or counters, in id order.
+    pub fn described_ids(&self) -> BTreeSet<ObjectId> {
+        let mut ids: BTreeSet<ObjectId> = self.chars.borrow().keys().copied().collect();
+        ids.extend(self.counters.borrow().keys().copied());
+        ids
+    }
+
     pub fn set_counter(&self, id: ObjectId, kind: &str, n: i64) {
         self.counters
             .borrow_mut()
@@ -248,6 +271,9 @@ impl TestProvider {
 
 impl CharacteristicsProvider for TestProvider {
     fn characteristics(&self, id: ObjectId) -> Option<Characteristics> {
+        if self.retired.borrow().contains(&id) {
+            return None;
+        }
         if let Some(c) = self.chars.borrow().get(&id) {
             return Some(c.clone());
         }
@@ -732,16 +758,17 @@ impl Sim {
                 }
             }
         }
-        let gone: Vec<ObjectId> = self
-            .layer
-            .bases
-            .keys()
-            .copied()
+        let mut known: BTreeSet<ObjectId> = self.layer.bases.keys().copied().collect();
+        known.extend(self.layer.counters.keys().copied());
+        known.extend(self.provider.described_ids());
+        let gone: Vec<ObjectId> = known
+            .into_iter()
             .filter(|id| self.zones.object(*id).is_none())
             .collect();
         for id in gone {
             self.layer.bases.remove(&id);
             self.layer.counters.remove(&id);
+            self.provider.forget(id);
         }
     }
 }
