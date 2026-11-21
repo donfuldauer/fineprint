@@ -119,7 +119,8 @@ impl Saved {
 /// - **Ceasing to exist** (CR 704.5d, CR 704.5e): after the batch, each such object
 ///   ceases to exist through [`Zones::cease_to_exist`](crate::zones::Zones::cease_to_exist)
 ///   (not a zone change: no `ZoneChange` event, nothing added to `executed`). Its last known
-///   information is captured right before its removal (REQ-CORE-003: the object leaves its
+///   information is captured for every ceasing object, before any removal and from the state
+///   before the batch (CR 704.8; REQ-CORE-003: the object leaves its
 ///   zone); a permanent among them also leaves the permanent container. An object that is both
 ///   a move target and ceasing only ceases. If a replacement effect of the batch moved a
 ///   ceasing object (CR 400.7: a new object), the reason it ceases (a token, a copy of a spell,
@@ -227,6 +228,13 @@ fn perform_findings(
         })
         .collect();
 
+    // CR 704.8: the batch may change the state (a removed permanent unattaches what is attached
+    // to it). The permanent state and markers of an object that only ceases are read from here.
+    // Only a snapshot: nothing is inserted into the live LKI store before the bus runs (an
+    // `Instead` moving a ceasing object would make the bus fail with `AlreadyCaptured`).
+    let pre_batch = (!moves.is_empty() && !ceasing.is_empty())
+        .then(|| (ctx.permanents.clone(), ctx.events.markers().clone()));
+
     let mut executed: Vec<ExecutedBatch> = Vec::new();
     if !moves.is_empty() {
         // CR 704.3, CR 704.7, CR 704.8: one simultaneous event through the bus.
@@ -254,7 +262,7 @@ fn perform_findings(
     }
 
     // CR 704.5d, CR 704.5e: ceasing to exist is not a zone change (no ZoneChange event).
-    let mut ceased = Vec::new();
+    let mut targets: Vec<(ObjectId, bool)> = Vec::new();
     for (old, reasons) in ceasing {
         let mut id = old;
         while let Some(&next) = moved_to.get(&id) {
@@ -281,11 +289,31 @@ fn perform_findings(
                 continue;
             }
         }
-        // REQ-CORE-003: the object leaves its zone, so its last known information is kept.
-        // Captured after the batch, right before removal: capturing before the batch would make
-        // the bus fail with `AlreadyCaptured` if an `Instead` then moved the object (decision
-        // #41 FP-040).
-        capture_ceasing_lki(ctx, id)?;
+        targets.push((id, id != old));
+    }
+    // REQ-CORE-003, CR 704.3, CR 704.8: the ceasing objects leave their zones as part of the
+    // one event, so their last known information is derived from the state before any of the
+    // state-based actions were performed. An object the batch did not move is captured from the
+    // pre-batch snapshot (a permanent the batch removed would otherwise have unattached it); an
+    // object the batch moved and that ceases under its new id is captured as it is now, in the
+    // zone it ceases from (the snapshot knows only the old id). Every record is captured before
+    // any removal: a removal unattaches the objects attached to it, which would change a later
+    // object's record. Captured after the batch, not before it: capturing before the batch would
+    // make the bus fail with `AlreadyCaptured` if an `Instead` moved the object (decision #41
+    // FP-040).
+    let live = (pre_batch.is_none() || targets.iter().any(|&(_, moved)| moved))
+        .then(|| (ctx.permanents.clone(), ctx.events.markers().clone()));
+    for &(id, moved) in &targets {
+        let (permanents, markers) = match (&pre_batch, &live, moved) {
+            (Some(pre), _, false) => pre,
+            (_, Some(now), _) => now,
+            // `live` is built whenever `pre_batch` is `None` or an object moved.
+            _ => continue,
+        };
+        capture_ceasing_lki(ctx, id, permanents, markers)?;
+    }
+    let mut ceased = Vec::new();
+    for (id, _) in targets {
         if ctx.permanents.get(id).is_some() {
             ctx.permanents
                 .leave(id)
@@ -371,20 +399,25 @@ impl CharacteristicsProvider for CeasingLki<'_> {
     }
 }
 
-/// Captures the last known information of `id` right before it ceases to exist
-/// (REQ-CORE-003, CR 608.2h). The request names exile as a pseudo-destination: for exile
+/// Captures the last known information of `id` before it ceases to exist (REQ-CORE-003,
+/// CR 608.2h, CR 704.8), reading the permanent state and counters from the given snapshot. The request names exile as a pseudo-destination: for exile
 /// `capture_lki_on_move` always treats the object as leaving its zone, so a record is stored
 /// from any zone (a token already in a graveyard included). An object the provider does not
 /// know gets no record (it still ceases).
-fn capture_ceasing_lki(ctx: &mut EventContext<'_>, id: ObjectId) -> Result<(), BusInterrupt> {
+fn capture_ceasing_lki(
+    ctx: &mut EventContext<'_>,
+    id: ObjectId,
+    permanents: &Permanents,
+    markers: &ObjectMarkers,
+) -> Result<(), BusInterrupt> {
     let provider = CeasingLki {
         inner: ctx.provider,
-        markers: ctx.events.markers(),
-        permanents: ctx.permanents,
+        markers,
+        permanents,
     };
     match capture_lki_on_move(
         ctx.zones,
-        ctx.permanents,
+        permanents,
         ctx.memories,
         &provider,
         ctx.lki,
