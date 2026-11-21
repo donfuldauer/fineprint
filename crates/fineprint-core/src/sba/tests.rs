@@ -2345,8 +2345,9 @@ fn sba_704_5m_aura_creature() {
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
 }
 
-// REQ-SBA-001, CR 704.5m, CR 310.10, CR 704.5p: an attached Aura that is also a battle goes to
-// the graveyard (decision #42 FP-041); the move wins over the unattach.
+// REQ-SBA-001, CR 310.10, CR 704.5p, CR 704.5m, CR 704.3: an attached battle-Aura on a legal
+// creature is only unattached in the first check (it stays on the battlefield); the repeated
+// check finds it "not attached" and puts it into the graveyard.
 #[test]
 fn sba_704_5m_aura_battle() {
     let mut w = World::new();
@@ -2355,13 +2356,50 @@ fn sba_704_5m_aura_battle() {
     c.card_types = set(&["Battle", "Enchantment"]);
     let a = w.create(1, ZoneKind::Battlefield, c);
     w.attach(a, AttachTarget::Permanent(host));
-    assert_eq!(w.found(obj(a)), ["704.5m", "704.5p"]);
+    // Check 1.
+    assert_eq!(w.found(obj(a)), ["704.5p"]);
+    let out = pass(&mut w);
+    assert_eq!(out.unattached, [a]);
+    assert!(batch_shape(&out).0.iter().all(|(id, _)| *id != a));
+    let (card, host_card) = (w.card_of(a), w.card_of(host));
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Battlefield));
+    assert_eq!(w.permanents.attached_to(a), None);
+    assert_eq!(w.zone_of_card(host_card), Some(ZoneId::Battlefield));
+    // Check 2 (the repeat).
+    assert_eq!(w.found(obj(a)), ["704.5m"]);
     let out = pass(&mut w);
     assert!(out.unattached.is_empty());
     assert_eq!(
         batch_shape(&out).0,
         [(a, ZoneChangeCause::StateBasedAction)]
     );
+}
+
+// REQ-SBA-001, CR 704.5m, CR 303.4c, CR 704.5p, CR 310.10: a battle-Aura on a host that is
+// independently illegal per the enchant ability fires 704.5m in the first check; the move wins
+// over the unattach.
+#[test]
+fn sba_704_5m_aura_battle_illegal_host() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let mut c = aura();
+    c.card_types = set(&["Battle", "Enchantment"]);
+    let a = w.create(1, ZoneKind::Battlefield, c);
+    w.attach(a, AttachTarget::Permanent(host));
+    w.env
+        .illegal_aura_targets
+        .insert((a, AttachTarget::Permanent(host)));
+    assert_eq!(w.found(obj(a)), ["704.5m", "704.5p"]);
+    let card = w.card_of(a);
+    let out = pass(&mut w);
+    assert!(out.unattached.is_empty());
+    assert_eq!(
+        batch_shape(&out).0,
+        [(a, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    let host_card = w.card_of(host);
+    assert_eq!(w.zone_of_card(host_card), Some(ZoneId::Battlefield));
 }
 
 // REQ-SBA-001, CR 704.5n, CR 301.5, CR 301.6: an Equipment on a player and on a noncreature
@@ -2571,6 +2609,24 @@ fn sba_704_5q_and_5r_same_kind() {
         [(a, "+1/+1".to_owned(), 4), (a, "-1/-1".to_owned(), 2)]
     );
     assert_eq!((w.counter(a, "+1/+1"), w.counter(a, "-1/-1")), (1, 0));
+}
+
+// REQ-SBA-001, CR 704.5q, CR 704.5r, CR 122.1: 3 +1/+1 and 5 -1/-1 with a limit of 1 on +1/+1:
+// 704.5q removes 3 of each, 704.5r would remove 2 of +1/+1; the larger amount per kind is 3.
+#[test]
+fn sba_704_5q_and_5r_larger_amount() {
+    let mut w = World::new();
+    let a = w.creature(1, 9);
+    w.counters(a, "+1/+1", 3);
+    w.counters(a, "-1/-1", 5);
+    w.env.counter_limits = BTreeMap::from([(a, BTreeMap::from([("+1/+1".to_owned(), 1)]))]);
+    assert_eq!(w.found(obj(a)), ["704.5q", "704.5r"]);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).1,
+        [(a, "+1/+1".to_owned(), 3), (a, "-1/-1".to_owned(), 3)]
+    );
+    assert_eq!((w.counter(a, "+1/+1"), w.counter(a, "-1/-1")), (0, 2));
 }
 
 // REQ-SBA-001, CR 704.5s, CR 715.2d, CR 715.4: a Saga with lore counters equal to (and above)
