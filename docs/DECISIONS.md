@@ -7398,3 +7398,97 @@ one (rejected: breaks the single SBA event, CR 704.3, REQ-SBA-001); omitting the
 when some event of the batch re-attaches the attachment (rejected: replacements are applied
 inside `process_batch`, so this is unknown before the bus runs); an `Unattach` naming its host
 (rejected for this unit: R2 contract change; the residual case above is deferred to it).
+
+## #57 FP-055 tester — order of `Resolution::ignored` and of resolved devotion words
+
+**Decision.** The interpreter spec tests (`crates/fineprint-core/tests/spec_interp_*.rs`) assert
+that `Resolution::ignored` lists the impossible parts in the order of the input they come from
+(e.g. a `BOUND` list `[O2, unknown player, O1 gone, P2, O77 gone]` gives items `[O2, P2]` and
+ignored `[Gone(unknown), Gone(O1), Gone(O77)]`), and that `DEVOTION` passes the resolved colour
+words to `InterpEnv::devotion` in the order they are written in the attribute.
+
+**Rationale.** The brief fixes the order of `items` ("items in this order") and of
+`partition_possible` (input order, CR 101.3) but not the order of `ignored` or of the word list;
+input order is the only order that needs no extra key, matches how `items` and
+`partition_possible` behave, and keeps the report of ignored parts deterministic (R3).
+
+**Alternatives.** Sorting ignored entries (rejected: `Ignored` has no ordering in the pinned
+API); not asserting the order (rejected: an unpinned order would let a hash-ordered or
+environment-ordered result through, against R3).
+
+## #57 FP-055 — Interpreter API and InterpEnv boundary
+
+**Decision.** `fineprint_core::interp` exposes exactly the API pinned by the brief:
+`Referent`, `ChosenValue`, `ObjectView` (+ `ObjectView::new`), `PlayerStat`, the `InterpEnv`
+trait, `EvalContext` (+ `EvalContext::new`), `Ignored`, `Resolution<T>` (with `Default` for any
+`T`), `Partition<T>`, `#[non_exhaustive] InterpError`, and the functions `resolve_reference`,
+`resolve_players`, `select_objects`, `eval_predicate_object`, `eval_predicate_player`,
+`eval_value`, `compare` and `partition_possible`. Additions: `Display` and `std::error::Error`
+for `InterpError`. Submodules (`types`, `resolve`, `expr`) are private and re-exported from
+`interp/mod.rs`. The game is read only through `InterpEnv`; every object is read as an
+already-layer-evaluated `ObjectView`.
+
+**Rationale.** `GameState` has no zones, permanents, stack or wired history ledger yet (#18
+FP-017), and #31 FP-030 puts real-state environments in the integration unit; an injected trait
+(like `TriggerEnv` and `LayerEnvironment`) lets the expression layer be complete and tested now
+and keeps it a pure function of the environment and the context (REQ-CORE-006). Evaluated
+numeric `power`/`toughness`/`mana_value` are carried by the view because `Characteristics`
+holds placeholder JSON wrappers for P/T (#32 FP-031).
+
+**Alternatives.** Reading `GameState` directly (rejected: the data is not there and the
+integration belongs to a later unit); passing raw `Characteristics` and evaluating layers inside
+the interpreter (rejected: layers are the layer system's job, and the CDA path is #186 FP-146).
+
+## #57 FP-055 — Interpretations where the brief was silent
+
+**Decision.** The brief's marked decisions, as implemented: `TEAMMATES` is the empty list (no
+team formats yet); the filter-selector default zone is the battlefield; `ENCHANTED`, `EQUIPPED`
+and `ATTACHED_TO` are the same lookup (`InterpEnv::attached_to(source)`); `REMEMBERED(key)`
+resolves only a remembered `ChoiceValue::Player`; `CONTROLS` is "some player in the set controls
+some selected object"; `PLAYER_HAS_MAX_SPEED` is true iff the resolved set is non-empty and all
+have max speed, independent of the subject; division by zero is `InterpError::DivisionByZero`
+(malformed, not an impossible instruction); `MEMORY(key)` is the `Number` or the `Mode` index,
+otherwise 0. Further interpretations made here:
+1. Every player referent (CONTROLLER, OWNER, ACTIVE_PLAYER, DEFENDING_PLAYER, TARGET, CHOSEN,
+   BOUND, LINKED, REMEMBERED, THAT_PLAYER) is checked against `env.players()` and becomes
+   `Ignored::Gone(Player)` if absent; every object referent except SELF/SOURCE_LKI, including
+   each member of a `BOUND` or `LINKED` list, is checked with `env.object(id)`.
+2. For a player subject, object-only predicates (`HAS_CARD_TYPE`, `HAS_COLOR`, `HAS_COUNTER`
+   with a comparison, `MANA_VALUE`, `POWER`, `TOUGHNESS`, `CONTROLLED_BY`, `OWNED_BY`) return
+   false without evaluating their words, values or player selectors (so they cannot error).
+3. For an object subject, `POWER`/`TOUGHNESS` evaluate the right-hand value before looking at the
+   subject's P/T, so a malformed value errors the same way whether or not the subject has P/T;
+   a subject without P/T is then false.
+4. `CONTROLS` reads each selected object's controller from `env.object(id)` (current
+   information; an object without a controller controls nothing).
+5. `resolve_players` / `select_objects` reference form: the ignored entries of the underlying
+   reference come first, then one `Unresolved(ref)` per referent of the wrong kind.
+6. Selector `count` larger than `usize` keeps all; ids `objects_in` reports that `env.object`
+   does not know are skipped silently (no `Ignored` entry: they are not part of the instruction).
+7. `SPELLS_CAST_THIS_TURN` with a condition and no player counts casters in `env.players()`
+   (the brief's "all players"); a caster no longer in the game is not counted. Without a
+   condition and without a player it is the ledger total, which still counts such a caster.
+8. `ATTR` and `DISTINCT` read objects with `view_of` (current information, then LKI);
+   `DISTINCT ... COLOR` counts only the five colour bits.
+9. `MANA_SPENT_TO_CAST` resolves its reference with `resolve_reference` (so `SELF` may use LKI;
+   other references require the object to be present) and sums over the Object items.
+
+**Rationale.** Each choice follows the brief's tables literally where they speak, keeps
+evaluation integer-only, side-effect-free and independent of iteration order (R3), and keeps the
+CR 101.3 split (impossible instruction = ignored part; malformed expression = error).
+
+**Alternatives.** Evaluating object-only predicates' operands for player subjects (rejected: the
+brief says "false", and an error there would make a player-subject test depend on unrelated
+data); treating an unknown referent player as resolved (rejected: CR 101.3 says the impossible
+part is ignored); counting every caster for conditioned spell queries (rejected: the brief names
+"all players").
+
+## #57 FP-055 — Deferred
+
+**Decision.** Not built in this unit: the `InterpEnv` implementation on the real game state
+(integration unit); spec-generated YES_NO text (#28); non-literal CDA evaluation through the
+layer environment (#186 FP-146).
+
+**Rationale.** Outside issue #57's deliverables.
+
+**Alternatives.** None considered.

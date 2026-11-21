@@ -12,6 +12,8 @@ pub mod choice;
 pub mod events;
 /// Match configuration: FormatConfig, versioned ban-list references, constructed presets and deck validation (REQ-FMT-001, REQ-ING-008, REQ-FMT-004).
 pub mod format;
+/// The DSL interpreter's expression layer: references, selectors, predicates and integer value expressions (REQ-DSL-003, REQ-ARCH-002).
+pub mod interp;
 /// Who knows what, shuffle knowledge and the redacted per-player zones view (REQ-CORE-004).
 pub mod knowledge;
 /// The layer system: continuous-effect registry, evaluation through layers 1a-7d and timestamps (REQ-LAYER-001, REQ-CORE-002).
