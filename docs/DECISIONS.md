@@ -7094,9 +7094,14 @@ CR 704.3 single event).
 
 ## #42 FP-041 — Other judgement calls (Aura and battle, unknown targets, phasing)
 
-**Decision.** (1) An attached Aura that is also a battle is illegal under CR 704.5m (graveyard),
-like an Aura that is a creature (CR 303.4d); its CR 704.5p finding (CR 310.10) is not performed
-because the move wins. (2) An Equipment that is also a Fortification is legal on a creature or a
+**Decision.** (1) An attached Aura that is also a battle is unattached by CR 704.5p /
+CR 310.10 in the first check and stays on the battlefield. It is put into the graveyard by
+CR 704.5m as "not attached" in the next check (CR 704.3). If the object it is attached to is
+independently illegal (enchant ability, CR 303.4c), CR 704.5m also fires in the first check and
+the move wins over the unattach. Creature-Auras (CR 303.4d) are unchanged: graveyard in one
+pass. The rules-researcher established this from CR 310.10, 704.5p, 704.5m and 303.4c: "illegal"
+in CR 704.5m is defined by the enchant ability and effects on the object it is attached to, not
+by the Aura's own types. (2) An Equipment that is also a Fortification is legal on a creature or a
 land. (3) An attachment whose target permanent is on the battlefield but cannot be evaluated by
 the layer environment is not judged by CR 704.5n (existing "skip what cannot be evaluated"
 policy). (4) An attachment to a phased-out permanent is not checked by CR 704.5m, 704.5n or
@@ -7106,10 +7111,25 @@ is not in the game counts as having left the game for CR 303.4c. (6) The contain
 self-attachment, so "attached to itself" is checked defensively by
 `target_self_or_gone` and unit-tested there.
 
-**Rationale.** CR 310.10 says a battle can't be attached even if it is also an Aura, and an
-illegally attached Aura goes to the graveyard (CR 704.5m); either order ends in the graveyard,
-and the one-pass graveyard result avoids a needless repeat. The rest follows the decisions of
+**Rationale.** CR 310.10 restricts the battle as the attacher, so a battle-Aura's own types do
+not make the attachment illegal for CR 704.5m. The observable difference from a one-pass
+graveyard is that it is unattached when it leaves (last known information) and its host loses the
+Aura's effects between the two checks. The rest follows the decisions of
 #41 FP-040 on phasing and unevaluable objects.
 
-**Alternatives.** (1) Unattach only, then graveyard on the next check as "not attached"
-(rejected: same end state, one more pass, and an observable unattached Aura in between).
+**Alternatives.** (1) The former one-pass graveyard for a battle-Aura, treating it as illegal
+under CR 704.5m (rejected: contradicts CR 310.10 / 704.5p as established by the rules-researcher).
+
+## #42 FP-041 — 704.5q and 704.5r on the same permanent and kind
+
+**Decision.** Per counter kind, remove the larger of the two amounts: an order-independent union
+of both removals.
+
+**Rationale.** The CR does not address the overlap. Counters of one kind are interchangeable
+(CR 122.1); applying 704.5q then 704.5r removes the larger amount, whereas applying 704.5r then
+704.5q would differ. Examples: 5 +1/+1, 2 -1/-1, limit 1 on +1/+1 gives events (+1/+1, 4) and
+(-1/-1, 2), final (1, 0). 3 +1/+1, 5 -1/-1, limit 1 on +1/+1: 704.5q removes 3 of each, 704.5r
+would remove 2 of +1/+1, so events are (+1/+1, 3) and (-1/-1, 3), final 0 +1/+1 and 2 -1/-1.
+
+**Alternatives.** Summing the amounts (rejected: it removes more than either rule requires);
+applying 704.5r first (rejected: order-dependent).

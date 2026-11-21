@@ -690,11 +690,11 @@ fn illegal_aura(view: &SbaView<'_>) -> Vec<SbaSubject> {
                     target_self_or_gone(id, target, &|x| view.on_battlefield(x), &|pl| {
                         view.remaining(pl)
                     });
-                // CR 303.4d: an Aura that's also a creature can't enchant anything; decision
-                // #42 FP-041: an Aura that's also a battle neither (CR 310.10).
+                // CR 303.4d: an Aura that's also a creature can't enchant anything. An Aura
+                // that's also a battle is not illegal here: CR 310.10 / 704.5p unattach it and
+                // CR 704.5m takes it as "not attached" in the next check (decision #42 FP-041).
                 bad_target
                     || f.creature
-                    || f.battle
                     // CR 303.4c: as defined by its enchant ability and other effects.
                     || !view.env.aura_can_enchant(id, target)
             }
