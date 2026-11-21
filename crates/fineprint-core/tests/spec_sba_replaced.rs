@@ -382,17 +382,17 @@ fn req_sba_001_g2_instead_naming_retiring_object() {
         0,
         "the -1/-1 removal proceeded"
     );
-    // Whether the replacement's Tap of Y executes is not asserted: the brief's G2 text calls it
-    // "dropped as impossible", but contract items 1 and 3 (non-move events execute before the
-    // zone changes; eligibility is pre-event) make Y still on the battlefield when it executes.
-    // Reported to the Orchestrator as an internal inconsistency of the brief.
-    assert!(
+    // Ruling (Orchestrator): the bus runs the non-zone-change events of a batch before the zone
+    // changes and judges replacements against pre-event state (CR 704.3, CR 614.1; REQ-SBA-001
+    // "one event"), so Y is still on the battlefield when the replacement's Tap executes and the
+    // Tap of Y executes exactly once.
+    assert_eq!(
         executed_events(&r)
             .iter()
             .filter(|e| matches!(e, GameEvent::Tap { object } if *object == y))
-            .count()
-            <= 1,
-        "at most one Tap of Y: {:?}",
+            .count(),
+        1,
+        "exactly one Tap of Y: {:?}",
         executed_events(&r)
     );
 }
@@ -558,4 +558,192 @@ fn req_sba_001_round2_deterministic() {
         assert_eq!(a.after.snap(), b.after.snap());
         assert_eq!(a.after.canonical(), b.after.canonical());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR #214 round 3 (H4, H6): replacement-produced Unattach / Attach events
+// ---------------------------------------------------------------------------------------------
+
+use fineprint_core::permanent::AttachTarget;
+
+/// The H4 board: Equipment E attached to a LEGAL creature `host` (no 704.5n finding for E) and a
+/// creature `d` (base 1/0, CR 704.5f) whose SBA zone change is replaced by
+/// `Instead([ZoneChange d -> graveyard (StateBasedAction), Unattach E, (exile E when `exile`)])`.
+fn h4_board(exile: bool) -> (Sim, ObjectId, ObjectId, ObjectId) {
+    let mut s = Sim::new();
+    let host = s.creature(P2, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, host);
+    let d = s.creature(P1, "test.vanilla_1_0", 1, 0);
+    let mut events = vec![
+        GameEvent::ZoneChange {
+            object: d,
+            request: MoveRequest::new(ZoneKind::Graveyard),
+            cause: ZoneChangeCause::StateBasedAction,
+        },
+        GameEvent::Unattach { attachment: eq },
+    ];
+    if exile {
+        events.push(GameEvent::ZoneChange {
+            object: eq,
+            request: MoveRequest::new(ZoneKind::Exile),
+            cause: ZoneChangeCause::Other,
+        });
+    }
+    s.replace(1, sba_zone_change_of(d), Action::Instead(events));
+    (s, eq, d, host)
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, 704.5n, 701.3d, 614.1 (H4): an Unattach produced by a
+// replacement (not planned by any SBA) is executed once, the Equipment stays on the battlefield
+// detached and `unattached` lists it.
+#[test]
+fn req_sba_001_h4_replacement_unattach_listed() {
+    let (mut s, eq, d, host) = h4_board(false);
+    assert!(s.check().iter().all(|f| f.entry_id != "704.5n"));
+    let r = run_sba(s);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    let o = r.outcome();
+    assert!(o.performed);
+    assert_still_on_battlefield(&r, eq);
+    assert_still_on_battlefield(&r, host);
+    assert_eq!(r.after.permanents.attached_to(eq), None);
+    assert_eq!(unattach_count(&r, eq), 1, "exactly one Unattach for E");
+    assert_eq!(o.unattached, vec![eq]);
+    assert_to_owners_graveyard(&r, d, ZoneChangeCause::StateBasedAction);
+}
+
+// REQ-SBA-001, CR 701.3d, 704.3 (H4 control): the replacement also exiles E: E is not listed in
+// `unattached` (it left the battlefield); its Unattach is still in `executed`.
+#[test]
+fn req_sba_001_h4_control_replacement_unattach_then_exile() {
+    let (s, eq, _d, _host) = h4_board(true);
+    let r = run_sba(s);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    let o = r.outcome();
+    assert!(r.after.zones.object(eq).is_none(), "E left the battlefield");
+    let new_eq = r.moved_to(eq).expect("E moved");
+    assert_eq!(r.after.zone_of(new_eq), Some(ZoneKind::Exile));
+    assert!(!o.unattached.contains(&eq));
+    assert!(o.unattached.is_empty());
+    assert_eq!(unattach_count(&r, eq), 1, "its Unattach is executed");
+}
+
+// REQ-SBA-001, REQ-CORE-001 (H4): the H4 boards run twice give equal outcomes and states.
+#[test]
+fn req_sba_001_h4_deterministic() {
+    for exile in [false, true] {
+        let a = run_sba(h4_board(exile).0);
+        let b = run_sba(h4_board(exile).0);
+        assert_eq!(a.result, b.result);
+        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.outcome().unattached, b.outcome().unattached);
+        assert_eq!(a.after.snap(), b.after.snap());
+        assert_eq!(a.after.canonical(), b.after.canonical());
+    }
+}
+
+/// The H6 board: Equipment E attached to an illegal host (704.5n, so an Unattach is planned),
+/// `new_host`, and `x` (base 1/0, +1/+1 and -1/-1 counters, CR 704.5q) whose SBA move is Skipped
+/// (when `via_counters`) with its +1/+1 removal replaced by `Instead([RemoveCounters +1/+1,
+/// Attach E -> new_host])`; otherwise creature `d` (base 1/0) whose SBA move is replaced by
+/// `Instead([ZoneChange d, Attach E -> new_host])`.
+fn h6_board(via_counters: bool) -> (Sim, ObjectId, ObjectId) {
+    let mut s = Sim::new();
+    let old_host = s.creature(P2, "test.vanilla_2_2", 2, 2);
+    let new_host = s.creature(P2, "test.vanilla_3_3", 3, 3);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, old_host);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(old_host)));
+    let attach = GameEvent::Attach {
+        attachment: eq,
+        target: AttachTarget::Permanent(new_host),
+    };
+    if via_counters {
+        let x = s.creature(P1, "test.vanilla_1_0", 1, 0);
+        s.counters(x, "+1/+1", 1);
+        s.counters(x, "-1/-1", 1);
+        s.skip_sba_move(1, x);
+        s.replace(
+            2,
+            remove_counters_of(x, "+1/+1"),
+            Action::Instead(vec![
+                GameEvent::RemoveCounters {
+                    target: CounterTarget::Object(x),
+                    kind: "+1/+1".to_owned(),
+                    amount: 1,
+                },
+                attach,
+            ]),
+        );
+    } else {
+        let d = s.creature(P1, "test.vanilla_1_0", 1, 0);
+        s.replace(
+            1,
+            sba_zone_change_of(d),
+            Action::Instead(vec![
+                GameEvent::ZoneChange {
+                    object: d,
+                    request: MoveRequest::new(ZoneKind::Graveyard),
+                    cause: ZoneChangeCause::StateBasedAction,
+                },
+                attach,
+            ]),
+        );
+    }
+    (s, eq, new_host)
+}
+
+// REQ-SBA-001, CR 704.3, 704.5n, 704.5q, 614.1 (H6): the planned Unattach does not clear a new
+// link an Attach made in the same pass: E ends attached to the NEW host; it is listed in
+// `unattached` (its Unattach occurred and it stays on the battlefield).
+#[test]
+fn req_sba_001_h6_replacement_attach_keeps_new_host_counters() {
+    let (s, eq, new_host) = h6_board(true);
+    let r = run_sba(s);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert_still_on_battlefield(&r, eq);
+    assert_eq!(
+        r.after.permanents.attached_to(eq),
+        Some(AttachTarget::Permanent(new_host))
+    );
+    assert_eq!(r.outcome().unattached, vec![eq]);
+    assert_eq!(unattach_count(&r, eq), 1);
+}
+
+// REQ-SBA-001, CR 704.3, 704.5n, 614.1 (H6, zone-change variant): same as above where the Attach
+// is produced by replacing another object's SBA zone change.
+#[test]
+fn req_sba_001_h6_replacement_attach_keeps_new_host_zone_change() {
+    let (s, eq, new_host) = h6_board(false);
+    let r = run_sba(s);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert_still_on_battlefield(&r, eq);
+    assert_eq!(
+        r.after.permanents.attached_to(eq),
+        Some(AttachTarget::Permanent(new_host))
+    );
+    assert_eq!(r.outcome().unattached, vec![eq]);
+    assert_eq!(unattach_count(&r, eq), 1);
+}
+
+// REQ-SBA-001, CR 704.5n (item 4, unchanged behaviour): an illegal Equipment link with no
+// replacement present: covered by `req_sba_001_704_5n_f5_illegal_equipment_target_unattached`
+// in spec_sba_attach.rs (unattached, stays, listed); the exactly-one-Unattach count here.
+#[test]
+fn req_sba_001_h6_unchanged_illegal_link_without_replacement() {
+    let mut s = Sim::new();
+    let old_host = s.creature(P2, "test.vanilla_2_2", 2, 2);
+    let eq = s.permanent(P1, P1, equipment_chars("test.equipment_a"));
+    s.attach_to(eq, old_host);
+    s.env
+        .illegal_equipment_targets
+        .insert((eq, AttachTarget::Permanent(old_host)));
+    let r = run_sba(s);
+    assert_still_on_battlefield(&r, eq);
+    assert_eq!(r.after.permanents.attached_to(eq), None);
+    assert_eq!(unattach_count(&r, eq), 1);
+    assert_eq!(r.outcome().unattached, vec![eq]);
 }
