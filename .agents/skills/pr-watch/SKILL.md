@@ -33,14 +33,18 @@ threads:
    ```
    Determine whether CodeRabbit review is required on this PR (`docs/PROCESS.md` P6; if
    `review:skip` ever coexists with `review:sanity` or `review:full`, remove `review:skip` and
-   treat the stronger review label as authoritative):
+   treat the stronger review label as authoritative; if the PR has no `review:*` label during M1
+   or later commits changed the diff, verify the linked issue's `review:*` label and the current
+   PR diff against P6 `review:sanity` categories and apply/upgrade the missing label before
+   treating the PR as skipped):
    - **Review required:** the PR carries `review:sanity` or `review:full`, **or** `.coderabbit.yaml`
      has `auto_review.enabled: true` and the PR does not carry `review:skip`, **or** `coderabbitai`
      has already posted a review on this PR.
    - **Review skipped:** the PR is excluded from automatic review — either it carries `review:skip`
      (in either phase, without `review:sanity` or `review:full`), **or** `.coderabbit.yaml` has
-     `auto_review.enabled: false` and the PR carries neither `review:sanity` nor `review:full` —
-     and `coderabbitai` has posted no review on this PR.
+     `auto_review.enabled: false` and the PR carries neither `review:sanity` nor `review:full`
+     (after confirming the linked issue and current diff do not require `review:sanity`/`review:full`)
+     — and `coderabbitai` has posted no review on this PR.
 2. **All review threads and all comments in each thread (paginated via GraphQL so nothing is missed;
    skip when review is skipped and `reviews` is empty):**
    ```sh

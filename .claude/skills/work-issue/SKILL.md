@@ -208,29 +208,37 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 
 1. Check the head is the commit the work-verifier last passed. Push:
    `git -c push.negotiate=true push -u origin <branch>`.
-2. Determine the PR's **review mode label** (`docs/PROCESS.md` P6): carry the issue's
-   `review:skip` / `review:sanity` / `review:full` label onto the PR (a PR carries at most one
-   `review:*` label). Upgrade to `review:sanity` — and do **not** apply `review:skip` (removing
-   `review:skip` if already present) — if the diff touches any P6 `review:sanity` category, even
-   when the issue lacked the label:
-   - public interfaces, schemas, wire/event contracts, or bindings (any P3 contract owner in
-     `docs/DEVELOPMENT.md`, `contracts/CHANGE_REQUESTS.md`, `fineprint-dsl` wire schema, `.pzl` /
-     `*.fpreplay` / `*.fpdb` formats, `IRulesEngine`, wire protocol, native-effect or keyword macro
-     registries, C ABI / .NET / WASM bindings);
-   - state machines, deterministic core rules loops, or `very-high` blast-radius rules evaluation
-     (priority/SBA heartbeat, turn sequencer, layer evaluator & `GameState` state-hash integration,
-     casting/cost-lock-in/payment state machine, DSL interpreter core & stack resolution, combat
-     constraint solvers, mandatory loop detection & shortcut protocol);
-   - security or compliance-critical paths (R5 card-data boundary including CI aggregate-only
-     reporting, R11 override validation & `VERIFIED` enforcement, R12 hidden-information redaction,
-     determinized forking, and untrusted-input parsers); or
-   - automated milestone determinism, conformance, or release gates (`#106`, `#121`, `#122`).
-3. Create the PR with `gh pr create --base main --head <branch> --label <review:*> --title … --body-file <file>`
-   or REST (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f head=<branch> -f base=main
-   -F body=@<file>` followed by applying the `review:*` label). The body follows
-   `.github/pull_request_template.md`, starts with `Closes #<N>`, states the review mode and reason
-   under `## Work item`, and fills every section (write "not applicable" with a reason rather than
-   leaving one empty: CodeRabbit checks it on reviewed PRs). Bot names go in backticks.
+2. Determine the PR's **review mode label** (`docs/PROCESS.md` P6; a PR carries at most one
+   `review:*` label):
+   - Preserve an existing `review:full` label on the issue as authoritative even if the diff also
+     touches a `review:sanity` category.
+   - Upgrade to `review:sanity` — and do **not** apply `review:skip` (removing `review:skip` if
+     already present) — if the issue has `review:skip` or no `review:*` label and the diff touches
+     any P6 `review:sanity` category:
+     - public interfaces, schemas, wire/event contracts, or bindings (any P3 contract owner in
+       `docs/DEVELOPMENT.md`, `contracts/CHANGE_REQUESTS.md`, `fineprint-dsl` wire schema, `.pzl` /
+       `*.fpreplay` / `*.fpdb` formats, `IRulesEngine`, wire protocol, native-effect or keyword
+       macro registries, C ABI / .NET / WASM bindings);
+     - state machines, deterministic core rules loops, or `very-high` blast-radius rules evaluation
+       (priority/SBA heartbeat, turn sequencer, layer evaluator & `GameState` state-hash
+       integration, casting/cost-lock-in/payment state machine, DSL interpreter core & stack
+       resolution, combat constraint solvers, mandatory loop detection & shortcut protocol);
+     - security or compliance-critical paths (R5 card-data boundary including CI aggregate-only
+       reporting, R11 override validation & `VERIFIED` enforcement, R12 hidden-information
+       redaction, determinized forking, and untrusted-input parsers); or
+     - automated milestone determinism, conformance, or release gates (`#106`, `#121`, `#122`).
+   - Otherwise, carry the issue's `review:*` label. If the issue has no `review:*` label and the
+     diff matches no `review:sanity` category, apply `review:skip` during the M1
+     initial-usable-build phase (`auto_review.enabled: false`), or omit `review:*` labels in
+     post-usable-build mode (`auto_review.enabled: true`, per-PR review default).
+3. Create the PR with `gh pr create --base main --head <branch> [--label <review:*>] --title … --body-file <file>`
+   (omitting `--label` only for the unlabelled post-usable default above) or REST
+   (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f head=<branch> -f base=main
+   -F body=@<file>` followed immediately by applying the `review:*` label when one is selected).
+   The body follows `.github/pull_request_template.md`, starts with `Closes #<N>`, states the
+   review mode (or `post-usable default`) and reason under `## Work item`, and fills every section
+   (write "not applicable" with a reason rather than leaving one empty: CodeRabbit checks it on
+   reviewed PRs). Bot names go in backticks.
 4. Watch the PR:
    - **Claude Code:** if the session can subscribe to PR activity (`subscribe_pr_activity`), do so.
      Otherwise schedule a check-in with `send_later` (about 10 minutes, or 3–5 minutes for a
@@ -247,7 +255,8 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 
 - **Unreviewed `review:skip` PRs** (when `.coderabbit.yaml` excludes the PR — either `review:skip`
   in either phase without `review:sanity`/`review:full`, or no opt-in label while
-  `auto_review.enabled: false` — and CodeRabbit has posted no review on the PR): do **not**
+  `auto_review.enabled: false` after confirming the linked issue and current diff do not require
+  `review:sanity`/`review:full` — and CodeRabbit has posted no review on the PR): do **not**
   request `@coderabbitai review`. Handle any CI failures through the investigator / classifier /
   Fixer / `work-verifier` loop, and proceed to §7 as soon as all required CI checks and
   `work-verifier` are green.
@@ -282,9 +291,9 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 ## 7. Merge
 
 When every P6 step 5 condition holds on the head commit (required checks green; if the PR requires
-or received CodeRabbit review, CodeRabbit reviewed the head with no outstanding change request and
-every thread replied to and resolved; branch up to date with `main`; last work-verifier result
-`pass` for the head):
+or received CodeRabbit review, `coderabbitai` has an effective `APPROVED` review covering the head
+commit with no unanswered actionable comments and every thread replied to and resolved; branch up
+to date with `main`; last work-verifier result `pass` for the head):
 
 1. Merge with a merge commit:
    `gh pr merge <P> --merge --match-head-commit <head>` or REST
