@@ -2,7 +2,8 @@ Closes #<!-- issue number -->
 
 ## Work item
 
-<!-- issue title, plan ID (FP-…) and phase -->
+<!-- issue title, plan ID (FP-…), phase, and review mode (`review:skip` / `review:sanity` /
+     `review:full`, docs/PROCESS.md P6) with reason -->
 
 ## Requirements satisfied
 
