@@ -7,6 +7,11 @@ labels: ["work-unit", "blocked"]
 
 > **Plan ID:** FP-XXX · **Phase:** <n — name> · **Milestone:** <M1|M2|M3> · **Expected tier:** <T1 (Sonnet 5.5 / Flash) | T2 (Opus 5.5 / Pro)>
 
+<!-- After creating the issue: add type:<feature|binding|toolchain|client|fixtures|infra|docs>,
+     area:<…>, phase:<NN-name>, tier:<T1|T2>, and during M1 exactly one review mode label
+     review:<skip|sanity|full> (docs/PROCESS.md P6); replace `blocked` with `ready` if every
+     dependency is already satisfied (docs/PROCESS.md P6 step 5). -->
+
 ## Summary
 
 <what this unit delivers and why, in two or three sentences>
