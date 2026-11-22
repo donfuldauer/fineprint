@@ -85,7 +85,11 @@ You are **done** when all of these hold on the current `headRefOid`:
      `test (macos-latest)`, `coverage (ubuntu-latest)`, `guards`, `req-coverage`, and
      `differential (ubuntu-latest)`) is **present** in `statusCheckRollup` on `headRefOid` with
      `status == "COMPLETED"` and `conclusion == "SUCCESS"` (an empty or incomplete
-     `statusCheckRollup` never satisfies this check).
+     `statusCheckRollup` never satisfies this check), with one exception matching
+     `.github/workflows/ci.yml`: when the `changes` job classifies the PR as documentation-only
+     (`code=false`, i.e., only Markdown files other than `docs/SRS.md` and `.claude/*`),
+     `coverage (ubuntu-latest)` may be `status == "COMPLETED"` with `conclusion == "SKIPPED"`
+     (whenever code changes are present, `coverage (ubuntu-latest)` must be `SUCCESS`).
    - Every other entry in `statusCheckRollup` (excluding path-gated `SKIPPED` runs and any
      non-required `cr` check documented in `docs/RUN_LOG.md` as failing solely due to an upstream
      network outage rather than a citation or vocabulary defect) passes for its entry type:
