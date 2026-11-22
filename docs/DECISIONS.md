@@ -7481,3 +7481,68 @@ fast.
 - Install Playwright browsers or rebuild `cbindgen` / `wasm-bindgen-cli` on every VM boot:
   deferred because `spikes/bindings` is a completed Phase 00 spike and the real FFI / .NET / WASM
   bindings land in Phase 14 (#102–#104); adding them later keeps current cloud VM startup fast.
+
+## Process — Initial-usable-build review rhythm (tests along the way, sanity review on boundaries, full review at M1)
+
+**Decision:** While Milestone M1 — Two-player engine builds the first usable end-to-end two-player
+build, split PR code review into three mutually exclusive label-driven modes in `docs/PROCESS.md`
+P6 and `.coderabbit.yaml`:
+
+1. **`review:skip`** (default for routine M1 vertical-slice chunks: individual SBA additions,
+   effect families, keyword families, grammar template slices, demo decks/clients, `.pzl`
+   regression packs, benchmarks, and scoped follow-ups on already-reviewed spines): no automatic
+   per-PR CodeRabbit review. Every PR remains gated by Implementer + Independent Tester tests,
+   coverage floors (90% rules core / 75% others, REQ-NFR-008), repository guards
+   (`cargo xtask guard all`), differential cached vs. full-recompute layer digests (REQ-LAYER-005),
+   `work-verifier` (`pass`, P5 unit gate), and all required multi-OS CI checks.
+2. **`review:sanity`** (targeted mid-stream sanity review for anything expensive to change later):
+   required on any issue or PR defining or changing
+   - P3 public interfaces, schemas, wire/event contracts, or bindings (`#16`, `#17`, `#51`, `#64`,
+     `#70`, `#79`, `#80`, `#81`, `#83`, `#86`, `#100`, `#102`, `#103`, `#104`, `#159`, `#161`,
+     `#169`, or any PR touching `contracts/CHANGE_REQUESTS.md`);
+   - core deterministic state machines, rules loops, or `very-high` blast-radius rules evaluation
+     (`#44`, `#46`, `#52`–`#54`, `#57`, `#58`, `#67`, `#68`, `#77`, `#78`, `#183`, `#184`, `#186`);
+   - security or compliance-critical paths: R5 card-data boundary (`#17`, `#87`, `#100`, `#101`),
+     R11 override validation and `VERIFIED` enforcement (`#86`, `#98`), and R12 redaction,
+     determinized forking, and untrusted-input parsers (`#16`, `#51`, `#80`, `#81`, `#83`, `#85`,
+     `#87`, `#89`, `#91`, `#100`); or
+   - automated milestone determinism, conformance, or release gates (`#106`, `#121`, `#122`).
+   CodeRabbit runs in `quiet` profile with `auto_pause_after_reviewed_commits: 2`; blocking
+   boundary, contract, schema, state-machine, determinism (R3), no-card-branch (R4),
+   security/compliance (R5/R11/R12) and verified correctness defects are fixed, while cosmetic
+   style, naming and minor refactor nitpicks are deferred to `#219` (FP-161) or a new M2
+   `work-unit` issue.
+3. **`review:full`**: runs the cohesive full review pass over the working end-to-end M1 build in
+   `#219` (FP-161, gating `#123` FP-121 Milestone M1 acceptance), lands high-leverage cross-cutting
+   fixes, and flips `.coderabbit.yaml` to post-usable per-chunk review (`auto_review.enabled: true`,
+   `profile: chill`, `labels: ["!review:skip"]`, `auto_pause_after_reviewed_commits: 2`) for `#123`
+   (`review:full`) and all M2/M3 work (`#124`–`#141`, all transitively blocked by `#123`).
+
+A PR carries at most one `review:*` label; upgrading a `review:skip` issue/PR removes `review:skip`,
+and if `review:skip` ever coexists with `review:sanity` or `review:full`, the stronger review label
+wins. Because `docs/SRS.md` REQ-NFR-011 bullet 2 still reads "reviewed by CodeRabbit" unconditionally
+and only a person edits `docs/SRS.md` (P1, P8), a proposed wording alignment is queued in
+`docs/HUMAN_QUEUE.md` while this owner-requested workflow takes effect immediately.
+
+**Rationale:** Running multi-round full CodeRabbit polish loops on every isolated M1 vertical slice
+slows down reaching the first working two-player build and risks polishing abstractions whose real
+shape only becomes clear once the full engine, DSL runtime, toolchain, bindings and clients run
+end-to-end. Keeping Implementer + Independent Tester tests, 90%/75% coverage floors, differential
+cached/full-recompute checks, repo guards, `work-verifier` and multi-OS CI mandatory per PR catches
+logic regressions immediately; targeted `review:sanity` passes protect every P3 contract, core
+deterministic state machine and R5/R11/R12 security boundary that is expensive to retrofit; and
+`#219` (FP-161) gives the full review pass the cohesive context needed to catch cross-cutting
+drift, duplicated logic and contract/state-transition bugs before flipping to tighter per-PR review
+for M2/M3.
+
+**Alternatives:**
+- Keep full per-PR CodeRabbit review (`auto_review.enabled: true`, `auto_pause_after_reviewed_commits: 0`)
+  on all 102 open M1 PRs: rejected because per-chunk polish loops bottleneck delivery of the first
+  usable two-player build and create sunk-cost attachment to early module shapes.
+- Disable CodeRabbit completely until M1 acceptance: rejected because P3 contracts (`fineprint-dsl`,
+  `IRulesEngine`, wire protocol, bindings, `*.fpdb`/`*.fpreplay`/`.pzl`), core deterministic rules
+  loops (priority/SBA heartbeat, layers/`GameState` hash, casting, DSL interpreter, combat solvers,
+  loops) and R5/R11/R12 security boundaries (redaction, determinized forking, `VERIFIED`, untrusted
+  parsers) are expensive to retrofit once downstream modules build on them.
+- Rely on agent self-review during M1: rejected; R9 (no self-review) remains intact, with
+  `work-verifier` checking objective facts and CodeRabbit remaining the sole code reviewer.
