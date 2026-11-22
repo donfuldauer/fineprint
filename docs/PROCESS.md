@@ -337,8 +337,8 @@ M2 and M3) gets tighter per-PR review by default unless explicitly opted out wit
    Every CodeRabbit comment and CI failure is handled as it arrives or on check-in; nobody
    sleep-polls in a foreground loop. On an unreviewed PR excluded from automatic review
    (`review:skip` in either phase without `review:sanity`/`review:full`, or no opt-in label while
-   `auto_review.enabled: false` after confirming the linked issue and current diff do not require
-   `review:sanity`/`review:full`), do not request `@coderabbitai review`.
+   `auto_review.enabled: false`), after confirming that neither the linked issue nor the current
+   PR diff requires `review:sanity`/`review:full`, do not request `@coderabbitai review`.
 3. **Every finding is accounted for** (on reviewed PRs, or whenever CodeRabbit posted comments),
    batch by batch (P5), each ending in exactly one disposition recorded as a reply on its thread:
    - **Fixed:** an executor commit addresses it and the verifier passed; the reply names the
@@ -383,9 +383,11 @@ M2 and M3) gets tighter per-PR review by default unless explicitly opted out wit
        `CHANGES_REQUESTED` or `DISMISSED` review), with no actionable comments unanswered, and
        every thread has a disposition reply and is resolved (except types that cannot be resolved);
      - if the PR is excluded from automatic review (`review:skip` in either phase without
-       `review:sanity`/`review:full`, or no opt-in label while `auto_review.enabled: false` after
-       confirming the linked issue and current diff do not require `review:sanity`/`review:full`)
-       and no CodeRabbit review was posted: no CodeRabbit review or approval is required;
+       `review:sanity`/`review:full`, or no opt-in label while `auto_review.enabled: false`) and
+       no CodeRabbit review was posted: first re-check the linked issue and the current PR diff
+       against the `review:sanity` categories above; if either requires `review:sanity` or
+       `review:full`, upgrade the PR label (removing `review:skip`) and complete review before
+       merging; otherwise no CodeRabbit review or approval is required;
    - the branch is up to date with `main`;
    - the work-verifier's last result for the head is `pass`.
    Then merge with a merge commit (`gh pr merge <P> --merge --match-head-commit <sha>`

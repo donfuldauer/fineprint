@@ -255,10 +255,13 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 
 - **Unreviewed `review:skip` PRs** (when `.coderabbit.yaml` excludes the PR — either `review:skip`
   in either phase without `review:sanity`/`review:full`, or no opt-in label while
-  `auto_review.enabled: false` after confirming the linked issue and current diff do not require
-  `review:sanity`/`review:full` — and CodeRabbit has posted no review on the PR): do **not**
-  request `@coderabbitai review`. Handle any CI failures through the investigator / classifier /
-  Fixer / `work-verifier` loop, and proceed to §7 as soon as all required CI checks and
+  `auto_review.enabled: false` — and CodeRabbit has posted no review on the PR): do **not**
+  request `@coderabbitai review` while the linked issue and current PR diff match no P6
+  `review:sanity`/`review:full` requirement. Handle any CI failures through the investigator /
+  classifier / Fixer / `work-verifier` loop; after any push, re-check the linked issue and
+  current diff against P6 `review:sanity` categories, and if either now requires `review:sanity`
+  or `review:full`, upgrade the PR label (removing `review:skip`) and complete review under the
+  reviewed-PR path below. Otherwise proceed to §7 as soon as all required CI checks and
   `work-verifier` are green.
 - **Reviewed PRs (`review:sanity`, `review:full`, post-usable default without `review:skip`, or
   any PR where CodeRabbit posted a review):** each CodeRabbit review round (or push) is one batch,
@@ -290,10 +293,13 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 
 ## 7. Merge
 
-When every P6 step 5 condition holds on the head commit (required checks green; if the PR requires
-or received CodeRabbit review, `coderabbitai` has an effective `APPROVED` review covering the head
-commit with no unanswered actionable comments and every thread replied to and resolved; branch up
-to date with `main`; last work-verifier result `pass` for the head):
+When every P6 step 5 condition holds on the head commit (required checks green; for an unreviewed
+`review:skip` or unlabelled PR, re-confirming that neither the linked issue nor the current PR
+diff requires `review:sanity`/`review:full` — upgrading the label and completing review first if
+either does; if the PR requires or received CodeRabbit review, `coderabbitai` has an effective
+`APPROVED` review covering the head commit with no unanswered actionable comments and every thread
+replied to and resolved; branch up to date with `main`; last work-verifier result `pass` for the
+head):
 
 1. Merge with a merge commit:
    `gh pr merge <P> --merge --match-head-commit <head>` or REST
