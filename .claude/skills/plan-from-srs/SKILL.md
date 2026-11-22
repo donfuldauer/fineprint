@@ -5,10 +5,11 @@ description: "Turns docs/SRS.md into Fine Print's plan, which is a set of GitHub
 
 # plan-from-srs
 
-The plan turns the SRS into units of work the agents in `.claude/agents/` can execute under
-`docs/PROCESS.md`. **The plan is GitHub issues, never a repository file**: each `work-unit` issue
-is one unit, sized as one reviewable PR, and its body is the unit's spec. Every later brief is
-built from an issue, so issues must be concrete: owned paths, deliverables, acceptance criteria.
+The plan turns the SRS into units of work the agents in `.claude/agents/` (forwarded by
+`.agents/agents/` for Gemini / Antigravity) can execute under `docs/PROCESS.md`. **The plan is
+GitHub issues, never a repository file**: each `work-unit` issue is one unit, sized as one
+reviewable PR, and its body is the unit's spec. Every later brief is built from an issue, so
+issues must be concrete: owned paths, deliverables, acceptance criteria.
 
 This is the one workflow in which the Orchestrator stops to ask a person (PROCESS.md P8).
 
@@ -19,7 +20,8 @@ written into the SRS as a **nonfunctional requirement** before step 2. Issues ar
 requirements, never from chat or from the decision log alone.
 
 1. **Ask.** For each decision with no `REQ-NFR-*` requirement in the SRS, ask the user with
-   AskUserQuestion (at most four per call; SRS default first, marked Recommended, one-line
+   `AskUserQuestion` (Claude Code) or `ask_question` (Antigravity) / the harness's interactive
+   question tool (at most four per call; SRS default first, marked Recommended, one-line
    consequence per option). If the user is unreachable, stop here: unlike every other step in
    this repository, these decisions are never made by default.
 2. **Write the SRS section.** Add or update `## 17. Nonfunctional Requirements: Architecture,

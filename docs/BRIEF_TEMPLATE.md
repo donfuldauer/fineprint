@@ -7,7 +7,7 @@ the GitHub issue, `docs/DEVELOPMENT.md` or `docs/PROCESS.md`: everything the age
 ```text
 WORK ITEM <id>: <title>          AGENT: task-executor | fixture-author | work-verifier | issue-investigator | rules-researcher
 ROLE: Implementer | Independent Tester | Fixer | Fixture Author | Verifier | Investigator | Researcher
-MODEL: <Haiku 5.5 | Sonnet 5.5 | Opus 5.5 | Fable 5.2>   TIER: T0–T3 (+ Fable evidence if T3)
+MODEL: <Haiku 5.5 | Sonnet 5.5 | Opus 5.5 | Fable 5.2 — or Flash-Lite | Flash | Pro | T3>   TIER: T0–T3 (+ P4 T3/Fable evidence if T3)
 BRANCH: <branch>   BASE: main   PR: <number or "not yet open">
 
 ISSUE: #<n> <url>   PLAN ID: FP-<NNN>
@@ -70,5 +70,5 @@ ROLE-SPECIFIC
   Researcher:         cite and quote; change no repository files.
 
 REPORT FORMAT
-  <the report block from the receiving agent's definition>
+  <the report block from the receiving agent's definition in .claude/agents/ (forwarded by .agents/agents/)>
 ```

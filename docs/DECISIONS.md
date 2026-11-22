@@ -7398,3 +7398,86 @@ one (rejected: breaks the single SBA event, CR 704.3, REQ-SBA-001); omitting the
 when some event of the batch re-attaches the attachment (rejected: replacements are applied
 inside `process_batch`, so this is unknown before the bus runs); an `Unattach` naming its host
 (rejected for this unit: R2 contract change; the residual case above is deferred to it).
+
+## Process — Dual-harness agent documentation (Claude Code and Gemini/Antigravity)
+
+**Decision:** Support both Claude Code and Gemini / Antigravity across the repository's agent
+instructions, subagents, skills, templates and process documents, using a single-source-of-truth
+layout with no git symlinks:
+- `AGENTS.md` is the canonical root instruction file. `CLAUDE.md` imports `@AGENTS.md` with brief
+  Claude Code notes; `GEMINI.md` imports `@./AGENTS.md` with brief Gemini / Antigravity notes
+  (Gemini CLI inlines `@./AGENTS.md`; Antigravity loads `AGENTS.md` directly and treats
+  `@./AGENTS.md` as a path reference without duplicating context).
+- `.claude/agents/` and `.claude/skills/` remain the canonical Markdown prompts and skill
+  procedures, updated to be dual-platform (Claude Code and Gemini / Antigravity model tiers,
+  REST/`ccr` and `gh` CLI / MCP tooling, and harness-neutral worktree fallback).
+- `.agents/agents/` provides Antigravity custom subagent definitions (with Antigravity YAML
+  frontmatter and safe cross-surface tool lists: `view_file` and `run_command` for read-only roles
+  including `rules-researcher`, plus `replace_file_content` and `write_to_file` for `task-executor`
+  and `fixture-author`) that forward to `.claude/agents/`. Standalone Gemini CLI does not load
+  `.agents/agents/`; its main session does not run executor, fixture-author or verifier roles
+  directly and uses `.claude/agents/` only through custom subagents mirrored locally under
+  `.gemini/agents/`, as documented in `GEMINI.md`.
+- `.agents/skills/` provides Gemini / Antigravity skill adapters forwarding to `.claude/skills/`
+  (`work-issue`, `run-plan`, `plan-from-srs`, `triage`, `pzl-test`), plus the Gemini /
+  Antigravity-specific `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`), which stands in for
+  Claude Code's `subscribe_pr_activity` / auto-fix loop by scheduling non-blocking check-ins
+  (`/schedule` or a single async background check-in), addressing CodeRabbit findings, resolving
+  threads itself, and driving PRs to CodeRabbit approval and green CI.
+- `docs/PROCESS.md` P1 and P4–P7, `docs/DEVELOPMENT.md`, `docs/BRIEF_TEMPLATE.md`, `README.md`,
+  `.github/ISSUE_TEMPLATE/work-unit.md`, `.github/pull_request_template.md` and `.gitignore`
+  (ignoring local Claude Code files and `.gemini/settings.json` for personal project-specific
+  Gemini CLI settings) are updated for both harnesses.
+
+**Rationale:** The repository previously assumed Claude Code exclusively (`CLAUDE.md`,
+`.claude/agents/`, `.claude/skills/`, Claude-only model names, and `subscribe_pr_activity` /
+`send_later` / `get_session` tooling). Antigravity discovers `AGENTS.md`, `.agents/agents/*.md`
+and `.agents/skills/<name>/SKILL.md` natively, while Gemini CLI discovers `GEMINI.md` and
+`.agents/skills/<name>/SKILL.md`. Forwarding from thin `.agents/` adapters to the canonical
+`.claude/` files avoids duplicating long prompt bodies and avoids git symlinks, which require
+elevated privileges or Developer Mode on Windows (a first-class target OS under REQ-NFR-003).
+Antigravity custom subagent frontmatter requires exact Antigravity tool names (unmapped tool names
+can hang subagent startup), so `.agents/agents/*.md` declares its own frontmatter rather than
+sharing `.claude/agents/*.md` directly. Because Antigravity has no built-in PR auto-fix or
+GitHub-webhook subscription, a dedicated `pr-watch` skill gives Antigravity sessions a repeatable,
+non-blocking check-in and thread-resolution procedure without touching Claude Code's native PR
+subscription.
+
+**Alternatives:**
+- Duplicate full skill and agent Markdown bodies in `.agents/` and `.claude/`: rejected because
+  every process edit would risk drift between the two copies.
+- Symlink `CLAUDE.md`, `GEMINI.md`, `.agents/skills/` and `.claude/skills/`: rejected because git
+  symlinks break or check out as plain text files on Windows without Developer Mode.
+- Use `.agents/skills.json` pointing to `.claude/skills/` instead of `.agents/skills/<name>/SKILL.md`:
+  rejected because Gemini CLI reads `.agents/skills/` directly and does not read Antigravity's
+  `skills.json` discovery manifest.
+- Mirror `.gemini/agents/` in the repository for Gemini CLI: deferred in favor of scoping
+  `.agents/agents/` to Antigravity and documenting the standalone Gemini CLI workflow in
+  `GEMINI.md`, avoiding unverified version-specific Gemini CLI frontmatter.
+
+## Infrastructure — Cloud agent environment setup (.agents/environment.json)
+
+**Decision:** Add repo-scoped Antigravity cloud environment configuration (`.agents/environment.json`
+invoking `.agents/setup-env.sh`) so fresh Linux cloud VMs boot with the pinned Rust toolchain from
+`rust-toolchain.toml` plus `llvm-tools` and `wasm32-unknown-unknown`, `cargo-llvm-cov` pinned to
+match `.github/workflows/ci.yml`, required Linux packages (`build-essential`, `pkg-config`, `curl`,
+`ca-certificates`, `python3`, `jq`, `git`), non-interactive `~/.bashrc` `PATH` persistence for
+Cargo's bin directory, and pre-fetched locked Cargo crate caches for the root workspace and
+`spikes/bindings`.
+
+**Rationale:** `rust-toolchain.toml` deliberately omits `llvm-tools` and `wasm32-unknown-unknown`
+(CI installs them separately), and `cargo-llvm-cov` is required locally on every PR to run
+`cargo xtask coverage` (REQ-NFR-008). Installing only the Linux packages Fine Print actually needs
+(skipping GUI, GPU, audio and unrelated runtime dependencies) keeps fresh VM bootstrap fast while
+ensuring `cargo fmt`, `cargo clippy`, `cargo test`, `cargo xtask coverage`, `cargo xtask guard`,
+`cargo xtask cr`, `scripts/req_coverage.py` and `pr-watch` work out of the box. Checking `dpkg-query`,
+active toolchain components/targets and `cargo llvm-cov --version` makes re-runs idempotent and
+fast.
+
+**Alternatives:**
+- Add `llvm-tools` and `wasm32-unknown-unknown` to `rust-toolchain.toml`: rejected because it
+  changes every developer's and every CI job's toolchain download (including `fmt`, `clippy` and
+  `guards`, which do not need them), contradicting `docs/DEVELOPMENT.md`.
+- Install Playwright browsers or rebuild `cbindgen` / `wasm-bindgen-cli` on every VM boot:
+  deferred because `spikes/bindings` is a completed Phase 00 spike and the real FFI / .NET / WASM
+  bindings land in Phase 14 (#102–#104); adding them later keeps current cloud VM startup fast.
