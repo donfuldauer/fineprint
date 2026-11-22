@@ -28,24 +28,21 @@ export PATH="$CARGO_BIN_DIR:$PATH"
 # 1. Non-interactive ~/.bashrc persistence
 # ---------------------------------------------------------------------------
 # Non-interactive command shells source ~/.bashrc via BASH_ENV; ensure Cargo's
-# bin directory is exported before any interactive-shell guard while preserving
-# both single-line and multiline guards and all existing configuration.
+# bin directory is unconditionally exported on line 1 (before any
+# interactive-shell guard or conditional) without modifying or deleting any
+# existing lines or shell constructs in ~/.bashrc.
 touch "$HOME/.bashrc"
 
 PATH_EXPORT="export PATH=\"${CARGO_BIN_DIR}:\$PATH\""
-HAS_EARLY_PATH=$(awk -v target="$PATH_EXPORT" '
-  $0 == target { found = 1; exit }
-  /(^|[;&|[:space:]])return([;&|[:space:]]|$)/ { exit }
-  END { print (found ? 1 : 0) }
-' "$HOME/.bashrc")
+FIRST_LINE=$(head -n 1 "$HOME/.bashrc" || true)
 
-if [ "$HAS_EARLY_PATH" -ne 1 ]; then
+if [ "$FIRST_LINE" != "$PATH_EXPORT" ]; then
   TMP_BASHRC=$(mktemp "$HOME/.bashrc.tmp.XXXXXX")
   trap 'rm -f "$TMP_BASHRC"' EXIT
   cp -p "$HOME/.bashrc" "$TMP_BASHRC"
   {
     printf '%s\n' "$PATH_EXPORT"
-    grep -vxF "$PATH_EXPORT" "$HOME/.bashrc" || true
+    cat "$HOME/.bashrc"
   } > "$TMP_BASHRC"
   mv "$TMP_BASHRC" "$HOME/.bashrc"
   trap - EXIT

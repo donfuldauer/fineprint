@@ -42,7 +42,8 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
    timeline, `gh api repos/donfuldauer/fineprint/issues/<n>/timeline`, has a `closed` event
-   from a merged PR, or a PR merged into `main` whose body contains `Closes #<n>`). A blocker closed without a
+   from a merged PR, or a PR merged into `main` whose body contains a whole-number match for
+   `Closes #<n>` — `#<n>` not followed by another digit). A blocker closed without a
    merged PR counts only if a comment on it names the replacement issue(s) that delivered the
    work and those replacements pass the same test. If any is unsatisfied, stop and tell the user
    which ones, and which of them are themselves ready to start. Do not start blocked work.
@@ -61,11 +62,13 @@ REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes f
      or `COLLABORATOR` (write/maintain/admin collaborator) or its `user.login` matches the
      authenticated harness account (`gh api user --jq .login`).
    - **Governing claim.** An issue's **governing claim** is the lowest-ID eligible claim comment
-     on it (from a trusted author) that is not released and names a live session (when
-     `get_session` is available, it reports `working` or `blocked`; in harnesses without a
-     session-status tool, such as Gemini / Antigravity, treat any unreleased/undeleted claim from
-     another session by a trusted author as live unless the owner confirms it is abandoned). There
-     is no
+     on it (from a trusted author) that is not released and names a live session. When
+     `get_session` is available and resolves the claim's session ID, it is live if `get_session`
+     reports `working` or `blocked` and ended otherwise. When `get_session` is unavailable (for
+     example in Gemini / Antigravity) **or** cannot resolve the claim's session ID (for example
+     when Claude Code inspects a claim posted by a Gemini / Antigravity session), treat any
+     unreleased/undeleted claim from another session by a trusted author as live unless the owner
+     confirms it is abandoned. There is no
    time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
    claim. A claim stops counting only when its session ends, deletes it, or edits it to start with
    `Released:`, and a session deletes (or edits to `Released: <reason>` if delete is unavailable)
