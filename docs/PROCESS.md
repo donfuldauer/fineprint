@@ -296,10 +296,10 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
    or REST; the repository deletes the branch), unsubscribe if subscribed, and unblock dependents:
    every issue whose blockers are now all satisfied swaps its `blocked` label for `ready`. A
    blocker is satisfied only if it is closed as completed by a merged PR (the issue timeline shows
-   a `closed` event from a merged PR, or a PR merged into `main` whose body contains `Closes #<n>`),
-   or a comment on it names the replacement issue(s) that delivered the work and those pass the
-   same test. The run-log row was committed in the PR itself, so nothing is pushed to `main`
-   directly.
+   a `closed` event from a merged PR, or a PR merged into `main` whose body contains a whole-number
+   match for `Closes #<n>` — `#<n>` not followed by another digit), or a comment on it names the
+   replacement issue(s) that delivered the work and those pass the same test. The run-log row was
+   committed in the PR itself, so nothing is pushed to `main` directly.
 6. **Never**, to get green: skip, ignore, delete or weaken a test; force-push or rewrite history
    on a branch the agent did not create; push an empty commit; close and reopen a PR to restart
    CI; merge with a failing required check.
