@@ -193,9 +193,12 @@ Development is run by AI coding agents (Claude Code or Gemini / Antigravity) und
    runs the `work-issue` skill: it checks the dependencies are merged, routes the work to the
    cheapest capable model tier (Haiku 5.5 / Sonnet 5.5 / Opus 5.5 / Fable 5.2 in Claude Code;
    Flash-Lite / Flash / Pro / T3 escalation in Gemini / Antigravity), implements and independently
-   tests it, verifies it against the issue, opens a PR that closes the issue, resolves CodeRabbit's
-   review, merges, and marks newly unblocked issues `ready`. `/run-plan` does the same across every
-   ready issue.
+   tests it, verifies it against the issue, opens a PR that closes the issue, handles CI and review
+   according to the PR's review mode (during M1 until `#219` / FP-161 merges: `review:skip` on
+   routine vertical slices, targeted `review:sanity` on contracts, core deterministic loops,
+   bindings and R5/R11/R12 security boundaries, and `review:full` for the cohesive M1 review pass
+   in `#219` before flipping to per-PR CodeRabbit review for post-usable work), merges, and marks
+   newly unblocked issues `ready`. `/run-plan` does the same across every ready issue.
 3. **Instructions, agents and skills:** [`AGENTS.md`](AGENTS.md) is the canonical instruction file,
    imported by [`CLAUDE.md`](CLAUDE.md) (Claude Code) and [`GEMINI.md`](GEMINI.md) (Gemini CLI and
    Antigravity). Canonical subagent prompts and skills live in `.claude/agents/` and
