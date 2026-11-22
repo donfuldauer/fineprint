@@ -43,11 +43,19 @@ documents `.pzl` scenario conventions.
   (main session) does every spawn.
 - **Rules questions** go to `rules-researcher`. Never put CR rule numbers or text into a brief,
   code comment or reply from memory (R6).
-- **No self-review (R9).** Do not review code yourself or with a sibling agent. Open a PR against
-  `main` (body from `.github/pull_request_template.md`, starting `Closes #<N>`), watch its activity
-  (Claude Code: `subscribe_pr_activity` or `send_later`; Gemini / Antigravity: run the `pr-watch`
-  skill in `.agents/skills/pr-watch/SKILL.md` to schedule non-blocking check-ins and drive
-  CodeRabbit to approval; never sleep-poll in a foreground loop), give every CodeRabbit finding a
+- **No self-review (R9) and review rhythm (P6).** Do not review code yourself or with a sibling
+  agent. Open a PR against `main` (body from `.github/pull_request_template.md`, starting
+  `Closes #<N>`, carrying the issue's `review:*` label). During the M1 initial-usable-build phase
+  (until `#219` / FP-161 merges), routine vertical-slice PRs (`review:skip`) merge on green tests,
+  coverage floors, repository guards, differential layer checks, `work-verifier` (`pass`) and
+  required CI checks without waiting on CodeRabbit; P3 contract, public schema/API/binding, core
+  deterministic loop/state-machine, `very-high` blast-radius, R5/R11/R12 security/compliance and
+  milestone-gate PRs (`review:sanity`) get a targeted CodeRabbit sanity review (fix blocking
+  defects, defer cosmetic style/refactor nits to `#219` or M2); `#219` (`review:full`) runs the
+  cohesive full review once M1 works end-to-end and flips `.coderabbit.yaml` to per-PR review for
+  M2/M3 and all post-usable work. On every reviewed PR, watch activity (Claude Code:
+  `subscribe_pr_activity` or `send_later`; Gemini / Antigravity: `pr-watch` in
+  `.agents/skills/pr-watch/SKILL.md`; never sleep-poll), give every CodeRabbit finding a
   disposition reply, resolve every thread yourself when justified (never leave one for a person;
   never resolve an unfixed security issue or a verified unfixed correctness defect), and merge
   without waiting for a person once the P6 merge conditions hold.

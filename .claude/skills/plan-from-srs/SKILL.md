@@ -79,7 +79,13 @@ issue owns `docs/DEVELOPMENT.md` (layout, commands, gates, contracts, fixture an
 
 **Labels:** `work-unit`; `ready` / `blocked` (later `in-progress`); `type:` infra, feature,
 binding, toolchain, client, fixtures, docs; `area:` the SRS area; `phase:NN-name`; `tier:T1` /
-`tier:T2` (expected; T3 is never planned). **Milestones:** M1 per REQ-NFR-010, then the deferred
+`tier:T2` (expected; T3 is never planned); and `review:skip` / `review:sanity` / `review:full`
+(`docs/PROCESS.md` P6). During an initial-usable-build milestone (M1 — Two-player engine), label
+P3 contract, public schema/API/binding, core deterministic loop/state-machine, `very-high`
+blast-radius, R5/R11/R12 security/compliance and milestone-gate units `review:sanity`, routine
+vertical-slice/fixture/client units `review:skip`, and include a cohesive full-review unit
+(`review:full`, e.g. `#219` FP-161) once the end-to-end M1 build works before M1 acceptance and
+before flipping to post-usable per-PR review. **Milestones:** M1 per REQ-NFR-010, then the deferred
 features in later milestones.
 
 **Suggested phase order** (adapt to the decisions): repository and CI → foundations (numbers,
@@ -87,7 +93,7 @@ IDs, PRNG, hashing, DSL schema, lints, synthetic card library) → state, zones,
 layouts → events, choices, replacement and triggers → layers → state-based actions → turn
 structure and priority → casting and resolution → DSL runtime effects → combat → keywords →
 loops → engine API, views and replays → card toolchain → bindings → test clients → regression
-fixtures → hardening and release → later milestones.
+fixtures → hardening, cohesive full review pass (`#219` FP-161) and M1 acceptance → later milestones.
 
 ## 3. Check the breakdown
 
