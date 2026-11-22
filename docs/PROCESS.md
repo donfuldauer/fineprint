@@ -309,13 +309,19 @@ M2 and M3) gets tighter per-PR review by default unless explicitly opted out wit
 1. **Open.** The Orchestrator commits the unit's `docs/RUN_LOG.md` row(s) before the
    work-verifier's final run, so the verified commit is the PR head. When the verifier passes, it
    pushes the branch and opens a PR against `main` (`gh pr create --label <review:*>` or REST plus
-   label edit) carrying the issue's `review:skip` / `review:sanity` / `review:full` label
-   (upgrading to `review:sanity` — and removing `review:skip` — if the diff touches any
-   `review:sanity` category above even when the issue lacked the label). The body follows
-   `.github/pull_request_template.md`, starts with `Closes #<issue>`, states the review mode and
-   reason under `## Work item`, and fills every section (write "not applicable" with a reason
-   rather than leaving one empty). Bot names in the body go in backticks so nobody is notified by
-   accident.
+   label edit) carrying the issue's `review:skip` / `review:sanity` / `review:full` label:
+   - preserve an existing `review:full` label as authoritative even when the diff touches a
+     `review:sanity` category;
+   - upgrade to `review:sanity` (removing `review:skip` if present) when the issue has `review:skip`
+     or no `review:*` label and the diff touches any `review:sanity` category above;
+   - when the issue has no `review:*` label and the diff matches no `review:sanity` category, apply
+     `review:skip` during the M1 initial-usable-build phase (`auto_review.enabled: false`), or
+     omit `review:*` labels in post-usable-build mode (`auto_review.enabled: true`, per-PR review
+     default).
+   The body follows `.github/pull_request_template.md`, starts with `Closes #<issue>`, states the
+   review mode (or `post-usable default`) and reason under `## Work item`, and fills every section
+   (write "not applicable" with a reason rather than leaving one empty). Bot names in the body go
+   in backticks so nobody is notified by accident.
 2. **PR watch / auto-fix.** Right after opening:
    - **Claude Code:** subscribe to the PR's activity (`subscribe_pr_activity`: comments, reviews,
      CI) if the session offers that; otherwise schedule `send_later` check-ins (about every 10
@@ -331,7 +337,8 @@ M2 and M3) gets tighter per-PR review by default unless explicitly opted out wit
    Every CodeRabbit comment and CI failure is handled as it arrives or on check-in; nobody
    sleep-polls in a foreground loop. On an unreviewed PR excluded from automatic review
    (`review:skip` in either phase without `review:sanity`/`review:full`, or no opt-in label while
-   `auto_review.enabled: false`), do not request `@coderabbitai review`.
+   `auto_review.enabled: false` after confirming the linked issue and current diff do not require
+   `review:sanity`/`review:full`), do not request `@coderabbitai review`.
 3. **Every finding is accounted for** (on reviewed PRs, or whenever CodeRabbit posted comments),
    batch by batch (P5), each ending in exactly one disposition recorded as a reply on its thread:
    - **Fixed:** an executor commit addresses it and the verifier passed; the reply names the
@@ -371,12 +378,14 @@ M2 and M3) gets tighter per-PR review by default unless explicitly opted out wit
    - every required CI check is green;
    - **CodeRabbit review (conditional on review mode):**
      - if the PR requires review (`review:sanity`, `review:full`, post-usable default without
-       `review:skip`), or if CodeRabbit posted a review on the PR anyway: CodeRabbit has reviewed
-       the head with nothing actionable unanswered and no outstanding change request, and every
-       thread has a disposition reply and is resolved (except types that cannot be resolved);
+       `review:skip`), or if CodeRabbit posted a review on the PR anyway: `coderabbitai` has an
+       effective `APPROVED` review covering the head commit (not superseded by a later
+       `CHANGES_REQUESTED` or `DISMISSED` review), with no actionable comments unanswered, and
+       every thread has a disposition reply and is resolved (except types that cannot be resolved);
      - if the PR is excluded from automatic review (`review:skip` in either phase without
-       `review:sanity`/`review:full`, or no opt-in label while `auto_review.enabled: false`) and
-       no CodeRabbit review was posted: no CodeRabbit review or approval is required;
+       `review:sanity`/`review:full`, or no opt-in label while `auto_review.enabled: false` after
+       confirming the linked issue and current diff do not require `review:sanity`/`review:full`)
+       and no CodeRabbit review was posted: no CodeRabbit review or approval is required;
    - the branch is up to date with `main`;
    - the work-verifier's last result for the head is `pass`.
    Then merge with a merge commit (`gh pr merge <P> --merge --match-head-commit <sha>`
