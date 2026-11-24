@@ -31,6 +31,10 @@ itself is the set of GitHub issues labelled `work-unit` (milestones M1-M3). Proc
   (`build-essential`, `pkg-config`, `curl`, `ca-certificates`, `python3`, `jq`, `git`); persists
   Cargo's bin directory in `~/.bashrc` for non-interactive shells; and warms the locked Cargo cache
   for the root workspace and `spikes/bindings`.
+- Commit attribution: `scripts/install-git-hooks.sh` sets `core.hooksPath=.githooks` and
+  `fineprint.coauthor`; `.githooks/commit-msg` then adds `Co-authored-by:` for the human contributor
+  to agent-authored commits (`AGENTS.md` "Commit attribution"). Claude Code runs the script at
+  `SessionStart`; `.agents/setup-env.sh` runs it on Antigravity VMs.
 - Each issue works in its own git worktree `../fineprint-issue-<N>` (`work-issue` skill §2), or
   directly on a branch inside the checkout when a cloud sandbox restricts sibling directories and
   only one issue runs in the VM.
