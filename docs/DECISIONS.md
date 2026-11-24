@@ -7578,7 +7578,18 @@ already-layer-evaluated `ObjectView`. `InterpEnv::attached_to(object)` returns
 because the engine can attach an Aura or similar to a player (`AttachTarget::Player`); this is
 the one change to the pinned API, made in PR review round 1. `crates/fineprint-core/src/lib.rs`
 received one wiring edit (a doc line plus `pub mod interp;`) outside the Implementer's owned
-paths, authorised by the classifier's brief for #57.
+paths, authorised by the classifier's brief for #57. `InterpEnv::defending_player(attacker)` is
+the defending player an attacker's abilities refer to (CR 508.5): the player it is attacking
+or the controller of the planeswalker / protector of the battle it is attacking and, once it is
+no longer attacking (removed from combat, CR 506.4), the player it was attacking just before;
+`None` only for an object that never attacked this combat. Retaining the last-attacked player
+when a creature is removed from combat is the integration unit's duty, tracked by the follow-up
+issue #221 FP-162; the interpreter does not check whether the source is currently attacking.
+Likewise `InterpEnv::objects_in` and `object` must exclude phased-out permanents (a phased-out
+permanent is treated as though it does not exist, CR 702.26b, while its zone is unchanged,
+CR 702.26d); `lki` is unaffected. The integration unit's `InterpEnv` must do that filtering: the
+interpreter relies on it and has no phased-out concept of its own (a phased-out target thus
+resolves as `Gone`, derived from CR 702.26b with CR 608.2b).
 
 **Rationale.** `GameState` has no zones, permanents, stack or wired history ledger yet (#18
 FP-017), and #31 FP-030 puts real-state environments in the integration unit; an injected trait
@@ -7630,8 +7641,17 @@ otherwise 0. Further interpretations made here:
    `ATTR(SOURCE_LKI, attr)`, which reads the source's captured last known information first
    and falls back to its current information (CR 608.2h, CR 113.7a, CR 608.2b);
    `DISTINCT ... COLOR` counts only the five colour bits.
-9. `MANA_SPENT_TO_CAST` resolves its reference with `resolve_reference` (so `SELF` may use LKI;
-   other references require the object to be present) and sums over the Object items.
+9. `MANA_SPENT_TO_CAST` resolves its reference with `resolve_reference`; both `SELF` and
+   `SOURCE_LKI` can resolve an object no longer present (`SELF` through current-then-last-known
+   information, `SOURCE_LKI` through its captured view, CR 608.2h); every other reference
+   requires the object to be present. It sums `env.mana_spent_to_cast` over the Object items.
+10. `DEFENDING_PLAYER`: a source that never attacked gives `None` (the reference is
+   `Unresolved`; the CR is silent, a modelling choice); a retained defending player who has left
+   the game gives `Ignored::Gone(Player)`. Recommendation (not a CR claim): an attacker whose
+   planeswalker or battle was removed from combat while it was still attacking (permanent module
+   `Attacking(None)`, CR 506.4c) should also keep its last defending player.
+11. A player selector used by a HISTORY query is a set of distinct players: each matching player
+   (and each cast) is counted once, however often the selector names the player.
 
 **Rationale.** Each choice follows the brief's tables literally where they speak, keeps
 evaluation integer-only, side-effect-free and independent of iteration order (R3), and keeps the
@@ -7647,8 +7667,10 @@ counts every caster).
 ## #57 FP-055 — Deferred
 
 **Decision.** Not built in this unit: the `InterpEnv` implementation on the real game state
-(integration unit); spec-generated YES_NO text (#28); non-literal CDA evaluation through the
-layer environment (#186 FP-146).
+(integration unit); engine retention of the last-attacked player in the permanent combat state
+and the `InterpEnv` implementation on the real state, both owned by #221 FP-162;
+spec-generated YES_NO text (#28); non-literal CDA evaluation through the layer environment
+(#186 FP-146).
 
 **Rationale.** Outside issue #57's deliverables.
 

@@ -154,9 +154,14 @@ pub trait InterpEnv {
     fn active_player(&self) -> Option<PlayerId>;
     /// The current game turn number (the history ledger's key).
     fn turn_number(&self) -> u64;
-    /// Every object currently in a zone of that kind, all owners, in any order.
+    /// Every object currently in a zone of that kind, all owners, in any order. A phased-out
+    /// permanent is treated as though it does not exist (CR 702.26b): it is not listed,
+    /// although phasing does not change its zone (CR 702.26d). `lki` is unaffected by phasing.
     fn objects_in(&self, zone: Zone) -> Vec<ObjectId>;
     /// Current, layer-evaluated information about an object; `None` if it is not in a zone now.
+    /// A phased-out permanent is treated as though it does not exist (CR 702.26b): `None` for
+    /// it, although phasing does not change its zone (CR 702.26d). `lki` is unaffected by
+    /// phasing.
     fn object(&self, id: ObjectId) -> Option<ObjectView>;
     /// Last known information about an object, if it was captured (CR 608.2h, CR 113.7a).
     fn lki(&self, id: ObjectId) -> Option<ObjectView>;
@@ -171,7 +176,14 @@ pub trait InterpEnv {
     /// The object or player `object` is attached to, if any (an Aura or similar can be
     /// attached to a player). `ENCHANTED`, `EQUIPPED` and `ATTACHED_TO` all read this.
     fn attached_to(&self, object: ObjectId) -> Option<Referent>;
-    /// The player `attacker` is attacking, if any.
+    /// The defending player `attacker`'s abilities refer to (CR 508.5): the player `attacker`
+    /// is attacking, the controller of the planeswalker it is attacking, or the protector of
+    /// the battle it is attacking; and, if `attacker` is no longer attacking (removed from
+    /// combat, CR 506.4), the player it was attacking immediately before it was removed. The
+    /// implementation must therefore retain that player when a creature is removed from
+    /// combat, until combat ends. `None` only for an object that never attacked this combat
+    /// (a modelling choice: the CR does not say; the reference then resolves `Unresolved`).
+    /// The interpreter does not check whether the object is currently attacking.
     fn defending_player(&self, attacker: ObjectId) -> Option<PlayerId>;
     /// The Memory record of an object, if any.
     fn memory(&self, object: ObjectId) -> Option<&Memory>;

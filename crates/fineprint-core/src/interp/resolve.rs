@@ -134,6 +134,11 @@ fn resolve_slots(
             Some(p) => push_player(env, &mut out, p),
             None => unresolved(&mut out),
         },
+        // CR 508.5: the player the source is attacking (or the controller of the planeswalker /
+        // protector of the battle it is attacking); once the source is no longer attacking
+        // (removed from combat, CR 506.4), the one it was attacking just before. The
+        // environment retains that player; the interpreter does not check that the source is
+        // still attacking. A source that never attacked gives `None` (modelling choice).
         ReferenceAST::DefendingPlayer => match ctx.source.and_then(|id| env.defending_player(id)) {
             Some(p) => push_player(env, &mut out, p),
             None => unresolved(&mut out),

@@ -454,13 +454,20 @@ fn distinct(attr: DistinctAttr, views: &[ObjectView]) -> i64 {
     }
 }
 
-/// The players a player selector resolves to (none resolved: empty).
+/// The distinct players a player selector resolves to, in first-occurrence order (none
+/// resolved: empty). A selector used by a HISTORY query is a set of players: each is counted
+/// once however often the selector names it (REQ-DSL-003; a modelling choice, no CR rule).
 fn players_of(
     env: &dyn InterpEnv,
     ctx: &EvalContext,
     sel: &PlayerSelectorAST,
 ) -> Result<Vec<PlayerId>, InterpError> {
-    Ok(resolve_players(env, ctx, sel)?.items)
+    let mut seen = BTreeSet::new();
+    Ok(resolve_players(env, ctx, sel)?
+        .items
+        .into_iter()
+        .filter(|p| seen.insert(*p))
+        .collect())
 }
 
 /// `HISTORY(query)`, answered from the history ledger for the current turn and from the
