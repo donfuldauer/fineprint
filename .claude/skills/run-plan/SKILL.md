@@ -49,7 +49,9 @@ parallelism (default 3 at once).
 
 Run the `work-issue` skill for it, from §1 (dependency check) to §7 (merge and unblock). Each
 issue works in its own git worktree (`work-issue` §2), so parallel issues never share a working
-tree. Keep going with other ready issues while a PR waits for review.
+tree. Keep going with other ready issues while a PR waits for CI or a gate review. Run at most
+one gate review at a time (PROCESS.md P6): a second gate issue waits, with its PR open, until the
+first gate closes out.
 
 ## 3. Discovered work
 
@@ -62,11 +64,13 @@ Merges make new issues ready: go back to §1.
 
 ## 5. Phase gate
 
-When every issue of the phase is complete under the merged-PR rule (closed by a merged PR, or
-replaced as `work-issue` §1 step 2 describes; or optional and blocked), run the phase gate from
-PROCESS.md P5 on `main` (the CI matrix, golden replays across platforms and bindings, earlier
-phases' tests, benchmarks). Green: tag `phase-<NN>-green` and log it in the next PR. Red: each
-failure becomes a new issue against the owning area; never pause for a person.
+The phase's last open issue is its gate issue: `work-issue` §6 runs its CodeRabbit gate review
+(cumulative since the last `reviewed/*` tag) before it merges, and the same review closes the
+milestone when it is also the milestone's last issue. Alongside, run the phase gate from
+PROCESS.md P5 on the gate branch (the CI matrix, golden replays across platforms and bindings,
+earlier phases' tests, benchmarks). On merge, tag `phase-<NN>-green` and `reviewed/<gate>`. A red
+check or a blocking finding too large for the gate branch becomes a new issue against the owning
+area that the gate issue depends on; never pause for a person.
 
 ## 6. When to stop
 
