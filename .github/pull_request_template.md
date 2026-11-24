@@ -2,7 +2,8 @@ Closes #<!-- issue number -->
 
 ## Work item
 
-<!-- issue title, plan ID (FP-…) and phase -->
+<!-- issue title, plan ID (FP-…), phase, and review mode (`review:skip` / `review:sanity` /
+     `review:full`, docs/PROCESS.md P6) with reason -->
 
 ## Requirements satisfied
 
@@ -34,4 +35,6 @@ Closes #<!-- issue number -->
 
 ## Model routing
 
-<!-- tiers used; every Fable 5.2 use with its P4 evidence (need, why Opus was not enough, allowance) -->
+<!-- harness and tiers used; every T3 / Fable 5.2 use with its P4 evidence (need, why T2 was not
+     enough, allowance on Claude Code or plan/quota on Gemini / Antigravity);
+     [Fable wanted] / [T3 wanted] notes -->

@@ -19,9 +19,11 @@ If there are no `work-unit` issues, stop and use the `plan-from-srs` skill inste
    is driven to merge (step 4) before new work on the same paths starts, except the PR of an
    issue labelled `status:blocked-failure` or `blocked`: it waits for a person and reserves no
    paths (§1).
-4. Read the account's current usage limits once and set `FABLE_ALLOWANCE` to `sufficient`,
-   `insufficient` or `unknown` for this session's classifier calls. Re-read it before any call
-   that could route T3.
+4. Set `FABLE_ALLOWANCE` (Claude Code) or T3 availability (Gemini / Antigravity) to `sufficient`,
+   `insufficient` or `unknown` for this session's classifier calls (PROCESS.md P4). Re-check it
+   before any call that could route T3. In Claude Code, read the account's current usage limits
+   once (unknown means no Fable); on Gemini / Antigravity, it is `sufficient` when the active plan
+   and quota support T3 and no rate limit, throttling or fallback is reported.
 
 ## 1. Pick ready work
 
@@ -69,5 +71,6 @@ failure becomes a new issue against the owning area; never pause for a person.
 ## 6. When to stop
 
 Stop when no issue is ready, no issue is `in-progress`, and no PR is open, or when every remaining
-issue is blocked. End with a short account: phases completed, PRs merged, blocked issues and why, `[Fable wanted]` lines, the
-aggregate parser coverage, and the P8 human-queue items a person should look at first.
+issue is blocked. End with a short account: phases completed, PRs merged, blocked issues and why,
+`[Fable wanted]` / `[T3 wanted]` lines, the aggregate parser coverage, and the P8 human-queue
+items a person should look at first.

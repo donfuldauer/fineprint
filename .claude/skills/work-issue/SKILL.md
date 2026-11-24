@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', 'Work on the next issue' (the merge-triggered scheduled task's prompt), or similar. Merging an issue/ branch starts a fresh session for the next issue (§8)."
+description: "Takes one Fine Print GitHub issue from start to merge: checks its dependencies are merged, branches, routes the work through the work-classifier and agents, verifies, opens a PR that closes the issue, drives the CodeRabbit review to resolution, merges, and unblocks dependent issues. Use when the user says 'Start work on issue X', 'work on #X', 'pick up issue X', 'start work on the next ready issue', 'Work on the next issue' (the merge-triggered scheduled task's prompt), or similar. Merging an issue/ branch starts a fresh session for the next issue (§8) when a GitHub-triggered automation is configured."
 ---
 
 # work-issue
@@ -9,9 +9,11 @@ You are the **Orchestrator** (PROCESS.md P5) for exactly one GitHub issue. The i
 of work and its own spec; the plan is the set of `work-unit` issues, never a repository file. You route, spawn, commit, open the PR, drive
 review, merge and log. You write no product code and review no code (R9).
 
-Repository: `donfuldauer/fineprint`. In Claude Code web sessions GitHub GraphQL is unavailable:
-use REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review
-threads.
+Repository: `donfuldauer/fineprint`. Use the official `gh` CLI (`gh issue`, `gh pr`, `gh run`,
+`gh api`, with explicit paging on list/search endpoints when a proxy blocks `--paginate`) or GitHub
+MCP tools when configured. In Claude Code web sessions where GitHub GraphQL is unavailable, use
+REST (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review threads
+(PROCESS.md P1 "Working with GitHub").
 
 ## 1. Load and check the issue
 
@@ -40,7 +42,8 @@ threads.
    (`gh api repos/donfuldauer/fineprint/issues/<N>/dependencies/blocked_by`) list the same.
    Every one must be **satisfied**: closed as completed and closed by a merged PR (the issue
    timeline, `gh api repos/donfuldauer/fineprint/issues/<n>/timeline`, has a `closed` event
-   from a merged PR, or a merged PR body contains `Closes #<n>`). A blocker closed without a
+   from a merged PR, or a PR merged into `main` whose body contains a whole-number match for
+   `Closes #<n>` — `#<n>` not followed by another digit). A blocker closed without a
    merged PR counts only if a comment on it names the replacement issue(s) that delivered the
    work and those replacements pass the same test. If any is unsatisfied, stop and tell the user
    which ones, and which of them are themselves ready to start. Do not start blocked work.
@@ -52,10 +55,23 @@ threads.
    no atomic lock, so the earliest claim wins, ordered by **comment ID**. Comment IDs are unique and
    increase over time, so there are no ties. A claim posted after yours always has a higher ID and
    can never supersede a claim that has already passed its check: that claim's session saw every
-   lower-ID claim when it checked. An issue's **governing claim** is the lowest-ID claim comment
-   on it that names a live session (`get_session` reports `working` or `blocked`). There is no
+   lower-ID claim when it checked.
+   - **Trusted claim authors.** Because this repository is public, ignore claim-shaped comments
+     from untrusted accounts before applying the lowest-ID and liveness rules: a comment is
+     eligible to govern **only** when its GitHub REST `author_association` is `OWNER`, `MEMBER`,
+     or `COLLABORATOR` (write/maintain/admin collaborator) or its `user.login` matches the
+     authenticated harness account (`gh api user --jq .login`).
+   - **Governing claim.** An issue's **governing claim** is the lowest-ID eligible claim comment
+     on it (from a trusted author) that is not released and names a live session. When
+     `get_session` is available and resolves the claim's session ID, it is live if `get_session`
+     reports `working` or `blocked` and ended otherwise. When `get_session` is unavailable (for
+     example in Gemini / Antigravity) **or** cannot resolve the claim's session ID (for example
+     when Claude Code inspects a claim posted by a Gemini / Antigravity session), treat any
+     unreleased/undeleted claim from another session by a trusted author as live unless the owner
+     confirms it is abandoned. There is no
    time cutoff: label changes (including a person re-applying `ready`) never invalidate a live
-   claim. A claim stops counting only when its session ends or deletes it, and a session deletes
+   claim. A claim stops counting only when its session ends, deletes it, or edits it to start with
+   `Released:`, and a session deletes (or edits to `Released: <reason>` if delete is unavailable)
    its own claim whenever it loses (step 4), marks the issue blocked (§4) or finishes (§7).
    Resuming abandoned work writes no separate record: claims from ended sessions are never live,
    so they cannot govern, and the lowest-ID live claim still wins among sessions resuming at the
@@ -64,12 +80,17 @@ threads.
    order and listed as soon as they are created: observed behaviour that GitHub does not document
    (DECISIONS.md "Self-chaining — claim ordering").
    1. Post the claim comment: work has started, with the branch name and this session's ID.
-      Read the ID from the environment, not from `get_session`:
-      `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"`. Only if that variable is unset,
-      call `get_session` with no argument. Call `get_session` on another session only to check
-      whether a claim that isn't yours is live.
-   2. Re-read all the issue's comments, its labels and its state. Your claim loses, and you
-      delete it, if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
+      In Claude Code, read the ID from the environment, not from `get_session`:
+      `echo "session_${CLAUDE_CODE_REMOTE_SDK_URL##*/cse_}"` (only if that variable is unset,
+      call `get_session` with no argument; call `get_session` on another session only to check
+      whether a claim that isn't yours is live). In Gemini / Antigravity, include the
+      conversation/session ID and UTC timestamp.
+   2. Re-read **all** the issue's comments (`gh api -X GET repos/donfuldauer/fineprint/issues/<N>/comments -F per_page=100 -F page=<P>`,
+      paged explicitly with `P = 1, 2, …` until a page returns fewer than 100 items, never relying
+      on the default 30-item page), its labels and its state. Filter out comments from untrusted
+      authors and only compare eligible claim IDs after the full comment set has been fetched. Your
+      claim loses, and you
+      delete it (or edit it to `Released: <reason>` if delete is unavailable), if the issue is now closed or labelled `status:blocked-failure` or `blocked`,
       if the governing claim is not yours, or (without an issue number) if the issue no longer
       qualifies as the candidate step 0 chose it as: a ready candidate must still carry `ready`
       and must not have gained `in-progress` from another session; an abandoned candidate must
@@ -87,22 +108,26 @@ threads.
       lower `FP-NNN` plan ID wins, so two abandoned overlapping issues never block each other).
       **Re-verify a loss once.** Two sessions can each lose at the same moment: one to the
       plan-ID tie-break against an abandoned issue, the other to the first one's claim before it
-      is deleted. So before deleting a losing claim, wait about 30 seconds, then repeat with fresh
+      is deleted. So before deleting (or releasing) a losing claim, wait about 30 seconds, then
+      repeat with fresh
       reads the dependency check of §1 step 2 (every dependency still satisfied), the checks of
       step 4.2 (issue still open and not blocked, governing claim still yours and, without an
       issue number, the candidate still qualifies) and this overlap check. If all of them pass
       and you now win against every live overlapping claim, continue. Otherwise delete your
-      claim; if the dependency check failed, act as in §1 step 2 (report the unsatisfied
+      claim (or edit it to `Released: <reason>` if delete is unavailable); if the dependency check
+      failed, act as in §1 step 2 (report the unsatisfied
       dependencies and which of them are ready, or, without an issue number, move on to the
       next candidate), and for any other failure act as in step 4.2. This cannot let two
       overlapping sessions both proceed: a session only proceeds after a check in which its
       claim beats every live overlapping claim, and the lower comment ID always beats the
       higher.
    4. Only after the claim holds, run the §1 step 2 dependency check once more with fresh reads.
-      If a dependency is no longer satisfied, delete your claim and act as in §1 step 2.
+      If a dependency is no longer satisfied, delete your claim (or edit it to
+      `Released: <reason>` if delete is unavailable) and act as in §1 step 2.
       Otherwise add the `in-progress` label (remove `ready`), then re-read the issue once more:
       if it is now closed or labelled `status:blocked-failure` or `blocked`, remove
-      `in-progress`, delete your claim and act as in step 4.2. Checking after the label change
+      `in-progress`, delete your claim (or edit it to `Released: <reason>` if delete is
+      unavailable) and act as in step 4.2. Checking after the label change
       closes the window between the last check and the change; a block or close after this
       point is handled like any other blocked or closed issue. The cleanup leaves the issue with
       neither `ready` nor `in-progress`. The person who clears `blocked` or `status:blocked-failure` replaces it with `ready`
@@ -111,39 +136,57 @@ threads.
 
 ## 2. Branch
 
-Each issue gets its own git worktree, so issues running in parallel never share a working tree.
-One branch, one PR, one issue.
+Each issue gets its own git worktree, so issues running in parallel never share a working tree
+(if a sandbox restricts sibling directories and only one issue runs in the VM, use the
+single-checkout fallback below). One branch, one PR, one issue.
 
-1. `git fetch origin`. Look for an existing branch and worktree for the issue: `git branch -a
-   --list "*issue/<N>-*"` and `git worktree list`.
-2. **Found (a restart).** Resume it; never reset it to `origin/main`. Reuse the worktree if it
-   exists, otherwise `git worktree add ../fineprint-issue-<N> <branch>` (for a remote-only
-   branch, `git worktree add -b <branch> ../fineprint-issue-<N> origin/<branch>`). In the
-   worktree, if the remote branch exists, `git merge --ff-only origin/<branch>`. Read the issue
-   comments and the branch's commits, and continue from the step they show was reached.
-3. **Not found.** `git worktree add -B issue/<N>-<short-slug> ../fineprint-issue-<N>
-   origin/main`.
+0. **Select the target branch first.** Normally the branch is `issue/<N>-<short-slug>` (when
+   GitHub-triggered session chaining is enabled, the next session starts only when an `issue/`
+   branch merges, §8). However, if the session environment allows pushing only to a single
+   **assigned branch**, select that assigned branch **before** discovery and checkout below, retain
+   its existing local/remote history (never reset it to `origin/main`), and note in the PR body
+   that the chain will not continue from this merge so the owner restarts it with the scheduled
+   task's "Run now".
+1. `git fetch origin`. Look for an existing branch and worktree:
+   - If using an assigned branch `<assigned>`, look for `<assigned>` (`git branch -a --list
+     "*<assigned>"`) and `git worktree list`.
+   - Otherwise look for an existing issue branch: `git branch -a --list "*issue/<N>-*"` and
+     `git worktree list`.
+2. **Found (a restart, or an existing assigned branch).** Resume it; never reset it to
+   `origin/main`.
+   - *Worktree:* reuse the worktree if it exists, otherwise `git worktree add ../fineprint-issue-<N> <branch>`
+     (for a remote-only branch, `git worktree add -b <branch> ../fineprint-issue-<N> origin/<branch>`).
+     In the worktree, if the remote branch exists, `git merge --ff-only origin/<branch>`.
+   - *Single-checkout fallback:* if the local branch exists, `git checkout <branch>`; for a
+     remote-only branch, `git checkout -b <branch> origin/<branch>`. If the remote branch exists,
+     `git merge --ff-only origin/<branch>`.
+   Read the issue comments and the branch's commits, and continue from the step they show was
+   reached.
+3. **Not found** (no existing branch for `<branch>`, where `<branch>` is `<assigned>` if one was
+   assigned, else `issue/<N>-<short-slug>`):
+   - *Worktree:* `git worktree add -B <branch> ../fineprint-issue-<N> origin/main`.
+   - *Single-checkout fallback:* `git checkout -B <branch> origin/main`.
 4. Every later step for this issue (agents' working directory, commits, pushes, checks) runs
-   inside that worktree. It is removed in §7.
-
-The branch is always `issue/<N>-<short-slug>`: the next session starts only when an `issue/`
-branch merges (§8). If the session may push only to an assigned branch, use it, and say in the PR
-body that the chain will not continue from this merge: the owner restarts it with the scheduled
-task's "Run now".
+   inside that worktree (or directly in the checkout for the single-checkout fallback). If a
+   worktree was created, it is removed in §7.
 
 ## 3. Route and execute
 
-1. Read the account's usage limits once and set `FABLE_ALLOWANCE` (`sufficient`,
-   `insufficient` or `unknown`).
-2. Spawn `work-classifier` with: the full issue body, its number and URL, the
-   branch, and `FABLE_ALLOWANCE`. For a `type:feature` or `type:binding` issue ask for **two**
-   briefs: Implementer and Independent Tester (owned paths disjoint). For `type:fixtures`, one
-   `fixture-author` brief. For `type:infra`, `type:toolchain`, `type:client` and `type:docs`,
-   an Implementer brief whose TESTS REQUIRED include the issue's acceptance tests.
+1. Set `FABLE_ALLOWANCE` (Claude Code) or T3 availability (Gemini / Antigravity) (`sufficient`,
+   `insufficient` or `unknown`; PROCESS.md P4). In Claude Code, read the account's usage limits
+   once (unknown means no Fable); on Gemini / Antigravity, it is `sufficient` when the active plan
+   and quota support T3 and no rate limit, throttling or fallback is reported.
+2. Spawn `work-classifier` (via Claude Code's `Agent` tool or Antigravity's `invoke_subagent` /
+   `define_subagent`, PROCESS.md P5) with: the full issue body, its number and URL, the
+   branch, and `FABLE_ALLOWANCE` / T3 availability. For a `type:feature` or `type:binding` issue
+   ask for **two** briefs: Implementer and Independent Tester (owned paths disjoint). For
+   `type:fixtures`, one `fixture-author` brief. For `type:infra`, `type:toolchain`, `type:client`
+   and `type:docs`, an Implementer brief whose TESTS REQUIRED include the issue's acceptance tests.
 3. `needs-rules` → one `rules-researcher` call with all questions, then call the classifier
    again with the answers. SRS discrepancies are recorded in `docs/DECISIONS.md`; the proposed SRS edit is a P8 line in `docs/HUMAN_QUEUE.md`.
-4. Spawn the agents the classifier names with the briefs verbatim and its models as `model`
-   overrides; Implementer and Independent Tester in parallel.
+4. Spawn the agents the classifier names with the briefs verbatim and its model tier overrides
+   (keeping `inherit` in Antigravity if the harness policy requires it); Implementer and
+   Independent Tester in parallel.
 5. Agent reports with `rules questions` → rules-researcher → classifier follow-up brief.
    `engine gaps` or `requests outside owned paths` that this issue cannot absorb become a
    **new GitHub issue** (labelled like this one, "Depends on" filled in) linked from the PR.
@@ -153,52 +196,114 @@ task's "Run now".
 ## 4. Log and verify
 
 First add the run-log row(s) for this issue to `docs/RUN_LOG.md` (phase = the issue's `phase:` label, work
-item = `#<N>`) and commit, so the verified commit is the one the PR opens on. Any later fix
+item = `#<N>`, T3 / Fable notes in Notes) and commit, so the verified commit is the one the PR opens on. Any later fix
 commit updates the row and is verified again.
 
 Then spawn `work-verifier` with every brief and report, the branch and the base `origin/main`. On
 `fail`: investigator if the cause is unclear, then classifier → Fixer → verify again, under the
 P7 failure policy. Three failed attempts plus one tier-up attempt → mark the issue `blocked`
-(label `status:blocked-failure`, remove `in-progress`, delete this session's claim comment), comment the account, add a `docs/RUN_LOG.md` row, and stop.
+(label `status:blocked-failure`, remove `in-progress`, delete or release this session's claim comment), comment the account, add a `docs/RUN_LOG.md` row, and stop.
 
 ## 5. Open the PR
 
 1. Check the head is the commit the work-verifier last passed. Push:
    `git -c push.negotiate=true push -u origin <branch>`.
-2. Create the PR with REST (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f
-   head=<branch> -f base=main -F body=@<file>`). The body follows
-   `.github/pull_request_template.md`, starts with `Closes #<N>`, and fills every section
-   (write "not applicable" with a reason rather than leaving one empty: CodeRabbit checks it).
-3. Reply-to-review readiness: watch the PR. If the session can subscribe to PR activity, do so.
-   Otherwise schedule a check-in with `send_later` (about 10 minutes) and end the turn with a
-   one-line status; never sleep-poll in a loop. Repeat check-ins until the PR merges.
+2. Determine the PR's **review mode label** (`docs/PROCESS.md` P6; a PR carries at most one
+   `review:*` label):
+   - Preserve an existing `review:full` label on the issue as authoritative even if the diff also
+     touches a `review:sanity` category.
+   - Upgrade to `review:sanity` — and do **not** apply `review:skip` (removing `review:skip` if
+     already present) — if the issue has `review:skip` or no `review:*` label and the diff touches
+     any P6 `review:sanity` category:
+     - public interfaces, schemas, wire/event contracts, or bindings (any P3 contract owner in
+       `docs/DEVELOPMENT.md`, `contracts/CHANGE_REQUESTS.md`, `fineprint-dsl` wire schema, `.pzl` /
+       `*.fpreplay` / `*.fpdb` formats, `IRulesEngine`, wire protocol, native-effect or keyword
+       macro registries, C ABI / .NET / WASM bindings);
+     - state machines, deterministic core rules loops, or `very-high` blast-radius rules evaluation
+       (priority/SBA heartbeat, turn sequencer, layer evaluator & `GameState` state-hash
+       integration, casting/cost-lock-in/payment state machine, DSL interpreter core & stack
+       resolution, combat constraint solvers, mandatory loop detection & shortcut protocol);
+     - security or compliance-critical paths (R5 card-data boundary including CI aggregate-only
+       reporting, R11 override validation & `VERIFIED` enforcement, R12 hidden-information
+       redaction, determinized forking, and untrusted-input parsers); or
+     - automated milestone determinism, conformance, or release gates (`#106`, `#121`, `#122`).
+   - Otherwise, carry the issue's `review:*` label. If the issue has no `review:*` label and the
+     diff matches no `review:sanity` category, apply `review:skip` during the M1
+     initial-usable-build phase (`auto_review.enabled: false`), or omit `review:*` labels in
+     post-usable-build mode (`auto_review.enabled: true`, per-PR review default).
+3. Create the PR with `gh pr create --base main --head <branch> [--label <review:*>] --title … --body-file <file>`
+   (omitting `--label` only for the unlabelled post-usable default above) or REST
+   (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f head=<branch> -f base=main
+   -F body=@<file>` followed immediately by applying the `review:*` label when one is selected).
+   The body follows `.github/pull_request_template.md`, starts with `Closes #<N>`, states the
+   review mode (or `post-usable default`) and reason under `## Work item`, and fills every section
+   (write "not applicable" with a reason rather than leaving one empty: CodeRabbit checks it on
+   reviewed PRs). Bot names go in backticks.
+4. Watch the PR:
+   - **Claude Code:** if the session can subscribe to PR activity (`subscribe_pr_activity`), do so.
+     Otherwise schedule a check-in with `send_later` (about 10 minutes, or 3–5 minutes for a
+     `review:skip` PR waiting only on CI) and end the turn with a one-line status; repeat check-ins
+     until the PR merges.
+   - **Gemini / Antigravity:** run the `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`), which
+     schedules non-blocking check-ins (`/schedule` or a single async background check-in), handles
+     CI failures and — on reviewed PRs (`review:sanity` / `review:full`, post-usable default, or
+     whenever CodeRabbit posted a review) — responds to CodeRabbit findings, resolves review threads
+     itself, and drives the PR to completion.
+   Never sleep-poll in a foreground loop.
 
 ## 6. Review rounds
 
-Each CodeRabbit review round (or push) is one batch, handled with the `triage` skill's §2
-procedure and PROCESS.md P6:
-
-- Read: `pulls/<P>/reviews`, `pulls/<P>/comments`, `issues/<P>/comments` (CodeRabbit's summary
-  and pre-merge checks), `pulls/<P>/ccr/review_threads`, and the head commit's check runs.
-- Every finding gets exactly one disposition (Fixed / Not a defect / Deferred) recorded as a
-  reply (`pulls/<P>/comments/<id>/replies`), reason and evidence first.
-- Resolve with `POST pulls/<P>/ccr/comments/<comment_id>/resolve`. Never resolve an unfixed
-  security issue (including any redaction or forking leak) or a verified unfixed correctness
-  defect.
-- Failed pre-merge checks (for example the description check) are fixed by editing the PR body
-  (`PATCH pulls/<P>`).
-- CI failures go through the same loop (investigator if the cause is unclear).
-- If CodeRabbit has not reviewed the head commit, post `@coderabbitai review` once; at most two
-  more asks, then the RUN_LOG row of P6 step 4.
+- **Unreviewed `review:skip` PRs** (when `.coderabbit.yaml` excludes the PR — either `review:skip`
+  in either phase without `review:sanity`/`review:full`, or no opt-in label while
+  `auto_review.enabled: false` — and CodeRabbit has posted no review on the PR): do **not**
+  request `@coderabbitai review` while the linked issue and current PR diff match no P6
+  `review:sanity`/`review:full` requirement. Handle any CI failures through the investigator /
+  classifier / Fixer / `work-verifier` loop; after any push, re-check the linked issue and
+  current diff against P6 `review:sanity` categories, and if either now requires `review:sanity`
+  or `review:full`, upgrade the PR label (removing `review:skip`) and complete review under the
+  reviewed-PR path below. Otherwise proceed to §7 as soon as all required CI checks and
+  `work-verifier` are green.
+- **Reviewed PRs (`review:sanity`, `review:full`, post-usable default without `review:skip`, or
+  any PR where CodeRabbit posted a review):** each CodeRabbit review round (or push) is one batch,
+  handled with the `triage` skill's §2 procedure and PROCESS.md P6:
+  - Read: `gh pr view` / `gh pr checks` / `gh api graphql` (for review threads), or REST
+    `pulls/<P>/reviews`, `pulls/<P>/comments`, `issues/<P>/comments` (CodeRabbit's summary and
+    pre-merge checks), `pulls/<P>/ccr/review_threads`, and the head commit's check runs.
+  - On **`review:sanity`** PRs, keep the pass targeted: fix blocking boundary, contract, schema,
+    state-machine, determinism (R3), no-card-branch (R4), security/compliance (R5/R11/R12) and
+    verified correctness defects; dispose of cosmetic style, naming or non-blocking refactor
+    nitpicks as `Deferred` (linking `#219` FP-161 or a new M2 `work-unit` issue) or `Not a defect`
+    rather than running multi-round polish loops.
+  - Batch local fix commits before pushing so `auto_pause_after_reviewed_commits: 2` is not tripped
+    unnecessarily.
+  - Every finding gets exactly one disposition (Fixed / Not a defect / Deferred) recorded as a
+    reply (`pulls/<P>/comments/<id>/replies`), reason and evidence first.
+  - Resolve with GraphQL `resolveReviewThread` via `gh api graphql`, `resolve_review_thread`, or the
+    REST route `POST pulls/<P>/ccr/comments/<comment_id>/resolve`. Never resolve an unfixed
+    security issue (including any redaction or forking leak) or a verified unfixed correctness
+    defect.
+  - Failed pre-merge checks (for example the description check) are fixed by editing the PR body
+    (`gh pr edit <P> --body-file <file>` or `PATCH pulls/<P>`).
+  - CI failures go through the same loop (investigator if the cause is unclear).
+  - If CodeRabbit has not reviewed the head commit on a PR that requires review (for example it
+    paused after `auto_pause_after_reviewed_commits: 2` or was rate-limited), post
+    `@coderabbitai review` once; at most two more asks, then the RUN_LOG row of P6 step 4.
+  - When CodeRabbit's approval is all that is missing on a reviewed PR, post `@coderabbitai approve`
+    (P6 step 3).
 
 ## 7. Merge
 
-When every P6 step 5 condition holds on the head commit (required checks green, CodeRabbit
-reviewed the head with no outstanding change request, every thread replied to and resolved,
-branch up to date with `main`, last work-verifier result `pass` for the head):
+When every P6 step 5 condition holds on the head commit (required checks green; for an unreviewed
+`review:skip` or unlabelled PR, re-confirming that neither the linked issue nor the current PR
+diff requires `review:sanity`/`review:full` — upgrading the label and completing review first if
+either does; if the PR requires or received CodeRabbit review, `coderabbitai` has an effective
+`APPROVED` review covering the head commit with no unanswered actionable comments and every thread
+replied to and resolved; branch up to date with `main`; last work-verifier result `pass` for the
+head):
 
 1. Merge with a merge commit:
-   `gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`.
+   `gh pr merge <P> --merge --match-head-commit <head>` or REST
+   (`gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`).
 2. The repository deletes merged branches automatically; check it did.
 3. **Unblock dependents (the sweep).** List every open `work-unit` issue labelled `blocked`
    (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
@@ -223,23 +328,25 @@ branch up to date with `main`, last work-verifier result `pass` for the head):
    Leave `blocked` on an issue with no blockers at all: a person set that hold (the plan sets
    `blocked` from dependencies; other holds use `status:blocked-failure`, PROCESS.md P7).
 4. Remove `in-progress` from the issue if it is still present (it closes through `Closes #<N>`),
-   and delete this session's claim comment.
-5. Remove the issue's worktree from the main checkout: `git worktree remove
-   ../fineprint-issue-<N>`.
+   and delete (or edit to `Released: merged in PR #<P>`) this session's claim comment.
+5. Remove the issue's worktree from the main checkout (if a worktree was used):
+   `git worktree remove ../fineprint-issue-<N>`.
 6. Tell the user: what merged, the PR link, the issues it unblocked, and the next ready issues
    in plan order.
 7. Do nothing to start the next session (§8).
 
 ## 8. Next session
 
-The merge starts the next session. A scheduled task with a GitHub trigger on pull requests merged
-into `main` from `issue/` branches starts a fresh session that works on the next issue. This
-session does nothing to hand off: never call `create_session`, `fire_trigger` or
-`update_trigger` to chain. A session started by another session asks a person to approve every
-remote-session tool call, and a session can neither fire nor edit a task it did not create. The
-chain runs until no issue is ready, or until a session ends without merging an `issue/` branch;
-the owner then restarts it with the task's "Run now". If the task does not exist or is disabled,
-nothing starts. See DECISIONS.md "Self-chaining — next session starts from a merged issue/ PR".
+In **Claude Code**, a scheduled task with a GitHub trigger on pull requests merged into `main` from
+`issue/` branches starts a fresh session that works on the next issue. This session does nothing to
+hand off: never call `create_session`, `fire_trigger` or `update_trigger` to chain. A session
+started by another session asks a person to approve every remote-session tool call, and a session
+can neither fire nor edit a task it did not create. The chain runs until no issue is ready, or
+until a session ends without merging an `issue/` branch; the owner then restarts it with the task's
+"Run now". In **Gemini / Antigravity**, there is no native GitHub-merge webhook trigger; start the
+next session manually (or use a persistent polling `/automation` job or `/run-plan`). If no
+scheduled task exists or it is disabled, nothing starts automatically. See DECISIONS.md
+"Self-chaining — next session starts from a merged issue/ PR".
 
 ## Never
 
