@@ -8,9 +8,9 @@ labels: ["work-unit", "blocked"]
 > **Plan ID:** FP-XXX · **Phase:** <n — name> · **Milestone:** <M1|M2|M3> · **Expected tier:** <T1 (Sonnet 5.5 / Flash) | T2 (Opus 5.5 / Pro)>
 
 <!-- After creating the issue: add type:<feature|binding|toolchain|client|fixtures|infra|docs>,
-     area:<…>, phase:<NN-name>, tier:<T1|T2>, and during M1 exactly one review mode label
-     review:<skip|sanity|full> (docs/PROCESS.md P6); replace `blocked` with `ready` if every
-     dependency is already satisfied (docs/PROCESS.md P6 step 5). -->
+     area:<…>, phase:<NN-name>, tier:<T1|T2>, and review:gate only if this issue must carry a
+     phase/milestone gate review (docs/PROCESS.md P6); replace `blocked` with `ready` if every
+     dependency is already satisfied (docs/PROCESS.md P6 routine step 3). -->
 
 ## Summary
 
