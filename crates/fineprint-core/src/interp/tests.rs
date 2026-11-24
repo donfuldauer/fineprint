@@ -113,6 +113,8 @@ struct TestEnv {
     died: Vec<ObjectView>,
     mana: BTreeMap<(ObjectId, Option<String>), i64>,
     tokens: BTreeMap<(ObjectId, String), String>,
+    /// Phased-out permanents: hidden from `object` and `objects_in`, not from `lki`.
+    phased_out: BTreeSet<ObjectId>,
 }
 
 /// A local integer LCG (no `rand`).
@@ -169,7 +171,7 @@ impl InterpEnv for TestEnv {
         let mut ids: Vec<ObjectId> = self
             .objects
             .values()
-            .filter(|v| v.zone == zone)
+            .filter(|v| v.zone == zone && !self.phased_out.contains(&v.id))
             .map(|v| v.id)
             .chain(
                 self.extra_in
@@ -188,6 +190,9 @@ impl InterpEnv for TestEnv {
         ids
     }
     fn object(&self, id: ObjectId) -> Option<ObjectView> {
+        if self.phased_out.contains(&id) {
+            return None;
+        }
         self.objects.get(&id).cloned()
     }
     fn lki(&self, id: ObjectId) -> Option<ObjectView> {
@@ -2132,4 +2137,142 @@ fn attr_source_lki_reads_captured_view_first() {
         .insert("$s".into(), vec![Referent::Object(o(10))]);
     let bound = at(ReferenceAST::Bound { var: "$s".into() });
     assert_eq!(val(&env, &cb, &bound), 7);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CodeRabbit round 2 (G1-G4)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-DSL-003, CR 508.5, CR 506.4: DEFENDING_PLAYER keeps naming the player the attacker was
+/// attacking after it is removed from combat (the environment retains it).
+#[test]
+fn defending_player_survives_removal_from_combat() {
+    let mut env = TestEnv::with_players(2);
+    let mut atk = creature(10, 1, 2, 2);
+    atk.attacking = true;
+    env.add(atk);
+    env.defending.insert(o(10), p(2));
+    let c = ctx_src(1, 10);
+    let p2 = vec![Referent::Player(p(2))];
+    // (i) attacking.
+    let r = resolved(&env, &c, ReferenceAST::DefendingPlayer);
+    assert_eq!((r.items, r.ignored.is_empty()), (p2.clone(), true));
+    // (ii) removed from combat: no longer attacking, the player is retained.
+    if let Some(v) = env.objects.get_mut(&o(10)) {
+        v.attacking = false;
+    }
+    let r = resolved(&env, &c, ReferenceAST::DefendingPlayer);
+    assert_eq!((r.items, r.ignored.is_empty()), (p2.clone(), true));
+    // (v) the player selector form gives the same player.
+    let players = resolve_players(&env, &c, &pref(ReferenceAST::DefendingPlayer)).unwrap();
+    assert_eq!(players.items, vec![p(2)]);
+    // (iv) the retained player has left the game.
+    env.players.retain(|pl| *pl != p(2));
+    let r = resolved(&env, &c, ReferenceAST::DefendingPlayer);
+    assert!(r.items.is_empty());
+    assert_eq!(r.ignored, vec![Ignored::Gone(Referent::Player(p(2)))]);
+}
+
+/// REQ-DSL-003, REQ-ARCH-002, CR 508.5: a source that never attacked has no defending player.
+#[test]
+fn defending_player_never_attacked_is_unresolved() {
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(10, 1, 2, 2));
+    let r = resolved(&env, &ctx_src(1, 10), ReferenceAST::DefendingPlayer);
+    assert!(r.items.is_empty());
+    assert_eq!(
+        r.ignored,
+        vec![Ignored::Unresolved(ReferenceAST::DefendingPlayer)]
+    );
+}
+
+/// REQ-DSL-003, CR 608.2h: MANA_SPENT_TO_CAST(SELF) and (SOURCE_LKI) count an object that has
+/// left every zone but was captured; a TARGET reference to it is `Gone` and counts 0.
+#[test]
+fn mana_spent_to_cast_uses_lki_only_for_self_and_source_lki() {
+    let mut env = TestEnv::with_players(2);
+    env.add(card(6, Zone::Stack, 1, &["Instant"]));
+    env.mana.insert((o(6), None), 4);
+    env.leave(o(6));
+    let mut c = ctx_src(1, 6);
+    c.targets = vec![Some(Referent::Object(o(6)))];
+    let h = |reference| {
+        ValueExpressionAST::History(Box::new(HistoryAST::ManaSpentToCast {
+            reference,
+            color: None,
+        }))
+    };
+    assert_eq!(val(&env, &c, &h(ReferenceAST::SelfRef)), 4);
+    assert_eq!(val(&env, &c, &h(ReferenceAST::SourceLki)), 4);
+    let target = ReferenceAST::Target { slot: 0 };
+    assert_eq!(val(&env, &c, &h(target.clone())), 0);
+    assert_eq!(
+        resolved(&env, &c, target).ignored,
+        vec![Ignored::Gone(Referent::Object(o(6)))]
+    );
+}
+
+/// REQ-DSL-003: a player selector naming a player twice counts that player once in HISTORY.
+#[test]
+fn history_player_selector_is_a_set() {
+    let mut env = TestEnv::with_players(3);
+    env.history = ledger();
+    env.turn = 2;
+    let mut c = ctx(1);
+    let bound = || pref(ReferenceAST::Bound { var: "$ps".into() });
+    let h = |q: HistoryAST| ValueExpressionAST::History(Box::new(q));
+    let pl = |n| Referent::Player(p(n));
+    c.bindings.insert("$ps".into(), vec![pl(1), pl(1), pl(2)]);
+    // Ledger: P1 cast 2, P2 cast 1.
+    let spells = h(HistoryAST::SpellsCastThisTurn {
+        player: Some(bound()),
+        condition: None,
+    });
+    assert_eq!(val(&env, &c, &spells), 3);
+    // Conditioned: two P1 spells and one P2 spell, all passing.
+    let spell = |id| card(id, Zone::Stack, 1, &["Instant"]);
+    env.spells = vec![(p(1), spell(1)), (p(1), spell(2)), (p(2), spell(3))];
+    let cond = h(HistoryAST::SpellsCastThisTurn {
+        player: Some(bound()),
+        condition: Some(PredicateAST::HasCardType {
+            value: WordRef::Name("Instant".into()),
+        }),
+    });
+    assert_eq!(val(&env, &c, &cond), 3);
+    // Per-player stats: P1 gained 3 and drew 2 on turn 2; P2 lost 5.
+    c.bindings.insert("$ps".into(), vec![pl(1), pl(1)]);
+    let gained = h(HistoryAST::LifeGainedThisTurn { player: bound() });
+    assert_eq!(val(&env, &c, &gained), 3);
+    let drawn = h(HistoryAST::CardsDrawnThisTurn { player: bound() });
+    assert_eq!(val(&env, &c, &drawn), 2);
+    c.bindings.insert("$ps".into(), vec![pl(2), pl(2)]);
+    let lost = h(HistoryAST::LifeLostThisTurn { player: bound() });
+    assert_eq!(val(&env, &c, &lost), 5);
+    // `resolve_players` itself still reports every referent.
+    let all = resolve_players(&env, &c, &bound()).unwrap();
+    assert_eq!(all.items, vec![p(2), p(2)]);
+}
+
+/// REQ-DSL-003, REQ-ARCH-002, CR 702.26b, CR 702.26d, CR 608.2b: a phased-out permanent is
+/// not listed or readable, a target on it is `Gone`, and its captured LKI stays readable.
+#[test]
+fn phased_out_permanent_is_hidden_but_lki_remains() {
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(10, 1, 2, 2));
+    env.lki.insert(o(10), creature(10, 1, 2, 2));
+    let mut c = ctx(1);
+    c.targets = vec![Some(Referent::Object(o(10)))];
+    let count = ValueExpressionAST::Count(Box::new(sel(filter(None, None))));
+    let target = ReferenceAST::Target { slot: 0 };
+    assert_eq!(val(&env, &c, &count), 1);
+    assert_eq!(
+        resolved(&env, &c, target.clone()).items,
+        vec![Referent::Object(o(10))]
+    );
+    env.phased_out.insert(o(10));
+    assert_eq!(val(&env, &c, &count), 0);
+    let r = resolved(&env, &c, target);
+    assert!(r.items.is_empty());
+    assert_eq!(r.ignored, vec![Ignored::Gone(Referent::Object(o(10)))]);
+    assert!(env.lki(o(10)).is_some());
 }
