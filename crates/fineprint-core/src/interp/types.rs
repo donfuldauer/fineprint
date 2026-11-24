@@ -168,8 +168,9 @@ pub trait InterpEnv {
     fn has_max_speed(&self, player: PlayerId) -> bool;
     /// The history ledger.
     fn history(&self) -> &History;
-    /// The object `object` is attached to, if any.
-    fn attached_to(&self, object: ObjectId) -> Option<ObjectId>;
+    /// The object or player `object` is attached to, if any (an Aura or similar can be
+    /// attached to a player). `ENCHANTED`, `EQUIPPED` and `ATTACHED_TO` all read this.
+    fn attached_to(&self, object: ObjectId) -> Option<Referent>;
     /// The player `attacker` is attacking, if any.
     fn defending_player(&self, attacker: ObjectId) -> Option<PlayerId>;
     /// The Memory record of an object, if any.

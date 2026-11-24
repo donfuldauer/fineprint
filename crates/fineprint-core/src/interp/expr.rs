@@ -6,13 +6,13 @@
 
 use std::collections::BTreeSet;
 
-use fineprint_base::ids::PlayerId;
+use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::expr::{
     Cmp, DistinctAttr, HistoryQuery as HistoryAST, MathOp, ObjectAttr, PlayerAttr,
-    PlayerSelectorAST, PredicateAST, ValueExpressionAST, WordRef, Zone,
+    PlayerSelectorAST, PredicateAST, ReferenceAST, ValueExpressionAST, WordRef, Zone,
 };
 
-use super::resolve::{apnap_players, resolve_players, resolve_reference, select_objects, view_of};
+use super::resolve::{resolve_players, resolve_reference, select_objects, view_of};
 use super::types::{EvalContext, InterpEnv, InterpError, ObjectView, PlayerStat, Referent};
 use crate::events::{HistoryQuery as LedgerQuery, HistoryScope, HistoryStat};
 use crate::memory::ChoiceValue;
@@ -127,17 +127,27 @@ fn eval_pred(
         PredicateAST::Not(c) => !eval_pred(env, ctx, c, subject)?,
         PredicateAST::IsCreature => obj(&|s| s.characteristics.card_types.contains("Creature")),
         PredicateAST::IsLand => obj(&|s| s.characteristics.card_types.contains("Land")),
+        // CR 110.1
         PredicateAST::IsPermanent => obj(&|s| s.zone == Zone::Battlefield),
         PredicateAST::IsPlayer => matches!(subject, Subject::Player(_)),
         PredicateAST::IsCardOrToken => matches!(subject, Subject::Object(_)),
         PredicateAST::IsToken => obj(&|s| s.is_token),
         PredicateAST::IsColorless => obj(&|s| s.characteristics.colors.bits() == 0),
         PredicateAST::IsMulticolored => obj(&|s| s.characteristics.colors.bits().count_ones() >= 2),
+        // The environment supplies the status flags. FaceUp and Untapped are simply "not face
+        // down" and "not tapped": they are true for any object without that flag, including
+        // objects outside the battlefield.
+        // CR 110.5, 110.5b
         PredicateAST::FaceUp => obj(&|s| !s.face_down),
+        // CR 110.5, 110.5b
         PredicateAST::FaceDown => obj(&|s| s.face_down),
+        // CR 110.5, 701.26a, 701.26b
         PredicateAST::Tapped => obj(&|s| s.tapped),
+        // CR 110.5, 701.26a, 701.26b
         PredicateAST::Untapped => obj(&|s| !s.tapped),
+        // CR 508.1k, 506.4
         PredicateAST::Attacking => obj(&|s| s.attacking),
+        // CR 509.1g, 506.4
         PredicateAST::Blocking => obj(&|s| s.blocking),
         PredicateAST::EnteredThisTurn => obj(&|s| s.entered_this_turn),
         PredicateAST::WasCast => obj(&|s| s.was_cast),
@@ -273,8 +283,18 @@ pub fn eval_value(
         ValueExpressionAST::Count(sel) => Ok(len_i64(select_objects(env, ctx, sel)?.items.len())),
         ValueExpressionAST::Attr { reference, attr } => {
             let items = resolve_reference(env, ctx, reference)?.items;
+            // CR 608.2h, CR 113.7a, CR 608.2b: SOURCE_LKI reads the source's captured last
+            // known information first; every other reference reads current information first.
+            let source_lki = *reference == ReferenceAST::SourceLki;
             Ok(sat_sum(items.into_iter().map(|item| match item {
-                Referent::Object(id) => view_of(env, id).map_or(0, |view| object_attr(&view, attr)),
+                Referent::Object(id) => {
+                    let view = if source_lki && ctx.source == Some(id) {
+                        lki_first_view(env, id)
+                    } else {
+                        view_of(env, id)
+                    };
+                    view.map_or(0, |view| object_attr(&view, attr))
+                }
                 Referent::Player(_) => 0,
             })))
         }
@@ -332,6 +352,12 @@ pub fn eval_value(
                 _ => 0,
             })),
     }
+}
+
+/// The source's captured last known information, falling back to its current information when
+/// none was captured (REQ-DSL-003, CR 608.2h, CR 113.7a, CR 608.2b): the view `SOURCE_LKI` reads.
+fn lki_first_view(env: &dyn InterpEnv, id: ObjectId) -> Option<ObjectView> {
+    env.lki(id).or_else(|| env.object(id))
 }
 
 /// One characteristic of an object as an integer (a missing power or toughness counts as 0,
@@ -471,13 +497,16 @@ fn eval_history(
             player,
             condition: Some(pred),
         } => {
-            let casters = match player {
-                None => apnap_players(env),
-                Some(sel) => players_of(env, ctx, sel)?,
+            // No player selector: every caster counts, as in the unconditioned ledger query.
+            let casters: Option<Vec<PlayerId>> = match player {
+                None => None,
+                Some(sel) => Some(players_of(env, ctx, sel)?),
             };
             let mut n = 0_i64;
             for (caster, view) in env.spells_cast_this_turn() {
-                if casters.contains(&caster) && eval_predicate_object(env, ctx, pred, &view)? {
+                if casters.as_ref().is_none_or(|c| c.contains(&caster))
+                    && eval_predicate_object(env, ctx, pred, &view)?
+                {
                     n = n.saturating_add(1);
                 }
             }
