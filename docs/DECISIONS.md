@@ -7484,6 +7484,8 @@ fast.
 
 ## Process — Initial-usable-build review rhythm (tests along the way, sanity review on boundaries, full review at M1)
 
+**Superseded** by "Process — Gate reviews at phase and milestone completion" below.
+
 **Decision:** While Milestone M1 — Two-player engine builds the first usable end-to-end two-player
 build, split PR code review into three mutually exclusive label-driven modes in `docs/PROCESS.md`
 P6 and `.coderabbit.yaml`:
@@ -7546,3 +7548,47 @@ for M2/M3.
   parsers) are expensive to retrofit once downstream modules build on them.
 - Rely on agent self-review during M1: rejected; R9 (no self-review) remains intact, with
   `work-verifier` checking objective facts and CodeRabbit remaining the sole code reviewer.
+
+## Process — Gate reviews at phase and milestone completion
+
+**Decision:** At the repository owner's request, align the review rhythm with the sibling
+projects: no code review on routine unit-of-work PRs, and one cumulative CodeRabbit review at the
+completion of each phase and milestone (`docs/PROCESS.md` P6 "Gate reviews"). This supersedes the
+label-driven `review:skip` / `review:sanity` / `review:full` modes and the planned flip to per-PR
+review in `#219` (FP-161).
+
+1. **Routine PRs** merge on green required CI, coverage floors, repository guards, differential
+   cached vs. full-recompute layer digests, and `work-verifier` (`pass`). No `review:*` label is
+   applied and no CodeRabbit review is requested.
+2. **Gate issues** are the last open `work-unit` issue of a `phase:*` label or a milestone (or an
+   issue labelled `review:gate`). The gate issue's branch is opened twice: once against `main`
+   (closes the issue) and once, review-only, against `review-base/<gate>`, a branch at the newest
+   `reviewed/*` tag, so CodeRabbit sees every change merged since the previous gate. The first
+   base is `reviewed/baseline` at `60024a4`, the last commit of the former rhythm.
+3. **`.coderabbit.yaml`:** `auto_review.enabled: false` (nothing is reviewed automatically),
+   `base_branches: ["^review-base/.*"]`, `profile: chill`, `request_changes_workflow: true`; the
+   Orchestrator requests `@coderabbitai full review`, then `@coderabbitai review` after each fix
+   push.
+4. **Close out:** the gate issue's PR merges only once CodeRabbit approves every review PR of the
+   gate; the review PRs close unmerged; the merge commit is tagged `reviewed/<gate>`.
+5. **Granularity:** phases (`phase:*`), not only milestones, because a cumulative M1 diff
+   (about 140 issues) exceeds what one CodeRabbit pass can review; oversized gate diffs are split
+   into area review PRs.
+6. **`#219` (FP-161)** keeps its cohesive M1 audit as a `review:gate` issue but no longer flips
+   `.coderabbit.yaml` to per-PR review. The retired `review:*` labels on open issues, and review-mode
+   notes in their bodies, are ignored.
+
+**Rationale:** Per-PR CodeRabbit rounds were the main source of fix loops on unit PRs, while unit
+correctness is already gated by Implementer and Independent Tester tests, coverage floors,
+guards, differential checks and the verifier. A cumulative review at each phase and milestone
+keeps review where it pays off (cross-cutting drift, duplicated logic, contract and boundary
+defects) and matches the gate-only review rhythm of the owner's other projects. CodeRabbit stays
+the sole code reviewer (R9); only its timing changes.
+
+**Alternatives:**
+- Keep `review:sanity` on contract and core-loop PRs: rejected by the owner's direction that
+  review happens only at phase and milestone completion; contracts are still protected by R2 and
+  reviewed at the first gate after they land.
+- Review on the gate issue's own PR against `main`: rejected because CodeRabbit would see only that
+  issue's diff, not the phase's cumulative changes.
+- Milestone-only gates: rejected for diff size (point 5).
