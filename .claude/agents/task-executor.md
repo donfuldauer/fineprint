@@ -40,7 +40,8 @@ excerpts do not settle a rules question, implement everything else, and report t
    evidence.
 5. Before you report, run the brief's COMMANDS yourself, including the golden replay check when
    you touched rules evaluation. Report the real numbers.
-6. Do not review or polish code outside your task. CodeRabbit reviews the PR.
+6. Do not review or polish code outside your task. CodeRabbit reviews at the phase or
+   milestone gate (PROCESS.md P6).
 
 ## Role variants (the brief names one)
 

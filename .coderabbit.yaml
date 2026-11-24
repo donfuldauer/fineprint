@@ -1,43 +1,33 @@
 # CodeRabbit is the only code reviewer in the run (docs/PROCESS.md P6, rule R9).
 #
-# Review phase: INITIAL USABLE BUILD (Milestone M1 — Two-player engine).
-# While M1 assembles the first usable end-to-end two-player build, per-PR auto-review is opt-in by
-# PR label:
-#   - `review:skip` (or no opt-in label): skipped during M1 vertical slices (tests, coverage
-#     floors, repo guards, differential layer checks, work-verifier and CI still gate every merge).
-#   - `review:sanity`: targeted single-pass sanity review on P3 contracts, public APIs/schemas,
-#     bindings, core deterministic state-machine/rules loops, very-high blast radius, R5/R11/R12
-#     security and compliance boundaries, and milestone determinism/conformance/release gates.
-#   - `review:full`: full review (M1 cohesive review pass #219 / FP-161, M1 acceptance #123 /
-#     FP-121, or explicit opt-in).
-# When #219 (FP-161) merges once M1 works end-to-end, flip `profile` to `chill`,
-# `auto_review.enabled` to `true`, and `auto_review.labels` to `["!review:skip"]` for tighter
-# post-usable per-chunk reviews.
+# Review rhythm: GATE REVIEWS ONLY. CodeRabbit does not review routine unit-of-work PRs; they merge
+# on green CI, coverage floors, repository guards, differential layer checks and `work-verifier`
+# (P5 unit gate). CodeRabbit reviews only at the completion of a phase or milestone, on a
+# review-only "gate review" PR whose head is the gate issue's branch and whose base is
+# `review-base/<gate>` (the last reviewed commit, tag `reviewed/<previous gate>`), so the review
+# covers every change merged since the previous gate (docs/PROCESS.md P6 "Gate reviews").
+# The Orchestrator requests each pass explicitly with `@coderabbitai full review` (first pass) and
+# `@coderabbitai review` (after fix pushes); nothing is reviewed automatically.
 language: en-US
 reviews:
-  # Critical and major findings inline; minor/nitpicks collapsed in the summary during M1.
-  profile: quiet
-  # Approve once every comment is resolved on reviewed PRs (PROCESS.md P6 step 5).
+  # Gate reviews are infrequent and cumulative, so report everything worth fixing.
+  profile: chill
+  # Approve once every comment is resolved (PROCESS.md P6 gate merge conditions).
   request_changes_workflow: true
   high_level_summary: true
   collapse_walkthrough: true
   poem: false
   auto_review:
-    # Opt-in by positive label during M1; flip to `true` with `["!review:skip"]` in #219 (FP-161).
+    # Off: routine PRs are never reviewed; gate review PRs are reviewed on explicit request.
     enabled: false
     drafts: false
-    auto_incremental_review: true
-    # Pause after 2 reviewed commits so fix rounds are batched locally instead of looping; use
-    # `@coderabbitai review` explicitly when another pass is needed.
-    auto_pause_after_reviewed_commits: 2
-    labels:
-      - "review:sanity"
-      - "review:full"
+    auto_incremental_review: false
     ignore_title_keywords:
       - "WIP"
       - "[skip review]"
+    # Gate review PRs target `review-base/<gate>` branches, not `main`.
     base_branches:
-      - main
+      - "^review-base/.*"
   # Keep generated, binary and recorded data out of review. Source, DSL schemas, card
   # definitions, .pzl scenarios, CI and docs stay in review.
   path_filters:
@@ -61,14 +51,17 @@ reviews:
   path_instructions:
     - path: "**/*"
       instructions: >-
-        Focus on issues that are expensive to change later or block correctness: architectural
-        boundaries, P3 public interfaces/schemas/wire/binding contracts, deterministic rules loops
-        and state machines, R3 determinism, R4 no card-specific branches, R5 card-data boundary,
-        R11 VERIFIED enforcement, R12 untrusted-input parsing and hidden-information redaction,
-        and verified correctness defects. Ignore cosmetic style, formatting, and minor
-        naming/refactor nitpicks (rustfmt, clippy, coverage floors, guards, and unit/spec tests
-        cover them; broader refactors belong in the M1 cohesive review pass #219). Mention any
-        repeated pattern once at summary level instead of posting duplicate inline comments.
+        This is a cumulative phase or milestone gate review: the diff is every change merged since
+        the previous gate. Look across files and modules for what per-unit work misses:
+        architectural drift, duplicated logic, mismatched contracts, awkward state transitions and
+        test gaps. Prioritise issues that are expensive to change later or block correctness:
+        architectural boundaries, P3 public interfaces/schemas/wire/binding contracts,
+        deterministic rules loops and state machines, R3 determinism, R4 no card-specific
+        branches, R5 card-data boundary, R11 VERIFIED enforcement, R12 untrusted-input parsing and
+        hidden-information redaction, and verified correctness defects. Skip cosmetic style and
+        formatting (rustfmt, clippy, coverage floors, guards and unit/spec tests cover them).
+        Mention any repeated pattern once at summary level instead of posting duplicate inline
+        comments.
     - path: "**/*.{rs,cs,c,h,cpp,ts}"
       instructions: >-
         Check docs/PROCESS.md rules. R3: no floating point in rules paths, no iteration over

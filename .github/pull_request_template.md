@@ -2,8 +2,9 @@ Closes #<!-- issue number -->
 
 ## Work item
 
-<!-- issue title, plan ID (FP-…), phase, and review mode (`review:skip` / `review:sanity` /
-     `review:full`, docs/PROCESS.md P6) with reason -->
+<!-- issue title, plan ID (FP-…), phase, and whether this is a gate issue (last open issue of
+     its phase or milestone, or `review:gate`; docs/PROCESS.md P6) with a link to its gate review
+     PR, or "routine (no code review)" -->
 
 ## Requirements satisfied
 
