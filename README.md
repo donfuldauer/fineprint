@@ -171,26 +171,50 @@ xtask/                    repository automation: coverage, guards, CR citation c
 spikes/                   throwaway spikes that chose the libraries and binding toolchains
 contracts/                change requests for shared contracts
 scripts/req_coverage.py   checks every SRS requirement is traced by the work-unit issues and tests
-.claude/agents/           work-classifier, task-executor, fixture-author, work-verifier,
-                          issue-investigator, rules-researcher
-.claude/skills/           work-issue, run-plan, plan-from-srs, triage, pzl-test
-CLAUDE.md                 entry point for Claude Code sessions
+.claude/agents/           canonical subagent prompts: work-classifier, task-executor,
+                          fixture-author, work-verifier, issue-investigator, rules-researcher
+.claude/skills/           canonical skills: work-issue, run-plan, plan-from-srs, triage, pzl-test
+.agents/agents/           Antigravity custom subagent definitions (forward to .claude/agents/)
+.agents/skills/           Gemini / Antigravity skill adapters (forward to .claude/skills/), plus pr-watch
+.agents/environment.json  cloud VM setup hook running .agents/setup-env.sh
+AGENTS.md                 canonical agent instructions (Claude Code and Gemini / Antigravity)
+CLAUDE.md                 Claude Code entry point (imports AGENTS.md)
+GEMINI.md                 Gemini / Antigravity entry point (imports AGENTS.md)
 ```
 
 ## How the work gets done
 
-Development is run by Claude Code agents under [`docs/PROCESS.md`](docs/PROCESS.md):
+Development is run by AI coding agents (Claude Code or Gemini / Antigravity) under [`docs/PROCESS.md`](docs/PROCESS.md):
 
 1. **The plan is GitHub issues.** Each `work-unit` issue is one reviewable pull request, with
    its requirements, deliverables, acceptance criteria and "blocked by" links to the issues it
    depends on. Issues labelled `ready` can start now.
-2. **"Start work on issue X"** in a Claude Code session on this repository runs the `work-issue`
-   skill: it checks the dependencies are merged, routes the work to the cheapest capable model
-   tier, implements and independently tests it, verifies it against the issue, opens a PR that
-   closes the issue, resolves CodeRabbit's review, merges, and marks newly unblocked issues
-   `ready`. `/run-plan` does the same across every ready issue.
-3. A person is needed only for architecture decisions, SRS changes, legal questions and
-   publishing releases.
+2. **"Start work on issue X"** in a Claude Code or Gemini / Antigravity session on this repository
+   runs the `work-issue` skill: it checks the dependencies are merged, routes the work to the
+   cheapest capable model tier (Haiku 5.5 / Sonnet 5.5 / Opus 5.5 / Fable 5.2 in Claude Code;
+   Flash-Lite / Flash / Pro / T3 escalation in Gemini / Antigravity), implements and independently
+   tests it, verifies it against the issue, opens a PR that closes the issue, handles CI and review
+   according to the PR's review mode (during M1 until `#219` / FP-161 merges: `review:skip` on
+   routine vertical slices, targeted `review:sanity` on contracts, core deterministic loops,
+   bindings and R5/R11/R12 security boundaries, and `review:full` for the cohesive M1 review pass
+   in `#219` before flipping to per-PR CodeRabbit review for post-usable work), merges, and marks
+   newly unblocked issues `ready`. `/run-plan` does the same across every ready issue.
+3. **Instructions, agents and skills:** [`AGENTS.md`](AGENTS.md) is the canonical instruction file,
+   imported by [`CLAUDE.md`](CLAUDE.md) (Claude Code) and [`GEMINI.md`](GEMINI.md) (Gemini CLI and
+   Antigravity). Canonical subagent prompts and skills live in `.claude/agents/` and
+   `.claude/skills/`; `.agents/agents/` and `.agents/skills/` provide Antigravity / Gemini adapters
+   plus the Gemini / Antigravity-specific `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`),
+   which schedules non-blocking check-ins and drives CodeRabbit reviews to approval.
+4. **Cloud environment setup:** `.agents/environment.json` runs `.agents/setup-env.sh` on fresh
+   cloud VMs to ensure the pinned Rust toolchain (`rust-toolchain.toml` + `llvm-tools` +
+   `wasm32-unknown-unknown`), `cargo-llvm-cov` (matching `.github/workflows/ci.yml`), Linux
+   prerequisites and pre-fetched locked Cargo crates are ready.
+5. **Settings:** Claude Code defaults live in `.claude/settings.json` (personal overrides in
+   git-ignored `.claude/settings.local.json`). Antigravity stores user settings in
+   `~/.gemini/config/`; Gemini CLI uses `~/.gemini/settings.json` and git-ignored
+   `.gemini/settings.json`.
+6. A person is needed only for architecture decisions, SRS changes, legal questions and
+   publishing releases (PROCESS.md P8).
 
 ## License
 

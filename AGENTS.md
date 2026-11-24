@@ -1,0 +1,71 @@
+# Fine Print — agent instructions
+
+Fine Print is a deterministic, data-driven rules engine in Rust. These instructions apply to both
+**Claude Code** (`CLAUDE.md`, `.claude/`) and **Gemini / Antigravity** (`GEMINI.md`, `.agents/`).
+The requirements are `docs/SRS.md` (SRS-TCG-ENGINE-001). The process every agent follows is
+`docs/PROCESS.md` (cite it as P1–P8, rules R1–R12). Layout, commands, CI, coverage floors,
+repository guards and contract owners are in `docs/DEVELOPMENT.md`; delegation briefs follow
+`docs/BRIEF_TEMPLATE.md`. The plan is the set of GitHub issues labelled `work-unit` (milestones
+M1–M3); it is never written into the repository.
+
+**Starting work:** each issue is one unit of work with its dependencies. When the user says
+"Start work on issue X", use the `work-issue` skill (`.claude/skills/work-issue/SKILL.md`,
+forwarded by `.agents/skills/work-issue/SKILL.md`): it checks the issue's dependencies are merged,
+drives the work through the agents below, opens a PR that closes the issue, resolves the CodeRabbit
+review and merges. "Start work on the next ready issue" (or "Work on the next issue") picks one;
+in Claude Code, a GitHub-triggered scheduled task can start a fresh session when an `issue/` branch
+merges (`work-issue` §8), whereas in Gemini / Antigravity the next session is started manually or
+by a polling `/automation` job. The `run-plan` skill loops over every ready issue in plan order
+(`FP-NNN`). The `plan-from-srs` skill turns SRS requirements into issues. The `pzl-test` skill
+documents `.pzl` scenario conventions.
+
+- **Model routing (P4).** Every unit of work goes through the `work-classifier` agent first,
+  except items that pass the `triage` skill's fast-path checks; each review round or push is one
+  batch (P5). Tiers (details in `docs/PROCESS.md` P4):
+  - **Claude Code:** T0 Haiku 5.5 (`haiku`), T1 Sonnet 5.5 (`sonnet`), T2 Opus 5.5 (`opus`), and
+    **T3 Fable 5.2 (`fable`) only** for very-high-blast-radius (P3) or extremely
+    hard-to-troubleshoot work, with evidence, **and** only when the account's current usage limits
+    leave enough Fable allowance. Unknown allowance means no Fable (log `[Fable wanted]` in
+    `docs/RUN_LOG.md`).
+  - **Gemini / Antigravity:** T0 Flash-Lite (`flash_lite`), T1 Flash (`flash`), T2 Pro (`pro`, or
+    `inherit` when the session already runs on a Pro/reasoning model), and **T3 escalation**
+    (`pro` at maximum reasoning) only under the same P4 need and T2-exhaustion rules when plan and
+    quota allow (otherwise run at T2 and log `[T3 wanted]` in `docs/RUN_LOG.md`). Keep `inherit`
+    on Antigravity subagent calls unless a tier override is requested or needed by the harness
+    policy.
+- **Agents (P5).** Six subagent roles: `work-classifier`, `task-executor`, `fixture-author`,
+  `work-verifier`, `issue-investigator`, `rules-researcher`. Canonical role prompts live in
+  `.claude/agents/` (loaded directly by Claude Code); Antigravity custom subagent definitions live
+  in `.agents/agents/` and forward to them. In Antigravity environments that do not auto-load
+  `.agents/agents/`, register each role with `define_subagent` and run it with `invoke_subagent`.
+  (Standalone Gemini CLI does not load `.agents/agents/`; see `GEMINI.md`.) Pass the classifier's
+  brief verbatim and its model tier override. Subagents never spawn subagents; the Orchestrator
+  (main session) does every spawn.
+- **Rules questions** go to `rules-researcher`. Never put CR rule numbers or text into a brief,
+  code comment or reply from memory (R6).
+- **No self-review (R9) and review rhythm (P6).** Do not review code yourself or with a sibling
+  agent. Open a PR against `main` (body from `.github/pull_request_template.md`, starting
+  `Closes #<N>`, carrying the issue's `review:*` label). During the M1 initial-usable-build phase
+  (until `#219` / FP-161 merges), routine vertical-slice PRs (`review:skip`) merge on green tests,
+  coverage floors, repository guards, differential layer checks, `work-verifier` (`pass`) and
+  required CI checks without waiting on CodeRabbit; P3 contract, public schema/API/binding, core
+  deterministic loop/state-machine, `very-high` blast-radius, R5/R11/R12 security/compliance and
+  milestone-gate PRs (`review:sanity`) get a targeted CodeRabbit sanity review (fix blocking
+  defects, defer cosmetic style/refactor nits to `#219` or M2); `#219` (`review:full`) runs the
+  cohesive full review once M1 works end-to-end and flips `.coderabbit.yaml` to per-PR review for
+  M2/M3 and all post-usable work. On every reviewed PR, watch activity (Claude Code:
+  `subscribe_pr_activity` or `send_later`; Gemini / Antigravity: `pr-watch` in
+  `.agents/skills/pr-watch/SKILL.md`; never sleep-poll), give every CodeRabbit finding a
+  disposition reply, resolve every thread yourself when justified (never leave one for a person;
+  never resolve an unfixed security issue or a verified unfixed correctness defect), and merge
+  without waiting for a person once the P6 merge conditions hold.
+- **GitHub (P1).** Use the official `gh` CLI (`gh issue`, `gh pr`, `gh run`, `gh api`, with
+  explicit paging on list/search endpoints when a proxy blocks `--paginate`) or GitHub MCP tools
+  when configured; in Claude Code web sessions where GitHub GraphQL is unavailable, use REST
+  (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review threads.
+- **Non-negotiables:** determinism (R3), no card-specific branches (R4), no card data anywhere in
+  the repo, synthetic test cards only (R5), `VERIFIED` only through passing tests (R11), untrusted
+  inputs stay untrusted and redacted views never leak hidden information (R12). Contracts change
+  only through `contracts/CHANGE_REQUESTS.md` (R2).
+- Record ambiguous choices and judgement calls in `docs/DECISIONS.md` (your recommendation is the
+  decision) and continue (R8). `docs/HUMAN_QUEUE.md` is only for P8 items a person must do.

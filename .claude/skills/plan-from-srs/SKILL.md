@@ -5,10 +5,11 @@ description: "Turns docs/SRS.md into Fine Print's plan, which is a set of GitHub
 
 # plan-from-srs
 
-The plan turns the SRS into units of work the agents in `.claude/agents/` can execute under
-`docs/PROCESS.md`. **The plan is GitHub issues, never a repository file**: each `work-unit` issue
-is one unit, sized as one reviewable PR, and its body is the unit's spec. Every later brief is
-built from an issue, so issues must be concrete: owned paths, deliverables, acceptance criteria.
+The plan turns the SRS into units of work the agents in `.claude/agents/` (forwarded by
+`.agents/agents/` for Gemini / Antigravity) can execute under `docs/PROCESS.md`. **The plan is
+GitHub issues, never a repository file**: each `work-unit` issue is one unit, sized as one
+reviewable PR, and its body is the unit's spec. Every later brief is built from an issue, so
+issues must be concrete: owned paths, deliverables, acceptance criteria.
 
 This is the one workflow in which the Orchestrator stops to ask a person (PROCESS.md P8).
 
@@ -19,7 +20,8 @@ written into the SRS as a **nonfunctional requirement** before step 2. Issues ar
 requirements, never from chat or from the decision log alone.
 
 1. **Ask.** For each decision with no `REQ-NFR-*` requirement in the SRS, ask the user with
-   AskUserQuestion (at most four per call; SRS default first, marked Recommended, one-line
+   `AskUserQuestion` (Claude Code) or `ask_question` (Antigravity) / the harness's interactive
+   question tool (at most four per call; SRS default first, marked Recommended, one-line
    consequence per option). If the user is unreachable, stop here: unlike every other step in
    this repository, these decisions are never made by default.
 2. **Write the SRS section.** Add or update `## 17. Nonfunctional Requirements: Architecture,
@@ -77,7 +79,13 @@ issue owns `docs/DEVELOPMENT.md` (layout, commands, gates, contracts, fixture an
 
 **Labels:** `work-unit`; `ready` / `blocked` (later `in-progress`); `type:` infra, feature,
 binding, toolchain, client, fixtures, docs; `area:` the SRS area; `phase:NN-name`; `tier:T1` /
-`tier:T2` (expected; T3 is never planned). **Milestones:** M1 per REQ-NFR-010, then the deferred
+`tier:T2` (expected; T3 is never planned); and `review:skip` / `review:sanity` / `review:full`
+(`docs/PROCESS.md` P6). During an initial-usable-build milestone (M1 — Two-player engine), label
+P3 contract, public schema/API/binding, core deterministic loop/state-machine, `very-high`
+blast-radius, R5/R11/R12 security/compliance and milestone-gate units `review:sanity`, routine
+vertical-slice/fixture/client units `review:skip`, and include a cohesive full-review unit
+(`review:full`, e.g. `#219` FP-161) once the end-to-end M1 build works before M1 acceptance and
+before flipping to post-usable per-PR review. **Milestones:** M1 per REQ-NFR-010, then the deferred
 features in later milestones.
 
 **Suggested phase order** (adapt to the decisions): repository and CI → foundations (numbers,
@@ -85,7 +93,7 @@ IDs, PRNG, hashing, DSL schema, lints, synthetic card library) → state, zones,
 layouts → events, choices, replacement and triggers → layers → state-based actions → turn
 structure and priority → casting and resolution → DSL runtime effects → combat → keywords →
 loops → engine API, views and replays → card toolchain → bindings → test clients → regression
-fixtures → hardening and release → later milestones.
+fixtures → hardening, cohesive full review pass (`#219` FP-161) and M1 acceptance → later milestones.
 
 ## 3. Check the breakdown
 

@@ -22,3 +22,11 @@ AtomicCards*.json
 *.log
 .DS_Store
 __pycache__/
+
+# Claude Code local settings and scratch directories
+.claude/settings.local.json
+.claude/worktrees/
+.claude/.cc-writes/
+
+# Gemini CLI per-project personal settings (user settings live in ~/.gemini/settings.json)
+.gemini/settings.json

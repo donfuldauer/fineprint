@@ -7399,6 +7399,153 @@ when some event of the batch re-attaches the attachment (rejected: replacements 
 inside `process_batch`, so this is unknown before the bus runs); an `Unattach` naming its host
 (rejected for this unit: R2 contract change; the residual case above is deferred to it).
 
+## Process — Dual-harness agent documentation (Claude Code and Gemini/Antigravity)
+
+**Decision:** Support both Claude Code and Gemini / Antigravity across the repository's agent
+instructions, subagents, skills, templates and process documents, using a single-source-of-truth
+layout with no git symlinks:
+- `AGENTS.md` is the canonical root instruction file. `CLAUDE.md` imports `@AGENTS.md` with brief
+  Claude Code notes; `GEMINI.md` imports `@./AGENTS.md` with brief Gemini / Antigravity notes
+  (Gemini CLI inlines `@./AGENTS.md`; Antigravity loads `AGENTS.md` directly and treats
+  `@./AGENTS.md` as a path reference without duplicating context).
+- `.claude/agents/` and `.claude/skills/` remain the canonical Markdown prompts and skill
+  procedures, updated to be dual-platform (Claude Code and Gemini / Antigravity model tiers,
+  REST/`ccr` and `gh` CLI / MCP tooling, and harness-neutral worktree fallback).
+- `.agents/agents/` provides Antigravity custom subagent definitions (with Antigravity YAML
+  frontmatter and safe cross-surface tool lists: `view_file` and `run_command` for read-only roles
+  including `rules-researcher`, plus `replace_file_content` and `write_to_file` for `task-executor`
+  and `fixture-author`) that forward to `.claude/agents/`. Standalone Gemini CLI does not load
+  `.agents/agents/`; its main session does not run executor, fixture-author or verifier roles
+  directly and uses `.claude/agents/` only through custom subagents mirrored locally under
+  `.gemini/agents/`, as documented in `GEMINI.md`.
+- `.agents/skills/` provides Gemini / Antigravity skill adapters forwarding to `.claude/skills/`
+  (`work-issue`, `run-plan`, `plan-from-srs`, `triage`, `pzl-test`), plus the Gemini /
+  Antigravity-specific `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`), which stands in for
+  Claude Code's `subscribe_pr_activity` / auto-fix loop by scheduling non-blocking check-ins
+  (`/schedule` or a single async background check-in), addressing CodeRabbit findings, resolving
+  threads itself, and driving PRs to CodeRabbit approval and green CI.
+- `docs/PROCESS.md` P1 and P4–P7, `docs/DEVELOPMENT.md`, `docs/BRIEF_TEMPLATE.md`, `README.md`,
+  `.github/ISSUE_TEMPLATE/work-unit.md`, `.github/pull_request_template.md` and `.gitignore`
+  (ignoring local Claude Code files and `.gemini/settings.json` for personal project-specific
+  Gemini CLI settings) are updated for both harnesses.
+
+**Rationale:** The repository previously assumed Claude Code exclusively (`CLAUDE.md`,
+`.claude/agents/`, `.claude/skills/`, Claude-only model names, and `subscribe_pr_activity` /
+`send_later` / `get_session` tooling). Antigravity discovers `AGENTS.md`, `.agents/agents/*.md`
+and `.agents/skills/<name>/SKILL.md` natively, while Gemini CLI discovers `GEMINI.md` and
+`.agents/skills/<name>/SKILL.md`. Forwarding from thin `.agents/` adapters to the canonical
+`.claude/` files avoids duplicating long prompt bodies and avoids git symlinks, which require
+elevated privileges or Developer Mode on Windows (a first-class target OS under REQ-NFR-003).
+Antigravity custom subagent frontmatter requires exact Antigravity tool names (unmapped tool names
+can hang subagent startup), so `.agents/agents/*.md` declares its own frontmatter rather than
+sharing `.claude/agents/*.md` directly. Because Antigravity has no built-in PR auto-fix or
+GitHub-webhook subscription, a dedicated `pr-watch` skill gives Antigravity sessions a repeatable,
+non-blocking check-in and thread-resolution procedure without touching Claude Code's native PR
+subscription.
+
+**Alternatives:**
+- Duplicate full skill and agent Markdown bodies in `.agents/` and `.claude/`: rejected because
+  every process edit would risk drift between the two copies.
+- Symlink `CLAUDE.md`, `GEMINI.md`, `.agents/skills/` and `.claude/skills/`: rejected because git
+  symlinks break or check out as plain text files on Windows without Developer Mode.
+- Use `.agents/skills.json` pointing to `.claude/skills/` instead of `.agents/skills/<name>/SKILL.md`:
+  rejected because Gemini CLI reads `.agents/skills/` directly and does not read Antigravity's
+  `skills.json` discovery manifest.
+- Mirror `.gemini/agents/` in the repository for Gemini CLI: deferred in favor of scoping
+  `.agents/agents/` to Antigravity and documenting the standalone Gemini CLI workflow in
+  `GEMINI.md`, avoiding unverified version-specific Gemini CLI frontmatter.
+
+## Infrastructure — Cloud agent environment setup (.agents/environment.json)
+
+**Decision:** Add repo-scoped Antigravity cloud environment configuration (`.agents/environment.json`
+invoking `.agents/setup-env.sh`) so fresh Linux cloud VMs boot with the pinned Rust toolchain from
+`rust-toolchain.toml` plus `llvm-tools` and `wasm32-unknown-unknown`, `cargo-llvm-cov` pinned to
+match `.github/workflows/ci.yml`, required Linux packages (`build-essential`, `pkg-config`, `curl`,
+`ca-certificates`, `python3`, `jq`, `git`), non-interactive `~/.bashrc` `PATH` persistence for
+Cargo's bin directory, and pre-fetched locked Cargo crate caches for the root workspace and
+`spikes/bindings`.
+
+**Rationale:** `rust-toolchain.toml` deliberately omits `llvm-tools` and `wasm32-unknown-unknown`
+(CI installs them separately), and `cargo-llvm-cov` is required locally on every PR to run
+`cargo xtask coverage` (REQ-NFR-008). Installing only the Linux packages Fine Print actually needs
+(skipping GUI, GPU, audio and unrelated runtime dependencies) keeps fresh VM bootstrap fast while
+ensuring `cargo fmt`, `cargo clippy`, `cargo test`, `cargo xtask coverage`, `cargo xtask guard`,
+`cargo xtask cr`, `scripts/req_coverage.py` and `pr-watch` work out of the box. Checking `dpkg-query`,
+active toolchain components/targets and `cargo llvm-cov --version` makes re-runs idempotent and
+fast.
+
+**Alternatives:**
+- Add `llvm-tools` and `wasm32-unknown-unknown` to `rust-toolchain.toml`: rejected because it
+  changes every developer's and every CI job's toolchain download (including `fmt`, `clippy` and
+  `guards`, which do not need them), contradicting `docs/DEVELOPMENT.md`.
+- Install Playwright browsers or rebuild `cbindgen` / `wasm-bindgen-cli` on every VM boot:
+  deferred because `spikes/bindings` is a completed Phase 00 spike and the real FFI / .NET / WASM
+  bindings land in Phase 14 (#102–#104); adding them later keeps current cloud VM startup fast.
+
+## Process — Initial-usable-build review rhythm (tests along the way, sanity review on boundaries, full review at M1)
+
+**Decision:** While Milestone M1 — Two-player engine builds the first usable end-to-end two-player
+build, split PR code review into three mutually exclusive label-driven modes in `docs/PROCESS.md`
+P6 and `.coderabbit.yaml`:
+
+1. **`review:skip`** (default for routine M1 vertical-slice chunks: individual SBA additions,
+   effect families, keyword families, grammar template slices, demo decks/clients, `.pzl`
+   regression packs, benchmarks, and scoped follow-ups on already-reviewed spines): no automatic
+   per-PR CodeRabbit review. Every PR remains gated by Implementer + Independent Tester tests,
+   coverage floors (90% rules core / 75% others, REQ-NFR-008), repository guards
+   (`cargo xtask guard all`), differential cached vs. full-recompute layer digests (REQ-LAYER-005),
+   `work-verifier` (`pass`, P5 unit gate), and all required multi-OS CI checks.
+2. **`review:sanity`** (targeted mid-stream sanity review for anything expensive to change later):
+   required on any issue or PR defining or changing
+   - P3 public interfaces, schemas, wire/event contracts, or bindings (`#16`, `#17`, `#51`, `#64`,
+     `#70`, `#79`, `#80`, `#81`, `#83`, `#86`, `#100`, `#102`, `#103`, `#104`, `#159`, `#161`,
+     `#169`, or any PR touching `contracts/CHANGE_REQUESTS.md`);
+   - core deterministic state machines, rules loops, or `very-high` blast-radius rules evaluation
+     (`#44`, `#46`, `#52`–`#54`, `#57`, `#58`, `#67`, `#68`, `#77`, `#78`, `#183`, `#184`, `#186`);
+   - security or compliance-critical paths: R5 card-data boundary (`#17`, `#87`, `#100`, `#101`),
+     R11 override validation and `VERIFIED` enforcement (`#86`, `#98`), and R12 redaction,
+     determinized forking, and untrusted-input parsers (`#16`, `#51`, `#80`, `#81`, `#83`, `#85`,
+     `#87`, `#89`, `#91`, `#100`); or
+   - automated milestone determinism, conformance, or release gates (`#106`, `#121`, `#122`).
+   CodeRabbit runs in `quiet` profile with `auto_pause_after_reviewed_commits: 2`; blocking
+   boundary, contract, schema, state-machine, determinism (R3), no-card-branch (R4),
+   security/compliance (R5/R11/R12) and verified correctness defects are fixed, while cosmetic
+   style, naming and minor refactor nitpicks are deferred to `#219` (FP-161) or a new M2
+   `work-unit` issue.
+3. **`review:full`**: runs the cohesive full review pass over the working end-to-end M1 build in
+   `#219` (FP-161, gating `#123` FP-121 Milestone M1 acceptance), lands high-leverage cross-cutting
+   fixes, and flips `.coderabbit.yaml` to post-usable per-chunk review (`auto_review.enabled: true`,
+   `profile: chill`, `labels: ["!review:skip"]`, `auto_pause_after_reviewed_commits: 2`) for `#123`
+   (`review:full`) and all M2/M3 work (`#124`–`#141`, all transitively blocked by `#123`).
+
+A PR carries at most one `review:*` label; upgrading a `review:skip` issue/PR removes `review:skip`,
+and if `review:skip` ever coexists with `review:sanity` or `review:full`, the stronger review label
+wins. Because `docs/SRS.md` REQ-NFR-011 bullet 2 still reads "reviewed by CodeRabbit" unconditionally
+and only a person edits `docs/SRS.md` (P1, P8), a proposed wording alignment is queued in
+`docs/HUMAN_QUEUE.md` while this owner-requested workflow takes effect immediately.
+
+**Rationale:** Running multi-round full CodeRabbit polish loops on every isolated M1 vertical slice
+slows down reaching the first working two-player build and risks polishing abstractions whose real
+shape only becomes clear once the full engine, DSL runtime, toolchain, bindings and clients run
+end-to-end. Keeping Implementer + Independent Tester tests, 90%/75% coverage floors, differential
+cached/full-recompute checks, repo guards, `work-verifier` and multi-OS CI mandatory per PR catches
+logic regressions immediately; targeted `review:sanity` passes protect every P3 contract, core
+deterministic state machine and R5/R11/R12 security boundary that is expensive to retrofit; and
+`#219` (FP-161) gives the full review pass the cohesive context needed to catch cross-cutting
+drift, duplicated logic and contract/state-transition bugs before flipping to tighter per-PR review
+for M2/M3.
+
+**Alternatives:**
+- Keep full per-PR CodeRabbit review (`auto_review.enabled: true`, `auto_pause_after_reviewed_commits: 0`)
+  on all 102 open M1 PRs: rejected because per-chunk polish loops bottleneck delivery of the first
+  usable two-player build and create sunk-cost attachment to early module shapes.
+- Disable CodeRabbit completely until M1 acceptance: rejected because P3 contracts (`fineprint-dsl`,
+  `IRulesEngine`, wire protocol, bindings, `*.fpdb`/`*.fpreplay`/`.pzl`), core deterministic rules
+  loops (priority/SBA heartbeat, layers/`GameState` hash, casting, DSL interpreter, combat solvers,
+  loops) and R5/R11/R12 security boundaries (redaction, determinized forking, `VERIFIED`, untrusted
+  parsers) are expensive to retrofit once downstream modules build on them.
+- Rely on agent self-review during M1: rejected; R9 (no self-review) remains intact, with
+  `work-verifier` checking objective facts and CodeRabbit remaining the sole code reviewer.
 ## #57 FP-055 tester — order of `Resolution::ignored` and of resolved devotion words
 
 **Decision.** The interpreter spec tests (`crates/fineprint-core/tests/spec_interp_*.rs`) assert

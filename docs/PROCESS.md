@@ -16,7 +16,7 @@ Section numbers below (P1–P8) are what agents, briefs and replies cite.
 | Source | Role | Who writes it |
 |---|---|---|
 | `docs/SRS.md` | Requirements (`REQ-<AREA>-<NNN>`), the rules baseline, and CR citations. Normative. | A person only. Agents propose SRS changes in `docs/HUMAN_QUEUE.md`. |
-| GitHub issues (`work-unit`) | **The plan.** One issue per reviewable PR: plan ID (`FP-NNN`, also the plan order), summary, `Depends on` list (also linked as GitHub "blocked by" dependencies), REQ IDs, deliverables, acceptance criteria, owned paths, expected tier. Labels: `ready` / `blocked` / `in-progress`, `type:*`, `area:*`, `phase:*`, `tier:*`; milestones M1–M3. | `plan-from-srs`; new issues for discovered work by any Orchestrator, with dependencies filled in. |
+| GitHub issues (`work-unit`) | **The plan.** One issue per reviewable PR: plan ID (`FP-NNN`, also the plan order), summary, `Depends on` list (also linked as GitHub "blocked by" dependencies), REQ IDs, deliverables, acceptance criteria, owned paths, expected tier. Labels: `ready` / `blocked` / `in-progress`, `type:*`, `area:*`, `phase:*`, `tier:*`, and review mode `review:skip` / `review:sanity` / `review:full` (P6); milestones M1–M3. | `plan-from-srs`; new issues for discovered work by any Orchestrator, with dependencies filled in. |
 | `docs/DEVELOPMENT.md` | Workspace layout, module ownership, exact commands and environment, coverage floors per crate, contracts and their owners, card-data and fixture paths. | The workspace issue creates it; later issues update it in their own PRs. |
 | `docs/PROCESS.md` | This file. | A person, or a reviewed PR the person asked for. |
 | `docs/DECISIONS.md` | Every ambiguity or judgement call an agent resolved, with rationale. The recorded recommendation is the decision (R8). | Any agent (rule R8). |
@@ -30,6 +30,17 @@ in `docs/DECISIONS.md`. When the SRS and the Comprehensive Rules (CR) of the SRS
 disagree, the CR wins, the work follows the CR, the erratum is recorded in `docs/DECISIONS.md`,
 and, because only a person edits the SRS (P8), the proposed SRS edit is one line in
 `docs/HUMAN_QUEUE.md` (that is how Appendix A of the SRS was built).
+
+### Working with GitHub
+
+Sessions interact with `donfuldauer/fineprint` through the official `gh` CLI (`gh issue`, `gh pr`,
+`gh run`, `gh api`) or GitHub MCP tools when configured. On list and search REST endpoints
+(`repos/donfuldauer/fineprint/issues`, `issues/<N>/comments`, `search/issues`), page explicitly
+with `per_page=100` and `page=1, 2, …` until a page returns fewer than 100 items (never
+`gh api --paginate`: a session proxy can block the numeric-ID links it follows). In Claude Code
+web sessions where GitHub GraphQL is unavailable, use REST (`gh api repos/donfuldauer/fineprint/...`)
+and the session's `ccr` routes for review threads; in Gemini / Antigravity sessions with the
+GitHub plugin, `gh api graphql` and the `gh` subcommands work directly.
 
 ## P2. Execution rules (R1–R12)
 
@@ -74,8 +85,10 @@ These apply to every change, by every agent. Briefs inline them in full.
    confirmation, and is not added to `docs/HUMAN_QUEUE.md`. Only a later `docs/DECISIONS.md`
    entry (or the repository owner) changes it. The only exceptions are the P8 items.
 9. **R9 — No self-review.** No agent reviews code for style or design, its own or another
-   agent's. The work-verifier checks objective facts only. Code review happens on the pull
-   request, by CodeRabbit (P6).
+   agent's. The work-verifier checks objective facts only. Code review happens on pull requests by
+   CodeRabbit, scheduled according to the PR's review mode (P6). On every reviewed PR, the
+   Orchestrator resolves every review thread itself when justified and never leaves one for a
+   person (P6 step 3).
 10. **R10 — Tests are evidence, not obstacles.** Never delete, skip, ignore or weaken a test to
     get green. A test that contradicts the brief is corrected to assert exactly what the brief
     requires (never less), and the report names the brief clause and the evidence.
@@ -127,48 +140,65 @@ Every unit of work (a unit, an Independent Tester task, a fixture task, a fix ta
 CodeRabbit finding, a CI or gate failure) goes through the **work-classifier** before anyone works
 on it, except items that take the `triage` fast path.
 
-| Tier | Model (`model` override) | Typical work |
-|---|---|---|
-| T0 | Haiku 5.5 (`haiku`) | Docs-only edits, run-log and queue lines, formatting, renames, a review nit whose fix the comment spells out exactly |
-| T1 | Sonnet 5.5 (`sonnet`) | Well-specified changes in one module, adding tests, CI tweaks, most review findings, keyword macros or synthetic test cards from a clear template, verification runs |
-| T2 | Opus 5.5 (`opus`) | New unit implementations; the layer evaluator, dependency solver, replacement bus, combat solvers, loop detection, determinized forking; grammar work; cross-module changes; anything ambiguous; every investigation |
-| T3 | Fable 5.2 (`fable`) | Only under the Fable rule |
+| Tier | Claude Code (`model` override) | Gemini / Antigravity (`Model` override) | Typical work |
+|---|---|---|---|
+| T0 | Haiku 5.5 (`haiku`) | Flash-Lite (`flash_lite`) | Docs-only edits, run-log and queue lines, formatting, renames, a review nit whose fix the comment spells out exactly |
+| T1 | Sonnet 5.5 (`sonnet`) | Flash (`flash`) | Well-specified changes in one module, adding tests, CI tweaks, most review findings, keyword macros or synthetic test cards from a clear template, verification runs |
+| T2 | Opus 5.5 (`opus`) | Pro (`pro`, or `inherit` on a Pro/reasoning session) | New unit implementations; the layer evaluator, dependency solver, replacement bus, combat solvers, loop detection, determinized forking; grammar work; cross-module changes; anything ambiguous; every investigation |
+| T3 | Fable 5.2 (`fable`) | High-tier escalation (`pro` at maximum reasoning) | Only under the T3 / Fable rule below |
 
-**Fable rule.** Fable 5.2 is used only when all three hold:
+Verification runs on T1 (`Sonnet 5.5` / `Flash`) and investigation runs on T2 (`Opus 5.5` / `Pro`)
+by default; neither needs to differ from the implementing model. In Antigravity sessions where the
+user has not requested switching model tiers, `invoke_subagent` may keep `inherit` when the harness
+policy requires it.
+
+**T3 / Fable rule.** T3 (Fable 5.2 on Claude Code; maximum-reasoning `pro` on Gemini / Antigravity)
+is used only when all three hold:
 1. **Need.** Blast radius is `very-high` (P3), **or** the work is extremely hard to troubleshoot:
-   two full issue-investigator passes on Opus 5.5 found no reproducible root cause, or Opus 5.5
-   used up the fix attempts of P7, or the failure is non-deterministic below the code's control
-   (compiler, platform, binding runtime) and two Opus passes did not isolate it.
-2. **Opus is not enough.** The classifier names the T2 attempt that failed, or says exactly why
+   two full issue-investigator passes at T2 (`Opus 5.5` / `Pro`) found no reproducible root cause,
+   or T2 used up the fix attempts of P7, or the failure is non-deterministic below the code's
+   control (compiler, platform, binding runtime) and two T2 passes did not isolate it.
+2. **T2 is not enough.** The classifier names the T2 attempt that failed, or says exactly why
    one would.
-3. **Allowance.** Just before routing, the Orchestrator reads the account's current usage limits
-   and finds enough Fable allowance for the task, with headroom, without going into overage.
-   An allowance that cannot be read counts as not enough.
+3. **Allowance / quota.**
+   - **Claude Code:** Just before routing, the Orchestrator reads the account's current usage
+     limits and finds enough Fable allowance for the task, with headroom, without going into
+     overage. An allowance that cannot be read counts as not enough.
+   - **Gemini / Antigravity:** T3 escalation requires the active plan and quota to support it (no
+     rate limit, throttling or fallback). If unavailable or unconfirmed, run at T2.
 
-If 1 and 2 hold but 3 does not, the work runs on Opus 5.5 and a `[Fable wanted]` note goes in that
-unit's `docs/RUN_LOG.md` row. The run never waits for allowance. Every Fable use is logged in
-`docs/RUN_LOG.md` with the evidence for 1–3. When torn between two tiers, take the higher one,
-but never move up into T3 that way.
+If 1 and 2 hold but 3 does not, the work runs at T2 (`Opus 5.5` / `Pro`) and a `[Fable wanted]`
+(Claude Code) or `[T3 wanted]` (Gemini / Antigravity) note goes in that unit's `docs/RUN_LOG.md`
+row. The run never waits for allowance. Every T3 use is logged in `docs/RUN_LOG.md` with the
+evidence for 1–3. When torn between two tiers, take the higher one, but never move up into T3 that
+way.
 
 **Fast path.** The Orchestrator classifies an obviously small item inline with the `triage` skill
-instead of spawning a work-classifier, under the eligibility checks in that skill. The fast path
-never routes T2 or T3, and never handles units, Independent Tester tasks, fixture tasks,
-investigations or gate failures.
+(`.claude/skills/triage/SKILL.md`, forwarded by `.agents/skills/triage/SKILL.md`) instead of
+spawning a work-classifier, under the eligibility checks in that skill. The fast path never routes
+T2 or T3, and never handles units, Independent Tester tasks, fixture tasks, investigations or gate
+failures.
 
 ## P5. Agents and the flow of one unit of work
 
-Agents live in `.claude/agents/`. Subagents cannot start subagents, so the Orchestrator (the main
-session) does every spawn, passing the classifier's brief **verbatim** and the classifier's model
-as the `model` override. The Orchestrator writes no product code and reviews no code.
+Canonical agent prompts live in `.claude/agents/` (loaded directly by Claude Code); Antigravity
+custom subagents live in `.agents/agents/` and forward to them so role instructions stay in one
+place. In Antigravity environments that do not auto-load `.agents/agents/`, the Orchestrator
+registers each role with `define_subagent` (using the prompt from `.claude/agents/<name>.md`, with
+write tools enabled only for `task-executor` and `fixture-author`) and launches it with
+`invoke_subagent`. (Standalone Gemini CLI does not discover `.agents/agents/`; see `GEMINI.md`.)
+Subagents never spawn subagents (enforced by Claude Code and by policy in Gemini / Antigravity), so
+the Orchestrator (the main session) does every spawn, passing the classifier's brief **verbatim**
+and its model tier override. The Orchestrator writes no product code and reviews no code.
 
-| Agent | Default model | Does | Never does |
+| Agent | Default tier (model) | Does | Never does |
 |---|---|---|---|
-| `work-classifier` | Sonnet 5.5 | Rates blast radius and difficulty, picks tier and agent, writes the self-contained brief (`docs/BRIEF_TEMPLATE.md`) | Edit files, implement, review |
+| `work-classifier` | T1 (`Sonnet 5.5` / `Flash`) | Rates blast radius and difficulty, picks tier and agent, writes the self-contained brief (`docs/BRIEF_TEMPLATE.md`) | Edit files, implement, review |
 | `task-executor` | from the classifier | Implementer, Independent Tester or Fixer, strictly from the brief | Leave owned paths, review others' code |
 | `fixture-author` | from the classifier | Builds the shared synthetic test-card library and the `.pzl` scenarios of the SRS regression suite (REQ-TEST-001) | Use real card names or text, edit engine code |
-| `work-verifier` | Sonnet 5.5 | Re-runs every gate; traces each requirement and `REQ-*` ID to a passing test | Give style or design opinions |
-| `issue-investigator` | Opus 5.5 | Reproduces and root-causes failures; judges unclear review findings | Change repository files |
-| `rules-researcher` | Sonnet 5.5 | Answers rules questions with exact CR citations and quoted text; checks SRS/CR consistency | Change repository files |
+| `work-verifier` | T1 (`Sonnet 5.5` / `Flash`) | Re-runs every gate; traces each requirement and `REQ-*` ID to a passing test | Give style or design opinions |
+| `issue-investigator` | T2 (`Opus 5.5` / `Pro`) | Reproduces and root-causes failures; judges unclear review findings | Change repository files |
+| `rules-researcher` | T1 (`Sonnet 5.5` / `Flash`) | Answers rules questions with exact CR citations and quoted text; checks SRS/CR consistency | Change repository files |
 
 **Flow.** classify (inline via `triage` for eligible small items) → execute (Implementer and
 Independent Tester in parallel for a unit) → verify → on `fail`, investigate if the cause is
@@ -187,11 +217,12 @@ work-classifier call; runs one Fixer brief per (tier, module) group, with docs-o
 docs group; and runs one work-verifier on the resulting head commit whenever the head changed.
 
 **Branches.** `main` is protected. Each unit of work is one GitHub issue and runs on its own
-branch from the latest `main` (`issue/<N>-<slug>`, or the branch the session assigns) and reaches
-`main` only through its own PR, which closes the issue. Work found along the way that the issue
-cannot absorb becomes a new issue with its dependencies filled in. If the
-session can push only to one assigned branch, record that
-in `docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] …`).
+branch from the latest `main` (`issue/<N>-<slug>` in its own worktree `../fineprint-issue-<N>`, or
+directly in the checkout when a sandbox restricts sibling directories and only one issue runs in the
+VM, or the branch the session assigns) and reaches `main` only through its own PR, which closes the
+issue. Work found along the way that the issue cannot absorb becomes a new issue with its
+dependencies filled in. If the session can push only to one assigned branch, record that in
+`docs/DECISIONS.md` and prefix commit subjects with the work item (`[sp 3.2] …`).
 
 **Unit gate (definition of done).** All must hold:
 1. The format and lint commands in `docs/DEVELOPMENT.md` are clean (warnings are errors).
@@ -217,50 +248,156 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
 
 ## P6. Pull request, review and merge
 
+Agents do not review their own code (R9). Review comes from CodeRabbit on pull requests, scheduled
+according to the repository's review phase and the PR's review label, and the Orchestrator drives
+every PR to a merge without a person.
+
+### Review modes (initial usable build vs. post-usable build)
+
+During an **initial-usable-build phase** (currently Milestone M1 — Two-player engine, until `#219`
+/ FP-161 merges), per-PR CodeRabbit review is opt-in in `.coderabbit.yaml`
+(`auto_review.enabled: false`, `profile: quiet`, `auto_pause_after_reviewed_commits: 2`) so
+vertical-slice work stays green on tests, coverage floors, repository guards, differential layer
+checks, `work-verifier` and CI without burning multi-round polish loops before the end-to-end
+two-player flow runs:
+
+- **`review:skip`** (default for routine M1 vertical-slice chunks: individual SBA additions, effect
+  families, keyword families, grammar template slices, demo decks/clients, `.pzl` regression packs,
+  benchmarks, and scoped follow-ups on already-reviewed spines): no automatic CodeRabbit review.
+  Every merge is still gated by Implementer + Independent Tester tests, coverage floors (90% rules
+  core / 75% others, REQ-NFR-008), `cargo xtask guard all`, differential cached vs. full-recompute
+  layer digests (REQ-LAYER-005), `work-verifier` (`pass`, P5 unit gate), and all required multi-OS
+  CI checks. (If a review is triggered manually with `@coderabbitai review`, any findings posted
+  are still accounted for under step 3 before merge.)
+- **`review:sanity`** (short, targeted mid-stream sanity review for anything expensive to change
+  later): required on any issue or PR that defines or changes
+  - public interfaces, schemas, wire/event contracts, or bindings (any P3 contract owner in
+    `docs/DEVELOPMENT.md`, `contracts/CHANGE_REQUESTS.md`, `fineprint-dsl` wire schema, `.pzl` /
+    `*.fpreplay` / `*.fpdb` formats, `IRulesEngine`, wire protocol, native-effect or keyword macro
+    registries, C ABI / .NET / WASM bindings);
+  - state machines, deterministic core rules loops, or `very-high` blast-radius rules evaluation
+    (priority/SBA heartbeat, turn sequencer, layer evaluator & `GameState` state-hash integration,
+    casting/cost-lock-in/payment state machine, DSL interpreter core & stack resolution, combat
+    constraint solvers, mandatory loop detection & shortcut protocol);
+  - security or compliance-critical paths (R5 card-data boundary including CI aggregate-only
+    reporting, R11 override validation & `VERIFIED` enforcement, R12 hidden-information redaction,
+    determinized forking, and untrusted-input parsers for Scryfall/MTGJSON/Oracle
+    text/`.pzl`/`*.fpreplay`/`*.fpdb`); or
+  - automated milestone determinism, conformance, or release gates (golden replay
+    cross-platform/cross-binding CI `#106`, query-point conformance audit `#121`, release packaging
+    `#122`).
+  In `review:sanity`, CodeRabbit reviews in `quiet` profile. Fix blocking boundary, contract,
+  schema, state-machine, determinism (R3), no-card-branch (R4), security/compliance (R5/R11/R12)
+  and verified correctness defects; defer cosmetic style, naming or non-blocking refactor nitpicks
+  to the M1 cohesive review pass (`#219` FP-161) or a new M2 `work-unit` issue instead of running
+  multi-round polish loops.
+- **`review:full`** (full CodeRabbit review and approval): used for the M1 cohesive full review
+  pass (`#219` FP-161, once M1 works end-to-end), Milestone M1 acceptance (`#123` FP-121), and
+  explicit opt-in PRs.
+
+**Mutual exclusivity and precedence.** A PR carries at most one `review:*` label. Upgrading a
+`review:skip` issue or PR to `review:sanity` or `review:full` removes `review:skip`. If
+`review:skip` ever coexists with `review:sanity` or `review:full` on a PR, remove `review:skip`
+and treat the stronger review label (`review:sanity` / `review:full`) as authoritative.
+
+Once `#219` (FP-161) completes the cohesive review of the working M1 build, it flips
+`.coderabbit.yaml` to **post-usable-build mode** (`auto_review.enabled: true`, `profile: chill`,
+`labels: ["!review:skip"]`, `auto_pause_after_reviewed_commits: 2`) so every chunk PR (including
+M2 and M3) gets tighter per-PR review by default unless explicitly opted out with `review:skip`
+(for example mechanical run-log or housekeeping edits).
+
 1. **Open.** The Orchestrator commits the unit's `docs/RUN_LOG.md` row(s) before the
    work-verifier's final run, so the verified commit is the PR head. When the verifier passes, it
-   pushes the branch and opens a PR against `main` using
-   `.github/pull_request_template.md`, starting the body with `Closes #<issue>`. Bot names in the
-   body go in backticks so nobody is notified by accident.
-2. **Auto-fix on.** Right after opening, the Orchestrator subscribes to the PR's activity
-   (comments, reviews, CI) if the session offers that; otherwise it schedules `send_later`
-   check-ins (about every 10 minutes) until the PR merges. Every CodeRabbit comment and CI
-   failure is handled as it arrives; nobody sleep-polls in a loop.
-3. **Every finding is accounted for**, batch by batch (P5), each ending in exactly one
-   disposition recorded as a reply on its thread:
+   pushes the branch and opens a PR against `main` (`gh pr create --label <review:*>` or REST plus
+   label edit) carrying the issue's `review:skip` / `review:sanity` / `review:full` label:
+   - preserve an existing `review:full` label as authoritative even when the diff touches a
+     `review:sanity` category;
+   - upgrade to `review:sanity` (removing `review:skip` if present) when the issue has `review:skip`
+     or no `review:*` label and the diff touches any `review:sanity` category above;
+   - when the issue has no `review:*` label and the diff matches no `review:sanity` category, apply
+     `review:skip` during the M1 initial-usable-build phase (`auto_review.enabled: false`), or
+     omit `review:*` labels in post-usable-build mode (`auto_review.enabled: true`, per-PR review
+     default).
+   The body follows `.github/pull_request_template.md`, starts with `Closes #<issue>`, states the
+   review mode (or `post-usable default`) and reason under `## Work item`, and fills every section
+   (write "not applicable" with a reason rather than leaving one empty). Bot names in the body go
+   in backticks so nobody is notified by accident.
+2. **PR watch / auto-fix.** Right after opening:
+   - **Claude Code:** subscribe to the PR's activity (`subscribe_pr_activity`: comments, reviews,
+     CI) if the session offers that; otherwise schedule `send_later` check-ins (about every 10
+     minutes, or 3–5 minutes for a `review:skip` PR waiting only on CI) until the PR merges.
+   - **Gemini / Antigravity:** Antigravity has no built-in PR auto-fix or GitHub-webhook
+     subscription. Run the `pr-watch` skill (`.agents/skills/pr-watch/SKILL.md`), which schedules
+     non-blocking check-ins (`/schedule` or a single async background check-in, or a persistent
+     `/automation` job across sessions), handles CI failures and — on reviewed PRs (`review:sanity`,
+     `review:full`, post-usable default without `review:skip`, or whenever CodeRabbit posted a
+     review) — addresses CodeRabbit findings, resolves review threads itself, and repeats until
+     the PR is ready to merge.
+
+   Every CodeRabbit comment and CI failure is handled as it arrives or on check-in; nobody
+   sleep-polls in a foreground loop. On an unreviewed PR excluded from automatic review
+   (`review:skip` in either phase without `review:sanity`/`review:full`, or no opt-in label while
+   `auto_review.enabled: false`), after confirming that neither the linked issue nor the current
+   PR diff requires `review:sanity`/`review:full`, do not request `@coderabbitai review`.
+3. **Every finding is accounted for** (on reviewed PRs, or whenever CodeRabbit posted comments),
+   batch by batch (P5), each ending in exactly one disposition recorded as a reply on its thread:
    - **Fixed:** an executor commit addresses it and the verifier passed; the reply names the
      commit; the thread is resolved.
    - **Not a defect:** the reply gives the evidence (test output, commit, CR rule and its text,
      SRS requirement, DECISIONS.md section, `.coderabbit.yaml` setting); the thread is resolved.
      A rules disagreement is settled by the `rules-researcher`'s citation, not by argument.
-   - **Deferred:** real but out of scope: a new `work-unit` GitHub issue (with `Depends on`
+   - **Deferred:** real but out of scope (or, on a `review:sanity` PR, a non-blocking style, naming
+     or minor refactor nitpick saved for the cohesive pass). It links `#219` (FP-161) when it is
+     an M1 cohesive-review item, or becomes a new `work-unit` GitHub issue (with `Depends on`
      filled in) or a `docs/DECISIONS.md` entry that records why it is not done now; the reply
      links it; the thread is resolved.
 
+   No thread is resolved without a reply. On `review:full` / post-usable PRs, nitpicks are fixed
+   when cheap (T0/T1), otherwise answered as above; on `review:sanity` PRs, prefer deferring
+   cosmetic or refactor nitpicks over extra fix rounds.
+
    **Resolving.** The Orchestrator resolves threads itself, on its own judgment, once the reply
-   states the reason and evidence first. It does not wait for CodeRabbit to agree. In Claude Code
-   web sessions the GitHub GraphQL API is unavailable; resolve with the session's REST routes
-   (`POST /repos/{owner}/{repo}/pulls/{n}/ccr/comments/{comment_id}/resolve`, list with
-   `GET …/pulls/{n}/ccr/review_threads`) or a GitHub MCP resolve tool if one is connected.
+   states the reason and evidence first. It does not wait for CodeRabbit to agree. Resolve with
+   GraphQL `resolveReviewThread` via `gh api graphql`, a GitHub MCP `resolve_review_thread` tool
+   if connected, or — in Claude Code web sessions where GitHub GraphQL is unavailable — the
+   session's REST routes (`POST /repos/{owner}/{repo}/pulls/{n}/ccr/comments/{comment_id}/resolve`,
+   list with `GET …/pulls/{n}/ccr/review_threads`).
    **Never resolved:** a thread reporting an unfixed security issue (including any information
-   leak through redaction) or a verified correctness defect that is not yet fixed. A person is
-   never asked to resolve a thread. When every other merge condition holds and CodeRabbit's
-   approval is all that is missing, post `@coderabbitai approve`.
-4. **Re-review.** Each push triggers CodeRabbit's incremental review. If it has not reviewed the
-   head commit, ask once with `@coderabbitai review`, wait as long as it says, and ask at most
-   twice more. If it still has not reviewed, the PR stays open, a `docs/RUN_LOG.md` row
-   records it, and the run continues with independent work.
-5. **Merge conditions**, all on the current head commit: every required CI check green;
-   CodeRabbit has reviewed the head with nothing actionable unanswered and no outstanding change
-   request; every thread has a disposition reply and is resolved (except types that cannot be
-   resolved); the branch is up to date with `main`; the work-verifier's last result for the head
-   is `pass`. Then merge with a merge commit (the repository deletes the branch), unsubscribe,
-   and unblock dependents: every issue whose blockers are now all satisfied swaps its
-   `blocked` label for `ready`. A blocker is satisfied only if it is closed as completed by a
-   merged PR (the issue timeline shows a `closed` event from a merged PR, or a merged PR body
-   contains `Closes #<n>`), or a comment on it names the replacement issue(s) that delivered the
-   work and those pass the same test. The run-log row was committed in the PR itself, so nothing is pushed to
-   `main` directly.
+   leak through redaction or determinized forking, R12) or a verified correctness defect that is
+   not yet fixed. A person is never asked to resolve a thread. When every other merge condition
+   holds on a reviewed PR and CodeRabbit's approval is all that is missing, post
+   `@coderabbitai approve`.
+4. **Re-review (reviewed PRs only).** Batch fix commits locally before pushing; `.coderabbit.yaml`
+   sets `auto_pause_after_reviewed_commits: 2` so incremental reviews pause after two reviewed
+   commits rather than burning review allowance on every push. New findings go through step 3. If
+   CodeRabbit has not reviewed the head commit on a PR that requires review (for example it paused
+   at the commit limit or was rate-limited), ask once with `@coderabbitai review`, wait as long as
+   it says, and ask at most twice more. If it still has not reviewed, the PR stays open, a
+   `docs/RUN_LOG.md` row records it, and the run continues with independent work.
+5. **Merge conditions**, all on the current head commit:
+   - every required CI check is green;
+   - **CodeRabbit review (conditional on review mode):**
+     - if the PR requires review (`review:sanity`, `review:full`, post-usable default without
+       `review:skip`), or if CodeRabbit posted a review on the PR anyway: `coderabbitai` has an
+       effective `APPROVED` review covering the head commit (not superseded by a later
+       `CHANGES_REQUESTED` or `DISMISSED` review), with no actionable comments unanswered, and
+       every thread has a disposition reply and is resolved (except types that cannot be resolved);
+     - if the PR is excluded from automatic review (`review:skip` in either phase without
+       `review:sanity`/`review:full`, or no opt-in label while `auto_review.enabled: false`) and
+       no CodeRabbit review was posted: first re-check the linked issue and the current PR diff
+       against the `review:sanity` categories above; if either requires `review:sanity` or
+       `review:full`, upgrade the PR label (removing `review:skip`) and complete review before
+       merging; otherwise no CodeRabbit review or approval is required;
+   - the branch is up to date with `main`;
+   - the work-verifier's last result for the head is `pass`.
+   Then merge with a merge commit (`gh pr merge <P> --merge --match-head-commit <sha>`
+   or REST; the repository deletes the branch), unsubscribe if subscribed, and unblock dependents:
+   every issue whose blockers are now all satisfied swaps its `blocked` label for `ready`. A
+   blocker is satisfied only if it is closed as completed by a merged PR (the issue timeline shows
+   a `closed` event from a merged PR, or a PR merged into `main` whose body contains a whole-number
+   match for `Closes #<n>` — `#<n>` not followed by another digit), or a comment on it names the
+   replacement issue(s) that delivered the work and those pass the same test. The run-log row was
+   committed in the PR itself, so nothing is pushed to `main` directly.
 6. **Never**, to get green: skip, ignore, delete or weaken a test; force-push or rewrite history
    on a branch the agent did not create; push an empty commit; close and reopen a PR to restart
    CI; merge with a failing required check.
@@ -270,7 +407,7 @@ regressed by more than 10% (REQ-NFR-009). The phase's last merge commit is tagge
 1. The executor gets up to three fix attempts, each from a classifier brief built on the
    verifier's failures, the investigator's report or the review findings.
 2. Then the issue-investigator makes a fresh pass and the classifier routes one more attempt one
-   tier up from a fresh brief plus the failure history (Fable only under P4).
+   tier up from a fresh brief plus the failure history (T3 / Fable only under P4).
 3. Then the unit is marked `blocked` in `docs/RUN_LOG.md`, and the issue gets the
    `status:blocked-failure` label and a comment with the failure history.
 4. A blocked issue outside milestone M1 (REQ-NFR-010) is
