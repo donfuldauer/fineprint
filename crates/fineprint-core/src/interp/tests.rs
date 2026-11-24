@@ -106,7 +106,7 @@ struct TestEnv {
     devotion: BTreeMap<(PlayerId, String), i64>,
     max_speed: BTreeSet<PlayerId>,
     history: History,
-    attached: BTreeMap<ObjectId, ObjectId>,
+    attached: BTreeMap<ObjectId, Referent>,
     defending: BTreeMap<ObjectId, PlayerId>,
     memory: BTreeMap<ObjectId, Memory>,
     spells: Vec<(PlayerId, ObjectView)>,
@@ -221,7 +221,7 @@ impl InterpEnv for TestEnv {
     fn history(&self) -> &History {
         &self.history
     }
-    fn attached_to(&self, object: ObjectId) -> Option<ObjectId> {
+    fn attached_to(&self, object: ObjectId) -> Option<Referent> {
         self.attached.get(&object).copied()
     }
     fn defending_player(&self, attacker: ObjectId) -> Option<PlayerId> {
@@ -602,7 +602,7 @@ fn attachment_references() {
     let mut env = TestEnv::with_players(2);
     env.add(card(5, Zone::Battlefield, 1, &["Artifact"]));
     env.add(creature(10, 1, 1, 1));
-    env.attached.insert(o(5), o(10));
+    env.attached.insert(o(5), Referent::Object(o(10)));
     for r in [
         ReferenceAST::Enchanted,
         ReferenceAST::Equipped,
@@ -1698,7 +1698,7 @@ fn history_list_queries() {
         (p(1), red.clone()),
         (p(2), blue),
         (p(1), red),
-        // A caster not in the game: not among "all players".
+        // A caster not in `env.players()`: still counted when `player` is None (all casters).
         (p(7), card(3, Zone::Stack, 7, &["Instant"])),
     ];
     env.died = vec![creature(4, 1, 2, 2), creature(5, 2, 5, 5)];
@@ -1716,7 +1716,7 @@ fn history_list_queries() {
             }),
         })
     };
-    assert_eq!(val(&env, &c, &instants(None)), 2);
+    assert_eq!(val(&env, &c, &instants(None)), 3);
     assert_eq!(
         val(&env, &c, &instants(Some(pref(ReferenceAST::Controller)))),
         2
@@ -1925,4 +1925,211 @@ fn property_sweep_determinism_and_no_panics() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1 (PR #217)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-DSL-003: HISTORY(SPELLS_CAST_THIS_TURN) with a condition and no player counts every
+/// caster, even one not in `env.players()`; with `Some(ALL_PLAYERS)` only seated casters count.
+#[test]
+fn history_spells_cast_condition_counts_every_caster_without_player() {
+    let mut env = TestEnv::with_players(2);
+    env.spells = vec![
+        (p(1), card(1, Zone::Stack, 1, &["Instant"])),
+        (p(9), card(2, Zone::Stack, 9, &["Instant"])),
+        (p(2), card(3, Zone::Stack, 2, &["Sorcery"])),
+    ];
+    let q = |player| {
+        ValueExpressionAST::History(Box::new(HistoryAST::SpellsCastThisTurn {
+            player,
+            condition: Some(PredicateAST::HasCardType {
+                value: WordRef::Name("Instant".into()),
+            }),
+        }))
+    };
+    let c = ctx(1);
+    assert_eq!(val(&env, &c, &q(None)), 2);
+    let all = PlayerSelectorAST::Players(PlayerGroup::AllPlayers);
+    assert_eq!(val(&env, &c, &q(Some(all))), 1);
+    // A caster outside env.players() only, under ALL_PLAYERS: not counted.
+    env.spells = vec![(p(9), card(2, Zone::Stack, 9, &["Instant"]))];
+    assert_eq!(val(&env, &c, &q(None)), 1);
+    let all = PlayerSelectorAST::Players(PlayerGroup::AllPlayers);
+    assert_eq!(val(&env, &c, &q(Some(all))), 0);
+}
+
+/// REQ-ARCH-002, REQ-DSL-003, CR 101.3: `select_objects` reports ignored parts in the input
+/// order of the reference's referents (wrong kind interleaved with gone referents).
+#[test]
+fn select_objects_ignored_in_referent_order() {
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(1, 1, 1, 1));
+    let bound = ReferenceAST::Bound { var: "$l".into() };
+    let s = ObjectSelectorAST::Ref(bound.clone());
+
+    let mut c = ctx(1);
+    c.bindings.insert(
+        "$l".into(),
+        vec![Referent::Player(p(1)), Referent::Object(o(9))],
+    );
+    let r = select_objects(&env, &c, &s).unwrap();
+    assert!(r.items.is_empty());
+    assert_eq!(
+        r.ignored,
+        vec![
+            Ignored::Unresolved(bound.clone()),
+            Ignored::Gone(Referent::Object(o(9))),
+        ]
+    );
+
+    c.bindings.insert(
+        "$l".into(),
+        vec![
+            Referent::Object(o(1)),
+            Referent::Player(p(8)),
+            Referent::Player(p(2)),
+            Referent::Object(o(9)),
+        ],
+    );
+    let r = select_objects(&env, &c, &s).unwrap();
+    assert_eq!(r.items, vec![o(1)]);
+    assert_eq!(
+        r.ignored,
+        vec![
+            Ignored::Gone(Referent::Player(p(8))),
+            Ignored::Unresolved(bound.clone()),
+            Ignored::Gone(Referent::Object(o(9))),
+        ]
+    );
+    // resolve_reference keeps items and ignored each in input order, unchanged.
+    let rr = resolve_reference(&env, &c, &bound).unwrap();
+    assert_eq!(
+        rr.items,
+        vec![Referent::Object(o(1)), Referent::Player(p(2))]
+    );
+    assert_eq!(
+        rr.ignored,
+        vec![
+            Ignored::Gone(Referent::Player(p(8))),
+            Ignored::Gone(Referent::Object(o(9))),
+        ]
+    );
+}
+
+/// REQ-ARCH-002, REQ-DSL-003, CR 101.3: `resolve_players` reports ignored parts in the input
+/// order of the reference's referents (wrong kind interleaved with gone referents).
+#[test]
+fn resolve_players_ignored_in_referent_order() {
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(1, 1, 1, 1));
+    let bound = ReferenceAST::Bound { var: "$l".into() };
+    let s = pref(bound.clone());
+    let mut c = ctx(1);
+    c.bindings.insert(
+        "$l".into(),
+        vec![Referent::Object(o(1)), Referent::Player(p(8))],
+    );
+    let r = resolve_players(&env, &c, &s).unwrap();
+    assert!(r.items.is_empty());
+    assert_eq!(
+        r.ignored,
+        vec![
+            Ignored::Unresolved(bound.clone()),
+            Ignored::Gone(Referent::Player(p(8))),
+        ]
+    );
+
+    c.bindings.insert(
+        "$l".into(),
+        vec![
+            Referent::Player(p(2)),
+            Referent::Object(o(9)),
+            Referent::Object(o(1)),
+            Referent::Player(p(1)),
+        ],
+    );
+    let r = resolve_players(&env, &c, &s).unwrap();
+    assert_eq!(r.items, vec![p(2), p(1)]);
+    assert_eq!(
+        r.ignored,
+        vec![
+            Ignored::Gone(Referent::Object(o(9))),
+            Ignored::Unresolved(bound),
+        ]
+    );
+}
+
+/// REQ-DSL-003, REQ-ARCH-002, CR 101.3: ENCHANTED / EQUIPPED / ATTACHED_TO name an object or a
+/// player host; a gone object host or an unknown player host is Gone; no host is Unresolved.
+#[test]
+fn attachment_references_object_or_player_host() {
+    let mut env = TestEnv::with_players(2);
+    env.add(card(5, Zone::Battlefield, 1, &["Enchantment"]));
+    env.add(card(6, Zone::Battlefield, 1, &["Enchantment"]));
+    env.add(card(7, Zone::Battlefield, 1, &["Enchantment"]));
+    env.add(card(8, Zone::Battlefield, 1, &["Enchantment"]));
+    env.add(card(9, Zone::Battlefield, 1, &["Enchantment"]));
+    env.add(creature(10, 1, 1, 1));
+    env.attached.insert(o(5), Referent::Object(o(10)));
+    env.attached.insert(o(6), Referent::Player(p(2)));
+    env.attached.insert(o(7), Referent::Object(o(77)));
+    env.attached.insert(o(8), Referent::Player(p(6)));
+    for r in [
+        ReferenceAST::Enchanted,
+        ReferenceAST::Equipped,
+        ReferenceAST::AttachedTo,
+    ] {
+        let at = |src: u64| resolved(&env, &ctx_src(1, src), r.clone());
+        let host = at(5);
+        assert_eq!(host.items, vec![Referent::Object(o(10))]);
+        assert!(host.ignored.is_empty());
+        let host = at(6);
+        assert_eq!(host.items, vec![Referent::Player(p(2))]);
+        assert!(host.ignored.is_empty());
+        let host = at(7);
+        assert!(host.items.is_empty());
+        assert_eq!(host.ignored, vec![Ignored::Gone(Referent::Object(o(77)))]);
+        let host = at(8);
+        assert!(host.items.is_empty());
+        assert_eq!(host.ignored, vec![Ignored::Gone(Referent::Player(p(6)))]);
+        let host = at(9);
+        assert!(host.items.is_empty());
+        assert_eq!(host.ignored, vec![Ignored::Unresolved(r.clone())]);
+    }
+    // A player host works through a player selector.
+    let r = resolve_players(&env, &ctx_src(1, 6), &pref(ReferenceAST::Enchanted)).unwrap();
+    assert_eq!(r.items, vec![p(2)]);
+}
+
+/// REQ-DSL-003, CR 608.2h, CR 113.7a, CR 608.2b: ATTR(SOURCE_LKI) reads the captured last known
+/// information first; ATTR(SELF) reads current information first.
+#[test]
+fn attr_source_lki_reads_captured_view_first() {
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(10, 1, 7, 7));
+    env.lki.insert(o(10), creature(10, 1, 3, 3));
+    let c = ctx_src(1, 10);
+    let at = |r: ReferenceAST| ValueExpressionAST::Attr {
+        reference: r,
+        attr: ObjectAttr::Power,
+    };
+    assert_eq!(val(&env, &c, &at(ReferenceAST::SourceLki)), 3);
+    assert_eq!(val(&env, &c, &at(ReferenceAST::SelfRef)), 7);
+    // Nothing captured: current information.
+    env.lki.clear();
+    assert_eq!(val(&env, &c, &at(ReferenceAST::SourceLki)), 7);
+    // Neither current nor captured information: 0, no error.
+    env.objects.clear();
+    assert_eq!(eval_value(&env, &c, &at(ReferenceAST::SourceLki)), Ok(0));
+    // Other references keep reading current information first.
+    let mut env = TestEnv::with_players(2);
+    env.add(creature(10, 1, 7, 7));
+    env.lki.insert(o(10), creature(10, 1, 3, 3));
+    let mut cb = ctx_src(1, 10);
+    cb.bindings
+        .insert("$s".into(), vec![Referent::Object(o(10))]);
+    let bound = at(ReferenceAST::Bound { var: "$s".into() });
+    assert_eq!(val(&env, &cb, &bound), 7);
 }

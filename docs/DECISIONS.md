@@ -7573,7 +7573,12 @@ trait, `EvalContext` (+ `EvalContext::new`), `Ignored`, `Resolution<T>` (with `D
 `eval_value`, `compare` and `partition_possible`. Additions: `Display` and `std::error::Error`
 for `InterpError`. Submodules (`types`, `resolve`, `expr`) are private and re-exported from
 `interp/mod.rs`. The game is read only through `InterpEnv`; every object is read as an
-already-layer-evaluated `ObjectView`.
+already-layer-evaluated `ObjectView`. `InterpEnv::attached_to(object)` returns
+`Option<Referent>` (the object or player `object` is attached to), not `Option<ObjectId>`,
+because the engine can attach an Aura or similar to a player (`AttachTarget::Player`); this is
+the one change to the pinned API, made in PR review round 1. `crates/fineprint-core/src/lib.rs`
+received one wiring edit (a doc line plus `pub mod interp;`) outside the Implementer's owned
+paths, authorised by the classifier's brief for #57.
 
 **Rationale.** `GameState` has no zones, permanents, stack or wired history ledger yet (#18
 FP-017), and #31 FP-030 puts real-state environments in the integration unit; an injected trait
@@ -7590,7 +7595,9 @@ the interpreter (rejected: layers are the layer system's job, and the CDA path i
 
 **Decision.** The brief's marked decisions, as implemented: `TEAMMATES` is the empty list (no
 team formats yet); the filter-selector default zone is the battlefield; `ENCHANTED`, `EQUIPPED`
-and `ATTACHED_TO` are the same lookup (`InterpEnv::attached_to(source)`); `REMEMBERED(key)`
+and `ATTACHED_TO` are the same lookup (`InterpEnv::attached_to(source)`) and may name an object
+or a player host (a player host is checked against `env.players()`, an object host with
+`env.object`, either becomes `Ignored::Gone` when absent); `REMEMBERED(key)`
 resolves only a remembered `ChoiceValue::Player`; `CONTROLS` is "some player in the set controls
 some selected object"; `PLAYER_HAS_MAX_SPEED` is true iff the resolved set is non-empty and all
 have max speed, independent of the subject; division by zero is `InterpError::DivisionByZero`
@@ -7608,14 +7615,20 @@ otherwise 0. Further interpretations made here:
    a subject without P/T is then false.
 4. `CONTROLS` reads each selected object's controller from `env.object(id)` (current
    information; an object without a controller controls nothing).
-5. `resolve_players` / `select_objects` reference form: the ignored entries of the underlying
-   reference come first, then one `Unresolved(ref)` per referent of the wrong kind.
-6. Selector `count` larger than `usize` keeps all; ids `objects_in` reports that `env.object`
+5. `resolve_players` / `select_objects` reference form: the ignored entries follow the input
+   order of the underlying reference's referents: each gone referent's `Gone` entry and each
+   wrong-kind referent's `Unresolved(ref)` entry appear where that referent stands in the list
+   (`items` also in input order).
+6. Selector `count`: 0 or less keeps none; a positive count larger than `usize::MAX` (32-bit or
+   wasm32 targets) keeps all; ids `objects_in` reports that `env.object`
    does not know are skipped silently (no `Ignored` entry: they are not part of the instruction).
-7. `SPELLS_CAST_THIS_TURN` with a condition and no player counts casters in `env.players()`
-   (the brief's "all players"); a caster no longer in the game is not counted. Without a
-   condition and without a player it is the ledger total, which still counts such a caster.
-8. `ATTR` and `DISTINCT` read objects with `view_of` (current information, then LKI);
+7. `SPELLS_CAST_THIS_TURN` with a condition and no player counts every entry of
+   `env.spells_cast_this_turn()` whose view passes the condition, with no filter on the caster
+   (so a caster no longer in the game still counts), consistent with the unconditioned ledger
+   total. With a player selector the caster must be in the resolved player set.
+8. `ATTR` and `DISTINCT` read objects with `view_of` (current information, then LKI), except
+   `ATTR(SOURCE_LKI, attr)`, which reads the source's captured last known information first
+   and falls back to its current information (CR 608.2h, CR 113.7a, CR 608.2b);
    `DISTINCT ... COLOR` counts only the five colour bits.
 9. `MANA_SPENT_TO_CAST` resolves its reference with `resolve_reference` (so `SELF` may use LKI;
    other references require the object to be present) and sums over the Object items.
@@ -7627,8 +7640,9 @@ CR 101.3 split (impossible instruction = ignored part; malformed expression = er
 **Alternatives.** Evaluating object-only predicates' operands for player subjects (rejected: the
 brief says "false", and an error there would make a player-subject test depend on unrelated
 data); treating an unknown referent player as resolved (rejected: CR 101.3 says the impossible
-part is ignored); counting every caster for conditioned spell queries (rejected: the brief names
-"all players").
+part is ignored); counting only casters in `env.players()` for conditioned spell queries with no
+player (rejected in review round 1: it disagreed with the unconditioned ledger total, which
+counts every caster).
 
 ## #57 FP-055 — Deferred
 

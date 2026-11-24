@@ -39,26 +39,35 @@ pub(super) fn apnap_players(env: &dyn InterpEnv) -> Vec<PlayerId> {
     players
 }
 
+/// One referent of a reference, in input order: either resolved or ignored (CR 101.3). The
+/// selectors read this ordered form so their `ignored` lists follow the referents' order.
+enum Slot {
+    /// A referent that is still there.
+    Item(Referent),
+    /// An impossible part of the reference.
+    Ignored(Ignored),
+}
+
 /// Adds a player referent if the player is in the game, else records it as gone (CR 101.3).
-fn push_player(env: &dyn InterpEnv, out: &mut Resolution<Referent>, p: PlayerId) {
+fn push_player(env: &dyn InterpEnv, out: &mut Vec<Slot>, p: PlayerId) {
     if env.players().contains(&p) {
-        out.items.push(Referent::Player(p));
+        out.push(Slot::Item(Referent::Player(p)));
     } else {
-        out.ignored.push(Ignored::Gone(Referent::Player(p)));
+        out.push(Slot::Ignored(Ignored::Gone(Referent::Player(p))));
     }
 }
 
 /// Adds an object referent if the object is in a zone now, else records it as gone (CR 101.3).
-fn push_object(env: &dyn InterpEnv, out: &mut Resolution<Referent>, id: ObjectId) {
+fn push_object(env: &dyn InterpEnv, out: &mut Vec<Slot>, id: ObjectId) {
     if env.object(id).is_some() {
-        out.items.push(Referent::Object(id));
+        out.push(Slot::Item(Referent::Object(id)));
     } else {
-        out.ignored.push(Ignored::Gone(Referent::Object(id)));
+        out.push(Slot::Ignored(Ignored::Gone(Referent::Object(id))));
     }
 }
 
 /// Adds any referent, checking it is still there (CR 101.3).
-fn push_referent(env: &dyn InterpEnv, out: &mut Resolution<Referent>, r: Referent) {
+fn push_referent(env: &dyn InterpEnv, out: &mut Vec<Slot>, r: Referent) {
     match r {
         Referent::Object(id) => push_object(env, out, id),
         Referent::Player(p) => push_player(env, out, p),
@@ -70,7 +79,9 @@ fn push_referent(env: &dyn InterpEnv, out: &mut Resolution<Referent>, r: Referen
 /// An impossible reference (nothing to name, or a named player or object that is gone) is
 /// reported in [`Resolution::ignored`] and never an error (REQ-ARCH-002, CR 101.3). `SELF` and
 /// `SOURCE_LKI` use last known information once the source has left (CR 608.2h, CR 113.7a,
-/// CR 608.2b). `EACH_OPPONENT` is in APNAP order (CR 101.4).
+/// CR 608.2b). `EACH_OPPONENT` is in APNAP order (CR 101.4). `ENCHANTED`, `EQUIPPED` and
+/// `ATTACHED_TO` are the same lookup, [`InterpEnv::attached_to`] of the source: the host may be
+/// an object or a player, and a host that is gone is ignored as [`Ignored::Gone`].
 ///
 /// # Errors
 ///
@@ -82,18 +93,35 @@ pub fn resolve_reference(
     r: &ReferenceAST,
 ) -> Result<Resolution<Referent>, InterpError> {
     let mut out = Resolution::default();
-    let unresolved =
-        |out: &mut Resolution<Referent>| out.ignored.push(Ignored::Unresolved(r.clone()));
+    for slot in resolve_slots(env, ctx, r)? {
+        match slot {
+            Slot::Item(referent) => out.items.push(referent),
+            Slot::Ignored(ignored) => out.ignored.push(ignored),
+        }
+    }
+    Ok(out)
+}
+
+/// The referents of a reference in input order, each resolved or ignored (REQ-DSL-003,
+/// REQ-ARCH-002, CR 101.3): the ordered form behind [`resolve_reference`],
+/// [`resolve_players`] and [`select_objects`].
+fn resolve_slots(
+    env: &dyn InterpEnv,
+    ctx: &EvalContext,
+    r: &ReferenceAST,
+) -> Result<Vec<Slot>, InterpError> {
+    let mut out = Vec::new();
+    let unresolved = |out: &mut Vec<Slot>| out.push(Slot::Ignored(Ignored::Unresolved(r.clone())));
     match r {
         // CR 608.2h, CR 113.7a: the source's last known information stands in once it left.
         ReferenceAST::SelfRef => match ctx.source {
-            Some(id) if view_of(env, id).is_some() => out.items.push(Referent::Object(id)),
+            Some(id) if view_of(env, id).is_some() => out.push(Slot::Item(Referent::Object(id))),
             _ => unresolved(&mut out),
         },
         // CR 608.2h, CR 608.2b: last known information first, current information otherwise.
         ReferenceAST::SourceLki => match ctx.source {
             Some(id) if env.lki(id).is_some() || env.object(id).is_some() => {
-                out.items.push(Referent::Object(id));
+                out.push(Slot::Item(Referent::Object(id)));
             }
             _ => unresolved(&mut out),
         },
@@ -142,9 +170,10 @@ pub fn resolve_reference(
             }
             _ => unresolved(&mut out),
         },
+        // The three are the same lookup; the host may be an object or a player.
         ReferenceAST::Enchanted | ReferenceAST::Equipped | ReferenceAST::AttachedTo => {
             match ctx.source.and_then(|id| env.attached_to(id)) {
-                Some(host) => push_object(env, &mut out, host),
+                Some(host) => push_referent(env, &mut out, host),
                 None => unresolved(&mut out),
             }
         }
@@ -164,11 +193,12 @@ pub fn resolve_reference(
         },
         // CR 101.4: APNAP order.
         ReferenceAST::EachOpponent => {
-            out.items = apnap_players(env)
-                .into_iter()
-                .filter(|p| *p != ctx.controller)
-                .map(Referent::Player)
-                .collect();
+            out.extend(
+                apnap_players(env)
+                    .into_iter()
+                    .filter(|p| *p != ctx.controller)
+                    .map(|p| Slot::Item(Referent::Player(p))),
+            );
         }
     }
     Ok(out)
@@ -188,15 +218,15 @@ pub fn resolve_players(
 ) -> Result<Resolution<PlayerId>, InterpError> {
     match s {
         PlayerSelectorAST::Ref(r) => {
-            let res = resolve_reference(env, ctx, r)?;
-            let mut out = Resolution {
-                items: Vec::new(),
-                ignored: res.ignored,
-            };
-            for item in res.items {
-                match item {
-                    Referent::Player(p) => out.items.push(p),
-                    Referent::Object(_) => out.ignored.push(Ignored::Unresolved(r.clone())),
+            // CR 101.3: every ignored part is reported in the referents' input order.
+            let mut out = Resolution::default();
+            for slot in resolve_slots(env, ctx, r)? {
+                match slot {
+                    Slot::Item(Referent::Player(p)) => out.items.push(p),
+                    Slot::Item(Referent::Object(_)) => {
+                        out.ignored.push(Ignored::Unresolved(r.clone()));
+                    }
+                    Slot::Ignored(ignored) => out.ignored.push(ignored),
                 }
             }
             Ok(out)
@@ -227,15 +257,15 @@ pub fn select_objects(
 ) -> Result<Resolution<ObjectId>, InterpError> {
     match s {
         ObjectSelectorAST::Ref(r) => {
-            let res = resolve_reference(env, ctx, r)?;
-            let mut out = Resolution {
-                items: Vec::new(),
-                ignored: res.ignored,
-            };
-            for item in res.items {
-                match item {
-                    Referent::Object(id) => out.items.push(id),
-                    Referent::Player(_) => out.ignored.push(Ignored::Unresolved(r.clone())),
+            // CR 101.3: every ignored part is reported in the referents' input order.
+            let mut out = Resolution::default();
+            for slot in resolve_slots(env, ctx, r)? {
+                match slot {
+                    Slot::Item(Referent::Object(id)) => out.items.push(id),
+                    Slot::Item(Referent::Player(_)) => {
+                        out.ignored.push(Ignored::Unresolved(r.clone()));
+                    }
+                    Slot::Ignored(ignored) => out.ignored.push(ignored),
                 }
             }
             Ok(out)
@@ -285,13 +315,29 @@ fn select_filtered(
     });
     if let Some(count) = &filter.count {
         let n = eval_value(env, ctx, count)?;
-        let keep = usize::try_from(n).unwrap_or(0);
-        views.truncate(keep);
+        views.truncate(count_limit(n));
     }
     Ok(Resolution {
         items: views.into_iter().map(|v| v.id).collect(),
         ignored: Vec::new(),
     })
+}
+
+/// The number of objects a selector `count` of `n` keeps (REQ-DSL-003, REQ-CORE-006): 0 for
+/// `n <= 0`, `usize::MAX` (keep all) for a positive `n` above `usize::MAX` (32-bit and wasm32
+/// targets), otherwise `n`.
+fn count_limit(n: i64) -> usize {
+    count_limit_wide(i128::from(n))
+}
+
+/// [`count_limit`] over a wider input (REQ-CORE-006), so the overflow arm is reachable and
+/// testable on every target: 0 for `n <= 0`, `usize::MAX` when `n` does not fit `usize`.
+fn count_limit_wide(n: i128) -> usize {
+    if n <= 0 {
+        0
+    } else {
+        usize::try_from(n).unwrap_or(usize::MAX)
+    }
 }
 
 /// Compares two views by one ordering key (`None` power/toughness sorts before any number).
@@ -325,4 +371,25 @@ pub fn partition_possible<T>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::{count_limit, count_limit_wide};
+
+    /// REQ-CORE-006, REQ-DSL-003: selector count conversion: n <= 0 keeps none, a positive n
+    /// keeps n, a positive n above `usize::MAX` keeps all (no panic, no wrap).
+    #[test]
+    fn count_limit_every_arm() {
+        assert_eq!(count_limit(-1), 0);
+        assert_eq!(count_limit(i64::MIN), 0);
+        assert_eq!(count_limit(0), 0);
+        assert_eq!(count_limit(1), 1);
+        let max = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+        assert_eq!(count_limit(i64::MAX), max);
+        let above = i128::try_from(usize::MAX).unwrap() + 1;
+        assert_eq!(count_limit_wide(above), usize::MAX);
+        assert_eq!(count_limit_wide(i128::MAX), usize::MAX);
+        assert_eq!(count_limit_wide(-5), 0);
+    }
 }
