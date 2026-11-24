@@ -266,3 +266,50 @@ fn req_arch_002_partition_possible() {
     assert_eq!(split.performed, vec![obj(2)]);
     assert_eq!(split.ignored, vec![obj(1)]);
 }
+
+// REQ-ARCH-002, CR 101.3: `Resolution::ignored` lists impossible parts in the input order of the
+// referents, also when two kinds of impossibility interleave.
+#[test]
+fn req_arch_002_ignored_interleaved_kinds_keep_input_order() {
+    let v = bound("$v");
+    let sel = ObjectSelectorAST::Ref(v.clone());
+    let mut env = Env::new(); // seated: P1, P2
+    env.add(creature(1, Zone::Battlefield, P1, 1, 1));
+    let mut c = ctx(P1);
+
+    // select_objects: a live player is the wrong kind, a missing object is gone.
+    c.bindings.insert("$v".into(), vec![pl(P1), obj(9)]);
+    assert_eq!(
+        select_objects(&env, &c, &sel),
+        Ok(Resolution {
+            items: Vec::new(),
+            ignored: vec![Ignored::Unresolved(v.clone()), Ignored::Gone(obj(9))],
+        })
+    );
+    c.bindings
+        .insert("$v".into(), vec![obj(1), pl(NOBODY), pl(P2), obj(8)]);
+    assert_eq!(
+        select_objects(&env, &c, &sel),
+        Ok(Resolution {
+            items: vec![oid(1)],
+            ignored: vec![
+                Ignored::Gone(pl(NOBODY)),
+                Ignored::Unresolved(v.clone()),
+                Ignored::Gone(obj(8)),
+            ],
+        })
+    );
+
+    // resolve_players: the live object is the wrong kind.
+    assert_eq!(
+        resolve_players(&env, &c, &pref(v.clone())),
+        Ok(Resolution {
+            items: vec![P2],
+            ignored: vec![
+                Ignored::Unresolved(v.clone()),
+                Ignored::Gone(pl(NOBODY)),
+                Ignored::Gone(obj(8)),
+            ],
+        })
+    );
+}

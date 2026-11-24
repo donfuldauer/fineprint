@@ -11,6 +11,7 @@ mod support;
 
 use fineprint_core::interp::{
     ChosenValue, Ignored, InterpError, Referent, Resolution, resolve_players, resolve_reference,
+    select_objects,
 };
 use fineprint_core::memory::ChoiceValue;
 use support::*;
@@ -50,7 +51,7 @@ fn base_env() -> Env {
     env.add(creature(10, Zone::Battlefield, P1, 2, 2));
     env.add(artifact(11, Zone::Battlefield, P1));
     env.add(creature(12, Zone::Battlefield, P2, 1, 1));
-    env.attached.insert(oid(11), oid(12));
+    env.attached.insert(oid(11), obj(12));
     env.defending.insert(oid(10), P2);
     env
 }
@@ -279,6 +280,65 @@ fn req_dsl_003_attachment_refs() {
             "{r:?}"
         );
     }
+}
+
+// REQ-DSL-003, CR 101.3: the host may be a player; a player host that is seated resolves, an
+// absent object or player host is gone, and no attachment or no source is unresolved.
+#[test]
+fn req_dsl_003_attachment_refs_object_and_player_hosts() {
+    for r in [
+        ReferenceAST::Enchanted,
+        ReferenceAST::Equipped,
+        ReferenceAST::AttachedTo,
+    ] {
+        let mut env = base_env();
+        let c = ctx_src(P1, oid(11));
+        // Object host that exists.
+        assert_eq!(resolve(&env, &c, &r), only(vec![obj(12)]), "{r:?}");
+        // Player host that is seated.
+        env.attached.insert(oid(11), pl(P2));
+        assert_eq!(resolve(&env, &c, &r), only(vec![pl(P2)]), "{r:?}");
+        // Player host that is not seated.
+        env.attached.insert(oid(11), pl(NOBODY));
+        assert_eq!(resolve(&env, &c, &r), gone(pl(NOBODY)), "{r:?}");
+        // Object host that is gone.
+        env.attached.insert(oid(11), obj(77));
+        assert_eq!(resolve(&env, &c, &r), gone(obj(77)), "{r:?}");
+        // No attachment, no source.
+        env.attached.remove(&oid(11));
+        assert_eq!(resolve(&env, &c, &r), unresolved(r.clone()), "{r:?}");
+        env.attached.insert(oid(11), pl(P2));
+        assert_eq!(resolve(&env, &ctx(P1), &r), unresolved(r.clone()), "{r:?}");
+    }
+}
+
+// REQ-DSL-003, REQ-ARCH-002, CR 101.3: a player host is not an object (select_objects) and an
+// object host is not a player (resolve_players); the wrong kind is Unresolved(reference).
+#[test]
+fn req_dsl_003_attachment_player_host_by_kind() {
+    let mut env = base_env();
+    env.attached.insert(oid(11), pl(P2));
+    let c = ctx_src(P1, oid(11));
+    let r = ReferenceAST::Enchanted;
+    assert_eq!(
+        select_objects(&env, &c, &ObjectSelectorAST::Ref(r.clone())),
+        Ok(Resolution {
+            items: Vec::new(),
+            ignored: vec![Ignored::Unresolved(r.clone())],
+        })
+    );
+    let r = ReferenceAST::AttachedTo;
+    let got = resolve_players(&env, &c, &pref(r)).expect("no error");
+    assert_eq!(got.items, vec![P2]);
+    assert!(got.ignored.is_empty());
+    // An object host through resolve_players is dropped as Unresolved.
+    env.attached.insert(oid(11), obj(12));
+    let got = resolve_players(&env, &c, &pref(ReferenceAST::Equipped)).expect("no error");
+    assert!(got.items.is_empty());
+    assert_eq!(
+        got.ignored,
+        vec![Ignored::Unresolved(ReferenceAST::Equipped)]
+    );
 }
 
 // REQ-DSL-003: REMEMBERED{key} reads the source's memory; only a remembered player resolves.

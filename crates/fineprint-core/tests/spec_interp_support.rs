@@ -164,7 +164,8 @@ pub struct Env {
     pub history: History,
     pub memories: BTreeMap<ObjectId, Memory>,
     pub lki: BTreeMap<ObjectId, ObjectView>,
-    pub attached: BTreeMap<ObjectId, ObjectId>,
+    /// `object` -> what it is attached to (an object or a player).
+    pub attached: BTreeMap<ObjectId, Referent>,
     pub defending: BTreeMap<ObjectId, PlayerId>,
     /// `(player, stat key)` -> value; see [`stat_key`]. Known players without an entry read 0.
     pub stats: BTreeMap<(PlayerId, String), i64>,
@@ -360,8 +361,8 @@ impl InterpEnv for Env {
         &self.history
     }
 
-    fn attached_to(&self, object: ObjectId) -> Option<ObjectId> {
-        self.attached.get(&object).copied()
+    fn attached_to(&self, object: ObjectId) -> Option<Referent> {
+        self.attached.get(&object).cloned()
     }
 
     fn defending_player(&self, attacker: ObjectId) -> Option<PlayerId> {
