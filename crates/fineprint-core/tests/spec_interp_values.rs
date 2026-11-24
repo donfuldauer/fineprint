@@ -163,6 +163,49 @@ fn req_dsl_003_attr_source_lki() {
     );
 }
 
+// REQ-DSL-003, CR 608.2h / CR 113.7a / CR 608.2b: ATTR(SOURCE_LKI) reads the captured last known
+// view first and falls back to the current view; every other reference reads the current view
+// first.
+#[test]
+fn req_dsl_003_attr_source_lki_prefers_captured_view() {
+    let mut env = Env::new();
+    let mut now = creature(1, Zone::Battlefield, P1, 7, 7);
+    now.mana_value = 5;
+    let mut then = creature(1, Zone::Battlefield, P1, 3, 3);
+    then.mana_value = 2;
+    env.add(now);
+    env.lki.insert(oid(1), then);
+    let mut c = ctx_src(P1, oid(1));
+    c.targets = vec![Some(obj(1))];
+    c.bindings.insert("$o".into(), vec![obj(1)]);
+    let v = |r: ReferenceAST, a: ObjectAttr| val(&env, &c, &attr(r, a));
+    assert_eq!(v(ReferenceAST::SourceLki, ObjectAttr::Power), 3);
+    assert_eq!(v(ReferenceAST::SourceLki, ObjectAttr::ManaValue), 2);
+    assert_eq!(v(ReferenceAST::SelfRef, ObjectAttr::Power), 7);
+    assert_eq!(v(ReferenceAST::SelfRef, ObjectAttr::ManaValue), 5);
+    assert_eq!(v(target(0), ObjectAttr::Power), 7);
+    assert_eq!(v(bound("$o"), ObjectAttr::Power), 7);
+    assert_eq!(v(bound("$o"), ObjectAttr::ManaValue), 5);
+}
+
+// REQ-DSL-003, CR 608.2h: with no captured view SOURCE_LKI falls back to the current view; with
+// no information at all it is 0 and never an error.
+#[test]
+fn req_dsl_003_attr_source_lki_fallbacks() {
+    let mut env = Env::new();
+    env.add(creature(1, Zone::Battlefield, P1, 7, 7));
+    let c = ctx_src(P1, oid(1));
+    assert_eq!(
+        val(&env, &c, &attr(ReferenceAST::SourceLki, ObjectAttr::Power)),
+        7
+    );
+    env.vanish(oid(1));
+    assert_eq!(
+        val(&env, &c, &attr(ReferenceAST::SourceLki, ObjectAttr::Power)),
+        0
+    );
+}
+
 // REQ-DSL-003: PLAYER_ATTR maps every attribute one to one to PlayerStat and sums over players.
 #[test]
 fn req_dsl_003_player_attr_every_attribute() {

@@ -174,7 +174,13 @@ fn req_dsl_003_spells_cast_with_condition() {
         v
     };
     let p3_creature = creature(3, Zone::Stack, P3, 1, 1);
-    let p1_instant = instant(4, Zone::Graveyard, P1);
+    // As cast: a red Instant on the stack. Currently: a creature of another colour in the
+    // graveyard (the same id). The condition must read the as-cast view (F9).
+    let mut p1_instant = instant(4, Zone::Stack, P1);
+    p1_instant.characteristics.colors = colors(8);
+    let mut now = creature(4, Zone::Graveyard, P1, 1, 1);
+    now.characteristics.colors = colors(2);
+    env.add(now);
     env.spells = vec![
         (P1, red_creature),
         (P2, blue_instant),
@@ -247,6 +253,71 @@ fn req_dsl_003_spells_cast_with_condition() {
                 PredicateAST::IsCardOrToken
             )
         ),
+        0
+    );
+}
+
+// REQ-DSL-003: the condition is evaluated on the AS-CAST view recorded in the entry, never on
+// the object's current view (object 4 was an Instant on the stack and is now a creature in the
+// graveyard).
+#[test]
+fn req_dsl_003_spells_cast_condition_uses_as_cast_view() {
+    let mut env = Env::new();
+    let mut as_cast = instant(4, Zone::Stack, P1);
+    as_cast.characteristics.colors = colors(8);
+    let mut now = creature(4, Zone::Graveyard, P1, 1, 1);
+    now.characteristics.colors = colors(2);
+    env.add(now);
+    env.spells = vec![(P1, as_cast)];
+    let c = ctx(P1);
+    let q = |cond: PredicateAST| {
+        history(HistoryQuery::SpellsCastThisTurn {
+            player: None,
+            condition: Some(cond),
+        })
+    };
+    let card_type = |t: &str| PredicateAST::HasCardType { value: name(t) };
+    let color = |t: &str| PredicateAST::HasColor { value: name(t) };
+    // As cast: an Instant, red, not a creature.
+    assert_eq!(val(&env, &c, &q(card_type("Instant"))), 1);
+    assert_eq!(val(&env, &c, &q(card_type("Creature"))), 0);
+    assert_eq!(val(&env, &c, &q(PredicateAST::IsCreature)), 0);
+    assert_eq!(val(&env, &c, &q(color("red"))), 1);
+    assert_eq!(val(&env, &c, &q(color("blue"))), 0);
+    // The object is on the stack as cast, so it is not a permanent.
+    assert_eq!(val(&env, &c, &q(PredicateAST::IsPermanent)), 0);
+}
+
+// REQ-DSL-003: with no player selector the condition counts every entry, including a caster who
+// is not seated; with a selector only casters in the resolved player set count.
+#[test]
+fn req_dsl_003_spells_cast_player_none_counts_unseated_casters() {
+    let mut env = Env::new(); // seated: P1, P2
+    env.spells = vec![
+        (P1, creature(1, Zone::Stack, P1, 1, 1)),
+        (P2, creature(2, Zone::Stack, P2, 1, 1)),
+        (NOBODY, creature(3, Zone::Stack, NOBODY, 1, 1)),
+        (NOBODY, instant(5, Zone::Stack, NOBODY)),
+    ];
+    let c = ctx(P1);
+    let q = |player: Option<PlayerSelectorAST>| {
+        history(HistoryQuery::SpellsCastThisTurn {
+            player,
+            condition: Some(PredicateAST::IsCreature),
+        })
+    };
+    assert_eq!(val(&env, &c, &q(None)), 3);
+    assert_eq!(
+        val(
+            &env,
+            &c,
+            &q(Some(PlayerSelectorAST::Players(PlayerGroup::AllPlayers)))
+        ),
+        2
+    );
+    assert_eq!(val(&env, &c, &q(Some(pref(ReferenceAST::Controller)))), 1);
+    assert_eq!(
+        val(&env, &ctx(NOBODY), &q(Some(pref(ReferenceAST::Controller)))),
         0
     );
 }
