@@ -79,13 +79,11 @@ issue owns `docs/DEVELOPMENT.md` (layout, commands, gates, contracts, fixture an
 
 **Labels:** `work-unit`; `ready` / `blocked` (later `in-progress`); `type:` infra, feature,
 binding, toolchain, client, fixtures, docs; `area:` the SRS area; `phase:NN-name`; `tier:T1` /
-`tier:T2` (expected; T3 is never planned); and `review:skip` / `review:sanity` / `review:full`
-(`docs/PROCESS.md` P6). During an initial-usable-build milestone (M1 — Two-player engine), label
-P3 contract, public schema/API/binding, core deterministic loop/state-machine, `very-high`
-blast-radius, R5/R11/R12 security/compliance and milestone-gate units `review:sanity`, routine
-vertical-slice/fixture/client units `review:skip`, and include a cohesive full-review unit
-(`review:full`, e.g. `#219` FP-161) once the end-to-end M1 build works before M1 acceptance and
-before flipping to post-usable per-PR review. **Milestones:** M1 per REQ-NFR-010, then the deferred
+`tier:T2` (expected; T3 is never planned); and `review:gate` only on an issue that should carry
+a gate review although it may not be the last of its phase (for example a cohesive end-of-milestone
+audit such as `#219` FP-161). Units get no per-PR review label: CodeRabbit reviews only at the
+completion of each phase and milestone (`docs/PROCESS.md` P6 "Gate reviews"), so keep phases small
+enough that one phase's cumulative diff is reviewable in one pass. **Milestones:** M1 per REQ-NFR-010, then the deferred
 features in later milestones.
 
 **Suggested phase order** (adapt to the decisions): repository and CI → foundations (numbers,
@@ -93,7 +91,7 @@ IDs, PRNG, hashing, DSL schema, lints, synthetic card library) → state, zones,
 layouts → events, choices, replacement and triggers → layers → state-based actions → turn
 structure and priority → casting and resolution → DSL runtime effects → combat → keywords →
 loops → engine API, views and replays → card toolchain → bindings → test clients → regression
-fixtures → hardening, cohesive full review pass (`#219` FP-161) and M1 acceptance → later milestones.
+fixtures → hardening, cohesive M1 gate review (`#219` FP-161) and M1 acceptance → later milestones.
 
 ## 3. Check the breakdown
 
@@ -119,7 +117,7 @@ fixtures → hardening, cohesive full review pass (`#219` FP-161) and M1 accepta
 3. Link each dependency with GitHub's "blocked by" API
    (`POST /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` with the blocker's numeric
    `issue_id`). Label a unit `ready` only when every dependency is complete under the merged-PR rule
-   (PROCESS.md P6 step 5, `work-issue` §1 step 2); label the rest `blocked`. An open
+   (PROCESS.md P6 routine step 3, `work-issue` §1 step 2); label the rest `blocked`. An open
    dependency, or one closed as not planned without a qualifying replacement, is not complete.
 4. Run `python3 scripts/req_coverage.py` and fix any gap with an issue edit.
 5. Nothing is committed for the plan itself. Record any decisions made while planning in

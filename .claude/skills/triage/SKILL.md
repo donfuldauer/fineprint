@@ -54,7 +54,7 @@ work-classifier.
 7. Run ONE work-verifier on the resulting head commit covering every item, whenever the round
    changed the head (a queue-only round uses the verifier's queue-only case). Skip it only when
    the head is unchanged.
-8. Reply to and resolve threads per PROCESS.md P6 step 3.
+8. Reply to and resolve threads per PROCESS.md P6 "Gate reviews" step 4.
 
 ## 3. Fixer brief template
 
