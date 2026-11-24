@@ -9,6 +9,7 @@
 #[path = "spec_interp_support.rs"]
 mod support;
 
+use fineprint_core::interp::eval_value;
 use fineprint_core::interp::{
     ChosenValue, Ignored, InterpError, Referent, Resolution, resolve_players, resolve_reference,
     select_objects,
@@ -463,5 +464,75 @@ fn req_dsl_003_resolve_players_ref() {
     assert_eq!(
         resolve_players(&env, &c, &pref(bound("$x"))),
         Err(InterpError::UnboundVariable("$x".into()))
+    );
+}
+
+// REQ-DSL-003, CR 506.4: DEFENDING_PLAYER after the attacker left combat. The env retains the
+// defending player; the interpreter never checks whether the source is still attacking.
+#[test]
+fn req_dsl_003_defending_player_retained_after_leaving_combat() {
+    let r = ReferenceAST::DefendingPlayer;
+    // (a) attacking P2.
+    let mut env = Env::new();
+    let mut attacker = creature(1, Zone::Battlefield, P1, 2, 2);
+    attacker.attacking = true;
+    env.add(attacker);
+    env.defending.insert(oid(1), P2);
+    assert_eq!(resolve(&env, &ctx_src(P1, oid(1)), &r), only(vec![pl(P2)]));
+    // (b) removed from combat: the view says not attacking, the env still retains P2.
+    let mut gone_from_combat = creature(1, Zone::Battlefield, P1, 2, 2);
+    gone_from_combat.attacking = false;
+    env.add(gone_from_combat);
+    assert_eq!(resolve(&env, &ctx_src(P1, oid(1)), &r), only(vec![pl(P2)]));
+    // (c) never attacked; and no source.
+    env.add(creature(2, Zone::Battlefield, P1, 1, 1));
+    assert_eq!(
+        resolve(&env, &ctx_src(P1, oid(2)), &r),
+        unresolved(r.clone())
+    );
+    assert_eq!(resolve(&env, &ctx(P1), &r), unresolved(r.clone()));
+    // (e) player and object forms after removal from combat.
+    let c = ctx_src(P1, oid(1));
+    let got = resolve_players(&env, &c, &pref(r.clone())).expect("no error");
+    assert_eq!(got.items, vec![P2]);
+    assert!(got.ignored.is_empty());
+    let got = select_objects(&env, &c, &ObjectSelectorAST::Ref(r.clone())).expect("no error");
+    assert!(got.items.is_empty());
+    assert_eq!(got.ignored, vec![Ignored::Unresolved(r.clone())]);
+    // (d) retained player not in the game.
+    env.defending.insert(oid(1), NOBODY);
+    assert_eq!(resolve(&env, &c, &r), gone(pl(NOBODY)));
+}
+
+// REQ-DSL-003, CR 702.26b, CR 702.26d, CR 608.2b: a phased-out permanent is not found by ordinary
+// lookups, but phasing is not an LKI event.
+#[test]
+fn req_dsl_003_phased_out_target_is_gone() {
+    let mut env = Env::new();
+    env.add(creature(7, Zone::Battlefield, P1, 3, 3));
+    let mut c = ctx(P1);
+    c.targets = vec![Some(obj(7))];
+    assert_eq!(resolve(&env, &c, &target(0)), only(vec![obj(7)]));
+    env.phased_out.insert(oid(7));
+    assert_eq!(resolve(&env, &c, &target(0)), gone(obj(7)));
+    // Zone of the record is unchanged (CR 702.26d).
+    assert_eq!(
+        env.objects.get(&oid(7)).map(|v| v.zone),
+        Some(Zone::Battlefield)
+    );
+}
+
+// REQ-DSL-003, CR 702.26b, CR 608.2b: ATTR(SOURCE_LKI) still reads the captured view.
+#[test]
+fn req_dsl_003_phased_out_source_lki_reads_captured_view() {
+    let mut env = Env::new();
+    let v = creature(7, Zone::Battlefield, P1, 3, 3);
+    env.add(v.clone());
+    env.lki.insert(oid(7), v);
+    env.phased_out.insert(oid(7));
+    let c = ctx_src(P1, oid(7));
+    assert_eq!(
+        eval_value(&env, &c, &attr(ReferenceAST::SourceLki, ObjectAttr::Power)),
+        Ok(3)
     );
 }

@@ -340,3 +340,35 @@ fn req_dsl_003_reference_form() {
         })
     );
 }
+
+// REQ-DSL-003, CR 702.26b: a phased-out permanent is invisible to battlefield selectors and COUNT,
+// whatever order the env lists objects in; CR 702.26d: its zone is unchanged.
+#[test]
+fn req_dsl_003_phased_out_not_selected_or_counted() {
+    let mut base = Env::new();
+    base.add(creature(7, Zone::Battlefield, P1, 2, 2));
+    let sel = bf(PredicateAST::IsCreature);
+    let q = count(sel.clone());
+    for lo in [
+        ListOrder::Insertion,
+        ListOrder::Reverse,
+        ListOrder::Shuffled(1),
+        ListOrder::Shuffled(77),
+    ] {
+        let mut e = base.clone();
+        e.list_order = lo;
+        assert_eq!(select(&e, &ctx(P1), &sel), ids(&[7]), "{lo:?}");
+        assert_eq!(
+            fineprint_core::interp::eval_value(&e, &ctx(P1), &q),
+            Ok(1),
+            "{lo:?}"
+        );
+        e.phased_out.insert(oid(7));
+        assert!(select(&e, &ctx(P1), &sel).is_empty(), "{lo:?}");
+        assert_eq!(
+            fineprint_core::interp::eval_value(&e, &ctx(P1), &q),
+            Ok(0),
+            "{lo:?}"
+        );
+    }
+}
