@@ -9,6 +9,7 @@
 #[path = "spec_interp_support.rs"]
 mod support;
 
+use fineprint_base::ids::PlayerId;
 use fineprint_core::interp::{EvalContext, eval_value};
 use support::*;
 
@@ -398,4 +399,114 @@ fn req_dsl_003_mana_spent_to_cast() {
     assert_eq!(val(&env, &both, &q(bound("$s"), None)), 9);
     // No items: 0.
     assert_eq!(val(&env, &ctx(P1), &q(ReferenceAST::SelfRef, None)), 0);
+}
+
+fn dup_env(script: &[(u64, Feed)]) -> Env {
+    let mut env = Env::new();
+    env.history = ledger(2, script);
+    env
+}
+
+fn with_list(list: &[PlayerId]) -> EvalContext {
+    let mut c = ctx(P1);
+    c.bindings
+        .insert("$v".into(), list.iter().map(|p| pl(*p)).collect());
+    c
+}
+
+// REQ-DSL-003 (modelling choice): a player selector in a HISTORY query is a set of distinct
+// players, so a duplicate in the bound list is counted once.
+#[test]
+fn req_dsl_003_history_distinct_players_ledger() {
+    let env = dup_env(&[
+        (1, Feed::Spell(P1)),
+        (1, Feed::Spell(P1)),
+        (1, Feed::Spell(P2)),
+    ]);
+    let q = spells(Some(pref(bound("$v"))));
+    assert_eq!(val(&env, &with_list(&[P1, P1, P2]), &q), 3);
+    // No duplicates: unchanged.
+    assert_eq!(val(&env, &with_list(&[P1, P2]), &q), 3);
+}
+
+// REQ-DSL-003 (modelling choice): the conditioned SPELLS_CAST_THIS_TURN counts each as-cast entry
+// once however often its caster is listed.
+#[test]
+fn req_dsl_003_history_distinct_players_condition() {
+    let mut env = Env::new();
+    let mut a = instant(1, Zone::Stack, P1);
+    a.characteristics.colors = colors(8);
+    env.spells = vec![
+        (P1, a),
+        (P1, instant(2, Zone::Stack, P1)),
+        (P2, instant(3, Zone::Stack, P2)),
+    ];
+    let c = with_list(&[P1, P1, P2]);
+    let q = |cond: PredicateAST| {
+        history(HistoryQuery::SpellsCastThisTurn {
+            player: Some(pref(bound("$v"))),
+            condition: Some(cond),
+        })
+    };
+    assert_eq!(
+        val(
+            &env,
+            &c,
+            &q(PredicateAST::HasCardType {
+                value: name("Instant")
+            })
+        ),
+        3
+    );
+    // Only spell A (the coloured one) passes.
+    assert_eq!(
+        val(&env, &c, &q(PredicateAST::HasColor { value: name("red") })),
+        1
+    );
+}
+
+// REQ-DSL-003 (modelling choice): LIFE_LOST and CARDS_DRAWN sum over distinct players.
+#[test]
+fn req_dsl_003_history_distinct_players_life_and_draw() {
+    let env = dup_env(&[
+        (1, Feed::Lose(P1, 4)),
+        (1, Feed::Draw(P1)),
+        (1, Feed::Draw(P1)),
+        (1, Feed::Draw(P2)),
+    ]);
+    let lost = history(HistoryQuery::LifeLostThisTurn {
+        player: pref(bound("$v")),
+    });
+    assert_eq!(val(&env, &with_list(&[P1, P1]), &lost), 4);
+    let drawn = history(HistoryQuery::CardsDrawnThisTurn {
+        player: pref(bound("$v")),
+    });
+    assert_eq!(val(&env, &with_list(&[P1, P1, P2]), &drawn), 3);
+    assert_eq!(val(&env, &with_list(&[P1, P2]), &drawn), 3);
+}
+
+// REQ-DSL-003, CR 608.2h: MANA_SPENT_TO_CAST with a source absent from the env but captured in
+// LKI: SELF and SOURCE_LKI read it; TARGET of an absent object is gone and contributes 0.
+#[test]
+fn req_dsl_003_mana_spent_absent_source_uses_lki() {
+    let mut env = Env::new();
+    env.lki.insert(oid(5), instant(5, Zone::Stack, P1));
+    env.mana_spent.insert((oid(5), None), 3);
+    env.mana_spent.insert((oid(5), Some("red".into())), 1);
+    let q = |r: ReferenceAST, color: Option<WordRef>| {
+        history(HistoryQuery::ManaSpentToCast {
+            reference: r,
+            color,
+        })
+    };
+    let c = ctx_src(P1, oid(5));
+    assert_eq!(val(&env, &c, &q(ReferenceAST::SelfRef, None)), 3);
+    assert_eq!(
+        val(&env, &c, &q(ReferenceAST::SelfRef, Some(name("red")))),
+        1
+    );
+    assert_eq!(val(&env, &c, &q(ReferenceAST::SourceLki, None)), 3);
+    let mut t = ctx(P1);
+    t.targets = vec![Some(obj(5))];
+    assert_eq!(val(&env, &t, &q(target(0), None)), 0);
 }

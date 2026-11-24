@@ -166,7 +166,12 @@ pub struct Env {
     pub lki: BTreeMap<ObjectId, ObjectView>,
     /// `object` -> what it is attached to (an object or a player).
     pub attached: BTreeMap<ObjectId, Referent>,
+    /// Retained defending player per attacker, kept after the attacker left combat (CR 506.4);
+    /// the engine integration is responsible for retaining it, this env just models that.
     pub defending: BTreeMap<ObjectId, PlayerId>,
+    /// Phased-out permanents (CR 702.26b): ordinary lookups skip them; `lki` is unaffected and
+    /// the record's zone is unchanged (CR 702.26d).
+    pub phased_out: BTreeSet<ObjectId>,
     /// `(player, stat key)` -> value; see [`stat_key`]. Known players without an entry read 0.
     pub stats: BTreeMap<(PlayerId, String), i64>,
     /// `(player, colour word)` -> devotion to that colour.
@@ -221,6 +226,7 @@ impl Env {
             lki: BTreeMap::new(),
             attached: BTreeMap::new(),
             defending: BTreeMap::new(),
+            phased_out: BTreeSet::new(),
             stats: BTreeMap::new(),
             devotion_table: BTreeMap::new(),
             devotion_calls: RefCell::new(Vec::new()),
@@ -301,6 +307,7 @@ impl InterpEnv for Env {
             .inserted
             .iter()
             .copied()
+            .filter(|id| !self.phased_out.contains(id))
             .filter(|id| self.objects.get(id).is_some_and(|v| v.zone == zone))
             .collect();
         match self.list_order {
@@ -318,6 +325,9 @@ impl InterpEnv for Env {
     }
 
     fn object(&self, id: ObjectId) -> Option<ObjectView> {
+        if self.phased_out.contains(&id) {
+            return None;
+        }
         self.objects.get(&id).cloned()
     }
 
