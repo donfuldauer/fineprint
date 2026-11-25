@@ -28,18 +28,21 @@
 //!   the metadata (so it is stale and refetched, never trusted) or consistent with it.
 //! - HTTP goes through the [`Http`] trait; the production [`Curl`] runs the system `curl` (the
 //!   standard library has no TLS; the same choice as `cargo xtask cr fetch`) with `--disable`
-//!   (no `~/.curlrc`), `--globoff`, HTTPS only and no redirect following. The metadata response
-//!   is capped while it is read (curl is killed past [`MAX_METADATA_BYTES`]); bulk downloads
-//!   rely on `--max-filesize`, which needs curl [`MIN_CURL_VERSION`] or later to stop a
-//!   response of unknown size, so the version is checked once per process. Tests inject a fake
-//!   and never touch the network.
+//!   (no `~/.curlrc`), `--globoff`, HTTPS only and no redirect following. Every response is
+//!   streamed through this process and capped while it is read: the metadata in memory at
+//!   [`MAX_METADATA_BYTES`], each bulk file into its part file at the request's byte cap
+//!   ([`run_capped_to_file`]; curl writes to stdout, never `--output`). Past the cap curl is
+//!   killed, so the cap does not depend on the curl or libcurl version. `--max-filesize` stays
+//!   as a second line of defence; a curl older than [`MIN_CURL_VERSION`] or an unparseable
+//!   version only prints one warning per process. Tests inject a fake and never touch the
+//!   network.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdout, Command, Stdio};
 use std::sync::OnceLock;
 
 use fineprint_base::hash::sha256;
@@ -121,7 +124,8 @@ pub trait Http {
 pub struct Curl;
 
 /// The oldest curl whose `--max-filesize` also stops a transfer whose size is unknown when it
-/// starts (required for the bulk-download size cap, R12).
+/// starts. Advisory only: an older or unparseable `curl --version` prints one warning per
+/// process; the bulk-download size cap is enforced in-process whatever the version (R12).
 pub const MIN_CURL_VERSION: (u32, u32, u32) = (8, 4, 0);
 /// The lock file inside each cache group directory (left in place after a run).
 pub const LOCK_FILE: &str = ".lock";
@@ -208,12 +212,45 @@ pub fn read_stream_capped<R: Read>(r: R, cap: u64) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Runs `cmd` with piped stdout and stderr, reading at most `cap` bytes of stdout while it
-/// runs; past the cap the child is killed (R12). `role` names the transfer in errors.
+/// The buffer size of [`copy_stream_capped`].
+const COPY_BUFFER: usize = 64 * 1024;
+
+/// Copies `r` into `w` through a fixed 64 KiB buffer, reading at most `cap + 1` bytes and
+/// writing at most `cap` bytes (R12: the cap holds while the bytes stream, whatever produces
+/// them). Returns the number of bytes written. `w` is not flushed.
 ///
 /// # Errors
-/// A spawn failure, the cap, or [`curl_failure_message`] for a non-zero exit.
-pub fn run_capped(mut cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, String> {
+/// A read or write error, or a message naming the cap when `r` holds more than `cap` bytes
+/// (the bytes past the cap are never written).
+pub fn copy_stream_capped<R: Read, W: Write>(r: R, w: &mut W, cap: u64) -> Result<u64, String> {
+    let mut r = r.take(cap.saturating_add(1));
+    let mut buf = vec![0u8; COPY_BUFFER];
+    let mut written: u64 = 0;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return Ok(written),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("cannot read the response: {e}")),
+        };
+        let room = usize::try_from(cap.saturating_sub(written)).unwrap_or(usize::MAX);
+        if n > room {
+            return Err(format!("the response is larger than the {cap}-byte cap"));
+        }
+        w.write_all(&buf[..n])
+            .map_err(|e| format!("cannot write the download: {e}"))?;
+        written = written.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+}
+
+/// Runs `cmd` with stdin closed and stdout and stderr piped, hands stdout to `consume` while the
+/// child runs, and kills (and waits) the child as soon as `consume` fails (R12). stderr is
+/// drained on its own thread (first 4 KiB kept) so neither pipe can block the child.
+fn run_streaming<T>(
+    mut cmd: Command,
+    role: &str,
+    consume: impl FnOnce(ChildStdout) -> Result<T, String>,
+) -> Result<T, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -225,7 +262,6 @@ pub fn run_capped(mut cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, Str
             format!("cannot run curl: {e}")
         }
     })?;
-    // stderr is drained on its own thread (first 4 KiB kept) so neither pipe can block the child.
     let stderr = child.stderr.take().map(|mut e| {
         std::thread::spawn(move || {
             let mut kept = Vec::new();
@@ -235,7 +271,7 @@ pub fn run_capped(mut cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, Str
         })
     });
     let out = match child.stdout.take() {
-        Some(o) => read_stream_capped(o, cap),
+        Some(o) => consume(o),
         None => Err("cannot read the response: no stdout".to_owned()),
     };
     let out = match out {
@@ -254,6 +290,38 @@ pub fn run_capped(mut cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, Str
     } else {
         Err(curl_failure_message(role, status.code(), &err))
     }
+}
+
+/// Runs `cmd` with piped stdout and stderr, reading at most `cap` bytes of stdout while it
+/// runs; past the cap the child is killed (R12). `role` names the transfer in errors.
+///
+/// # Errors
+/// A spawn failure, the cap, or [`curl_failure_message`] for a non-zero exit.
+pub fn run_capped(cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, String> {
+    run_streaming(cmd, role, |o| read_stream_capped(o, cap))
+}
+
+/// Runs `cmd` and streams its stdout into the existing file `dest` (opened for writing and
+/// truncated, never created), writing at most `cap` bytes through [`copy_stream_capped`]; as
+/// soon as the child produces more than `cap` bytes it is killed and waited (R12). The cap is
+/// enforced by this process, whatever the child is. The file is flushed at the end. On any
+/// error `dest` may hold a partial body (at most `cap` bytes) and must not be trusted: the
+/// caller removes it. `role` names the transfer in errors.
+///
+/// # Errors
+/// A spawn, open, read or write failure, the cap, or [`curl_failure_message`] for a non-zero
+/// exit.
+pub fn run_capped_to_file(cmd: Command, cap: u64, role: &str, dest: &Path) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(dest)
+        .map_err(|e| format!("cannot open the part file for {role}: {e}"))?;
+    run_streaming(cmd, role, |o| {
+        copy_stream_capped(o, &mut file, cap)?;
+        file.flush()
+            .map_err(|e| format!("cannot write the download: {e}"))
+    })
 }
 
 fn run_curl(args: Vec<OsString>, cap: u64, role: &str) -> Result<Vec<u8>, String> {
@@ -284,40 +352,49 @@ pub fn parse_curl_version(output: &str) -> Option<(u32, u32, u32)> {
     Some((num(true)?, num(true)?, num(false)?))
 }
 
-/// The verdict on `curl --version` output: `Ok(None)` for [`MIN_CURL_VERSION`] or later,
-/// `Ok(Some(warning))` when the version cannot be parsed (the download proceeds).
+/// The advisory verdict on `curl --version` output: `Ok(None)` for [`MIN_CURL_VERSION`] or
+/// later, `Ok(Some(warning))` for an older or unparseable version. The warning names 8.4.0 and
+/// says the in-process cap still applies: the download size cap never depends on this verdict
+/// (R12; the frontend version need not be the linked libcurl's).
 ///
 /// # Errors
-/// A message naming 8.4.0 and the size cap when the version is older.
+/// Never for a version (the `Result` is kept for API stability).
 pub fn check_curl_version(output: &str) -> Result<Option<String>, String> {
     match parse_curl_version(output) {
         None => Ok(Some(
-            "warning: cannot parse the curl version; the download size cap needs curl 8.4.0 or later"
+            "warning: cannot parse the curl version; curl 8.4.0 or later is recommended as a \
+             second line of defence (--max-filesize), and the in-process download size cap \
+             still applies"
                 .to_owned(),
         )),
-        Some(v) if v < MIN_CURL_VERSION => Err(format!(
-            "curl {}.{}.{} is too old: curl 8.4.0 or later is required to enforce the download \
-             size cap (--max-filesize on responses of unknown size)",
+        Some(v) if v < MIN_CURL_VERSION => Ok(Some(format!(
+            "warning: curl {}.{}.{} is older than 8.4.0, so --max-filesize may not stop a \
+             response of unknown size; the in-process download size cap still applies",
             v.0, v.1, v.2
-        )),
+        ))),
         Some(_) => Ok(None),
     }
 }
 
-/// Checks the system curl version once per process (see [`check_curl_version`]).
-fn curl_version_ok() -> Result<(), String> {
-    static VERDICT: OnceLock<Result<(), String>> = OnceLock::new();
-    VERDICT
-        .get_or_init(|| {
-            let mut cmd = Command::new("curl");
-            cmd.args(["--disable", "--version"]);
-            let out = run_capped(cmd, 64 * 1024, "curl --version")?;
-            if let Some(w) = check_curl_version(&String::from_utf8_lossy(&out))? {
-                eprintln!("{w}");
-            }
-            Ok(())
-        })
-        .clone()
+/// Checks the system curl version once per process and prints at most one warning on stderr
+/// (see [`check_curl_version`]). Advisory only: it never fails and never decides the cap.
+fn curl_version_advisory() {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| {
+        let mut cmd = Command::new("curl");
+        cmd.args(["--disable", "--version"]);
+        let warning = match run_capped(cmd, 64 * 1024, "curl --version") {
+            Ok(out) => check_curl_version(&String::from_utf8_lossy(&out)).unwrap_or_else(Some),
+            Err(_) => Some(
+                "warning: cannot read the curl version; the in-process download size cap still \
+                 applies"
+                    .to_owned(),
+            ),
+        };
+        if let Some(w) = warning {
+            eprintln!("{w}");
+        }
+    });
 }
 
 /// The role label of a download into `dest` (`{file}.{pid}.part`): the cache file name.
@@ -336,13 +413,13 @@ impl Http for Curl {
     }
 
     fn download_to_file(&self, req: &Request, dest: &Path) -> Result<(), String> {
-        curl_version_ok()?;
-        run_curl(
-            curl_args(req, Some(dest)),
-            MAX_METADATA_BYTES,
-            download_role(dest),
-        )
-        .map(|_| ())
+        // R12: curl writes to stdout (no `--output`); this process streams the body into the
+        // part file and kills curl past `req.max_bytes`. `--max-filesize` stays in the arguments
+        // as a second line of defence only; the version check is advisory.
+        curl_version_advisory();
+        let mut cmd = Command::new("curl");
+        cmd.args(curl_args(req, None));
+        run_capped_to_file(cmd, req.max_bytes, download_role(dest), dest)
     }
 }
 

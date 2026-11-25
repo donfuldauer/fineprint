@@ -14,10 +14,10 @@ use serde_json::{Value, json};
 
 use super::cli::{parse_fetch_args, parse_import_args};
 use super::fetch::{
-    CachedFile, MIN_CURL_VERSION, Request, SourceMeta, check_curl_version, curl_args,
-    curl_failure_message, is_fresh, parse_bulk_data, parse_curl_version, parse_source_meta,
-    part_path, read_stream_capped, render_source_meta, run_capped, validate_atomic_cards,
-    validate_download_uri, validate_scryfall_bulk,
+    CachedFile, MIN_CURL_VERSION, Request, SourceMeta, check_curl_version, copy_stream_capped,
+    curl_args, curl_failure_message, is_fresh, parse_bulk_data, parse_curl_version,
+    parse_source_meta, part_path, read_stream_capped, render_source_meta, run_capped,
+    run_capped_to_file, validate_atomic_cards, validate_download_uri, validate_scryfall_bulk,
 };
 use super::json_array::{ArrayError, parse_elements, split_array, validate_array};
 use super::mtgjson::{cross_check, parse_atomic};
@@ -402,8 +402,9 @@ fn capped_command_is_killed_past_the_cap() {
     );
 }
 
-/// REQ-NFR-004, R12 (F12): the `curl --version` parser and verdict: 8.4.0 or later passes, an
-/// older version is an error naming 8.4.0 and the cap, an unparsable one is a warning.
+/// REQ-NFR-004, R12 (F12; gate R5, brief clause R5-3): the `curl --version` parser and the
+/// ADVISORY verdict: 8.4.0 or later passes silently, an older or unparsable version is a
+/// warning naming 8.4.0 and saying the in-process cap still applies; never an error.
 #[test]
 fn curl_version_check() {
     assert_eq!(MIN_CURL_VERSION, (8, 4, 0));
@@ -425,11 +426,186 @@ fn curl_version_check() {
         assert_eq!(check_curl_version(&line(ok)), Ok(None), "{ok}");
     }
     for old in ["8.3.99", "7.88.1", "8.0.0"] {
-        let e = check_curl_version(&line(old)).unwrap_err();
-        assert!(e.contains("8.4.0") && e.contains("cap"), "{e}");
+        let w = check_curl_version(&line(old)).unwrap().unwrap();
+        assert!(
+            w.starts_with("warning:")
+                && w.contains("8.4.0")
+                && w.contains("in-process")
+                && w.contains("cap"),
+            "{w}"
+        );
     }
-    let w = check_curl_version("garbage").unwrap().unwrap();
-    assert!(w.starts_with("warning:") && w.contains("8.4.0"), "{w}");
+    for bad in ["garbage", "", "curl x.y.z", "libcurl 8.4.0"] {
+        let w = check_curl_version(bad).unwrap().unwrap();
+        assert!(
+            w.starts_with("warning:")
+                && w.contains("8.4.0")
+                && w.contains("in-process")
+                && w.contains("cap"),
+            "{w}"
+        );
+    }
+}
+
+/// A new, empty scratch directory created exclusively under the private root
+/// `<workspace>/target/fp-import-tests`. The leaf name combines the pid, a counter and the
+/// clock (for uniqueness only, R7); an existing leaf is retried with a new name.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fp-import-tests");
+    std::fs::create_dir_all(&root).expect("create the scratch root");
+    for _ in 0..16 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let leaf = root.join(format!("{tag}-{}-{n}-{nanos}", std::process::id()));
+        match std::fs::create_dir(&leaf) {
+            Ok(()) => return leaf,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("cannot create scratch dir {}: {e}", leaf.display()),
+        }
+    }
+    panic!("no fresh scratch dir under {}", root.display());
+}
+
+/// A part file that already exists (as `create_part` makes it), holding stale bytes that the
+/// download must truncate.
+fn existing_part(dir: &std::path::Path) -> std::path::PathBuf {
+    let p = dir.join("test.part");
+    std::fs::write(&p, b"stale bytes that must be truncated").unwrap();
+    p
+}
+
+fn sh(script: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", script]);
+    cmd
+}
+
+/// REQ-NFR-004, REQ-ING-001, R12 (R5) T1: an endless producer streamed into a part file is
+/// stopped at the cap and killed (the call returns); the error names the cap and the role and
+/// the file holds at most `cap` bytes.
+#[cfg(unix)]
+#[test]
+fn capped_download_to_file_kills_an_endless_producer() {
+    let dir = scratch("capped-endless");
+    let part = existing_part(&dir);
+    let e = run_capped_to_file(sh("yes"), 1024, "test.role", &part).unwrap_err();
+    assert!(
+        e.contains("1024-byte cap") && e.contains("test.role") && e.contains("stopped"),
+        "{e}"
+    );
+    let len = std::fs::metadata(&part).unwrap().len();
+    assert!(len <= 1024, "{len}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// REQ-NFR-004, REQ-ING-001, R12 (R5) T2: output exactly at the cap or under it is written
+/// byte for byte (the stale content is truncated); a non-zero exit is a curl failure message.
+#[cfg(unix)]
+#[test]
+fn capped_download_to_file_writes_exact_bytes() {
+    let dir = scratch("capped-exact");
+    let part = existing_part(&dir);
+    // Exactly at the cap: 1024 bytes.
+    run_capped_to_file(
+        sh("head -c 1024 /dev/zero | tr '\\0' 'a'"),
+        1024,
+        "test.role",
+        &part,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&part).unwrap(), vec![b'a'; 1024]);
+    // One byte over the cap is refused, and no byte past the cap is written.
+    let e = run_capped_to_file(
+        sh("head -c 1025 /dev/zero | tr '\\0' 'b'"),
+        1024,
+        "test.role",
+        &part,
+    )
+    .unwrap_err();
+    assert!(e.contains("1024-byte cap"), "{e}");
+    assert!(std::fs::metadata(&part).unwrap().len() <= 1024);
+    // Under the cap.
+    run_capped_to_file(sh("printf abc"), 1024, "test.role", &part).unwrap();
+    assert_eq!(std::fs::read(&part).unwrap(), b"abc");
+    // A non-zero exit.
+    assert_eq!(
+        run_capped_to_file(sh("echo 'oops' >&2; exit 3"), 1024, "test.role", &part).unwrap_err(),
+        "curl failed for test.role (exit 3): oops"
+    );
+    // The part file is never created by the download: a missing one is an error.
+    let missing = dir.join("missing.part");
+    assert!(run_capped_to_file(sh("printf abc"), 1024, "test.role", &missing).is_err());
+    assert!(!missing.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// REQ-NFR-004, R12 (R5): the streaming copy never writes more than the cap, whatever the
+/// chunking, and reads at most `cap + 1` bytes of an endless reader.
+#[test]
+fn copy_stream_is_capped() {
+    let mut out = Vec::new();
+    assert_eq!(copy_stream_capped(&b"abcd"[..], &mut out, 4), Ok(4));
+    assert_eq!(out, b"abcd");
+    let mut out = Vec::new();
+    assert_eq!(copy_stream_capped(&b""[..], &mut out, 0), Ok(0));
+    let mut out = Vec::new();
+    let e = copy_stream_capped(&b"abcde"[..], &mut out, 4).unwrap_err();
+    assert!(e.contains("4-byte cap"), "{e}");
+    assert!(out.len() <= 4);
+    // An endless reader, a cap larger than the 64 KiB buffer and not a multiple of it.
+    let cap = 200 * 1024 + 7;
+    let mut out = Vec::new();
+    let e = copy_stream_capped(std::io::repeat(b'y'), &mut out, cap).unwrap_err();
+    assert!(e.contains(&format!("{cap}-byte cap")), "{e}");
+    assert!(u64::try_from(out.len()).unwrap() <= cap);
+    // Exactly the cap across several buffers.
+    let body = vec![b'z'; usize::try_from(cap).unwrap()];
+    let mut out = Vec::new();
+    assert_eq!(copy_stream_capped(&body[..], &mut out, cap), Ok(cap));
+    assert_eq!(out, body);
+}
+
+/// REQ-NFR-004, REQ-ING-001, R12 (R5) T3: the download arguments write to stdout (no
+/// `--output`) and keep `--max-filesize` as a second line of defence.
+#[test]
+fn download_arguments_stream_to_stdout() {
+    let req = Request {
+        url: "https://data.scryfall.io/a.json".to_owned(),
+        headers: Vec::new(),
+        max_bytes: 12_345,
+        max_time_secs: 1,
+    };
+    let a = lossy(&curl_args(&req, None));
+    assert!(!a.iter().any(|x| x == "--output" || x == "-o"));
+    assert!(a.join(" ").contains("--max-filesize 12345"));
+}
+
+/// REQ-NFR-004, REQ-ING-001, R12 (R5) T4: the cap does not depend on the version verdict:
+/// for every banner (current, older, garbage) the verdict is never an error and the same
+/// streaming download is capped.
+#[cfg(unix)]
+#[test]
+fn download_cap_does_not_depend_on_the_curl_version() {
+    let dir = scratch("capped-version");
+    for banner in [
+        "curl 8.4.0 (x) libcurl/8.4.0",
+        "curl 8.4.0 (x) libcurl/8.3.0",
+        "curl 7.88.1 (x) libcurl/7.88.1",
+        "garbage",
+        "",
+    ] {
+        assert!(check_curl_version(banner).is_ok(), "{banner:?}");
+        let part = existing_part(&dir);
+        let e = run_capped_to_file(sh("yes"), 4096, "test.role", &part).unwrap_err();
+        assert!(e.contains("4096-byte cap"), "{banner:?}: {e}");
+        assert!(std::fs::metadata(&part).unwrap().len() <= 4096);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// REQ-ING-001 (F14): each run stages into its own `{file}.{pid}.part`.

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use fineprint_base::hash::sha256;
 use fineprint_ingest::import::fetch::{
     BULK_DATA_URL, FetchOptions, Http, Request, SourceMeta, fetch, is_fresh, parse_source_meta,
+    run_capped_to_file,
 };
 use serde_json::json;
 
@@ -219,4 +220,28 @@ fn concurrent_fetches_serialize_on_the_group_lock() {
     let listed = names(&dir);
     assert!(listed.contains_key(".lock"), "{listed:?}");
     assert!(!listed.keys().any(|n| n.ends_with(".part")), "{listed:?}");
+}
+
+/// REQ-NFR-004, REQ-ING-001, R12 (R5; gate 02-state-objects R5): the public streaming capped
+/// download rejects an oversized (endless) stream with the cap in the message, stops the
+/// producer, and leaves at most `cap` bytes in the existing part file.
+#[cfg(unix)]
+#[test]
+fn streaming_download_is_capped_in_process() {
+    let dir = scratch("streaming-cap");
+    let part = dir.join("test.part");
+    std::fs::write(&part, b"").unwrap();
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "yes"]);
+    let e = run_capped_to_file(cmd, 2048, "test.role", &part).unwrap_err();
+    assert!(
+        e.contains("2048-byte cap") && e.contains("test.role"),
+        "{e}"
+    );
+    assert!(std::fs::metadata(&part).unwrap().len() <= 2048);
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "printf synthetic"]);
+    run_capped_to_file(cmd, 2048, "test.role", &part).unwrap();
+    assert_eq!(std::fs::read(&part).unwrap(), b"synthetic");
+    let _ = std::fs::remove_dir_all(&dir);
 }
