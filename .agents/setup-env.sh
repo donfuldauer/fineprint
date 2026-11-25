@@ -187,6 +187,12 @@ cargo fetch --locked --manifest-path "$REPO_ROOT/Cargo.toml"
 cargo fetch --locked --manifest-path "$REPO_ROOT/spikes/bindings/Cargo.toml"
 
 # ---------------------------------------------------------------------------
+# 5b. Commit attribution hooks (credit the human contributor on agent commits)
+# ---------------------------------------------------------------------------
+echo "==> Enabling git hooks (.githooks/)"
+"$REPO_ROOT/scripts/install-git-hooks.sh" || echo "WARN: scripts/install-git-hooks.sh failed" >&2
+
+# ---------------------------------------------------------------------------
 # 6. Summary
 # ---------------------------------------------------------------------------
 echo "==> Environment ready:"
