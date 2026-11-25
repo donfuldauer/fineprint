@@ -9,6 +9,9 @@
 //! The hash oracle is `fineprint_base::hash::sha256` over independently canonicalised bytes, and
 //! one minimal definition is pinned to hand-written canonical bytes whose SHA-256 was computed
 //! with `printf %s '<canonical>' | sha256sum`.
+//! #159 FP-140: AST positions (power, toughness, text, abilities, partner abilities) hold valid
+//! real ASTs, because `seal` and `from_json` now reject anything else; the AST validation itself
+//! is tested in `spec_dsl_card_ast.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,8 +62,9 @@ fn minimal() -> CardDefinitionDSL {
     let mut face = plain_face(FaceKind::Main, "Test Vanilla");
     face.mana_cost = Some(mana("{1}{G}"));
     face.card_types = vec!["Creature".to_string()];
-    face.power = Some(ValueExpressionAST(json!(1)));
-    face.toughness = Some(ValueExpressionAST(json!(1)));
+    // #159 FP-140: real value expressions (`{"LITERAL":1}`), formerly the bare placeholder `1`.
+    face.power = Some(ValueExpressionAST(json!({"LITERAL": 1})));
+    face.toughness = Some(ValueExpressionAST(json!({"LITERAL": 1})));
     let mut legalities = BTreeMap::new();
     legalities.insert("testformat".to_string(), Legality::Legal);
     CardDefinitionDSL {
@@ -92,22 +96,26 @@ fn minimal() -> CardDefinitionDSL {
 const PINNED_WITHOUT_HASH: &str = concat!(
     r#"{"cardDefId":"test.vanilla_1_1","colorIdentity":16,"digitalOnly":false,"dslVersion":"1.0","#,
     r#""faces":[{"abilities":[],"cardTypes":["Creature"],"faceKind":"MAIN","manaCost":"{1}{G}","#,
-    r#""name":"Test Vanilla","power":1,"subtypes":[],"supertypes":[],"text":[],"toughness":1}],"#,
+    r#""name":"Test Vanilla","power":{"LITERAL":1},"subtypes":[],"supertypes":[],"text":[],"#,
+    r#""toughness":{"LITERAL":1}}],"#,
     r#""layout":"NORMAL","legalities":{"testformat":"LEGAL"},"#,
     r#""source":{"oracleTextHash":"0000","origin":"PARSER","rulesBaseline":"test-baseline"},"#,
     r#""supportStatus":"AUTO_PARSED"}"#
 );
 
-/// `printf %s "$PINNED_WITHOUT_HASH" | sha256sum`.
-const PINNED_HASH: &str = "36337ac7f9d175df1da81a397b1b788a4f2c88ee12dcc1b937584e5ca34f3aa3";
+/// `printf %s "$PINNED_WITHOUT_HASH" | sha256sum`. Regenerated for #159 FP-140 when the power and
+/// toughness placeholders `1` became the real value expression `{"LITERAL":1}` (previously
+/// `36337ac7f9d175df1da81a397b1b788a4f2c88ee12dcc1b937584e5ca34f3aa3`).
+const PINNED_HASH: &str = "e930e89d0aec056f27c5a0bac081553c5435af9dbebf4b13f42d65b294d2b770";
 
 /// Canonical JSON of the sealed `minimal()`, written by hand.
 const PINNED_SEALED: &str = concat!(
     r#"{"cardDefId":"test.vanilla_1_1","colorIdentity":16,"#,
-    r#""definitionHash":"36337ac7f9d175df1da81a397b1b788a4f2c88ee12dcc1b937584e5ca34f3aa3","#,
+    r#""definitionHash":"e930e89d0aec056f27c5a0bac081553c5435af9dbebf4b13f42d65b294d2b770","#,
     r#""digitalOnly":false,"dslVersion":"1.0","#,
     r#""faces":[{"abilities":[],"cardTypes":["Creature"],"faceKind":"MAIN","manaCost":"{1}{G}","#,
-    r#""name":"Test Vanilla","power":1,"subtypes":[],"supertypes":[],"text":[],"toughness":1}],"#,
+    r#""name":"Test Vanilla","power":{"LITERAL":1},"subtypes":[],"supertypes":[],"text":[],"#,
+    r#""toughness":{"LITERAL":1}}],"#,
     r#""layout":"NORMAL","legalities":{"testformat":"LEGAL"},"#,
     r#""source":{"oracleTextHash":"0000","origin":"PARSER","rulesBaseline":"test-baseline"},"#,
     r#""supportStatus":"AUTO_PARSED"}"#
@@ -122,27 +130,28 @@ fn rich() -> CardDefinitionDSL {
     front.supertypes = vec!["Legendary".to_string()];
     front.card_types = vec!["Creature".to_string(), "Artifact".to_string()];
     front.subtypes = vec!["Testkin".to_string()];
-    front.power = Some(ValueExpressionAST(
-        json!({"op": "ADD", "args": [1, {"var": "X"}, null]}),
-    ));
-    front.toughness = Some(ValueExpressionAST(json!(3)));
+    // #159 FP-140: valid real content replaces the former free-form placeholders, keeping the
+    // intent (a nested expression with a variable; varied token kinds and characters; nested
+    // and maximal-integer ability payloads, now as opaque KEYWORD params).
+    front.power = Some(ValueExpressionAST(rich_power()));
+    front.toughness = Some(ValueExpressionAST(json!({"LITERAL": 3})));
     front.loyalty = Some(4);
     front.defense = Some(5);
     front.hand_modifier = Some(-1);
     front.life_modifier = Some(7);
-    front.text = TextTokenStream(vec![
-        json!({"t": "word", "v": "Test"}),
-        json!("plain"),
-        json!(null),
-        json!(true),
-        json!(-12),
-        json!([1, "two", {"three": false}]),
-    ]);
+    front.text = TextTokenStream(rich_text());
     front.abilities = vec![
         AbilityAST(
-            json!({"kind": "STATIC", "nested": {"a": [1, 2, {"b": false}], "s": "é\u{1F602}"}}),
+            json!({"abilityId": "a1", "kind": "STATIC", "effects": [{"type": "RULE", "kind": "SKIP"}]}),
         ),
-        AbilityAST(json!({"kind": "ACTIVATED", "cost": "{T}", "n": MAX_SAFE_INTEGER})),
+        AbilityAST(
+            json!({"abilityId": "a2", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+            "params": {"cost": "{T}", "n": MAX_SAFE_INTEGER,
+                       "nested": {"a": [1, 2, {"b": false}], "s": "é\u{1F602}"}}}),
+        ),
+        AbilityAST(
+            json!({"abilityId": "a3", "kind": "ACTIVATED", "cost": [{"cost": "TAP_SOURCE"}], "effect": []}),
+        ),
     ];
     let back = plain_face(FaceKind::Back, "Test Modal Back");
     let mut legalities = BTreeMap::new();
@@ -170,14 +179,37 @@ fn rich() -> CardDefinitionDSL {
         color_identity: bitmask(0b10011),
         commander_eligibility: Some(CommanderEligibilityDSL {
             eligible: true,
-            partner_abilities: vec![PartnerAbilityDSL(
-                json!({"kind": "TEST_PARTNER", "with": null}),
-            )],
+            partner_abilities: vec![PartnerAbilityDSL(rich_partner())],
         }),
         legalities,
         digital_only: true,
         related_tokens: Some(vec!["test.token_1_1".to_string()]),
     }
+}
+
+/// `rich()`'s power: a nested real value expression with a variable (#159 FP-140).
+fn rich_power() -> Value {
+    json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1},
+        "rhs": {"MATH": {"op": "MAX", "lhs": "X", "rhs": {"LITERAL": -12}}}}})
+}
+
+/// `rich()`'s front text: every token kind, escapes and non-ASCII characters (#159 FP-140).
+fn rich_text() -> Vec<Value> {
+    vec![
+        json!({"id": "t1", "kind": "LITERAL", "text": "Test"}),
+        json!({"id": "t2", "kind": "WORD", "category": "COLOR_WORD", "value": "Hue"}),
+        json!({"id": "t3", "kind": "NAME_REF", "ref": "SELF"}),
+        json!({"id": "t4", "kind": "NAME_REF", "ref": "OTHER", "name": "Test Other"}),
+        json!({"id": "t5", "kind": "WORD", "category": "NUMBER", "value": "-12"}),
+        json!({"id": "t6", "kind": "LITERAL", "text": "plain \"two\"\n\u{1}é\u{1F602}"}),
+    ]
+}
+
+/// `rich()`'s partner ability: a real KEYWORD ability with params (#159 FP-140; formerly
+/// `{"kind":"TEST_PARTNER","with":null}`, but abilities refuse nulls).
+fn rich_partner() -> Value {
+    json!({"abilityId": "p1", "kind": "KEYWORD", "keyword": "PARTNER",
+        "params": {"with": "test.partner_other"}})
 }
 
 fn sealed(d: CardDefinitionDSL) -> CardDefinitionDSL {
@@ -621,24 +653,22 @@ fn req_dsl_001_json_member_names_and_omitted_optionals() {
     assert_eq!(r["commanderEligibility"]["eligible"], json!(true));
     assert_eq!(
         r["commanderEligibility"]["partnerAbilities"],
-        json!([{"kind": "TEST_PARTNER", "with": null}])
+        json!([rich_partner()])
     );
     let f = &r["faces"][0];
     assert_eq!(f["faceKind"], json!("MAIN"));
     assert_eq!(f["manaCost"], json!("{2}{W}{U/P}"));
     assert_eq!(f["colorIndicator"], json!(3));
-    assert_eq!(
-        f["power"],
-        json!({"op": "ADD", "args": [1, {"var": "X"}, null]})
-    );
-    assert_eq!(f["toughness"], json!(3));
+    assert_eq!(f["power"], rich_power());
+    assert_eq!(f["toughness"], json!({"LITERAL": 3}));
     assert_eq!(f["loyalty"], json!(4));
     assert_eq!(f["defense"], json!(5));
     assert_eq!(f["handModifier"], json!(-1));
     assert_eq!(f["lifeModifier"], json!(7));
-    assert_eq!(f["text"][0], json!({"t": "word", "v": "Test"}));
+    assert_eq!(f["text"][0], rich_text()[0]);
+    assert_eq!(f["text"], Value::Array(rich_text()));
     assert_eq!(f["text"].as_array().unwrap().len(), 6);
-    assert_eq!(f["abilities"][1]["n"], json!(MAX_SAFE_INTEGER));
+    assert_eq!(f["abilities"][1]["params"]["n"], json!(MAX_SAFE_INTEGER));
     assert_eq!(r["faces"][1]["faceKind"], json!("BACK"));
     assert_eq!(r["faces"][1]["text"], json!([]));
 }
@@ -833,22 +863,28 @@ fn req_nfr_006_every_field_family_affects_hash() {
         ("cardTypes", |d| d.faces[0].card_types.swap(0, 1)),
         ("subtypes", |d| d.faces[1].subtypes.push("Testkin".into())),
         ("power", |d| {
-            d.faces[0].power = Some(ValueExpressionAST(json!(2)))
+            d.faces[0].power = Some(ValueExpressionAST(json!({"LITERAL": 2})))
         }),
         ("toughness", |d| d.faces[0].toughness = None),
         ("loyalty", |d| d.faces[0].loyalty = Some(5)),
         ("defense", |d| d.faces[0].defense = Some(-5)),
         ("handModifier", |d| d.faces[0].hand_modifier = Some(0)),
         ("lifeModifier", |d| d.faces[0].life_modifier = None),
-        ("text", |d| d.faces[0].text.0.push(json!("more"))),
+        ("text", |d| {
+            d.faces[0]
+                .text
+                .0
+                .push(json!({"id": "t7", "kind": "LITERAL", "text": "more"}))
+        }),
         ("text nested", |d| {
-            d.faces[0].text.0[0] = json!({"t": "word", "v": "Tesu"})
+            d.faces[0].text.0[0] = json!({"id": "t1", "kind": "LITERAL", "text": "Tesu"})
         }),
         ("abilities", |d| {
             d.faces[0].abilities.pop().map(|_| ()).unwrap_or(())
         }),
         ("ability payload", |d| {
-            d.faces[0].abilities[0] = AbilityAST(json!({"kind": "STATIC"}))
+            d.faces[0].abilities[0] =
+                AbilityAST(json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_OTHER"}))
         }),
         ("meldPartner", |d| d.meld_partner = None),
         ("colorIdentity", |d| d.color_identity = ColorBitmask::NONE),
@@ -984,9 +1020,38 @@ fn req_nfr_006_typed_integer_limits() {
             CanonicalError::UnsafeInteger(_)
         ))
     ));
-    // Also inside a placeholder payload.
+    // Also inside an AST position (formerly a free-form ability payload; #159 FP-140 keeps the
+    // case on a real KEYWORD ability's opaque params and on a LITERAL power). The document-level
+    // check runs before the AST check, so the error stays Canonical(UnsafeInteger).
     let mut v = to_value(&sealed(rich()));
-    v["faces"][0]["abilities"][0]["big"] = json!(u64::MAX);
+    v["faces"][0]["abilities"][1]["params"]["big"] = json!(u64::MAX);
+    assert!(matches!(
+        load_value(&v),
+        Err(CardDefinitionError::Canonical(
+            CanonicalError::UnsafeInteger(_)
+        ))
+    ));
+    for n in [9_007_199_254_740_992_i64, -9_007_199_254_740_992] {
+        let mut v = to_value(&sealed(rich()));
+        v["faces"][0]["power"] = json!({ "LITERAL": n });
+        assert!(
+            matches!(
+                load_value(&v),
+                Err(CardDefinitionError::Canonical(
+                    CanonicalError::UnsafeInteger(_)
+                ))
+            ),
+            "LITERAL {n}"
+        );
+    }
+    // The largest safe LITERAL is accepted in power and toughness.
+    let mut d = rich();
+    d.faces[0].power = Some(ValueExpressionAST(json!({ "LITERAL": MAX_SAFE_INTEGER })));
+    d.faces[0].toughness = Some(ValueExpressionAST(json!({ "LITERAL": -MAX_SAFE_INTEGER })));
+    let s = sealed(d);
+    assert_eq!(load(&canonical_bytes(&s)).unwrap(), s);
+    let mut v = to_value(&sealed(rich()));
+    v["faces"][0]["abilities"][1]["params"]["big"] = json!(u64::MAX);
     assert!(matches!(
         load_value(&v),
         Err(CardDefinitionError::Canonical(
@@ -1339,6 +1404,70 @@ fn random_json(rng: &mut Pcg64Dxsm, depth: u32) -> Value {
     }
 }
 
+/// `random_json` with every `null` replaced by `false` (ability params refuse nulls).
+fn without_nulls(v: Value) -> Value {
+    match v {
+        Value::Null => Value::Bool(false),
+        Value::Array(items) => Value::Array(items.into_iter().map(without_nulls).collect()),
+        Value::Object(m) => {
+            Value::Object(m.into_iter().map(|(k, x)| (k, without_nulls(x))).collect())
+        }
+        other => other,
+    }
+}
+
+/// A random real value expression: LITERAL, X or MATH (#159 FP-140; formerly random JSON).
+fn random_value_expr(rng: &mut Pcg64Dxsm, depth: u32) -> Value {
+    const OPS: [&str; 7] = ["ADD", "SUB", "MUL", "DIV_FLOOR", "DIV_CEIL", "MIN", "MAX"];
+    match below(rng, if depth == 0 { 2 } else { 3 }) {
+        0 => json!({ "LITERAL": random_int(rng) }),
+        1 => json!("X"),
+        _ => {
+            let op = OPS[below(rng, 7) as usize];
+            json!({"MATH": {"op": op, "lhs": random_value_expr(rng, depth - 1),
+                "rhs": random_value_expr(rng, depth - 1)}})
+        }
+    }
+}
+
+/// A random real token stream with unique ids (#159 FP-140; formerly random JSON elements).
+fn random_text(rng: &mut Pcg64Dxsm) -> Vec<Value> {
+    const CATEGORIES: [&str; 5] = [
+        "COLOR_WORD",
+        "BASIC_LAND_TYPE",
+        "CREATURE_TYPE",
+        "NUMBER",
+        "CARD_NAME",
+    ];
+    (0..below(rng, 4))
+        .map(|i| {
+            let id = format!("t{i}");
+            let s = format!("T{}", random_string(rng, 6));
+            match below(rng, 4) {
+                0 => json!({"id": id, "kind": "LITERAL", "text": s}),
+                1 => json!({"id": id, "kind": "WORD",
+                    "category": CATEGORIES[below(rng, 5) as usize], "value": s}),
+                2 => json!({"id": id, "kind": "NAME_REF", "ref": "SELF"}),
+                _ => json!({"id": id, "kind": "NAME_REF", "ref": "OTHER", "name": s}),
+            }
+        })
+        .collect()
+}
+
+/// A random real KEYWORD ability; its opaque params carry random (null-free) JSON, keeping the
+/// former "exotic placeholder JSON" coverage (#159 FP-140).
+fn random_keyword(rng: &mut Pcg64Dxsm, id: &str, keyword: &str) -> Value {
+    let mut a = json!({"abilityId": id, "kind": "KEYWORD", "keyword": keyword});
+    if below(rng, 2) == 0 {
+        let mut params = serde_json::Map::new();
+        for i in 0..below(rng, 3) {
+            params.insert(format!("p{i}"), without_nulls(random_json(rng, 2)));
+        }
+        a["params"] = Value::Object(params);
+    }
+    a
+}
+
 fn random_strings(rng: &mut Pcg64Dxsm) -> Vec<String> {
     (0..below(rng, 4)).map(|_| random_string(rng, 8)).collect()
 }
@@ -1386,15 +1515,15 @@ fn random_face(rng: &mut Pcg64Dxsm) -> CardFaceDSL {
         supertypes: random_strings(rng),
         card_types: random_strings(rng),
         subtypes: random_strings(rng),
-        power: maybe(rng, |r| ValueExpressionAST(random_json(r, 2))),
-        toughness: maybe(rng, |r| ValueExpressionAST(random_json(r, 2))),
+        power: maybe(rng, |r| ValueExpressionAST(random_value_expr(r, 3))),
+        toughness: maybe(rng, |r| ValueExpressionAST(random_value_expr(r, 3))),
         loyalty: maybe(rng, random_int),
         defense: maybe(rng, random_int),
         hand_modifier: maybe(rng, random_int),
         life_modifier: maybe(rng, random_int),
-        text: TextTokenStream((0..below(rng, 4)).map(|_| random_json(rng, 2)).collect()),
+        text: TextTokenStream(random_text(rng)),
         abilities: (0..below(rng, 3))
-            .map(|_| AbilityAST(random_json(rng, 3)))
+            .map(|i| AbilityAST(random_keyword(rng, &format!("a{i}"), "TEST_KEYWORD")))
             .collect(),
     }
 }
@@ -1429,7 +1558,7 @@ fn random_definition(rng: &mut Pcg64Dxsm) -> CardDefinitionDSL {
         commander_eligibility: maybe(rng, |r| CommanderEligibilityDSL {
             eligible: below(r, 2) == 0,
             partner_abilities: (0..below(r, 3))
-                .map(|_| PartnerAbilityDSL(random_json(r, 2)))
+                .map(|i| PartnerAbilityDSL(random_keyword(r, &format!("p{i}"), "PARTNER")))
                 .collect(),
         }),
         legalities,
