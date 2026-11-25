@@ -8353,3 +8353,22 @@ keeps card fixtures using `{"op":"POPULATE"}` hashing the same.
 **Alternatives.** A type alias or re-export of `Instruction` in `ability` (rejected: two import
 paths for one type); widening E5 to `NATIVE_EFFECT.params` (rejected: contradicts REQ-DSL-015
 opacity); tightening list emptiness (rejected: not requested, would change the wire contract).
+
+## #161 FP-141 — Spec-test readings after the instruction swap
+
+**Decision.** The Independent Tester's judgement calls in `tests/spec_dsl_ability*.rs`:
+(1) the SRS §14.4 examples are tested with real instruction members, as in the unit tests: the
+example-1 `DISCARD` `player` is `{"ref":"BOUND","var":"$P"}` with no `chooser`, and the activated
+example's `TAP_OR_UNTAP` uses `action`, not `mode`; (2) property templates that need a free-form
+name or string inside an instruction use the opaque `CREATE_TOKEN.inline` map, since a typed
+instruction has no free-form members; (3) nesting-limit spec tests assert rejection at 70 and
+200 nested `IF`s and do not pin the exact boundary (the unit tests pin it); (4) the spec test that
+asserted a look-back member on an instruction is opaque data now asserts it is rejected as an
+unknown member, and E5 inside a `CREATE_DELAYED_TRIGGER` matcher is asserted through the shared
+ability `Trigger` decoder.
+**Rationale.** R10: the placeholder content was not a valid real instruction; the assertions keep
+their intent against the real type. The exact nesting boundary depends on wrapper depth, which is
+an implementation detail for black-box tests.
+**Alternatives.** Keep the SRS shorthand and assert rejection (rejected: loses the round-trip
+coverage of the examples); pin the exact nesting boundary in spec tests (rejected: couples the
+black-box tests to wrapper depth).
