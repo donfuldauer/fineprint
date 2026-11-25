@@ -90,7 +90,9 @@ pub(super) fn strip_reminder(line: &str, keep: &BTreeSet<String>) -> String {
         return line.to_string();
     }
     pairs.sort_unstable();
-    let mut out = String::with_capacity(line.len());
+    // Segments of the line: (text, kept). Kept spans are copied byte for byte; everything else is
+    // tidied only when a span was removed.
+    let mut segments: Vec<(&str, bool)> = Vec::new();
     let mut pos = 0;
     let mut removed = false;
     for (open, end) in pairs {
@@ -98,20 +100,35 @@ pub(super) fn strip_reminder(line: &str, keep: &BTreeSet<String>) -> String {
             continue; // nested inside an outer pair already handled
         }
         if keep.contains(&line[open..end]) {
-            out.push_str(&line[pos..end]);
+            segments.push((&line[pos..open], false));
+            segments.push((&line[open..end], true));
         } else {
-            out.push_str(&line[pos..open]);
+            segments.push((&line[pos..open], false));
             removed = true;
         }
         pos = end;
     }
-    out.push_str(&line[pos..]);
-    if removed { tidy(&out) } else { out }
+    segments.push((&line[pos..], false));
+    let mut out = String::with_capacity(line.len());
+    for (text, kept) in segments {
+        if !removed || kept {
+            out.push_str(text);
+        } else {
+            tidy_into(&mut out, text);
+        }
+    }
+    if removed {
+        // A kept span starts with `(` and ends with `)`, so trimming never reaches into one.
+        out.trim_matches(' ').to_string()
+    } else {
+        out
+    }
 }
 
-/// Collapses space runs, drops a space before `.`, `,`, `;` and `:`, and trims.
-fn tidy(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Appends `s` to `out`, collapsing space runs (also across the join with what `out` already
+/// holds) and dropping a space before `.`, `,`, `;` and `:`. Applied only to text outside kept
+/// spans.
+fn tidy_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
             ' ' if out.ends_with(' ') => {}
@@ -124,5 +141,4 @@ fn tidy(s: &str) -> String {
             c => out.push(c),
         }
     }
-    out.trim_matches(' ').to_string()
 }
