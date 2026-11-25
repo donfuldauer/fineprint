@@ -503,3 +503,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 08-dsl-runtime | #57 (PR #217 CR round 2) | work-classifier | Sonnet 5.5 | 1 | routed | - | Fixer T1 Sonnet (G1 contract doc, G2, G3 dedupe, G4 contract doc), Tester T1 Sonnet |
 | 08-dsl-runtime | #57 (PR #217 CR round 2) | Fixer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace both configs pass; cr check ok (cr index re-run for 508.5); guard ok; core 98.89 % | 5 new unit tests |
 | 08-dsl-runtime | #57 (PR #217 CR round 2) | Independent Tester | Sonnet 5.5 | 1 | done | spec_interp suites pass; full-recompute pass; guard ok | 8 new spec tests; work-verifier result for the head that contains this row is reported in the PR discussion |
+| 05-sba | #43 | work-classifier | Sonnet 5.5 | 1 | needs-rules | - | Implementer T2 Opus 5.5, Tester T2 Opus 5.5; 7 rules questions |
+| 05-sba | #43 | rules-researcher | inherit | 1 | done | - | CR 2026-11-06 baseline fetched; 704.5v-aa, 310, 303.7a, 613.7e/m, 702.179; no SRS discrepancy |
+| 05-sba | #43 | work-classifier | Sonnet 5.5 | 2 | routed | - | final briefs; Implementer and Tester in parallel |
+| 05-sba | #43 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace both configs pass; guard, cr check ok; core 98.89 % | 6 entries, 5 seams; FABLE_ALLOWANCE unknown (no Fable) |
+| 05-sba | #43 | Independent Tester | Opus 5.5 | 1 | done | spec_sba_* 59 passed; workspace both configs pass | spec_sba_attach.rs 704.5p fixture updated (DECISIONS) |
