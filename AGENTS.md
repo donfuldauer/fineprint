@@ -62,6 +62,15 @@ documents `.pzl` scenario conventions.
   explicit paging on list/search endpoints when a proxy blocks `--paginate`) or GitHub MCP tools
   when configured; in Claude Code web sessions where GitHub GraphQL is unavailable, use REST
   (`gh api repos/donfuldauer/fineprint/...`) and the session's `ccr` routes for review threads.
+- **Commit attribution (all harnesses).** Agent-made commits credit the human contributor the
+  agent works for as well as the agent. `scripts/install-git-hooks.sh` (run by the Claude Code
+  `SessionStart` hook in `.claude/settings.json` and by `.agents/setup-env.sh`; otherwise run it
+  once per clone) enables `.githooks/commit-msg` and records the contributor in
+  `git config fineprint.coauthor` (from `$FINEPRINT_COAUTHOR`, an existing `fineprint.coauthor`, a
+  non-agent `user.name`/`user.email`, or the GitHub account `gh` is signed in to, via its
+  no-reply address). The hook appends `Co-authored-by: <contributor>` to every commit authored by an
+  agent identity (`noreply@anthropic.com`, `[bot]` accounts). Keep the agent as author; never
+  rewrite authorship to hide it, and never bypass the hook with `--no-verify`.
 - **Non-negotiables:** determinism (R3), no card-specific branches (R4), no card data anywhere in
   the repo, synthetic test cards only (R5), `VERIFIED` only through passing tests (R11), untrusted
   inputs stay untrusted and redacted views never leak hidden information (R12). Contracts change

@@ -192,6 +192,9 @@ single-checkout fallback below). One branch, one PR, one issue.
    **new GitHub issue** (labelled like this one, "Depends on" filled in) linked from the PR.
 6. Commit the work (one commit per role or deliverable, subject prefixed `[#<N>]`), unless the
    brief said the executor commits.
+   Run `./scripts/install-git-hooks.sh` first (idempotent) so the `commit-msg` hook credits the
+   contributor; after committing, `git log -1 --format=%B | grep -iF "Co-authored-by: $(git config
+   fineprint.coauthor)"` must match on every agent-authored commit. Never use `--no-verify`.
 
 ## 4. Log and verify
 
