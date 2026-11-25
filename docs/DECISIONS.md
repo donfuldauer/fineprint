@@ -8763,3 +8763,84 @@ hash).
 **Rationale.** Git uses one hooks directory, so replacing it silently disables a contributor's checks; the script runs at SessionStart so it must never fail or block.
 
 **Alternatives.** Chaining existing hooks automatically (fragile, executes unknown scripts); prompting (impossible at SessionStart); keeping the unconditional replacement.
+
+## Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense battle
+
+**Decision.** This SUPERSEDES the decision "#43 FP-042 — No protector request for a battle at 0
+defense", whose Decision read: "A battle that is also a CR 704.5v or CR 704.5w finding in the same
+pass gets no protector request and no `protectors_chosen` entry; its 704.5x/704.5y finding is still
+reported in `findings`. It moves once." That decision is superseded as follows. Before the batch,
+nothing changes: a battle that is also a CR 704.5v or CR 704.5w finding still gets no protector
+request, and the pre-batch request sequence (request ids included) is unchanged. The pass now
+remembers each such battle with the CR reference of its CR 704.5x or CR 704.5y finding
+(`Plan::retained_battles`). After the batch, if a remembered battle is still on the battlefield
+as the same object (same `ObjectId`; a battle that moved has another id or zone) and is still a
+CR 704.5x or CR 704.5y subject in a fresh view of the state after the batch, it means a replacement
+effect replaced its graveyard move (CR 614.6, CR 704.7). Its controller is then asked the usual
+protector choice in the same pass: one `CHOOSE_PLAYER`, with the request shape of a pre-batch
+protector choice and candidates computed from the post-batch view. These requests come after
+every pre-batch request and every request raised by the batch. They are ordered by the chooser's
+APNAP rank, then ascending battle id, and use `choices.next_request_id()` at that point. Each
+answer goes into `protectors_chosen` (sorted by battle; recorded through
+`SbaEnvironment::set_battle_protector` only when the pass succeeds), which makes the pass
+`performed`. A retained battle without a controller or without a candidate gets no request and
+the next pass finds it again. A battle that actually leaves gets no request and no
+`protectors_chosen` entry, as before. A pending or failed post-batch request rolls the whole pass
+back like any other request.
+
+**Rationale.** The rules-researcher's answers (CR 2026-11-06):
+(1) CR 704.5x applies independently of CR 704.5v and CR 704.5w. If the graveyard move is
+replaced, the battle stays and ends the event with the chosen protector.
+(2) A no-candidate graveyard move is part of the same event, and per CR 704.7 a single
+replacement replaces both moves.
+(3) When the move goes through, skipping the choice cannot be observed: the protector designation
+leaves with the object, and its last known information comes from before the state-based actions
+(CR 704.8). Asking only matters when the move is replaced.
+So suppressing the request for a battle that actually leaves is still correct. A battle whose move
+was replaced must get its protector choice, otherwise it would stay on the battlefield with no
+protector forever (gate review round 2, finding R3). Asking only after the batch keeps the replay
+of every normal game unchanged.
+
+**Alternatives.** Asking every zero-defense battle before the batch. Rejected: it adds a
+meaningless decision to the replay of every normal case and changes existing replay logs. Skipping
+forever (the superseded behaviour). Rejected: a battle whose move a replacement keeps skipping
+would stay unprotected and never be asked.
+
+## Gate 02-state-objects R5 — Bulk downloads are capped in-process
+
+Amends "Gate 02-state-objects F12 — curl 8.4.0 minimum and a capped metadata read" (its curl
+version floor and its fail-open handling of an unparseable version).
+
+**Decision.** `Curl::download_to_file` runs curl without `--output`: curl writes the body to
+stdout and this program streams it, through a fixed 64 KiB buffer, into the existing part file
+(opened for writing and truncated, never created there; flushed at the end) with a byte cap of
+`Request.max_bytes` (`run_capped_to_file`, built on `copy_stream_capped`). At most `cap + 1`
+bytes are read and at most `cap` bytes are written; as soon as more than `cap` bytes arrive the
+curl process is killed and waited, and the caller (`stage`) removes the part file. The metadata
+read keeps its in-memory 1 MiB cap (`run_capped`). The curl version check is advisory only:
+`check_curl_version` returns `Ok(None)` for 8.4.0 or later and `Ok(Some(warning))` for an older or
+unparseable version (never `Err`), and at most one warning per process is printed on stderr; a
+failure to read `curl --version` is also only a warning (a missing curl still fails at the
+download's spawn). `--max-filesize <cap>` stays in the arguments as a second line of defence.
+
+**Rationale.** `curl --version` reports the curl frontend version, which need not be the version
+of the linked libcurl that actually enforces `--max-filesize` on a response of unknown size; an
+unparseable banner was fail-open; and with `--output` curl writes the file itself, so no
+in-process count could stop an oversized body before it reached the disk (the later
+`read_capped` only rejected it after it was written). Counting the bytes in this process makes
+the cap hold whatever curl or libcurl is installed (R12, REQ-NFR-004).
+
+**Alternatives.** Parse the `libcurl/x.y.z` token and fail closed on an older or unknown
+version (rejected: it still trusts the library's behaviour, and it breaks unusual or vendor
+builds whose banner differs). Keep `--output` and check the file size afterwards (rejected: the
+oversized body is already on disk by then).
+
+## Gate 02-state-objects R4 — Destination identity check after the records are written
+
+**Amends:** "Gate 02-state-objects F8 — The records file and the MTGJSON report must be different files" (the spelling pre-check stays).
+
+**Decision.** `import` keeps the pre-write spelling check (`resolve_dest`, exit 2 before anything is written). It adds an identity check: after the records file is written and before the report is written, when both destinations are files and the report destination exists and is the same file as the records destination (`same_file::is_same_file`: device and inode on Unix, the volume serial and file index on Windows), `import` exits 2 with the usage message "the records file and --mtgjson-report name the same file" and writes no report; the records file just written stays intact. The check is skipped when the report destination is a symbolic link, since the atomic rename replaces the link itself and cannot reach the records. The `same-file` crate, exact-pinned (`=1.0.6`, already in Cargo.lock through another package), is added as a workspace dependency used by `fineprint-ingest` only; it does not enter the rules crates.
+
+**Rationale.** Names such as `cards.json` and `Cards.json` differ in spelling but name one file on a case-insensitive file system (APFS, NTFS), so a spelling comparison lets the report replace the records and the command succeeds. File identity is the only reliable test, and it needs the file to exist: when neither file exists there is no identity yet, so a check before writing is impossible; the records file is therefore written first and the report destination tested next. One crate on every platform means one code path and no unsafe.
+
+**Alternatives.** Std-only `MetadataExt` (dev+ino) on Unix plus the crate on Windows (rejected: two code paths for no saving). Comparing lower-cased names (rejected: wrong on case-sensitive file systems, where case-distinct names are valid). Probing the directory's case sensitivity (rejected: racy and per directory).
