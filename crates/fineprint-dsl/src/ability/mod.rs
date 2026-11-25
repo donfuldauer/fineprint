@@ -20,8 +20,9 @@
 //! There is no way to write a look-back flag on a trigger (SRS §14.4.1; the engine derives it,
 //! 603.10a–g): no ability, trigger, matcher or typed effect has such a member, and rule E5
 //! refuses any `filters`/`bind` key whose lower-cased form without `_` and `-` starts with
-//! `lookback`. The flat parameters of the opaque placeholder types (effect instructions,
-//! modifications, RULE effects, keyword params) are opaque by contract and not checked.
+//! `lookback`. Effect instructions are the real [`crate::effect::Instruction`] (REQ-DSL-010); the
+//! flat parameters of the remaining opaque placeholder types (modifications, RULE effects,
+//! keyword params) are opaque by contract and not checked.
 //!
 //! Nothing here is evaluated; the interpreter and the toolchain checks are other units.
 
@@ -31,6 +32,7 @@ use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 use serde_json::Value;
 
+use crate::effect::Instruction;
 use crate::expr::json::{
     AsMap, FromJson, JResult, Members, Obj, array_of, check_free_str, deserialize_via_from_json,
     free_str, ser_check, str_of, u32_of,
@@ -46,7 +48,7 @@ mod statics;
 #[cfg(test)]
 mod tests;
 
-pub use self::common::{EffectInstructionAST, ModeAST, ModeSetAST, TargetSlotAST};
+pub use self::common::{ModeAST, ModeSetAST, TargetSlotAST};
 pub use self::cost::{ActivationLimit, ActivationTiming, CostAST};
 pub use self::event::{
     EventBatch, EventKind, EventMatcher, EventSubject, FilterValue, StepId, Trigger,
@@ -213,7 +215,7 @@ pub struct SpellAbilityAST {
     /// Modes.
     pub modes: Option<ModeSetAST>,
     /// Instructions (may be empty).
-    pub effect: Vec<EffectInstructionAST>,
+    pub effect: Vec<Instruction>,
 }
 
 /// An activated ability (REQ-DSL-007, SRS §14.4.2): `kind` `"ACTIVATED"`, `cost` (non-empty),
@@ -237,7 +239,7 @@ pub struct ActivatedAbilityAST {
     /// Modes.
     pub modes: Option<ModeSetAST>,
     /// Instructions (may be empty).
-    pub effect: Vec<EffectInstructionAST>,
+    pub effect: Vec<Instruction>,
 }
 
 /// A triggered ability (REQ-DSL-006, SRS §14.4.1): `kind` `"TRIGGERED"`, `trigger`,
@@ -259,7 +261,7 @@ pub struct TriggeredAbilityAST {
     /// Modes.
     pub modes: Option<ModeSetAST>,
     /// Instructions (may be empty).
-    pub effect: Vec<EffectInstructionAST>,
+    pub effect: Vec<Instruction>,
 }
 
 /// A static ability (REQ-DSL-004, REQ-DSL-008, SRS §14.4.3): `kind` `"STATIC"`, `effects`
@@ -371,7 +373,7 @@ fn opt_modes(o: &mut Obj<'_>) -> JResult<Option<ModeSetAST>> {
 }
 
 /// Decodes the required `effect` member (may be empty).
-fn effect_req(o: &mut Obj<'_>) -> JResult<Vec<EffectInstructionAST>> {
+fn effect_req(o: &mut Obj<'_>) -> JResult<Vec<Instruction>> {
     vec_of(o.req("effect")?, "effect", false)
 }
 

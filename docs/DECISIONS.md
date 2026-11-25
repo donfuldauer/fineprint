@@ -8303,3 +8303,72 @@ spelling real ASTs), FP-010 loader order (canonical → version → schema → A
 **Alternatives.** Require `Schema`/`Serialize` for the unsafe LITERAL (rejected: contradicts the
 documented canonical-first order); keep placeholder content in the migrated files (rejected:
 `seal`/`from_json` now refuse it).
+
+## #161 FP-141 — Real effect::Instruction in abilities
+
+**Decision.**
+(a) `ability::EffectInstructionAST` is deleted. `SpellAbilityAST.effect`, `ActivatedAbilityAST.effect`,
+`TriggeredAbilityAST.effect`, `ModeAST.effect` and `ReplacementOp::Instead.instructions` hold
+`crate::effect::Instruction` directly; there is no alias and no re-export from `ability`
+(consumers import `fineprint_dsl::effect::Instruction`). The module docs now say instructions are
+the real type and that modifications, RULE effects and keyword params remain opaque. The helpers
+`check_upper_name`, `check_params`, `rest_params` and `write_params` stay: modifications, RULE
+effects and keyword names still use them. This supersedes "#13 FP-012 — EffectInstructionAST is a
+placeholder", the placeholder clause of "#13 FP-012 — Rule E5 covers filters and bind keys only"
+and "#14 FP-013 — Ability placeholder stays" (the older entries are not edited).
+
+(b) Emptiness is unchanged: a SPELL, ACTIVATED, TRIGGERED or mode `effect` list may be empty;
+`INSTEAD.instructions` must be non-empty. Lists nested inside an `effect::Instruction` follow
+`effect::`'s own rule (non-empty).
+
+(c) Rule E5 re-check against the real instruction. A real instruction has no flat free-form
+member: every member is typed and an unknown member is an error, so `lookBack`, `look_back` or
+`LOOK-BACK` directly on an instruction is rejected as unknown. The only positions inside an
+instruction that can carry a free-form key are the `filters` and `bind` of a trigger event matcher
+(`CREATE_DELAYED_TRIGGER.trigger`, `REFLEXIVE_TRIGGER` has none), and they decode through the
+ability `Trigger`, so `check_no_lookback` still applies: a delayed trigger whose matcher has a
+look-back `filters` or `bind` key is rejected (tested). `NATIVE_EFFECT.params` is opaque by
+contract (REQ-DSL-015): a `lookBack` key there is data and round-trips unchanged (tested); E5 is
+not widened to it. `CREATE_CONTINUOUS_EFFECT` carries `StaticEffect`s, whose opaque params are
+already outside E5 by "#13 FP-012". `check_no_lookback` semantics are unchanged.
+
+(d) Tests changed (R10): in `ability/tests.rs`, the SRS §14.4.1 example 1 effect became a valid
+`DISCARD` (`player` a bound reference, no `chooser`; the placeholder form was not a real
+instruction) and its assertion now uses `Instruction::name()`; the §14.4.2 activated example's
+`TAP_OR_UNTAP` uses the real member `action` instead of `mode`; the mode, INSTEAD and
+`Instead` serialize fixtures use `POPULATE`; the opaque-number, noncharacter and nesting tests
+moved their opaque values into `NATIVE_EFFECT.params` (nesting limits shift by one because
+`params` is an extra object level: 123 accepted, 124 rejected); the E5 test that said
+instruction members are opaque data now asserts that a look-back member on an instruction is
+rejected; `req_dsl_005_effect_instruction_placeholder` (it only proved free-form ops and opaque
+members are accepted) is replaced by the reject/accept/round-trip, emptiness, Serialize re-check
+and E5 tests of REQ-DSL-010; the serialize test no longer builds `EffectInstructionAST`. In
+`props.rs` `gen_instr` draws from a fixed list of valid instructions and the random-bytes run
+covers `Instruction`.
+
+**Rationale.** REQ-DSL-010 wants abilities to carry real instruction ASTs; reusing the merged
+FP-013 decoder gives strict decoding, canonical form and Serialize invariant checks for free, and
+keeps card fixtures using `{"op":"POPULATE"}` hashing the same.
+
+**Alternatives.** A type alias or re-export of `Instruction` in `ability` (rejected: two import
+paths for one type); widening E5 to `NATIVE_EFFECT.params` (rejected: contradicts REQ-DSL-015
+opacity); tightening list emptiness (rejected: not requested, would change the wire contract).
+
+## #161 FP-141 — Spec-test readings after the instruction swap
+
+**Decision.** The Independent Tester's judgement calls in `tests/spec_dsl_ability*.rs`:
+(1) the SRS §14.4 examples are tested with real instruction members, as in the unit tests: the
+example-1 `DISCARD` `player` is `{"ref":"BOUND","var":"$P"}` with no `chooser`, and the activated
+example's `TAP_OR_UNTAP` uses `action`, not `mode`; (2) property templates that need a free-form
+name or string inside an instruction use the opaque `CREATE_TOKEN.inline` map, since a typed
+instruction has no free-form members; (3) nesting-limit spec tests assert rejection at 70 and
+200 nested `IF`s and do not pin the exact boundary (the unit tests pin it); (4) the spec test that
+asserted a look-back member on an instruction is opaque data now asserts it is rejected as an
+unknown member, and E5 inside a `CREATE_DELAYED_TRIGGER` matcher is asserted through the shared
+ability `Trigger` decoder.
+**Rationale.** R10: the placeholder content was not a valid real instruction; the assertions keep
+their intent against the real type. The exact nesting boundary depends on wrapper depth, which is
+an implementation detail for black-box tests.
+**Alternatives.** Keep the SRS shorthand and assert rejection (rejected: loses the round-trip
+coverage of the examples); pin the exact nesting boundary in spec tests (rejected: couples the
+black-box tests to wrapper depth).

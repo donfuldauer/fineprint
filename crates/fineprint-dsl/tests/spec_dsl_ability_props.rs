@@ -5,7 +5,7 @@
 //! Spec tests for `fineprint_dsl::ability` (FP-012 wire contract), part 4: strict decoding (W2,
 //! REQ-NFR-006, REQ-CORE-006) at AbilityAST level through `from_str` and `from_slice`, and seeded
 //! property and random-bytes tests (R12) for AbilityAST, EventMatcher, CostAST, StaticEffect and
-//! ReplacementOp (REQ-DSL-005..009). Black-box: written from the work-item brief only. Fixed
+//! ReplacementOp (REQ-DSL-005..009) and the real `effect::Instruction` in effect lists (REQ-DSL-010). Black-box: written from the work-item brief only. Fixed
 //! seeds, no wall clock; synthetic data only (R5).
 
 use std::fmt::Debug;
@@ -13,6 +13,7 @@ use std::fmt::Debug;
 use fineprint_base::prng::Pcg64Dxsm;
 use fineprint_dsl::ability::{AbilityAST, CostAST, EventMatcher, ReplacementOp, StaticEffect};
 use fineprint_dsl::canonical::{MAX_DEPTH, canonicalize, to_canonical_vec};
+use fineprint_dsl::effect::Instruction;
 use fineprint_dsl::mana::ManaCostDSL;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -230,7 +231,7 @@ const NUMBER_TEMPLATES: [&str; 9] = [
     r#"{"abilityId":"a","kind":"SPELL","targets":[{"slot":<<V>>,"selector":{"ref":"SELF"},"min":0,"max":1}],"effect":[]}"#,
     r#"{"abilityId":"a","kind":"SPELL","targets":[{"slot":0,"selector":{"ref":"SELF"},"min":0,"max":<<V>>}],"effect":[]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES"}},"limit":{"perTurn":<<V>>},"effect":[]}"#,
-    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"TEST_OP","n":<<V>>}]}"#,
+    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":<<V>>}}]}"#,
     r#"{"abilityId":"a","kind":"ACTIVATED","cost":[{"cost":"PAY_LIFE","amount":{"LITERAL":<<V>>}}],"effect":[]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES","filters":{"n":<<V>>}}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"PREVENT"}],"shield":{"uses":<<V>>}}"#,
@@ -260,7 +261,7 @@ fn req_core_006_non_integer_and_unsafe_numbers_rejected() {
 
 /// Templates with a `<<K>>` member-name placeholder; `<<K>>` = "k" gives a valid document.
 const NAME_TEMPLATES: [&str; 4] = [
-    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"TEST_OP","<<K>>":1}]}"#,
+    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"CREATE_TOKEN","inline":{"<<K>>":1},"count":{"LITERAL":1}}]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES","filters":{"<<K>>":true}}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES","bind":{"<<K>>":"$v"}}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"KEYWORD","keyword":"TEST_KW","params":{"<<K>>":1}}"#,
@@ -271,7 +272,7 @@ const STRING_TEMPLATES: [&str; 6] = [
     r#"{"abilityId":"<<S>>","kind":"SPELL","effect":[]}"#,
     r#"{"abilityId":"a","kind":"SPELL","abilityWord":"<<S>>","effect":[]}"#,
     r#"{"abilityId":"a","kind":"SPELL","linkIds":["<<S>>"],"effect":[]}"#,
-    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"TEST_OP","s":"<<S>>"}]}"#,
+    r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"CREATE_TOKEN","inline":{"s":"<<S>>"},"count":{"LITERAL":1}}]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES","filters":{"name":"<<S>>"}}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"ACTIVATED","cost":[{"cost":"PUT_COUNTERS","on":{"ref":"SELF"},"kind":"<<S>>","amount":{"LITERAL":1}}],"effect":[]}"#,
 ];
@@ -337,8 +338,8 @@ const DUP_TEMPLATES: [(&str, &str); 10] = [
         r#""p":"$Q","#,
     ),
     (
-        r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"TEST_OP",<<D>>"n":1}]}"#,
-        r#""n":1,"#,
+        r#"{"abilityId":"a","kind":"SPELL","effect":[{"op":"DRAW",<<D>>"player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}]}"#,
+        r#""player":{"ref":"CONTROLLER"},"#,
     ),
     (
         r#"{"abilityId":"a","kind":"ACTIVATED","cost":[{"cost":"PAY_MANA",<<D>>"mana":"{2}"}],"effect":[]}"#,
@@ -364,13 +365,16 @@ fn req_nfr_006_duplicate_members_rejected() {
 }
 
 /// Valid documents with a `<<U>>` placeholder right after the `{` of one object of each kind.
-const UNKNOWN_TEMPLATES: [&str; 30] = [
+const UNKNOWN_TEMPLATES: [&str; 33] = [
     r#"{<<U>>"abilityId":"a","kind":"SPELL","effect":[]}"#,
     r#"{<<U>>"abilityId":"a","kind":"ACTIVATED","cost":[{"cost":"TAP_SOURCE"}],"effect":[]}"#,
     r#"{<<U>>"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"EVENT","event":{"kind":"DIES"}},"effect":[]}"#,
     r#"{<<U>>"abilityId":"a","kind":"STATIC","effects":[{"type":"RULE","kind":"SKIP"}]}"#,
     r#"{<<U>>"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"SKIP"}]}"#,
     r#"{<<U>>"abilityId":"a","kind":"KEYWORD","keyword":"TEST_KW"}"#,
+    r#"{"abilityId":"a","kind":"SPELL","effect":[{<<U>>"op":"POPULATE"}]}"#,
+    r#"{"abilityId":"a","kind":"SPELL","modes":{"min":1,"max":1,"modes":[{"id":"m","effect":[{<<U>>"op":"POPULATE"}]}]},"effect":[]}"#,
+    r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"INSTEAD","instructions":[{<<U>>"op":"POPULATE"}]}]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{<<U>>"mode":"EVENT","event":{"kind":"DIES"}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{<<U>>"mode":"PHASE_STEP","step":"UPKEEP","whose":{"ref":"CONTROLLER"}},"effect":[]}"#,
     r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{<<U>>"mode":"STATE","state":{"pred":"TAPPED"}},"effect":[]}"#,
@@ -389,7 +393,7 @@ const UNKNOWN_TEMPLATES: [&str; 30] = [
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"SKIP"}]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"PREVENT"}]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"MODIFY_EVENT","set":{"to":"EXILE"}}]}"#,
-    r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"INSTEAD","instructions":[{"op":"TEST_OP"}]}]}"#,
+    r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"INSTEAD","instructions":[{"op":"POPULATE"}]}]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{<<U>>"op":"CHOOSE","choice":{"chooser":{"ref":"CONTROLLER"},"kind":"COLOR"},"store":"k"}]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"CHOOSE","choice":{<<U>>"chooser":{"ref":"CONTROLLER"},"kind":"COLOR"},"store":"k"}]}"#,
     r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"SKIP"}],"shield":{<<U>>"uses":1}}"#,
@@ -691,11 +695,19 @@ fn gen_filter_obj(rng: &mut Pcg64Dxsm, allow_empty: bool) -> Value {
 }
 
 fn gen_instr(rng: &mut Pcg64Dxsm) -> Value {
-    match below(rng, 4) {
-        0 => json!({"op":"TEST_OP"}),
-        1 => json!({"op":"DRAW_TEST","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}),
-        2 => json!({"op":"TEST_OP_2","n":below(rng, 100),"s":"txt","o":{"a":[1,"b",true]}}),
-        _ => json!({"op":"OTHER","list":[],"empty":{},"flag":false}),
+    // A fixed pool of valid real `effect::Instruction` wire forms (REQ-DSL-010).
+    match below(rng, 9) {
+        0 => json!({"op":"POPULATE"}),
+        1 => json!({"op":"VENTURE"}),
+        2 => json!({"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":below(rng, 100)}}),
+        3 => json!({"op":"SHUFFLE","player":{"ref":"CONTROLLER"}}),
+        4 => {
+            json!({"op":"GAIN_LIFE","player":{"ref":"CONTROLLER"},"amount":{"LITERAL":below(rng, 100)}})
+        }
+        5 => json!({"op":"IF","cond":{"pred":"IS_CREATURE"},"then":[{"op":"POPULATE"}]}),
+        6 => json!({"op":"MAY","player":{"ref":"CONTROLLER"},"body":[{"op":"POPULATE"}]}),
+        7 => json!({"op":"TAP_OR_UNTAP","action":"TAP","objects":{"ref":"SELF"}}),
+        _ => json!({"op":"NATIVE_EFFECT","id":"native.test_effect","version":1,"params":{}}),
     }
 }
 
@@ -1163,9 +1175,10 @@ fn try_all(bytes: &[u8]) {
     one::<CostAST>(bytes);
     one::<StaticEffect>(bytes);
     one::<ReplacementOp>(bytes);
+    one::<Instruction>(bytes);
 }
 
-/// A sub-document of a generated ability that matches one of the five types, or the whole.
+/// A sub-document of a generated ability that matches one of the six types, or the whole.
 fn sample_doc(rng: &mut Pcg64Dxsm, n: u64) -> Vec<u8> {
     let (v, ..) = gen_ability(rng, n);
     let kind = v["kind"].as_str().unwrap().to_string();
@@ -1176,6 +1189,9 @@ fn sample_doc(rng: &mut Pcg64Dxsm, n: u64) -> Vec<u8> {
         "ACTIVATED" if coin(rng) => v["cost"][0].clone(),
         "STATIC" if coin(rng) => v["effects"][0].clone(),
         "REPLACEMENT" if coin(rng) => v["replaceWith"][0].clone(),
+        "SPELL" | "ACTIVATED" | "TRIGGERED" if coin(rng) && v["effect"][0].is_object() => {
+            v["effect"][0].clone()
+        }
         _ => v,
     };
     serde_json::to_vec(&sub).unwrap()
@@ -1183,7 +1199,8 @@ fn sample_doc(rng: &mut Pcg64Dxsm, n: u64) -> Vec<u8> {
 
 /// REQ-NFR-006 (R12, seed 0x0F12_0000_0000_0002): 3,600 bounded inputs (1,200 random byte
 /// strings, 1,200 truncated valid documents, 1,200 byte-flipped valid documents) never panic when
-/// decoded as AbilityAST, EventMatcher, CostAST, StaticEffect or ReplacementOp; whatever is
+/// decoded as AbilityAST, EventMatcher, CostAST, StaticEffect, ReplacementOp or
+/// `effect::Instruction` (REQ-DSL-010); whatever is
 /// accepted round-trips.
 #[test]
 fn req_nfr_006_ability_random_bytes_never_panic() {
