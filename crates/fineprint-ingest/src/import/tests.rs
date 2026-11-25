@@ -14,8 +14,10 @@ use serde_json::{Value, json};
 
 use super::cli::{parse_fetch_args, parse_import_args};
 use super::fetch::{
-    CachedFile, Request, SourceMeta, curl_args, is_fresh, parse_bulk_data, parse_source_meta,
-    render_source_meta, validate_atomic_cards, validate_download_uri, validate_scryfall_bulk,
+    CachedFile, MIN_CURL_VERSION, Request, SourceMeta, check_curl_version, curl_args,
+    curl_failure_message, is_fresh, parse_bulk_data, parse_curl_version, parse_source_meta,
+    part_path, read_stream_capped, render_source_meta, run_capped, validate_atomic_cards,
+    validate_download_uri, validate_scryfall_bulk,
 };
 use super::json_array::{ArrayError, parse_elements, split_array, validate_array};
 use super::mtgjson::{cross_check, parse_atomic};
@@ -225,7 +227,8 @@ fn array_splitter() {
     }
 }
 
-/// REQ-ING-001, R12: download URI validation.
+/// REQ-ING-001, R12: download URI validation, including the curl glob characters (F35) and the
+/// excluded API host `api.scryfall.com` (F37).
 #[test]
 fn download_uri_rules() {
     for ok in [
@@ -233,6 +236,9 @@ fn download_uri_rules() {
         "https://data.scryfall.io/a/b.json?x=1",
         "https://a-b.c.scryfall.com",
         "https://data.scryfall.io#frag",
+        "https://c2.scryfall.com/x.json",
+        "https://xapi.scryfall.com/a",
+        "https://api.scryfall.io/a",
     ] {
         assert_eq!(validate_download_uri(ok), Ok(()), "{ok}");
     }
@@ -251,13 +257,33 @@ fn download_uri_rules() {
         "https://",
         "HTTPS://scryfall.com/a",
         long.as_str(),
+        // F35: curl URL globbing characters.
+        "https://data.scryfall.io/a[1-9].json",
+        "https://data.scryfall.io/{a,b}.json",
+        "https://data.scryfall.io/a]",
+        "https://data.scryfall.io/a?x={",
+        "https://data.scryfall.io/a#}",
+        // F37: the API host is never a download host.
+        "https://api.scryfall.com/bulk-data",
+        "https://api.scryfall.com",
+        "https://api.scryfall.com?x=1",
+        "https://API.SCRYFALL.COM/bulk-data",
     ] {
         assert!(validate_download_uri(bad).is_err(), "{bad}");
     }
+    assert_eq!(
+        validate_download_uri("https://api.scryfall.com/x"),
+        Err("the download URI names the Scryfall API host")
+    );
 }
 
-/// REQ-ING-001, REQ-NFR-004: the curl arguments: HTTPS only, fail on errors, bounded size and
-/// time, the headers, never insecure.
+fn lossy(a: &[OsString]) -> Vec<String> {
+    a.iter().map(|x| x.to_string_lossy().into_owned()).collect()
+}
+
+/// REQ-ING-001, REQ-NFR-004, R12: the curl arguments: `--disable` first (F36: no `~/.curlrc`),
+/// `--globoff` (F35), HTTPS only, no redirect following (F15: neither `--location` nor
+/// `--proto-redir`), fail on errors, bounded size and time, the headers, never insecure.
 #[test]
 fn curl_arguments() {
     let req = Request {
@@ -266,15 +292,15 @@ fn curl_arguments() {
         max_bytes: MAX_INPUT_BYTES,
         max_time_secs: 60,
     };
-    let a = curl_args(&req, Some(std::path::Path::new("x.part")));
+    let a = lossy(&curl_args(&req, Some(std::path::Path::new("x.part"))));
+    assert_eq!(a.first().map(String::as_str), Some("--disable"));
     let joined = a.join(" ");
     for want in [
         "--fail",
-        "--location",
         "--silent",
         "--show-error",
+        "--globoff",
         "--proto =https",
-        "--proto-redir =https",
         "--max-filesize 4294967296",
         "--max-time 60",
         "--header Accept: application/json",
@@ -282,9 +308,138 @@ fn curl_arguments() {
     ] {
         assert!(joined.contains(want), "{want}");
     }
+    for absent in ["--location", "-L", "--proto-redir", "--insecure", "-k"] {
+        assert!(!a.iter().any(|x| x == absent), "{absent}");
+    }
     assert_eq!(a.last().map(String::as_str), Some(req.url.as_str()));
-    assert!(!joined.contains("--insecure") && !a.iter().any(|x| x == "-k"));
-    assert!(!curl_args(&req, None).iter().any(|x| x == "--output"));
+    assert!(!joined.contains("--insecure"));
+    let stdout_args = lossy(&curl_args(&req, None));
+    assert!(!stdout_args.iter().any(|x| x == "--output"));
+    assert_eq!(stdout_args.first().map(String::as_str), Some("--disable"));
+}
+
+/// REQ-ING-001, REQ-NFR-004 (F33): a non-UTF-8 destination path reaches curl byte-exact.
+#[cfg(unix)]
+#[test]
+fn curl_output_path_is_byte_exact() {
+    use std::os::unix::ffi::OsStrExt;
+    let raw: &[u8] = b"/tmp/cache-\xff\xfe/oracle-cards.json.1.part";
+    let dest = std::path::Path::new(std::ffi::OsStr::from_bytes(raw));
+    let req = Request {
+        url: "https://data.scryfall.io/a.json".to_owned(),
+        headers: Vec::new(),
+        max_bytes: 1,
+        max_time_secs: 1,
+    };
+    let a = curl_args(&req, Some(dest));
+    let i = a.iter().position(|x| x == "--output").unwrap();
+    assert_eq!(a[i + 1].as_bytes(), raw);
+}
+
+/// REQ-ING-001, R12 (F34): a curl failure names the role and exit status and at most 200 bytes
+/// of the first stderr line with control characters replaced; never the URL.
+#[test]
+fn curl_failure_messages() {
+    assert_eq!(
+        curl_failure_message("rulings.json", Some(22), b""),
+        "curl failed for rulings.json (exit 22)"
+    );
+    assert_eq!(
+        curl_failure_message(
+            "bulk-data metadata",
+            Some(6),
+            b"\ncurl: (6) Could not resolve host\nsecond line\n"
+        ),
+        "curl failed for bulk-data metadata (exit 6): curl: (6) Could not resolve host"
+    );
+    assert_eq!(
+        curl_failure_message("AtomicCards.json", None, b"a\x1b[31mb\tc"),
+        "curl failed for AtomicCards.json (no exit code): a?[31mb?c"
+    );
+    // A long line is cut to 200 bytes on a character boundary.
+    let long = "é".repeat(150);
+    let m = curl_failure_message("oracle-cards.json", Some(28), long.as_bytes());
+    let excerpt = m.split_once(": ").unwrap().1;
+    assert_eq!(excerpt.len(), 200);
+    assert!(excerpt.chars().all(|c| c == 'é'));
+    // Invalid UTF-8 never panics.
+    let m = curl_failure_message("oracle-cards.json", Some(1), &[0xff; 500]);
+    assert!(m.len() < 300, "{m}");
+}
+
+/// REQ-NFR-004, R12 (F12): the stream reader keeps at most `cap` bytes and names the cap on
+/// overflow.
+#[test]
+fn stream_reader_is_capped() {
+    assert_eq!(read_stream_capped(&b""[..], 4).unwrap(), b"");
+    assert_eq!(read_stream_capped(&b"abcd"[..], 4).unwrap(), b"abcd");
+    let e = read_stream_capped(&b"abcde"[..], 4).unwrap_err();
+    assert!(e.contains("4-byte cap"), "{e}");
+    // An endless reader stops at cap + 1 bytes.
+    let e = read_stream_capped(std::io::repeat(b'y'), 1024 * 1024).unwrap_err();
+    assert!(e.contains("1048576-byte cap"), "{e}");
+}
+
+/// REQ-NFR-004, R12 (F12): a child producing endless output is stopped at the cap and killed.
+#[cfg(unix)]
+#[test]
+fn capped_command_is_killed_past_the_cap() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "yes"]);
+    let e = run_capped(cmd, 1024, "test.role").unwrap_err();
+    assert!(
+        e.contains("1024-byte cap") && e.contains("test.role"),
+        "{e}"
+    );
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "printf abc"]);
+    assert_eq!(run_capped(cmd, 1024, "test.role").unwrap(), b"abc");
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", "echo 'oops' >&2; exit 3"]);
+    assert_eq!(
+        run_capped(cmd, 1024, "test.role").unwrap_err(),
+        "curl failed for test.role (exit 3): oops"
+    );
+}
+
+/// REQ-NFR-004, R12 (F12): the `curl --version` parser and verdict: 8.4.0 or later passes, an
+/// older version is an error naming 8.4.0 and the cap, an unparsable one is a warning.
+#[test]
+fn curl_version_check() {
+    assert_eq!(MIN_CURL_VERSION, (8, 4, 0));
+    let line = |v: &str| format!("curl {v} (x86_64-pc-linux-gnu) libcurl/{v}\nRelease-Date: x\n");
+    assert_eq!(parse_curl_version(&line("8.4.0")), Some((8, 4, 0)));
+    assert_eq!(parse_curl_version(&line("8.11.1-DEV")), Some((8, 11, 1)));
+    assert_eq!(parse_curl_version(&line("9.0")), Some((9, 0, 0)));
+    for bad in [
+        "",
+        "libcurl 8.4.0",
+        "curl",
+        "curl x.y.z",
+        "curl 8",
+        "\ncurl 8.4.0",
+    ] {
+        assert_eq!(parse_curl_version(bad), None, "{bad:?}");
+    }
+    for ok in ["8.4.0", "8.4.1", "8.10.0", "9.0.0"] {
+        assert_eq!(check_curl_version(&line(ok)), Ok(None), "{ok}");
+    }
+    for old in ["8.3.99", "7.88.1", "8.0.0"] {
+        let e = check_curl_version(&line(old)).unwrap_err();
+        assert!(e.contains("8.4.0") && e.contains("cap"), "{e}");
+    }
+    let w = check_curl_version("garbage").unwrap().unwrap();
+    assert!(w.starts_with("warning:") && w.contains("8.4.0"), "{w}");
+}
+
+/// REQ-ING-001 (F14): each run stages into its own `{file}.{pid}.part`.
+#[test]
+fn part_names_are_per_run() {
+    let p = part_path(std::path::Path::new("d"), "rulings.json");
+    assert_eq!(
+        p,
+        std::path::Path::new("d").join(format!("rulings.json.{}.part", std::process::id()))
+    );
 }
 
 /// REQ-ING-001: bulk-data and source.json parsing, and the freshness rule.
@@ -512,6 +667,9 @@ fn parsers_survive_random_input() {
         let _ = validate_atomic_cards(&b);
         let s = String::from_utf8_lossy(&b);
         let _ = validate_download_uri(&s);
+        let _ = parse_curl_version(&s);
+        let _ = check_curl_version(&s);
+        let _ = curl_failure_message("test.role", Some(1), &b);
         let _ = text_symbol_colors(&s);
         let _ = split_type_line(&s);
         let args: Vec<OsString> = s.split(['\0', ' ']).map(OsString::from).collect();
