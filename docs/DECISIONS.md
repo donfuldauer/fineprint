@@ -8933,3 +8933,35 @@ check in the shared `protector_asks` (rejected: it would change the pre-batch re
 Keep the pre-batch CR reference (rejected: names a rule that no longer flags the battle).
 Open rules question for the rules-researcher: whether such a battle should instead leave with the
 player who lost, or another player choose; a follow-up decision amends this one if needed.
+
+## Gate 02-state-objects R3d — No protector request to a controller who lost the game, on every path
+
+**Decision.** Amends "Gate 02-state-objects R3c". The live-controller check of the post-batch
+retained-battle request (the controller is a player of the game without the `LOST_THE_GAME`
+designation) now applies to the ordinary, pre-batch protector requests too, through one shared
+helper (`can_choose_protector` in `crates/fineprint-core/src/sba/perform.rs`). On either path a
+CR 704.5x or CR 704.5y battle whose controller has lost the game, or is not a player of the game,
+gets no request and consumes no request id. On the ordinary path that battle also does not move:
+it stays on the battlefield without a protector, and the next pass finds it again (the same
+outcome as the deferred path). A battle with no candidate still goes to its owner's graveyard
+without a request, as before; for example, a typeless battle whose controller lost the game has
+no candidate because its only appropriate player has left. Requests to live controllers, their
+order (CR 101.4) and their request ids are unchanged.
+
+**Rationale.** CR 704.5x and CR 704.5y name only "that battle's controller" as the chooser, and
+no rule transfers the choice. A player who lost the game has left it (CR 800.4a), so asking that
+player would suspend the pass on a choice nobody can answer. This can happen on the ordinary path
+(CodeRabbit thread 4699044484). In pass 1, a Siege at defense 0 has its graveyard move replaced
+by a defense counter while its controller loses the game. In pass 2, the Siege is at defense 1,
+is a CR 704.5x subject, and is planned as an ordinary request. CR 800.4a makes the leaving
+player's objects leave the game or be exiled. Performing that is the caller's job (player
+removal), not the SBA pass's, so the pass does not invent a graveyard move for such a battle.
+Leaving the battle in place keeps the two paths identical and lets the player-leaves-game
+procedure deal with it. One helper keeps the two checks from drifting apart.
+
+**Alternatives.** (1) Treat a lost controller like a missing controller on the ordinary path, so
+the battle goes to the graveyard with the batch. Rejected: no rule supports a graveyard move for
+this reason, the move would pre-empt CR 800.4a exile and the triggers that look at it, and it
+would differ from the deferred path. (2) Hand the choice to another player, such as the next
+player in APNAP order. Rejected: no rule transfers the choice (rules-researcher, CR 2026-11-06).
+(3) Keep the check on the deferred path only. Rejected: that is the reported suspension defect.
