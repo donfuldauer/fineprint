@@ -78,6 +78,7 @@ impl BusEventKind {
             GameEvent::StepBegins { .. } => BusEventKind::StepBegins,
             GameEvent::Attach { .. } => BusEventKind::Attach,
             GameEvent::Unattach { .. } => BusEventKind::Unattach,
+            GameEvent::UnattachFrom { .. } => BusEventKind::Unattach,
             GameEvent::BecomeCopy { .. } => BusEventKind::BecomeCopy,
             GameEvent::TurnFaceUp { .. } => BusEventKind::TurnFaceUp,
             GameEvent::TurnFaceDown { .. } => BusEventKind::TurnFaceDown,
@@ -858,9 +859,9 @@ pub(super) fn affected_object(event: &GameEvent) -> Option<ObjectId> {
         | GameEvent::TurnFaceUp { object }
         | GameEvent::TurnFaceDown { object }
         | GameEvent::BecomeCopy { object, .. } => Some(*object),
-        GameEvent::Attach { attachment, .. } | GameEvent::Unattach { attachment } => {
-            Some(*attachment)
-        }
+        GameEvent::Attach { attachment, .. }
+        | GameEvent::Unattach { attachment }
+        | GameEvent::UnattachFrom { attachment, .. } => Some(*attachment),
         GameEvent::Damage {
             target: DamageTarget::Object(o),
             ..

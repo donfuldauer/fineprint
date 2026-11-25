@@ -286,7 +286,8 @@ impl CanonicalEncode for Step {
 /// Canonical tags (one byte, then the fields in declaration order): `ZoneChange` 0, `Draw` 1,
 /// `Damage` 2, `LifeChange` 3, `AddCounters` 4, `RemoveCounters` 5, `Tap` 6, `Untap` 7,
 /// `CreateToken` 8, `TurnBegins` 9, `PhaseBegins` 10, `StepBegins` 11, `Attach` 12,
-/// `Unattach` 13, `BecomeCopy` 14, `TurnFaceUp` 15, `TurnFaceDown` 16. A [`MoveRequest`] is the
+/// `Unattach` 13, `BecomeCopy` 14, `TurnFaceUp` 15, `TurnFaceDown` 16, `UnattachFrom` 17. A
+/// [`MoveRequest`] is the
 /// zone-kind tag, the position (`Top` 0, `Bottom` 1, `Index` 2 then the index as `u64`), the
 /// face-down flag and the `Option` controller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,7 +388,7 @@ pub enum GameEvent {
         /// What it is attached to.
         target: AttachTarget,
     },
-    /// A permanent becomes unattached (CR 701.3d).
+    /// A permanent becomes unattached from whatever it is attached to (CR 701.3d).
     Unattach {
         /// The permanent.
         attachment: ObjectId,
@@ -408,6 +409,15 @@ pub enum GameEvent {
     TurnFaceDown {
         /// The permanent.
         object: ObjectId,
+    },
+    /// A permanent becomes unattached from `host` (CR 701.3d). Unlike
+    /// [`GameEvent::Unattach`], it does nothing unless the permanent is attached to exactly
+    /// `host` when it is executed.
+    UnattachFrom {
+        /// The permanent.
+        attachment: ObjectId,
+        /// The host it becomes unattached from.
+        host: AttachTarget,
     },
 }
 
@@ -542,6 +552,11 @@ impl CanonicalEncode for GameEvent {
                 put_variant(out, 16);
                 object.encode_canonical(out);
             }
+            GameEvent::UnattachFrom { attachment, host } => {
+                put_variant(out, 17);
+                attachment.encode_canonical(out);
+                host.encode_canonical(out);
+            }
         }
     }
 }
@@ -639,6 +654,9 @@ impl EventBatch {
 
 /// What executing one event produced (REQ-EVENT-001).
 ///
+/// Attachment links the event removed are not part of the outcome (which stays `Copy`); they
+/// are reported in [`ExecutedEvent::unattached`].
+///
 /// Canonical tags: `ZoneChange` 0 then old id, new id, from zone, to zone (each zone a
 /// zone-kind tag and `Option` owner); `TokenCreated` 1 then the object id; `CountersRemoved` 2
 /// then the amount; `Attached` 3 then the timestamp; `TurnBegan` 4 then the turn number;
@@ -704,8 +722,26 @@ impl CanonicalEncode for Outcome {
     }
 }
 
+/// One attachment link that an executed event removed (REQ-EVENT-001, CR 701.3d): the
+/// attachment became unattached from `host`.
+///
+/// Canonical encoding: `attachment`, then `host`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnattachRecord {
+    /// The attachment's id as it was before the event: its old id when the attachment itself
+    /// changed zones, its unchanged id otherwise (CR 400.7).
+    pub attachment: ObjectId,
+    /// The host it was attached to before the event.
+    pub host: AttachTarget,
+}
+
+fineprint_base::impl_canonical_struct!(UnattachRecord { attachment, host });
+
 /// One event that actually occurred (REQ-EVENT-001): what trigger detection reads (CR 603.2,
 /// CR 603.10).
+///
+/// Canonical encoding: `instance`, `outcome`, `lki_captured`, then `unattached` as a
+/// length-prefixed sequence of [`UnattachRecord`]s.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutedEvent {
     /// The event as submitted, with its applied effects.
@@ -715,12 +751,20 @@ pub struct ExecutedEvent {
     /// Whether last known information was stored for the departing object (the record is in
     /// the `LkiStore` under the old id).
     pub lki_captured: bool,
+    /// Every attachment link the event removed (CR 701.3d), in this order: an `Attach` to a
+    /// different host reports the previous host; an `Unattach` or `UnattachFrom` reports the
+    /// link it cleared; a permanent leaving the battlefield reports first its own link, then
+    /// one record per permanent attached to it, ascending id. A first attach, an attach to the
+    /// current host (CR 701.3b) and a same-zone reposition report nothing. Phasing is not
+    /// modelled and touches no link (CR 702.26i, CR 702.26j).
+    pub unattached: Vec<UnattachRecord>,
 }
 
 fineprint_base::impl_canonical_struct!(ExecutedEvent {
     instance,
     outcome,
-    lki_captured
+    lki_captured,
+    unattached
 });
 
 /// One executed batch of simultaneous events (REQ-EVENT-001).

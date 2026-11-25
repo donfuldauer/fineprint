@@ -52,3 +52,20 @@ Why: REQ-DSL-010 (typed ASTs; the placeholder was always marked as temporary unt
 REQ-NFR-006. The placeholder content was never a valid SRS §14 instruction.
 Consumers affected: fineprint-dsl ability and card modules; fineprint-core and fineprint-ingest
 through #232 FP-164. Recorded retroactively by the phase 02 gate review.
+
+## CR-004 — Events (REQ-EVENT-001) executed-event encoding: lost attachment links
+Requested by: #180 FP-143   Kind: breaking   Status: open
+Change: new type `events::UnattachRecord { attachment: ObjectId, host: AttachTarget }`
+(`Clone, Copy, Debug, PartialEq, Eq`; canonical encoding: `attachment`, then `host`).
+`ExecutedEvent` gains a LAST field `unattached: Vec<UnattachRecord>`, encoded last as a
+length-prefixed sequence (`put_len` then the records), so every `ExecutedEvent`'s canonical bytes,
+and with them the replay and state hashes, change. `GameEvent` gains a variant
+`UnattachFrom { attachment: ObjectId, host: AttachTarget }`, appended LAST with canonical tag 17,
+then `attachment`, then `host`. `Outcome` is unchanged; no existing `GameEvent` tag (0..=16) or
+`Outcome` tag (0..=5) changes.
+Why: REQ-EVENT-001 and REQ-EVENT-002 (the executed log is what trigger detection reads); CR 701.3d
+(attaching to a different host, a host leaving the battlefield or an attachment leaving the
+battlefield counts as becoming unattached) and CR 603.10c (UNATTACHED looks back in time). Today
+those links are dropped without a record, so `UNATTACHED` never triggers for them.
+Consumers affected: events executor (`events/exec.rs`), trigger normalizer (`triggers/event.rs`),
+replacement bus kind mapping (`replacement/types.rs`), replay and state-hash goldens.

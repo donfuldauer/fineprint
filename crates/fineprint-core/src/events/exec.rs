@@ -14,7 +14,7 @@ use super::history::HistoryStat;
 use super::state::{EventState, ObjectMarkers};
 use super::types::{
     CounterTarget, DamageTarget, EventBatch, EventInstance, ExecutedBatch, ExecutedEvent,
-    GameEvent, Outcome, Phase, Step,
+    GameEvent, Outcome, Phase, Step, UnattachRecord,
 };
 use crate::memory::{CharacteristicsProvider, LkiStore, MemoryTable, capture_lki_on_move};
 use crate::objects::Characteristics;
@@ -257,7 +257,10 @@ impl EventContext<'_> {
     ) -> Result<Vec<ExecutedEvent>, EventError> {
         let mut executed = Vec::new();
         for (index, instance) in batch.events().iter().enumerate() {
-            if let Some((outcome, lki_captured)) = self.apply(instance.event(), mode)? {
+            let mut unattached = Vec::new();
+            if let Some((outcome, lki_captured)) =
+                self.apply(instance.event(), mode, &mut unattached)?
+            {
                 if let LkiMode::On(_) = mode {
                     for (_, copied) in copies.iter().filter(|(i, _)| *i == index) {
                         self.enter_as_copy(outcome, *copied)?;
@@ -267,24 +270,28 @@ impl EventContext<'_> {
                     instance: instance.clone(),
                     outcome,
                     lki_captured,
+                    unattached,
                 });
             }
         }
         Ok(executed)
     }
 
-    /// Executes one event; `None` for a no-op. The flag is whether LKI was stored.
+    /// Executes one event; `None` for a no-op. The flag is whether LKI was stored. Every
+    /// attachment link the event removes is appended to `unattached` (CR 701.3d); a no-op
+    /// appends nothing.
     fn apply(
         &mut self,
         event: &GameEvent,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         let applied = |o: Option<Outcome>| o.map(|o| (o, false));
         match event {
             GameEvent::ZoneChange {
                 object, request, ..
-            } => self.zone_change(*object, *request, mode),
-            GameEvent::Draw { player } => self.draw(*player, mode),
+            } => self.zone_change(*object, *request, mode, unattached),
+            GameEvent::Draw { player } => self.draw(*player, mode, unattached),
             GameEvent::Damage {
                 source_controller,
                 target,
@@ -317,9 +324,14 @@ impl EventContext<'_> {
             GameEvent::PhaseBegins { phase } => Ok(applied(Some(self.phase_begins(*phase)))),
             GameEvent::StepBegins { step } => Ok(applied(Some(self.step_begins(*step)))),
             GameEvent::Attach { attachment, target } => {
-                self.attach(*attachment, *target).map(applied)
+                self.attach(*attachment, *target, unattached).map(applied)
             }
-            GameEvent::Unattach { attachment } => self.unattach(*attachment).map(applied),
+            GameEvent::Unattach { attachment } => {
+                self.unattach(*attachment, None, unattached).map(applied)
+            }
+            GameEvent::UnattachFrom { attachment, host } => self
+                .unattach(*attachment, Some(*host), unattached)
+                .map(applied),
             GameEvent::BecomeCopy { object, copied } => {
                 self.become_copy(*object, *copied).map(applied)
             }
@@ -363,6 +375,7 @@ impl EventContext<'_> {
         object: ObjectId,
         request: MoveRequest,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         let record = *self
             .zones
@@ -372,7 +385,7 @@ impl EventContext<'_> {
         if self.events.markers().is_token(record.card) && record.zone != ZoneId::Battlefield {
             return Ok(None);
         }
-        let (moved, lki_captured) = self.move_with_lki(object, request, mode)?;
+        let (moved, lki_captured) = self.move_with_lki(object, request, mode, unattached)?;
         Ok(Some((Outcome::ZoneChange(moved), lki_captured)))
     }
 
@@ -383,6 +396,7 @@ impl EventContext<'_> {
         &mut self,
         player: PlayerId,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         self.require_player(player)?;
         let Some(top) = self
@@ -406,7 +420,7 @@ impl EventContext<'_> {
             return Ok(None);
         }
         let (moved, lki_captured) =
-            self.move_with_lki(top, MoveRequest::new(ZoneKind::Hand), mode)?;
+            self.move_with_lki(top, MoveRequest::new(ZoneKind::Hand), mode, unattached)?;
         let turn = self.turn();
         self.events
             .history_mut()
@@ -417,11 +431,17 @@ impl EventContext<'_> {
     /// Moves `object` with the zone-move primitive and applies CR 400.7 to every component:
     /// LKI (captured before the move, CR 603.10, CR 704.8), Memory, the permanent container
     /// (CR 110.1) and the object markers (CR 122.2).
+    ///
+    /// CR 701.3d: when a permanent leaves the battlefield, every attachment link it was part of
+    /// ends; they are appended to `unattached`, read before the permanent container drops them:
+    /// first the permanent's own link (under its old id), then one record per permanent
+    /// attached to it, ascending id. A same-zone reposition ends no link.
     fn move_with_lki(
         &mut self,
         object: ObjectId,
         request: MoveRequest,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<(Moved, bool), EventError> {
         let lki_captured = match mode {
             LkiMode::Off => false,
@@ -441,7 +461,18 @@ impl EventContext<'_> {
         }
         self.memories.apply_zone_change(&moved);
         if moved.from == ZoneId::Battlefield && self.permanents.get(moved.old).is_some() {
-            // CR 110.1: it stops being a permanent.
+            // CR 701.3d: its own link ends, as do the links of everything attached to it.
+            if let Some(host) = self.permanents.attached_to(moved.old) {
+                unattached.push(UnattachRecord {
+                    attachment: moved.old,
+                    host,
+                });
+            }
+            let host = AttachTarget::Permanent(moved.old);
+            for attachment in self.permanents.attachments_of(host) {
+                unattached.push(UnattachRecord { attachment, host });
+            }
+            // CR 110.1: it stops being a permanent (this drops the links read above).
             self.permanents.leave(moved.old)?;
         }
         if moved.to == ZoneId::Battlefield {
@@ -697,36 +728,54 @@ impl EventContext<'_> {
     }
 
     /// CR 701.3a: attach; CR 701.3b: to the current host it does nothing; CR 701.3c: a new
-    /// timestamp.
+    /// timestamp. CR 701.3d: attaching to a different host ends the link to the previous one,
+    /// which is appended to `unattached`; a first attach ends no link.
     fn attach(
         &mut self,
         attachment: ObjectId,
         target: AttachTarget,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<Outcome>, EventError> {
         self.require_permanent(attachment)?;
         match target {
             AttachTarget::Permanent(host) => self.require_permanent(host)?,
             AttachTarget::Player(p) => self.require_player(p)?,
         }
-        if self.permanents.attached_to(attachment) == Some(target) {
+        let previous = self.permanents.attached_to(attachment);
+        if previous == Some(target) {
             // CR 701.3b
             return Ok(None);
         }
         self.permanents.attach(attachment, target)?;
+        if let Some(host) = previous {
+            // CR 701.3d: it ceases to be attached to its previous host.
+            unattached.push(UnattachRecord { attachment, host });
+        }
         // CR 701.3c
         let timestamp = self.game.issue_timestamp()?;
         Ok(Some(Outcome::Attached { timestamp }))
     }
 
-    /// CR 701.3d: unattach; an unattached object is no event.
-    fn unattach(&mut self, attachment: ObjectId) -> Result<Option<Outcome>, EventError> {
+    /// CR 701.3d: unattach; the cleared link is appended to `unattached`. With `only_from`
+    /// (`UnattachFrom`), the link is cleared only if it is to exactly that host. An unattached
+    /// object, or one attached to another host than `only_from`, is no event.
+    fn unattach(
+        &mut self,
+        attachment: ObjectId,
+        only_from: Option<AttachTarget>,
+        unattached: &mut Vec<UnattachRecord>,
+    ) -> Result<Option<Outcome>, EventError> {
         if self.zones.object(attachment).is_none() {
             return Err(EventError::UnknownObject(attachment));
         }
-        if self.permanents.attached_to(attachment).is_none() {
+        let Some(host) = self.permanents.attached_to(attachment) else {
+            return Ok(None);
+        };
+        if only_from.is_some_and(|from| from != host) {
             return Ok(None);
         }
         self.permanents.detach(attachment)?;
+        unattached.push(UnattachRecord { attachment, host });
         Ok(Some(Outcome::Applied))
     }
 

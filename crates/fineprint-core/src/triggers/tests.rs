@@ -248,6 +248,7 @@ fn executed(event: GameEvent, outcome: Outcome) -> ExecutedEvent {
         instance: EventInstance::new(event),
         outcome,
         lki_captured: false,
+        unattached: vec![],
     }
 }
 
@@ -2887,4 +2888,221 @@ fn req_event_002_cr_701_7a_token_enters_to_battlefield() {
         FilterValue::Zone(Zone::Graveyard),
     );
     assert!(run(&FakeEnv::new().post(reg(9, 1, "a1", from_gy)), &tes).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lost attachment links (#180 FP-143): UNATTACHED from executed-event records
+// ---------------------------------------------------------------------------------------------
+
+fn unattach_rec(attachment: u64, host: AttachTarget) -> crate::events::UnattachRecord {
+    crate::events::UnattachRecord {
+        attachment: o(attachment),
+        host,
+    }
+}
+
+fn with_records(
+    mut e: ExecutedEvent,
+    records: Vec<crate::events::UnattachRecord>,
+) -> ExecutedEvent {
+    e.unattached = records;
+    e
+}
+
+fn unattached_occ(attachment: u64) -> TriggerEvent {
+    TriggerEvent::new(vec![EventKind::Unattached])
+        .with_object(Some(o(attachment)), Some(o(attachment)))
+}
+
+fn attached_occ(attachment: u64) -> TriggerEvent {
+    TriggerEvent::new(vec![EventKind::Attached])
+        .with_object(Some(o(attachment)), Some(o(attachment)))
+}
+
+// REQ-EVENT-002, REQ-EVENT-001: CR 701.3d, CR 603.10c. Each executed event yields its own
+// occurrences first, then one UNATTACHED occurrence per record in record order; the result
+// indices follow batch order.
+#[test]
+fn req_event_002_cr_701_3d_records_normalise_after_own_occurrences() {
+    let attach_new_host = with_records(
+        executed(
+            GameEvent::Attach {
+                attachment: o(5),
+                target: AttachTarget::Permanent(o(2)),
+            },
+            Outcome::Attached {
+                timestamp: Timestamp::new(3),
+            },
+        ),
+        vec![unattach_rec(5, AttachTarget::Permanent(o(1)))],
+    );
+    let first_attach = executed(
+        GameEvent::Attach {
+            attachment: o(6),
+            target: AttachTarget::Player(p(1)),
+        },
+        Outcome::Attached {
+            timestamp: Timestamp::new(4),
+        },
+    );
+    let host_dies = with_records(
+        zone_change_exec(
+            3,
+            13,
+            ZoneId::Battlefield,
+            ZoneId::Graveyard(p(1)),
+            ZoneChangeCause::Destroy,
+        ),
+        vec![
+            unattach_rec(3, AttachTarget::Permanent(o(1))),
+            unattach_rec(4, AttachTarget::Permanent(o(3))),
+            unattach_rec(7, AttachTarget::Permanent(o(3))),
+        ],
+    );
+    // An event with no occurrence of its own still reports its records.
+    let silent = with_records(
+        executed(GameEvent::TurnFaceDown { object: o(9) }, Outcome::Applied),
+        vec![unattach_rec(8, AttachTarget::Player(p(2)))],
+    );
+    let got = events_from_batch(&batch_of(vec![
+        attach_new_host,
+        first_attach,
+        host_dies,
+        silent,
+    ]));
+    assert_eq!(got.len(), 8);
+    // CR 701.3d: moving to a new host is ATTACHED, then UNATTACHED from the old host.
+    assert_eq!(got[0], attached_occ(5));
+    assert_eq!(got[1], unattached_occ(5));
+    // A first attach is ATTACHED only.
+    assert_eq!(got[2], attached_occ(6));
+    // The host's zone change, then its own link, then its attachments in record order.
+    assert_eq!(got[3].subject_pre, Some(o(3)));
+    assert!(got[3].kinds.contains(&EventKind::Dies));
+    assert_eq!(got[4], unattached_occ(3));
+    assert_eq!(got[5], unattached_occ(4));
+    assert_eq!(got[6], unattached_occ(7));
+    assert_eq!(got[7], unattached_occ(8));
+}
+
+// REQ-EVENT-002: CR 701.3d. Unattach and UnattachFrom yield exactly one UNATTACHED occurrence
+// from the event itself, with or without records: no link is reported twice.
+#[test]
+fn req_event_002_cr_701_3d_explicit_unattach_not_duplicated() {
+    let host = AttachTarget::Permanent(o(1));
+    for event in [
+        GameEvent::Unattach { attachment: o(5) },
+        GameEvent::UnattachFrom {
+            attachment: o(5),
+            host,
+        },
+    ] {
+        for records in [vec![], vec![unattach_rec(5, host)]] {
+            let got = one(with_records(
+                executed(event.clone(), Outcome::Applied),
+                records,
+            ));
+            assert_eq!(got, vec![unattached_occ(5)], "{event:?}");
+        }
+    }
+}
+
+// REQ-EVENT-002, REQ-EVENT-001: CR 701.3b, CR 701.3d, CR 603.10c. Real execution: an initial
+// attach emits only ATTACHED; a same-host attach emits nothing; moving the attachment to
+// another host, the host dying and the attachment dying each emit UNATTACHED, and a
+// pre-event UNATTACHED matcher triggers once per such occurrence.
+#[test]
+fn req_event_002_cr_701_3d_unattached_from_real_execution() {
+    let mut game = GameState::new(7, 2, 20).unwrap();
+    game.set_turn_number(1);
+    game.set_active_player(Some(p(1))).unwrap();
+    let mut zones = Zones::new(&[p(1), p(2)], ZonesConfig::default());
+    let mut ids = IdGenerator::new();
+    let mut permanents = Permanents::new();
+    let mut memories = MemoryTable::new();
+    let mut lki = LkiStore::new();
+    let mut events = EventState::new();
+    let provider = Provider;
+    let mut create = |card: u64| {
+        let mut req = MoveRequest::new(ZoneKind::Battlefield);
+        req.position = Position::Bottom;
+        let id = zones
+            .create_object(&mut ids, CardId::new(card), p(1), req)
+            .unwrap();
+        permanents.enter(id, p(1), 1).unwrap();
+        id
+    };
+    let a = create(1);
+    let b = create(2);
+    let eq = create(3);
+    let eq2 = create(4);
+    let mut ctx = EventContext {
+        game: &mut game,
+        zones: &mut zones,
+        ids: &mut ids,
+        permanents: &mut permanents,
+        memories: &mut memories,
+        lki: &mut lki,
+        events: &mut events,
+        provider: &provider,
+    };
+    let mut norm = |event: GameEvent| {
+        let batch = ctx
+            .execute_batch(&EventBatch::from_events(vec![event]))
+            .unwrap();
+        events_from_batch(&batch)
+    };
+    let same = |id: ObjectId| Some(id);
+    let attach = |attachment, host| GameEvent::Attach {
+        attachment,
+        target: AttachTarget::Permanent(host),
+    };
+    let destroy = |object| GameEvent::ZoneChange {
+        object,
+        request: MoveRequest::new(ZoneKind::Graveyard),
+        cause: ZoneChangeCause::Destroy,
+    };
+    let env = FakeEnv::new().pre(reg(50, 1, "a1", matcher(EventKind::Unattached)));
+    let unattached = |tes: &[TriggerEvent]| -> Vec<Option<ObjectId>> {
+        tes.iter()
+            .filter(|t| t.kinds == vec![EventKind::Unattached])
+            .map(|t| t.subject_pre)
+            .collect()
+    };
+
+    // Initial attach: ATTACHED only; nothing triggers.
+    let tes = norm(attach(eq, a));
+    assert_eq!(tes.len(), 1);
+    assert_eq!(tes[0].kinds, vec![EventKind::Attached]);
+    assert!(run(&env, &tes).is_empty());
+    // Same host (CR 701.3b): nothing.
+    assert!(norm(attach(eq, a)).is_empty());
+    // Moving to another host: ATTACHED then UNATTACHED; the matcher triggers once.
+    let tes = norm(attach(eq, b));
+    assert_eq!(tes.len(), 2);
+    assert_eq!(tes[0].kinds, vec![EventKind::Attached]);
+    assert_eq!(unattached(&tes), vec![same(eq)]);
+    let got = run(&env, &tes);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].event_indices, vec![1]);
+    assert_eq!(got[0].look_back, Some(LookBackKind::Unattached));
+    // The host dies: its zone change, then UNATTACHED for each attachment, ascending.
+    let tes = norm(attach(eq2, b));
+    assert_eq!(unattached(&tes), Vec::<Option<ObjectId>>::new());
+    let tes = norm(destroy(b));
+    assert!(tes[0].kinds.contains(&EventKind::Dies));
+    assert_eq!(unattached(&tes), vec![same(eq), same(eq2)]);
+    assert_eq!(run(&env, &tes).len(), 2);
+    // The attachment dies: its zone change, then UNATTACHED with its old id.
+    let tes = norm(attach(eq, a));
+    assert_eq!(
+        tes.len(),
+        1,
+        "a first attach after the host left: ATTACHED only"
+    );
+    let tes = norm(destroy(eq));
+    assert_eq!(tes.len(), 2);
+    assert_eq!(tes[0].subject_pre, Some(eq));
+    assert_eq!(unattached(&tes), vec![same(eq)]);
+    assert_eq!(run(&env, &tes).len(), 1);
 }
