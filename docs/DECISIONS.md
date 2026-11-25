@@ -8844,3 +8844,49 @@ oversized body is already on disk by then).
 **Rationale.** Names such as `cards.json` and `Cards.json` differ in spelling but name one file on a case-insensitive file system (APFS, NTFS), so a spelling comparison lets the report replace the records and the command succeeds. File identity is the only reliable test, and it needs the file to exist: when neither file exists there is no identity yet, so a check before writing is impossible; the records file is therefore written first and the report destination tested next. One crate on every platform means one code path and no unsafe.
 
 **Alternatives.** Std-only `MetadataExt` (dev+ino) on Unix plus the crate on Windows (rejected: two code paths for no saving). Comparing lower-cased names (rejected: wrong on case-sensitive file systems, where case-distinct names are valid). Probing the directory's case sensitivity (rejected: racy and per directory).
+
+## Gate 02-state-objects R3b — Post-batch layer inputs for the retained-battle request
+
+Amends "Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense
+battle" (CodeRabbit gate round 3, thread 4697581022).
+
+**Decision.** `fineprint_core::sba` gains one additive entry point,
+`perform_all_relayered(registry, ctx, replacements, effects, layer_env, env, choices, post_batch)`,
+and one type alias,
+`PostBatchLayers<'a> = &'a mut dyn FnMut(&EventContext<'_>, &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment))`.
+After the batch, once the `&mut ctx` borrow of the bus has ended, the pass calls `post_batch` with
+the post-batch `EventContext`; the caller builds the layer inputs of that state and calls the inner
+closure with them, inside which the engine builds the post-batch `SbaView` used for BOTH the
+"still a CR 704.5x/704.5y subject" test and `protector_asks` (controller and candidates) of
+`Plan::retained_battles`. The provider is called at most once per pass, and only when a retained
+battle is still on the battlefield (an ordinary pass never calls it). Everything before the batch
+(check, `Plan::new`, the pre-batch request sequence and request ids, the batch) still reads
+`effects`/`layer_env`. `perform_all` keeps its signature and behaviour: it delegates to
+`perform_all_relayered` with a provider that hands back the same pre-batch `effects`/`layer_env`,
+and its rustdoc says so and points callers whose layer inputs depend on state the batch changes
+(unattach, counter removal, zone changes) to the new entry point. The name `perform_all_relayered`
+is the brief's recommendation and is kept.
+
+**Rationale.** `LayerEnvironment` is a caller-implemented trait (a pure function of the caller's
+state); the engine cannot rebuild it from `ctx`, and it cannot read the mutated context while the
+batch holds `&mut ctx`. Only the caller can supply post-batch layer inputs, so the engine hands it
+the post-batch context through a callback. The callback shape keeps the inputs inside the call
+(no lifetime escape, no unsafe code, no engine-side clone of the whole state), and calling it
+inside the pass keeps the rollback guarantee: a Pending post-batch request still restores every
+component through `perform_all`'s `Saved` restore.
+
+**Alternatives.** Change the `perform_all` signature (rejected: a breaking change to about twelve
+callers and to the public API, R2). A second pass that asks the retained battles with fresh inputs
+(rejected: the zero-defense finding would suppress the request again, since `Plan::new` cannot
+know the move was replaced). Keep the stale pre-batch inputs (rejected: wrong chooser or
+candidates when the batch changes a controller or counters that a layer effect reads).
+
+## Gate 02-state-objects R8b — An MTGJSON side that names an absent face is a disagreement
+
+Amends "Gate 02-state-objects R8" (the face pairing by `side`).
+
+**Decision.** In the MTGJSON cross-check, when every entry of a card carries a single lowercase letter `side` and an entry's letter names a face the normalized record does not have, that entry is reported as one disagreement `{"face": <index>, "field": "side", "scryfall": "absent", "mtgjson": "present"}` (`b` is index 1). It is emitted in entry order, after the card-wide and `faces` count disagreements, interleaved with the per-face ones. The `faces` count disagreement is unchanged, and so is the source-order pairing used when any `side` is unusable.
+
+**Rationale.** Silently skipping the entry made a card whose only face was never compared look agreed. The shape follows the per-face shape (`face`, `field`, `scryfall`, `mtgjson`) and carries kind words only, so untrusted MTGJSON text never enters the report.
+
+**Alternatives.** A top-level `unmatchedSides` list (rejected: changes the report layout and the `fields` consumers). Reusing `field: "faces"` with counts (rejected: counts can be equal, so it would not identify the entry). Rejecting the entry in `parse_atomic` (rejected: the card's other entries are still comparable, and a rejected record would hide the card from the report).
