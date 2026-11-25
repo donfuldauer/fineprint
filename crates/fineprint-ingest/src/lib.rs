@@ -11,3 +11,7 @@
 /// `fineprint-ingest vocab`: the `RulesVocabulary` generator (REQ-OBJ-001, REQ-SUB-001,
 /// REQ-DSL-014).
 pub mod vocab;
+
+/// `fineprint-ingest fetch` and `import`: the Scryfall bulk import into the git-ignored cache
+/// (REQ-ING-001, REQ-ING-002, REQ-NFR-004).
+pub mod import;
