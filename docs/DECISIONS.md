@@ -9228,3 +9228,26 @@ environment reads them.
 
 **Alternatives:** Helper methods returning the cause (rejected: the table and the test suffice,
 brief D7).
+
+## #183 FP-144 — Order record on B's source in the PR #187 scenario
+
+**Decision:** In the B-before-A timestamp order, evaluated on B's source, the test asserts what the
+brief requires: A applies, B does not apply, and B is not ordered after A by dependency
+(`Selection::Dependency` / `Selection::Loop`). The outcome-level criterion "no marker on any
+object, both orders" is asserted by `pr187_a_before_b_no_object_gets_the_marker` and
+`pr187_b_before_a_no_object_gets_the_marker`. Whether the order record must show a CR 613.8a
+existence dependency of B on A on B's own source is follow-up #242 (FP-168): it needs a
+rules-researcher answer and would change `layers/ordering`.
+
+**Rationale:** The Independent Tester read the rules-researcher's Q6 answer as "A's step precedes
+B's" on sB, but the brief's T3 clause says to assert B is not ordered after A on account of
+dependency, the issue's acceptance criterion says B is "not ordered after A by a false dependency"
+with no marker, and the merged test
+`layers::ordering_tests::req_layer_002_removed_generating_ability_stops_effect_both_orders` asserts
+the pipeline's order (`[B Timestamp not applied, A Timestamp applied]`). Trial application finds no
+dependency because B applies to sB neither with nor without A. Final characteristics are correct.
+The brief wins (R10).
+
+**Alternatives:** Changing the ordering pipeline to record the existence dependency now (rejected:
+outside this unit, rules question open, tracked in #242); dropping the test (rejected: the order
+record still deserves the brief's assertions).

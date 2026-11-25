@@ -229,11 +229,12 @@ fn pr187_b_before_a_on_source_of_b() {
 }
 
 // REQ-LAYER-002, CR 613.8a, CR 613.8b (T3, scenario PR #187), timestamp order B before A, the
-// order record on B's source: per the rules-researcher answer Q6 the dependency of B on A is
-// genuine (applying A changes B's existence, CR 613.8a(b)), so B "waits to apply until just
-// after" A (CR 613.8b): A's step precedes B's in the record.
+// order record on B's source: A applies, B does not apply, and B is not ordered after A by a
+// false dependency (the brief's T3 clause). Whether the record must show a CR 613.8a existence
+// dependency on B's own source is not asserted here: the order record of an existence
+// dependency on B's own source: #242.
 #[test]
-fn pr187_b_before_a_b_waits_for_a_on_its_source() {
+fn pr187_b_before_a_on_source_of_b_order_record() {
     let w = scenario_world();
     for a_first in [true, false] {
         let (s, ida, idb) = scenario(Order::BThenA, true, BLink::Linked, a_first);
@@ -242,11 +243,19 @@ fn pr187_b_before_a_b_waits_for_a_on_its_source() {
         let (_, record) = evaluate_with_order(s.effects(), &env, oid(S_B)).unwrap();
         let a_steps = steps_of(&record, ida);
         let b_steps = steps_of(&record, idb);
+        assert!(!a_steps.is_empty(), "A has a step: {:?}", record.steps);
+        assert!(a_steps.iter().all(|(_, st)| st.applied), "A applies");
+        assert!(!b_steps.is_empty(), "B has a step: {:?}", record.steps);
         assert!(
-            a_steps[0].0 < b_steps[0].0,
-            "B waits for A (CR 613.8b): {:?}",
-            record.steps
+            b_steps.iter().all(|(_, st)| !st.applied),
+            "B does not apply"
         );
+        for (_, st) in &b_steps {
+            assert!(
+                !matches!(st.selection, Selection::Dependency | Selection::Loop),
+                "B is not ordered after A by a false dependency"
+            );
+        }
     }
 }
 
