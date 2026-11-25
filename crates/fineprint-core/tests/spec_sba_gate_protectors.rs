@@ -4,7 +4,7 @@
 
 //! Gate 02-state-objects regression tests for the battle protector and legend-rule requests of
 //! one state-based action pass (REQ-SBA-001, REQ-CORE-001, REQ-CORE-006; CR 704.3, 101.4,
-//! 704.5j, 704.5x, 704.5y). Every card is synthetic (R5).
+//! 704.5j, 704.5w, 704.5x, 704.5y, 614.6). Every card is synthetic (R5).
 //!
 //! CR 101.4: "If multiple players would make choices and/or take actions at the same time, the
 //! active player (the player whose turn it is) makes any choices required, then the next player
@@ -16,8 +16,10 @@
 mod support;
 
 use fineprint_base::ids::{ObjectId, PlayerId};
-use fineprint_core::choice::{ChoiceType, PendingChoiceRequest};
+use fineprint_core::choice::{ChoiceSession, ChoiceType, PendingChoiceRequest};
 use fineprint_core::events::ZoneChangeCause;
+use fineprint_core::replacement::{Action, BusEventKind, EventMatcher, ReplacementEffect};
+use fineprint_core::txn::Transactional;
 use support::*;
 
 const SBA: ZoneChangeCause = ZoneChangeCause::StateBasedAction;
@@ -241,4 +243,47 @@ fn req_sba_001_101_4_three_players_apnap_not_id_order() {
     assert_eq!(again.requests, r.requests);
     assert_eq!(again.result, r.result);
     assert_eq!(again.hash, r.hash);
+}
+
+/// The state-based graveyard move of `object` (cause `StateBasedAction`).
+fn sba_move_of(object: ObjectId) -> EventMatcher {
+    EventMatcher {
+        affected_object: Some(object),
+        cause: Some(SBA),
+        ..EventMatcher::new(BusEventKind::ZoneChange)
+    }
+}
+
+/// REQ-SBA-001, REQ-CORE-001, CR 704.5w, 704.5x, 704.3, 614.6 (gate 02-state-objects R3): a
+/// typeless battle at defense 0 with no protector whose graveyard move a persistent replacement
+/// skips stays on the battlefield; the pass asks its controller ONE protector request after the
+/// batch (reason CR 704.5x, source the battle); while it is pending the state is unchanged; the
+/// answer is recorded and the pass is performed; the next pass asks nothing and still skips the
+/// move.
+#[test]
+fn req_sba_001_704_5x_retained_zero_defense_battle_gets_its_protector() {
+    let mut s = Sim::new();
+    let b = s.battle(P1, P1, 0, None);
+    s.add_replacement(ReplacementEffect::new(eid(1), sba_move_of(b), Action::Skip));
+    let before = s.state_hash();
+    let session = ChoiceSession::start(s.clone(), call_sba).unwrap();
+    let pending = session.pending().expect("a protector request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_protector_request(&pending, P1, "CR 704.5x", &[P1]);
+    assert_eq!(pending.reason.source, Some(b));
+
+    let r = drive_answers(s, &[submit_player(P1)]);
+    assert_eq!(r.requests, vec![pending]);
+    let o = r.outcome();
+    assert_eq!(o.protectors_chosen, vec![(b, P1)]);
+    assert!(o.performed);
+    assert_still_on_battlefield(&r, b);
+    assert_eq!(r.after.env.battle_protectors.get(&b), Some(&P1));
+    assert_eq!(r.finding_ids(), vec!["704.5w", "704.5x"]);
+
+    let next = run_sba(r.after.clone());
+    assert!(next.outcome().protectors_chosen.is_empty());
+    assert!(!next.outcome().performed);
+    assert_eq!(next.finding_ids(), vec!["704.5w"]);
+    assert_still_on_battlefield(&next, b);
 }

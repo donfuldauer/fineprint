@@ -5000,6 +5000,233 @@ fn sba_704_5x_y_battle_at_zero_defense_asks_nothing() {
     assert!(!w.env.battle_protectors.contains_key(&s));
 }
 
+// Gate 02-state-objects R3: a battle at defense 0 whose graveyard move a replacement effect
+// skipped stays on the battlefield and gets its protector choice after the batch.
+
+impl World {
+    /// A persistent `Skip` of the state-based graveyard move of `object` (CR 614.6).
+    fn skip_sba_move(&mut self, effect: u64, object: ObjectId) {
+        self.registry
+            .add(ReplacementEffect::new(
+                e(effect),
+                sba_move_of(object),
+                Action::Skip,
+            ))
+            .unwrap();
+    }
+}
+
+/// Runs the retained-battle scenario of `w` (battle `b`, expected entries `entries`, reason
+/// `cr`, one candidate `candidate`): exactly one request after the batch, a pending pass leaves
+/// the state unchanged, the answer is recorded, the pass is deterministic, and the next pass asks
+/// nothing and still skips the move. Returns the world after the first pass.
+fn assert_retained_battle_asked(
+    mut w: World,
+    b: ObjectId,
+    entries: [&str; 2],
+    cr: &str,
+    candidate: u64,
+) -> World {
+    assert_eq!(w.found(obj(b)), entries);
+    let before = w.state_hash();
+    // Pending: the request is the only one, and the state is exactly as before the pass (also
+    // asserted inside the procedure).
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(pending.choice_type, ChoiceType::ChoosePlayer);
+    assert_eq!(pending.chooser, p(1));
+    assert_eq!(pending.reason.cr, cr);
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!((pending.min, pending.max), (1, 1));
+    assert!(!pending.hidden);
+    assert_eq!(pending.default_on_timeout, submit_player(candidate));
+    assert_eq!(
+        pending.options,
+        ChoiceOptions::Enumerated(vec![ChoiceOption::Player(p(candidate))])
+    );
+    assert_eq!(
+        pending.payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(candidate)]
+        }
+    );
+    let (run, asked) = drive_answers(&w, &[submit_player(candidate)]);
+    assert_eq!(asked, [pending]);
+    let out = run.out.as_ref().unwrap().clone();
+    assert_eq!(out.protectors_chosen, [(b, p(candidate))]);
+    assert!(out.performed);
+    assert!(out.executed.is_empty());
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(run.state.env.battle_protectors.get(&b), Some(&p(candidate)));
+    // CR 704.3, REQ-CORE-001: the same requests (ids included) and the same result again.
+    let (again, asked_again) = drive_answers(&w, &[submit_player(candidate)]);
+    assert_eq!(asked_again, asked);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+    // T2: the next pass asks nothing more for it; the move is still skipped.
+    w = run.state;
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.executed.is_empty());
+    assert!(!out.performed);
+    assert_eq!(out.findings.len(), 1);
+    assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    w
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects R3): a non-Siege
+// battle at defense 0 with no protector whose graveyard move a persistent replacement skips stays
+// on the battlefield: its controller is asked its protector after the batch (one CHOOSE_PLAYER,
+// reason CR 704.5x, source the battle); the next pass asks nothing.
+#[test]
+fn sba_704_5w_x_retained_battle_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, b);
+    assert_retained_battle_asked(w, b, ["704.5w", "704.5x"], "CR 704.5x", 1);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 614.6 (gate 02-state-objects R3): the same for a Siege at
+// defense 0 (its candidates are its controller's opponents).
+#[test]
+fn sba_704_5v_x_retained_siege_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    assert_retained_battle_asked(w, s, ["704.5v", "704.5x"], "CR 704.5x", 2);
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5y, CR 614.6 (gate 02-state-objects R3): the same for a
+// typeless battle at defense 0 whose protector (an opponent) can't be its protector: reason
+// CR 704.5y, the old protector replaced.
+#[test]
+fn sba_704_5w_y_retained_battle_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, Some(2));
+    w.skip_sba_move(1, b);
+    let w = assert_retained_battle_asked(w, b, ["704.5w", "704.5y"], "CR 704.5y", 1);
+    assert_eq!(w.env.battle_protectors[&b], p(1));
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5w, CR 704.5x, CR 704.8 (gate 02-state-objects R3):
+// the post-batch request of a retained battle comes after a batch that changed the state (a
+// creature died); a pending post-batch request still leaves every component exactly as before
+// the pass, and answering it completes the pass with both results.
+#[test]
+fn sba_704_5x_retained_request_pending_after_a_real_batch_restores() {
+    let mut w = World::new();
+    let c = w.creature(2, 0);
+    let c_card = w.card_of(c);
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, b);
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!(session.state_hash(), before);
+    assert!(session.base().zones.object(c).is_some());
+    let (run, asked) = drive_answers(&w, &[submit_player(1)]);
+    assert_eq!(asked, [pending]);
+    let out = run.out.unwrap();
+    // The skipped move of the battle never happens; only the creature's move occurred.
+    assert_eq!(
+        batch_shape(&out).0,
+        [(c, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(out.protectors_chosen, [(b, p(1))]);
+    assert_eq!(
+        run.state.zone_of_card(c_card),
+        Some(ZoneId::Graveyard(p(2)))
+    );
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 704.5w, CR 614.6 (gate 02-state-objects R3): two retained battles of
+// different controllers are asked in APNAP order of the choosers (the active player's battle has
+// the HIGHER id and is asked first), then ascending battle id; a retained battle comes after an
+// ordinary pre-batch protector request even when the ordinary chooser is later in APNAP order.
+#[test]
+fn sba_704_5x_retained_requests_in_apnap_order_after_the_pre_batch_ones() {
+    let mut w = World::new();
+    let n = w.new_battle(2, 2, false, 0, None);
+    let a1 = w.new_battle(1, 1, false, 0, None);
+    let a2 = w.new_battle(1, 1, true, 0, None);
+    for (i, b) in [n, a1, a2].into_iter().enumerate() {
+        w.skip_sba_move(u64::try_from(i).unwrap() + 1, b);
+    }
+    let (run, asked) = drive_answers(&w, &[submit_player(1), submit_player(2), submit_player(2)]);
+    let order: Vec<(PlayerId, Option<ObjectId>)> =
+        asked.iter().map(|r| (r.chooser, r.reason.source)).collect();
+    assert_eq!(order, [(p(1), Some(a1)), (p(1), Some(a2)), (p(2), Some(n))]);
+    assert!(asked.windows(2).all(|r| r[0].request_id < r[1].request_id));
+    assert_eq!(
+        run.out.unwrap().protectors_chosen,
+        [(n, p(2)), (a1, p(1)), (a2, p(2))]
+    );
+
+    // An ordinary protector choice of player 2 (asked before the batch) comes before the
+    // retained battle of the active player 1 (asked after it).
+    let mut w = World::new();
+    let ordinary = w.new_battle(2, 2, false, 3, None);
+    let retained = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, retained);
+    let (run, asked) = drive_answers(&w, &[submit_player(2), submit_player(1)]);
+    let order: Vec<(PlayerId, Option<ObjectId>)> =
+        asked.iter().map(|r| (r.chooser, r.reason.source)).collect();
+    assert_eq!(order, [(p(2), Some(ordinary)), (p(1), Some(retained))]);
+    assert!(asked[0].request_id < asked[1].request_id);
+    assert_eq!(
+        run.out.unwrap().protectors_chosen,
+        [(ordinary, p(2)), (retained, p(1))]
+    );
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5w, CR 704.5x, CR 704.8 (gate 02-state-objects R3): a battle at
+// defense 0 whose move is NOT replaced leaves with the batch and gets no request, not even after
+// the batch; the pass consumes no request id (the next request has the same id as in a world
+// without that battle).
+#[test]
+fn sba_704_5x_leaving_battle_consumes_no_request_id() {
+    let mut base = World::new();
+    let ordinary = base.new_battle(2, 2, false, 3, None);
+    let (_, asked_base) = drive_answers(&base, &[submit_player(2)]);
+    let mut w = base.clone();
+    let s = w.new_battle(1, 1, true, 0, None);
+    let b = w.new_battle(1, 1, false, 0, None);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.source, Some(ordinary));
+    assert_eq!(asked[0].request_id, asked_base[0].request_id);
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(ordinary, p(2))]);
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (s, ZoneChangeCause::StateBasedAction),
+            (b, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5x, CR 614.6 (gate 02-state-objects R3): a retained battle with
+// no candidate (its controller can't protect it) gets no request and no panic; the pass is not
+// performed by it and the state is unchanged.
+#[test]
+fn sba_704_5x_retained_battle_without_candidate_asks_nothing() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.env.illegal_protectors.insert((b, p(1)));
+    w.skip_sba_move(1, b);
+    let before = w.state_hash();
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(!out.performed);
+    assert_eq!(out.findings.len(), 2);
+    assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(w.state_hash(), before);
+}
+
 // REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older
 // goes to its OWNER's graveyard; one Role each of players 1 and 2 on the same creature do not
 // interact; a non-Role Aura is unaffected; a Role controlled by player 1 but owned by player 2
