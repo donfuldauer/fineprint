@@ -129,17 +129,31 @@ impl Saved {
 /// What the performance of a pass needs from the check snapshot besides the findings
 /// (CR 704.3: everything is read from the one snapshot before anything changes).
 struct Plan {
-    /// CR 704.5j: the legend-rule groups that are findings, in asking order (CR 101.4: the
-    /// controller's APNAP rank, then the lowest id).
+    /// CR 704.5j: the legend-rule groups that are findings (CR 101.4: the controller's APNAP
+    /// rank, then the lowest id; asked in the order of `requests`).
     legend_groups: Vec<LegendGroup>,
     /// CR 704.5q, CR 704.5r: the counters to remove per object and kind. When both entries
     /// remove counters of one kind from one object, the larger amount is removed (decision
     /// #42 FP-041).
     counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>>,
-    /// CR 704.5x, CR 704.5y: the protector choices, in asking order (CR 101.4: the
-    /// controller's APNAP rank, then ascending battle id). A battle that is also a CR 704.5v or
+    /// CR 704.5x, CR 704.5y: the protector choices (CR 101.4: the controller's APNAP rank, then
+    /// ascending battle id; asked in the order of `requests`). A battle that is also a CR 704.5v or
     /// CR 704.5w finding goes to the graveyard anyway and has none (decision #43 FP-042).
     protector_asks: Vec<ProtectorAsk>,
+    /// CR 101.4: every request of the pass, in asking order: the chooser's APNAP rank, then
+    /// the legend-rule groups before the protector choices of that player, then the group's
+    /// lowest id or the ascending battle id. A protector choice without a chooser or without
+    /// candidates is no request (its battle goes to the graveyard).
+    requests: Vec<PlannedRequest>,
+}
+
+/// One choice of a pass, an index into [`Plan::legend_groups`] or [`Plan::protector_asks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlannedRequest {
+    /// CR 704.5j: the legend-rule group at this index.
+    Legend(usize),
+    /// CR 704.5x, CR 704.5y: the protector choice at this index.
+    Protector(usize),
 }
 
 impl Plan {
@@ -190,10 +204,35 @@ impl Plan {
         } else {
             protector_asks(view, &protector_battles)
         };
+        // CR 101.4: one APNAP-ordered sequence per pass for both kinds of choice (decision
+        // "Gate 02-state-objects F2 — One APNAP request sequence per SBA pass"): the chooser's APNAP rank, then (one player's own
+        // choices, in a fixed order) the legend-rule groups before the protector choices, then
+        // the lowest group id or the battle id.
+        let order = view.apnap_order();
+        let rank = |p: PlayerId| order.iter().position(|&q| q == p).unwrap_or(order.len());
+        let mut keyed: Vec<((usize, u8, ObjectId), PlannedRequest)> = Vec::new();
+        for (i, g) in legend_groups.iter().enumerate() {
+            keyed.push((
+                (rank(g.controller), 0, g.members[0]),
+                PlannedRequest::Legend(i),
+            ));
+        }
+        for (i, a) in protector_asks.iter().enumerate() {
+            if let Some(controller) = a.controller
+                && !a.candidates.is_empty()
+            {
+                keyed.push((
+                    (rank(controller), 1, a.battle),
+                    PlannedRequest::Protector(i),
+                ));
+            }
+        }
+        keyed.sort_unstable();
         Plan {
             legend_groups,
             counter_removals,
             protector_asks,
+            requests: keyed.into_iter().map(|(_, r)| r).collect(),
         }
     }
 }
@@ -203,12 +242,16 @@ impl Plan {
 /// changes, then all are performed simultaneously as one event. The heartbeat repeats the
 /// pass while it performs something (CR 704.3); this is one pass.
 ///
+/// - **Request order** (CR 101.4): the legend-rule and protector choices below are ONE
+///   sequence for the pass, asked before anything changes: by the chooser's APNAP rank (the
+///   active player first, then the turn order), then, for one player, every legend-rule group
+///   before every protector choice, then ascending lowest group id or ascending battle id.
+///   Request ids are assigned in this order.
 /// - **The legend rule** (CR 704.5j, CR 201.2a): the legendary permanents of each (evaluated,
 ///   CR 613.1b) controller form a conflict graph (an edge between two that have at least one
 ///   name in common); each connected component with an edge is a group. Before anything
 ///   changes, the controller of each group is asked ONE `SELECT_OBJECTS_FROM_ZONE` choice
-///   (CR 101.4: groups in APNAP order of their controllers, then ascending lowest id; candidates
-///   the group ascending; min 1; max 1 if every pair of members has the same name, otherwise
+///   (in the request order of the pass below; candidates the group ascending; min 1; max 1 if every pair of members has the same name, otherwise
 ///   the group size minus 1). The answer is the set of survivors and must be a maximal set of
 ///   members no two of which have the same name; on timeout the greedy such set by ascending
 ///   id. Every other member is moved with the batch below.
@@ -242,19 +285,22 @@ impl Plan {
 ///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
-/// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): after the
-///   legend-rule choices and before anything changes, the (evaluated) controller of each battle
-///   that has no player in the game as its protector, or whose protector can't be its
-///   protector, and that is not being attacked, is asked ONE `CHOOSE_PLAYER` choice (CR 101.4:
-///   in APNAP order of the controllers, then ascending battle id; reason `CR 704.5x` or
-///   `CR 704.5y`; candidates the appropriate players ascending: for a Siege the opponents of its
-///   controller, for a battle with no battle type its controller, each allowed by
-///   [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
+/// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): before
+///   anything changes, the (evaluated) controller of each battle that has no player in the game
+///   as its protector and is not being attacked (CR 704.5x), or whose protector can't be its
+///   protector, whether or not it is being attacked (CR 704.5y), is asked ONE `CHOOSE_PLAYER`
+///   choice (in the request order of the pass above; reason `CR 704.5x` or `CR 704.5y`;
+///   `reason.source` the battle; candidates the appropriate players ascending: for a Siege the
+///   opponents of its controller, for a battle with no battle type its controller, each allowed
+///   by [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
 ///   answer that is not a candidate is [`ChoiceError::Invalid`]. A battle with no candidate is
 ///   moved to its owner's graveyard with the batch below, without a request; a battle that is
 ///   also a CR 704.5v or CR 704.5w finding gets no request. After the pass succeeded each chosen
 ///   protector is recorded through [`SbaEnvironment::set_battle_protector`] and reported in
-///   [`SbaOutcome::protectors_chosen`].
+///   [`SbaOutcome::protectors_chosen`]. Changing the protector of a battle that is being
+///   attacked removes it from combat (CR 506.4, CR 506.4c: it stops being attacked; its
+///   attackers stay attacking creatures that attack nothing); the combat code applies that
+///   from [`SbaOutcome::protectors_chosen`], the pass does not touch combat state.
 /// - **Speed** (CR 704.5aa, CR 702.179a): each player found gets the [`SPEED`] designation
 ///   `Int(1)` once, reported in [`SbaOutcome::speed_set`]; not an event.
 /// - **Removing a dungeon from the game** (CR 704.5t, CR 309.7): like ceasing to exist below
@@ -356,39 +402,43 @@ fn perform_findings(
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
-    // CR 704.5j: every legend-rule choice is asked before any state changes, so a pending
-    // choice leaves the state as it was.
-    // CR 101.4: the groups are in APNAP order of their controllers; all moves happen together
-    // after every answer.
+    // CR 704.5j, CR 704.5x, CR 704.5y, CR 310.11: every legend-rule and protector choice is
+    // asked before any state changes, so a pending choice leaves the state as it was.
+    // CR 101.4: one sequence for the pass, in APNAP order of the choosing players (decision
+    // "Gate 02-state-objects F2 — One APNAP request sequence per SBA pass"); all moves happen together after every answer.
     let mut legend_losers: BTreeSet<ObjectId> = BTreeSet::new();
-    for group in &plan.legend_groups {
-        let kept = ask_legend_choice(choices, group)?;
-        legend_losers.extend(
-            group
-                .members
-                .iter()
-                .copied()
-                .filter(|id| !kept.contains(id)),
-        );
-    }
-
-    // CR 704.5x, CR 704.5y, CR 310.11: every protector choice is asked before any state change
-    // too, after the legend-rule choices (decision #43 FP-042). A battle no player can protect is
-    // put into its owner's graveyard with the batch, without a request.
     let mut protectors_chosen: Vec<(ObjectId, PlayerId)> = Vec::new();
-    let mut unprotectable: BTreeSet<ObjectId> = BTreeSet::new();
-    for ask in &plan.protector_asks {
-        match ask.controller {
-            Some(controller) if !ask.candidates.is_empty() => {
-                let chosen = ask_protector_choice(choices, ask, controller)?;
-                protectors_chosen.push((ask.battle, chosen));
+    for &request in &plan.requests {
+        match request {
+            PlannedRequest::Legend(i) => {
+                let group = &plan.legend_groups[i];
+                let kept = ask_legend_choice(choices, group)?;
+                legend_losers.extend(
+                    group
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|id| !kept.contains(id)),
+                );
             }
-            _ => {
-                unprotectable.insert(ask.battle);
+            PlannedRequest::Protector(i) => {
+                let ask = &plan.protector_asks[i];
+                if let Some(controller) = ask.controller {
+                    let chosen = ask_protector_choice(choices, ask, controller)?;
+                    protectors_chosen.push((ask.battle, chosen));
+                }
             }
         }
     }
     protectors_chosen.sort_unstable();
+    // CR 704.5x, CR 704.5y: a battle no player can protect is put into its owner's graveyard
+    // with the batch, without a request.
+    let unprotectable: BTreeSet<ObjectId> = plan
+        .protector_asks
+        .iter()
+        .filter(|a| a.controller.is_none() || a.candidates.is_empty())
+        .map(|a| a.battle)
+        .collect();
 
     // CR 704.5b, CR 121.4: the check consumes the flag. Taken before the batch so that an
     // empty-library draw made by a replacement during the batch counts for the next check.
@@ -705,7 +755,9 @@ fn ask_protector_choice(
         choice_type: ChoiceType::ChoosePlayer,
         reason: ChoiceReason {
             cr: ask.cr.to_owned(),
-            source: None,
+            // The battle whose protector is chosen: two requests with the same candidates are
+            // told apart by it.
+            source: Some(ask.battle),
         },
         min: 1,
         max: 1,

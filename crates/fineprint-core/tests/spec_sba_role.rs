@@ -251,3 +251,77 @@ fn req_sba_001_704_5z_deterministic() {
     assert_eq!(a.result, b.result);
     assert_eq!(a.after.canonical(), b.after.canonical());
 }
+
+/// A Role Aura owned and controlled by `controller`, enchanting PLAYER `target`, that became
+/// attached at stamp `since` (CR 303.7a, 613.7e).
+fn role_on_player(
+    s: &mut Sim,
+    controller: fineprint_base::ids::PlayerId,
+    target: fineprint_base::ids::PlayerId,
+    since: u64,
+) -> ObjectId {
+    let id = s.permanent(controller, controller, role_chars("test.role_a"));
+    s.attach(id, fineprint_core::permanent::AttachTarget::Player(target));
+    s.env.attachment_since.insert(id, since);
+    id
+}
+
+/// REQ-SBA-001, CR 704.5z ("If a PERMANENT has more than one Role controlled by the same
+/// player attached to it"): two Roles controlled by the same player, both enchanting a PLAYER,
+/// are not grouped: no finding, both stay (gate 02-state-objects F30). Both stamp orders.
+#[test]
+fn req_sba_001_704_5z_roles_on_a_player_not_grouped() {
+    for (s1, s2) in [(1, 2), (2, 1), (3, 3)] {
+        let mut s = Sim::new();
+        let a = role_on_player(&mut s, P1, P2, s1);
+        let b = role_on_player(&mut s, P1, P2, s2);
+        assert!(
+            fp042_findings(&s.check()).is_empty(),
+            "stamps {s1}/{s2}: no CR 704.5z finding for a player host"
+        );
+        let r = run_sba(s);
+        assert!(!r.finding_ids().contains(&"704.5z"));
+        assert_still_on_battlefield(&r, a);
+        assert_still_on_battlefield(&r, b);
+    }
+}
+
+/// REQ-SBA-001, CR 704.5z, 613.7e: next to two Roles of P1 enchanting a player (not grouped),
+/// two Roles of P1 on one PERMANENT: the older one goes, the newest stays (both stamp orders).
+#[test]
+fn req_sba_001_704_5z_permanent_host_still_grouped_next_to_player_host() {
+    for newer_first in [false, true] {
+        let mut s = Sim::new();
+        let p_old = role_on_player(&mut s, P1, P2, 1);
+        let p_new = role_on_player(&mut s, P1, P2, 5);
+        let host = s.creature(P2, "test.vanilla_2_2", 2, 2);
+        let (s1, s2) = if newer_first { (7, 3) } else { (3, 7) };
+        let a = s.role_aura(P1, P1, host, s1);
+        let b = s.role_aura(P1, P1, host, s2);
+        let (older, newer) = if newer_first { (b, a) } else { (a, b) };
+        assert_eq!(s.check(), vec![finding("704.5z", obj(older))]);
+        let r = run_sba(s);
+        assert_to_owners_graveyard(&r, older, SBA);
+        for id in [newer, p_old, p_new, host] {
+            assert_still_on_battlefield(&r, id);
+        }
+    }
+}
+
+/// REQ-SBA-001, CR 704.5z: two Roles on one permanent controlled by DIFFERENT players, and two
+/// Roles of different players on one player: all stay.
+#[test]
+fn req_sba_001_704_5z_different_controllers_on_permanent_and_player_stay() {
+    let mut s = Sim::new();
+    let host = s.creature(P1, "test.vanilla_2_2", 2, 2);
+    let a = s.role_aura(P1, P1, host, 1);
+    let b = s.role_aura(P2, P2, host, 2);
+    let c = role_on_player(&mut s, P1, P1, 3);
+    let d = role_on_player(&mut s, P2, P1, 4);
+    assert!(s.check().is_empty());
+    let r = run_sba(s);
+    assert!(!r.outcome().performed);
+    for id in [a, b, c, d] {
+        assert_still_on_battlefield(&r, id);
+    }
+}

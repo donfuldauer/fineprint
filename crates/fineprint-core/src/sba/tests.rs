@@ -4648,7 +4648,7 @@ fn sba_704_5x_siege_without_protector() {
     assert_eq!(r.chooser, p(1));
     assert_eq!(r.choice_type, ChoiceType::ChoosePlayer);
     assert_eq!(r.reason.cr, "CR 704.5x");
-    assert_eq!(r.reason.source, None);
+    assert_eq!(r.reason.source, Some(s));
     assert_eq!((r.min, r.max), (1, 1));
     assert_eq!(
         r.payload,
@@ -4886,11 +4886,13 @@ fn sba_704_5x_no_candidate_goes_to_the_owners_graveyard() {
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
 }
 
-// REQ-SBA-001, CR 704.5x, CR 704.5y, CR 310.11, CR 506.4c: a battle being attacked gets no
-// protector request (neither without a protector nor with an illegal one); an attacker whose
-// battle was removed from combat (`Attacking(None)`) attacks nothing and exempts nothing.
+// REQ-SBA-001, CR 704.5x, CR 704.5y, CR 506.4c (gate 02-state-objects F4): a battle being
+// attacked with NO protector gets no request (CR 704.5x has the attack condition), but a battle
+// being attacked whose protector can't be its protector IS a CR 704.5y finding and is asked;
+// an attacker whose battle was removed from combat (`Attacking(None)`) attacks nothing and
+// exempts nothing.
 #[test]
-fn sba_704_5x_y_attacked_battle_is_exempt() {
+fn sba_704_5x_attacked_exempt_but_704_5y_attacked_asked() {
     let mut w = World::new();
     let none = w.new_battle(1, 1, true, 3, None);
     let wrong = w.new_battle(1, 1, true, 3, Some(1));
@@ -4898,13 +4900,18 @@ fn sba_704_5x_y_attacked_battle_is_exempt() {
     let attacker2 = w.creature(2, 2);
     w.attack_battle(attacker, none);
     w.attack_battle(attacker2, wrong);
-    assert!(w.check().is_empty());
-    assert!(!pass(&mut w).performed);
+    assert!(w.found_by("704.5x").is_empty());
+    assert_eq!(w.found_by("704.5y"), [wrong]);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(asked[0].reason.source, Some(wrong));
+    assert_eq!(run.out.unwrap().protectors_chosen, [(wrong, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&wrong), Some(&p(2)));
     w.permanents
         .set_attack(attacker, crate::permanent::AttackState::Attacking(None))
         .unwrap();
     assert_eq!(w.found_by("704.5x"), [none]);
-    assert!(w.found_by("704.5y").is_empty());
 }
 
 // REQ-SBA-001, CR 704.5x: a protector who lost the game, or who is not a player in the game, is
@@ -5203,8 +5210,8 @@ fn simultaneity_board(reverse: bool) -> (World, [ObjectId; 9]) {
 
 // REQ-SBA-001, REQ-TEST-001, CR 704.3, CR 704.5a, CR 704.5f, CR 704.5j, CR 704.5v-704.5aa: all
 // found on one snapshot and performed in ONE pass with ONE batch, in both object-id orders; the
-// legend request comes first, then the protector requests (APNAP, then ascending battle id);
-// nothing remains for the next pass.
+// legend request comes first, then the protector requests (CR 101.4: every request is player
+// 1's, so within that player legend groups first, then ascending battle id); nothing remains for the next pass.
 #[test]
 fn sba_704_5v_to_aa_simultaneous_with_old_entries() {
     for reverse in [false, true] {

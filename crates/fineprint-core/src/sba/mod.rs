@@ -15,8 +15,8 @@
 //! (CR 704.8: last known information from before the pass), together with the counter
 //! removals (CR 704.5q, CR 704.5r) and the unattach events (CR 704.5n, CR 704.5p) of every
 //! applicable permanent, including one that also moves; the legend-rule choices
-//! (CR 704.5j) and the battle protector choices (CR 704.5x, CR 704.5y), asked in APNAP order
-//! (CR 101.4) before anything changes; ceasing to exist
+//! (CR 704.5j) and the battle protector choices (CR 704.5x, CR 704.5y), asked as ONE sequence
+//! in APNAP order of the choosing players (CR 101.4) before anything changes; ceasing to exist
 //! (CR 704.5d, CR 704.5e); removing a completed dungeon from the game (CR 704.5t); and the
 //! [`LOST_THE_GAME`] designation (CR 704.5a-704.5c); the [`SPEED`] designation (CR 704.5aa).
 //! The loop
@@ -35,7 +35,7 @@
 //! protectors, protector legality by effects and pending battle abilities (CR 704.5v-704.5y) and
 //! attachment timestamps (CR 704.5z, CR 613.7e) come from the caller's [`SbaEnvironment`]. Names, supertypes, subtypes, counters and controllers
 //! (CR 613.1b) are evaluated characteristics and the layer environment's counters; attachments
-//! and combat (whether a battle is being attacked, CR 310.11) come from the permanent container;
+//! and combat (whether a battle is being attacked, CR 704.5x) come from the permanent container;
 //! a player's speed is the [`SPEED`] player designation (CR 702.179b).
 //!
 //! **Not modelled here.** Regeneration (CR 701.8c), the Two-Headed Giant team checks
