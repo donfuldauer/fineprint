@@ -21,7 +21,9 @@
 //! [`LOST_THE_GAME`] designation (CR 704.5a-704.5c); the [`SPEED`] designation (CR 704.5aa).
 //! The loop
 //! of CR 704.3 (repeat while something was performed, then put waiting triggers on the stack)
-//! belongs to the heartbeat.
+//! belongs to the heartbeat. [`perform_all_relayered`] is the same pass with the layer inputs
+//! of the state after the batch supplied by the caller, for the protector choice of a
+//! zero-defense battle that stays on the battlefield (CR 704.5x, CR 614.6).
 //!
 //! **Inputs.** Toughness, abilities and card types are the evaluated characteristics
 //! (CR 613.1, CR 613.4) from the caller's [`ContinuousEffects`](crate::layers::ContinuousEffects)
@@ -61,7 +63,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use perform::{check, perform_all};
+pub use perform::{PostBatchLayers, check, perform_all, perform_all_relayered};
 pub use registry::{SbaAction, SbaEntry, SbaRegistry, VariantGate};
 pub use types::{
     GameVariant, LOST_THE_GAME, SPEED, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject,

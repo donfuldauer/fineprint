@@ -15,10 +15,18 @@
 #[path = "spec_sba_support.rs"]
 mod support;
 
+use std::cell::Cell;
+
 use fineprint_base::ids::{ObjectId, PlayerId};
-use fineprint_core::choice::{ChoiceSession, ChoiceType, PendingChoiceRequest};
-use fineprint_core::events::ZoneChangeCause;
-use fineprint_core::replacement::{Action, BusEventKind, EventMatcher, ReplacementEffect};
+use fineprint_core::choice::{
+    ChoiceContext, ChoiceError, ChoiceSession, ChoiceType, Interrupt, PendingChoiceRequest, Status,
+};
+use fineprint_core::events::{EventContext, ZoneChangeCause};
+use fineprint_core::layers::{ContinuousEffects, LayerEnvironment};
+use fineprint_core::replacement::{
+    Action, BusError, BusEventKind, BusInterrupt, EventMatcher, ReplacementEffect,
+};
+use fineprint_core::sba::{SbaRegistry, perform_all_relayered};
 use fineprint_core::txn::Transactional;
 use support::*;
 
@@ -286,4 +294,107 @@ fn req_sba_001_704_5x_retained_zero_defense_battle_gets_its_protector() {
     assert!(!next.outcome().performed);
     assert_eq!(next.finding_ids(), vec!["704.5w"]);
     assert_still_on_battlefield(&next, b);
+}
+
+/// One `perform_all_relayered` pass over `s` through the public API, whose provider hands back
+/// the same layer inputs (`s.effects`, `s.layer`) and counts its calls in `calls`. A pending
+/// request must leave the state unchanged.
+fn call_sba_relayered(
+    s: &mut Sim,
+    c: &mut ChoiceContext<'_>,
+    calls: &Cell<usize>,
+) -> Result<SbaOut, Interrupt> {
+    let registry = SbaRegistry::standard();
+    let before = s.snap();
+    let Sim {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider,
+        layer,
+        effects,
+        env,
+        replacements,
+        ..
+    } = s;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider,
+    };
+    let (effects, layer): (&ContinuousEffects, &dyn LayerEnvironment) = (effects, layer);
+    let mut post_batch =
+        |_: &EventContext<'_>, view: &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment)| {
+            calls.set(calls.get() + 1);
+            view(effects, layer);
+        };
+    let r = perform_all_relayered(
+        &registry,
+        &mut ctx,
+        replacements,
+        effects,
+        layer,
+        env,
+        c,
+        &mut post_batch,
+    );
+    match r {
+        Ok(o) => Ok(Ok(o)),
+        Err(BusInterrupt::Pending(p)) => {
+            assert_eq!(s.snap(), before, "a pending pass changed the state");
+            Err(Interrupt::Pending(p))
+        }
+        Err(BusInterrupt::Error(BusError::Choice(e @ ChoiceError::Invalid { .. }))) => {
+            Err(Interrupt::Error(e))
+        }
+        Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+    }
+}
+
+/// REQ-SBA-001, REQ-LAYER-001, CR 704.5w, 704.5x, 614.6, 704.3 (gate 02-state-objects R3b): the
+/// re-exported `perform_all_relayered`, with a provider that hands back the same layer inputs,
+/// asks the controller of a retained zero-defense battle exactly the request `perform_all`
+/// asks, after the batch (the provider called once per run); while it is pending the state is
+/// unchanged; the answer is recorded.
+#[test]
+fn req_sba_001_704_5x_relayered_entry_point_asks_the_retained_battle() {
+    let mut s = Sim::new();
+    let b = s.battle(P1, P1, 0, None);
+    s.add_replacement(ReplacementEffect::new(eid(1), sba_move_of(b), Action::Skip));
+    let before = s.state_hash();
+    let calls = Cell::new(0);
+    let mut session = ChoiceSession::start(s.clone(), |s: &mut Sim, c: &mut ChoiceContext<'_>| {
+        call_sba_relayered(s, c, &calls)
+    })
+    .unwrap();
+    assert_eq!(calls.get(), 1);
+    let pending = session.pending().expect("a protector request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_protector_request(&pending, P1, "CR 704.5x", &[P1]);
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!(
+        drive_answers(s, &[submit_player(P1)]).requests,
+        vec![pending.clone()]
+    );
+
+    session
+        .submit(pending.request_id, submit_player(P1))
+        .unwrap();
+    assert_eq!(calls.get(), 2);
+    let Status::Done { state, output } = session.status() else {
+        panic!("the pass is still pending");
+    };
+    let o = output.as_ref().expect("an SBA outcome");
+    assert_eq!(o.protectors_chosen, vec![(b, P1)]);
+    assert!(o.performed);
+    assert_eq!(state.env.battle_protectors.get(&b), Some(&P1));
 }

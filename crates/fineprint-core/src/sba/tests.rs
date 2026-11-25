@@ -144,6 +144,33 @@ impl CharacteristicsProvider for Snapshot {
     }
 }
 
+/// The layer environment over `zones` and the object markers of `events`, with the synthetic
+/// characteristics `chars` per card.
+fn snapshot_of(
+    zones: &Zones,
+    events: &EventState,
+    chars: &BTreeMap<CardId, Characteristics>,
+) -> Snapshot {
+    let mut bases = BTreeMap::new();
+    let mut counters = BTreeMap::new();
+    for id in zones.all_object_ids() {
+        let record = zones.object(id).unwrap();
+        let Some(c) = chars.get(&record.card) else {
+            continue;
+        };
+        bases.insert(
+            id,
+            ObjectBase {
+                characteristics: c.clone(),
+                controller: Some(record.controller),
+                on_battlefield: record.zone == ZoneId::Battlefield,
+            },
+        );
+        counters.insert(id, events.markers().counters(id));
+    }
+    Snapshot { bases, counters }
+}
+
 impl World {
     /// Two players at 20 life, turn 1, active player 1.
     fn new() -> World {
@@ -211,24 +238,7 @@ impl World {
     }
 
     fn snapshot(&self) -> Snapshot {
-        let mut bases = BTreeMap::new();
-        let mut counters = BTreeMap::new();
-        for id in self.zones.all_object_ids() {
-            let record = self.zones.object(id).unwrap();
-            let Some(c) = self.chars.get(&record.card) else {
-                continue;
-            };
-            bases.insert(
-                id,
-                ObjectBase {
-                    characteristics: c.clone(),
-                    controller: Some(record.controller),
-                    on_battlefield: record.zone == ZoneId::Battlefield,
-                },
-            );
-            counters.insert(id, self.events.markers().counters(id));
-        }
-        Snapshot { bases, counters }
+        snapshot_of(&self.zones, &self.events, &self.chars)
     }
 
     /// Executes `event` directly (no bus), for setup.
@@ -396,6 +406,17 @@ fn run_pass(w: &mut World, ch: &mut ChoiceContext<'_>) -> Result<Out, Interrupt>
         provider: &snap,
     };
     let result = perform_all(&registry, &mut ctx, replacements, effects, &snap, env, ch);
+    settle(w, before, result)
+}
+
+/// The session result of one pass of `w` whose hash before the pass was `before`: a pending
+/// choice or an error asserts that the world is exactly as before the call, then propagates
+/// (an invalid answer through `Interrupt::from`); every other error is the run's output.
+fn settle(
+    w: &World,
+    before: Digest,
+    result: Result<SbaOutcome, BusInterrupt>,
+) -> Result<Out, Interrupt> {
     match result {
         Ok(outcome) => Ok(Ok(outcome)),
         Err(BusInterrupt::Pending(r)) => {
@@ -5225,6 +5246,289 @@ fn sba_704_5x_retained_battle_without_candidate_asks_nothing() {
     assert_eq!(out.findings.len(), 2);
     assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
     assert_eq!(w.state_hash(), before);
+}
+
+// Gate 02-state-objects R3b: the retained-battle request reads the layer inputs of the state
+// after the batch, which `perform_all_relayered` receives from the caller's provider.
+
+/// How a test caller of [`perform_all_relayered`] derives its layer inputs (CR 613.1, CR 613.4).
+#[derive(Clone, Copy, Debug)]
+struct Relayer {
+    /// `(equipment, battle, player)`: the caller's own rule "while `equipment` is attached to
+    /// `battle`, a control-changing layer effect gives `battle` to `player`", applied to the
+    /// permanents of the state it describes.
+    rule: Option<(ObjectId, ObjectId, u64)>,
+    /// The provider hands back the PRE-batch inputs instead of inputs of the state after the
+    /// batch (what [`perform_all`] does).
+    stale: bool,
+}
+
+/// `base` plus the control effect of `rule` if its equipment is attached to its battle in
+/// `permanents`.
+fn rule_effects(
+    base: &ContinuousEffects,
+    permanents: &Permanents,
+    rule: Option<(ObjectId, ObjectId, u64)>,
+) -> ContinuousEffects {
+    let mut effects = base.clone();
+    if let Some((equipment, battle, player)) = rule
+        && permanents.attached_to(equipment) == Some(AttachTarget::Permanent(battle))
+    {
+        effects
+            .register(
+                e(90),
+                ContinuousEffect {
+                    source: Some(equipment),
+                    controller: p(player),
+                    timestamp: Timestamp::new(90),
+                    layer: Layer::L2,
+                    is_cda: false,
+                    origin: EffectOrigin::Resolved,
+                    affected: Affected::Objects(BTreeSet::from([battle])),
+                    modification: LayerModification::SetController(p(player)),
+                },
+            )
+            .unwrap();
+    }
+    effects
+}
+
+/// One `perform_all_relayered` pass over `w` whose layer inputs follow `relayer`; every call of
+/// the provider increments `calls`. Pending and error handling as [`run_pass`].
+fn run_pass_relayered(
+    w: &mut World,
+    ch: &mut ChoiceContext<'_>,
+    relayer: Relayer,
+    calls: &std::cell::Cell<usize>,
+) -> Result<Out, Interrupt> {
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    let pre_effects = rule_effects(&w.effects, &w.permanents, relayer.rule);
+    let registry = SbaRegistry::standard();
+    let World {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        registry: replacements,
+        effects,
+        chars,
+        env,
+        ..
+    } = w;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider: &snap,
+    };
+    let mut provider =
+        |after: &EventContext<'_>,
+         view: &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment)| {
+            calls.set(calls.get() + 1);
+            if relayer.stale {
+                view(&pre_effects, &snap);
+                return;
+            }
+            // A fresh snapshot of the context after the batch, and the caller's rule applied
+            // to its permanents.
+            let fresh = snapshot_of(after.zones, after.events, chars);
+            let fresh_effects = rule_effects(effects, after.permanents, relayer.rule);
+            view(&fresh_effects, &fresh);
+        };
+    let result = perform_all_relayered(
+        &registry,
+        &mut ctx,
+        replacements,
+        &pre_effects,
+        &snap,
+        env,
+        ch,
+        &mut provider,
+    );
+    settle(w, before, result)
+}
+
+/// Runs one `perform_all_relayered` pass on a clone of `w` in a choice session, answering
+/// `answers` in order; returns the run, every request asked and the number of provider calls of
+/// each run of the procedure (the start, then one per answer).
+fn drive_relayered(
+    w: &World,
+    answers: &[ChoiceResponse],
+    relayer: Relayer,
+) -> (Run, Vec<PendingChoiceRequest>, Vec<usize>) {
+    let calls = std::cell::Cell::new(0);
+    let mut session =
+        ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+            run_pass_relayered(w, ch, relayer, &calls)
+        })
+        .unwrap();
+    let mut per_run = vec![calls.replace(0)];
+    let mut asked = Vec::new();
+    let mut answers = answers.iter();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                assert!(answers.next().is_none(), "unused answers");
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked, per_run);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        let answer = answers.next().expect("more requests than answers").clone();
+        session.submit(pending.request_id, answer).unwrap();
+        per_run.push(calls.replace(0));
+        asked.push(pending);
+    }
+}
+
+/// A typeless battle `b` of player 2 at defense 0 with no protector whose graveyard move a
+/// persistent replacement skips, with an Equipment `gear` of player 1 attached to it (an
+/// Equipment can't equip a battle, so the batch unattaches it). The caller's rule gives control
+/// of `b` to player 1 while `gear` is attached: before the batch player 1 controls `b`, after it
+/// player 2 does. Returns (world, b, gear, rule).
+fn relayer_world() -> (World, ObjectId, ObjectId, Option<(ObjectId, ObjectId, u64)>) {
+    let mut w = World::new();
+    let b = w.new_battle(2, 2, false, 0, None);
+    w.skip_sba_move(1, b);
+    let gear = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(gear, AttachTarget::Permanent(b));
+    (w, b, gear, Some((gear, b, 1)))
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 704.5w, CR 704.5x, CR 614.6, CR 704.3, CR 613.1 (gate
+// 02-state-objects R3b, thread 4697581022): a retained battle whose controller, through a layer
+// effect, changes with the batch is asked by its controller AFTER the batch, with the candidates
+// of the state after the batch, when the caller supplies post-batch layer inputs. With the
+// pre-batch inputs (a stale provider, or `perform_all`) the request would go to the pre-batch
+// controller: both are asserted, so the test fails if the post-batch view used stale inputs.
+#[test]
+fn sba_704_5x_retained_request_reads_post_batch_layer_inputs() {
+    let (w, b, gear, rule) = relayer_world();
+    let fresh = Relayer { rule, stale: false };
+    let (run, asked, calls) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(calls, [1, 1]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(asked[0].reason.source, Some(b));
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(2)]
+        }
+    );
+    assert_eq!(asked[0].default_on_timeout, submit_player(2));
+    let out = run.out.unwrap();
+    assert_eq!(out.unattached, [gear]);
+    assert_eq!(out.protectors_chosen, [(b, p(2))]);
+    assert_eq!(run.state.permanents.attached_to(gear), None);
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(run.state.env.battle_protectors.get(&b), Some(&p(2)));
+
+    // The stale pre-batch inputs: the pre-batch controller (player 1) and its candidates.
+    let stale = Relayer { rule, stale: true };
+    let (run_stale, asked_stale, _) = drive_relayered(&w, &[submit_player(1)], stale);
+    assert_eq!(asked_stale.len(), 1);
+    assert_eq!(asked_stale[0].chooser, p(1));
+    assert_eq!(
+        asked_stale[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(1)]
+        }
+    );
+    assert_eq!(asked_stale[0].request_id, asked[0].request_id);
+
+    // T2: `perform_all` with the same pre-batch inputs gives exactly the stale result.
+    let mut w_all = w.clone();
+    w_all.effects = rule_effects(&w.effects, &w.permanents, rule);
+    let (run_all, asked_all) = drive_answers(&w_all, &[submit_player(1)]);
+    assert_eq!(asked_all, asked_stale);
+    assert_eq!(run_all.out, run_stale.out);
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, CR 704.5x, CR 704.5v, CR 704.5w, CR 704.8 (gate
+// 02-state-objects R3b): the provider is never called by a pass without a retained battle (an
+// ordinary protector request before the batch) nor by one whose zero-defense battles all leave
+// with the batch; it is called exactly once per run of a pass with two retained battles, and
+// that pass asks exactly what `perform_all` asks.
+#[test]
+fn sba_704_5x_post_batch_provider_called_only_for_retained_battles() {
+    let plain = Relayer {
+        rule: None,
+        stale: false,
+    };
+    let mut w = World::new();
+    let ordinary = w.new_battle(2, 2, false, 3, None);
+    let leaving = w.new_battle(1, 1, true, 0, None);
+    let (run, asked, calls) = drive_relayered(&w, &[submit_player(2)], plain);
+    assert_eq!(calls, [0, 0]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.source, Some(ordinary));
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [(leaving, ZoneChangeCause::StateBasedAction)]
+    );
+    let (run_all, asked_all) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked_all, asked);
+    assert_eq!(run_all.out.unwrap(), out);
+
+    let mut w = World::new();
+    let a1 = w.new_battle(1, 1, false, 0, None);
+    let a2 = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, a1);
+    w.skip_sba_move(2, a2);
+    let answers = [submit_player(1), submit_player(2)];
+    let (run, asked, calls) = drive_relayered(&w, &answers, plain);
+    assert_eq!(calls, [1, 1, 1]);
+    let sources: Vec<Option<ObjectId>> = asked.iter().map(|r| r.reason.source).collect();
+    assert_eq!(sources, [Some(a1), Some(a2)]);
+    let (run_all, asked_all) = drive_answers(&w, &answers);
+    assert_eq!(asked_all, asked);
+    assert_eq!(run_all.out, run.out);
+    assert_eq!(run_all.hash, run.hash);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(a1, p(1)), (a2, p(2))]);
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, CR 704.5x, CR 614.6 (gate 02-state-objects R3b): a
+// pending post-batch request through `perform_all_relayered` leaves the world exactly as before
+// the pass (also asserted inside the procedure), although the provider read the state after the
+// batch; answering completes the pass, and a second run reproduces the same request ids and the
+// same result.
+#[test]
+fn sba_704_5x_relayered_pending_restores_and_replays() {
+    let (w, b, _, rule) = relayer_world();
+    let fresh = Relayer { rule, stale: false };
+    let before = w.state_hash();
+    let calls = std::cell::Cell::new(0);
+    let session = ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+        run_pass_relayered(w, ch, fresh, &calls)
+    })
+    .unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(session.base().state_hash(), before);
+    let (run, asked, _) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(asked, [pending]);
+    let (again, asked_again, _) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(asked_again, asked);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+    assert_ne!(run.hash, before);
 }
 
 // REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older

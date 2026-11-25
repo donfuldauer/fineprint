@@ -315,11 +315,15 @@ impl Plan {
 ///   the batch, asking would change nothing (CR 704.8). If a replacement effect replaced its
 ///   graveyard move (CR 614.6, CR 704.7) and it is still on the battlefield as the same object
 ///   and still a CR 704.5x or CR 704.5y subject after the batch, its controller is asked the same
-///   choice AFTER the batch, in the same pass (candidates from the state after the batch;
-///   ordered by the controller's APNAP rank, then ascending battle id; these requests come after
-///   every request of the pass and every request of the batch); with no candidate it gets no
-///   request and the next pass finds it again (decision "Gate 02-state-objects R3 — Protector
-///   request after the batch for a retained zero-defense battle"). After the pass succeeded each chosen
+///   choice AFTER the batch, in the same pass (the subject test, the controller and the
+///   candidates from a view of the state after the batch, built from the post-batch layer
+///   inputs: those [`perform_all_relayered`] receives from its provider, or `effects` and
+///   `layer_env` again for `perform_all`; ordered by the controller's APNAP rank, then
+///   ascending battle id; these requests come after every request of the pass and every
+///   request of the batch); with no candidate it gets no request and the next pass finds it
+///   again (decisions "Gate 02-state-objects R3 — Protector request after the batch for a
+///   retained zero-defense battle" and "Gate 02-state-objects R3b — Post-batch layer inputs for
+///   the retained-battle request"). After the pass succeeded each chosen
 ///   protector is recorded through [`SbaEnvironment::set_battle_protector`] and reported in
 ///   [`SbaOutcome::protectors_chosen`]. Changing the protector of a battle that is being
 ///   attacked removes it from combat (CR 506.4, CR 506.4c: it stops being attacked; its
@@ -368,6 +372,14 @@ impl Plan {
 /// which have the same name, or a protector answer that is not a candidate ([`ChoiceError::Invalid`] with the request's id, which a
 /// [`ChoiceSession`](crate::choice::ChoiceSession) rejects without recording, the request
 /// staying pending). In both cases every component of `ctx`, the replacement registry and the flags of `env` are exactly as before the call.
+///
+/// # Layer inputs after the batch
+/// `perform_all` reads `effects` and `layer_env` for every view of the pass, including the
+/// post-batch view of the retained zero-defense battles (see "Battle protectors"): that step
+/// then evaluates the state after the batch with the caller's PRE-batch layer inputs. A caller
+/// whose layer inputs depend on state the batch can change (an attachment the batch unattaches,
+/// counters it removes, an object it moves) calls [`perform_all_relayered`] instead and
+/// supplies the layer inputs of the state after the batch.
 pub fn perform_all(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
@@ -376,6 +388,59 @@ pub fn perform_all(
     layer_env: &dyn LayerEnvironment,
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
+) -> Result<SbaOutcome, BusInterrupt> {
+    perform_all_relayered(
+        registry,
+        ctx,
+        replacements,
+        effects,
+        layer_env,
+        env,
+        choices,
+        &mut |_, view| view(effects, layer_env),
+    )
+}
+
+/// The provider of the layer inputs of the state after the batch of a pass, for
+/// [`perform_all_relayered`] (REQ-SBA-001, REQ-LAYER-001; CR 613.1, CR 613.4: characteristics
+/// after every layer).
+///
+/// The engine calls it with the [`EventContext`] as it is after the batch (no mutable borrow is
+/// held then); it must call the second argument exactly once with the continuous effects and
+/// the layer environment that describe that state. The inputs never leave the call, so they may
+/// borrow from the provider's own snapshot of the context.
+pub type PostBatchLayers<'a> =
+    &'a mut dyn FnMut(&EventContext<'_>, &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment));
+
+/// [`perform_all`] with the layer inputs of the state after the batch supplied by `post_batch`
+/// (REQ-SBA-001, CR 704.3, CR 704.5x, CR 614.6).
+///
+/// Everything [`perform_all`] documents holds unchanged: the check, the plan, the pre-batch
+/// requests (request ids included) and the batch read `effects` and `layer_env`. Only the
+/// post-batch protector step of the retained zero-defense battles ("Battle protectors" in
+/// [`perform_all`]) reads the inputs `post_batch` supplies, for both the test that the battle
+/// is still a CR 704.5x or CR 704.5y subject and its request (the chooser, its controller, and
+/// the candidates).
+///
+/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
+/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
+/// environment read), so that re-running the pass from the same state (a
+/// [`ChoiceSession`](crate::choice::ChoiceSession) replay) gives the same requests.
+///
+/// # Errors
+/// As [`perform_all`]; a pending or failed post-batch request leaves every component of `ctx`,
+/// the replacement registry and the flags of `env` exactly as before the call.
+#[allow(clippy::too_many_arguments)]
+pub fn perform_all_relayered(
+    registry: &SbaRegistry,
+    ctx: &mut EventContext<'_>,
+    replacements: &mut ReplacementRegistry,
+    effects: &ContinuousEffects,
+    layer_env: &dyn LayerEnvironment,
+    env: &mut dyn SbaEnvironment,
+    choices: &mut ChoiceContext<'_>,
+    post_batch: PostBatchLayers<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
     // CR 704.3: every predicate is evaluated against one snapshot before anything changes.
     let (findings, plan) = {
@@ -400,7 +465,7 @@ pub fn perform_all(
         replacements,
         findings,
         &plan,
-        (effects, layer_env),
+        post_batch,
         &*env,
         choices,
     ) {
@@ -430,8 +495,8 @@ pub fn perform_all(
 /// The requests of `plan` are asked before any state changes; then the one batch runs; then
 /// (CR 704.5x, CR 704.5y, CR 614.6) each battle of [`Plan::retained_battles`] that is still on
 /// the battlefield as the same object and still a CR 704.5x or CR 704.5y subject in a fresh view
-/// of the state after the batch (`layers`: the continuous effects and layer environment of that
-/// view) is asked its protector choice, in the order of the pre-batch requests (the
+/// of the state after the batch (built from the post-batch layer inputs `post_batch` supplies,
+/// see [`ask_retained_protectors`]) is asked its protector choice, in the order of the pre-batch requests (the
 /// controller's APNAP rank, then ascending battle id). A pending or failed request leaves the
 /// rollback to the caller like every other.
 #[allow(clippy::too_many_arguments)]
@@ -441,7 +506,7 @@ fn perform_findings(
     replacements: &mut ReplacementRegistry,
     findings: Vec<SbaFinding>,
     plan: &Plan,
-    layers: (&ContinuousEffects, &dyn LayerEnvironment),
+    post_batch: PostBatchLayers<'_>,
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
@@ -758,7 +823,7 @@ fn perform_findings(
     // CR 704.5x, CR 704.5y, CR 614.6: a battle at defense 0 whose graveyard move was replaced
     // and that stays without a protector gets its protector choice now, after the batch.
     protectors_chosen.extend(ask_retained_protectors(
-        registry, ctx, plan, layers, env, choices,
+        registry, ctx, plan, post_batch, env, choices,
     )?);
     protectors_chosen.sort_unstable();
 
@@ -789,9 +854,14 @@ fn perform_findings(
 /// zone) gets none (CR 704.8: what it was is last known information from before the pass); a
 /// battle that is still on the battlefield as the same object and is still a subject of a
 /// CR 704.5x or CR 704.5y entry in a view of the state after the batch is asked like a pre-batch
-/// choice ([`ask_protector_choice`]; candidates from that view), ordered by the controller's
-/// APNAP rank, then ascending battle id ([`protector_asks`]). A battle without a controller or
-/// without a candidate gets no request: the next pass finds it again (CR 704.5x).
+/// choice ([`ask_protector_choice`]; controller and candidates from that view), ordered by the
+/// controller's APNAP rank, then ascending battle id ([`protector_asks`]). A battle without a
+/// controller or without a candidate gets no request: the next pass finds it again (CR 704.5x).
+///
+/// The view is built from the post-batch layer inputs (CR 613.1, CR 613.4: characteristics after
+/// every layer) that `post_batch` supplies for `ctx` as it is after the batch, so a controller
+/// or counters that the batch changed through a layer input are read as they are now. Called
+/// at most once, and only when a retained battle is still on the battlefield.
 ///
 /// # Errors
 /// [`BusInterrupt::Pending`] until every request is answered; [`BusInterrupt::Error`] if an
@@ -800,16 +870,24 @@ fn ask_retained_protectors(
     registry: &SbaRegistry,
     ctx: &EventContext<'_>,
     plan: &Plan,
-    (effects, layer_env): (&ContinuousEffects, &dyn LayerEnvironment),
+    post_batch: PostBatchLayers<'_>,
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<Vec<(ObjectId, PlayerId)>, BusInterrupt> {
-    if plan.retained_battles.is_empty() {
+    // CR 704.8: a retained battle that left the battlefield gets nothing; with none left the
+    // provider is not called.
+    let on_battlefield = plan.retained_battles.keys().any(|&b| {
+        ctx.zones
+            .object(b)
+            .is_some_and(|r| r.zone == ZoneId::Battlefield)
+    });
+    if !on_battlefield {
         return Ok(Vec::new());
     }
-    let asks = {
-        // CR 704.5x, CR 704.5y: a fresh view of the state after the batch, used only for the
-        // retained battles.
+    let mut asks: Vec<ProtectorAsk> = Vec::new();
+    post_batch(ctx, &mut |effects, layer_env| {
+        // CR 704.5x, CR 704.5y: a fresh view of the state after the batch, through its own
+        // layer inputs, used only for the retained battles.
         let view = SbaView::new(
             ctx.game,
             ctx.zones,
@@ -836,8 +914,8 @@ fn ask_retained_protectors(
             .filter(|(b, _)| unprotected.contains(b))
             .map(|(&b, &cr)| (b, cr))
             .collect();
-        protector_asks(&view, &still)
-    };
+        asks = protector_asks(&view, &still);
+    });
     let mut chosen = Vec::new();
     for ask in &asks {
         if let Some(controller) = ask.controller
