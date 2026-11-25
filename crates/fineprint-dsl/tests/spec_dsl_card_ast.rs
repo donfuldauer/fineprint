@@ -499,8 +499,18 @@ fn req_dsl_010_nfr_006_check_order() {
     // And a valid seal with an unsupported version is rejected by seal.
     let mut d = base();
     d.dsl_version = "2.0".into();
-    Pos::Power(0).set(&mut d, json!(3));
-    assert!(matches!(d.seal(), Err(CanonicalError::Serialize(_))));
+    Pos::Power(0).set(&mut d, json!({"LITERAL": 3}));
+    match d.seal() {
+        Err(CanonicalError::Serialize(msg)) => assert!(
+            msg.contains("dslVersion major 2"),
+            "seal must name the rejected version, got {msg:?}"
+        ),
+        other => panic!("expected a version Serialize error, got {other:?}"),
+    }
+    // The same otherwise valid content seals under the supported version.
+    let mut d = base();
+    Pos::Power(0).set(&mut d, json!({"LITERAL": 3}));
+    assert!(d.seal().is_ok());
 }
 
 // ---------------------------------------------------------------- 1c valid content
