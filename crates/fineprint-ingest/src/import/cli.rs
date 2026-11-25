@@ -12,6 +12,8 @@
 //! repository root, where it is git-ignored). `import` writes `<cache>/normalized/cards.json`
 //! unless `--out` names another file (`-` is stdout; the summary line then goes to stderr).
 //! Files are written atomically (a temporary file next to the destination, then a rename).
+//! The records file and the MTGJSON report must be different files (compared after resolving
+//! the parent directory), and at most one of them may be stdout.
 //! An option never takes another option as its value. Exit codes: 0 success, 1 violations
 //! (`import --strict` with a rejection or diagnostic), 2 usage or input error. Messages never
 //! quote card data.
@@ -186,12 +188,17 @@ pub fn run_fetch_with(
     }
 }
 
+/// The provenance of `bytes` and whether it differs from the cached digest. The cached
+/// `updated_at` belongs to the bytes that were fetched, so it is kept only when the recomputed
+/// digest matches the recorded one; otherwise `updatedAt` is unknown (`None`).
 fn source_info(bytes: &[u8], cached: Option<&super::fetch::CachedFile>) -> (SourceInfo, bool) {
     let hash = sha256(bytes).to_hex();
     let mismatch = cached.is_some_and(|c| c.sha256 != hash);
     (
         SourceInfo {
-            updated_at: cached.and_then(|c| c.updated_at.clone()),
+            updated_at: cached
+                .filter(|c| c.sha256 == hash)
+                .and_then(|c| c.updated_at.clone()),
             sha256: hash,
             byte_count: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         },
@@ -311,6 +318,21 @@ fn emit(
     Ok(path.display().to_string())
 }
 
+/// The file a non-stdout destination names, for comparing two destinations: the parent
+/// directory canonicalized (symlinks and `.`/`..` resolved) joined with the file name. When the
+/// parent cannot be resolved (it does not exist), the path is kept as written; writing to it
+/// then fails on its own.
+fn resolve_dest(dest: &Path) -> PathBuf {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    match (dest.file_name(), std::fs::canonicalize(parent)) {
+        (Some(name), Ok(dir)) => dir.join(name),
+        _ => std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()),
+    }
+}
+
 /// Runs `import`; returns the exit code.
 pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let a = match parse_import_args(args) {
@@ -347,6 +369,18 @@ pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Wr
             let _ = writeln!(stderr, "import: cannot create {}: {e}", dir.display());
             return 2;
         }
+    }
+    // Two file destinations naming one file would let the report replace the records.
+    if let Some((dest, _)) = &report
+        && out != "-"
+        && *dest != "-"
+        && resolve_dest(Path::new(&out)) == resolve_dest(Path::new(dest))
+    {
+        let _ = writeln!(
+            stderr,
+            "import: the records file and --mtgjson-report name the same file\n{IMPORT_USAGE}"
+        );
+        return 2;
     }
     let to_stdout = out == "-" || report.as_ref().is_some_and(|(d, _)| *d == "-");
     let written = match emit(&out, &result.to_bytes(), stdout, stderr, "records") {

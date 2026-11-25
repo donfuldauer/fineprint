@@ -21,13 +21,19 @@ use fineprint_dsl::mana::ManaCostDSL;
 use serde_json::{Map, Value, json};
 
 use super::is_uuid_shape;
-use super::json_array::{ArrayError, split_array};
+use super::json_array::{ArrayElements, ArrayError};
 use super::recompute::{
     cmc_matches, color_identity, face_colors, letters_mask, record_colors, record_mana_value,
 };
 
 /// The version of the normalized output file.
 pub const FORMAT_VERSION: u64 = 1;
+
+/// The most faces one source card object may have (R12). Checked before any per-face work, so
+/// an object with a huge `card_faces` array is rejected with [`RejectReason::TooManyFaces`]
+/// without building a face or copying the shared type line once per face. Generous: real
+/// multi-face layouts have two faces.
+pub const MAX_FACES: usize = 16;
 
 /// The supertype words of a type line (the split is lexical only; no CR 205 validation here).
 pub const SUPERTYPES: [&str; 7] = [
@@ -222,7 +228,10 @@ impl NormalizedCardRecord {
     }
 }
 
-/// Why a source object was rejected: a fixed reason, never input text.
+/// Why a source object was rejected: a fixed reason, never input text. The wire strings
+/// ([`RejectReason::as_string`]) are `notObject`, `notGameplayObject`, `oracleIdShape`,
+/// `duplicateOracleId`, `missingField:<field>`, `fieldType:<field>`, `unknownColor:<field>`,
+/// `manaCostParse` and `tooManyFaces`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectReason {
     /// The element is not a JSON object (or did not parse).
@@ -241,6 +250,8 @@ pub enum RejectReason {
     UnknownColor(&'static str),
     /// A mana cost does not parse.
     ManaCostParse,
+    /// `card_faces` has more than [`MAX_FACES`] entries.
+    TooManyFaces,
 }
 
 impl RejectReason {
@@ -256,6 +267,7 @@ impl RejectReason {
             RejectReason::FieldType(f) => format!("fieldType:{f}"),
             RejectReason::UnknownColor(f) => format!("unknownColor:{f}"),
             RejectReason::ManaCostParse => "manaCostParse".to_owned(),
+            RejectReason::TooManyFaces => "tooManyFaces".to_owned(),
         }
     }
 }
@@ -514,6 +526,8 @@ pub fn normalize_card(v: &Value) -> Result<NormalizedCardRecord, RejectReason> {
     let top_type_line = get_str(o, "type_line", "type_line")?;
     let mut raw = match o.get("card_faces") {
         None | Some(Value::Null) => vec![raw_face(o, &TOP)?],
+        // R12: bound the face count before any per-face allocation.
+        Some(Value::Array(fs)) if fs.len() > MAX_FACES => return Err(RejectReason::TooManyFaces),
         Some(Value::Array(fs)) if !fs.is_empty() => fs
             .iter()
             .map(|f| match f {
@@ -536,27 +550,27 @@ pub fn normalize_card(v: &Value) -> Result<NormalizedCardRecord, RejectReason> {
 
     let mut diagnostics = BTreeSet::new();
 
-    // Type lines: a face's own line, else the per-face part of a combined top-level line.
-    let any_face_line = multi && raw.iter().any(|f| f.type_line.is_some());
-    if multi && !any_face_line {
-        let line = top_type_line.clone().unwrap_or_default();
+    // Type lines: a face's own line wins; a face without one takes the matching part of the
+    // top-level line split on " // " (one part per face), or the whole line when it has a
+    // single part; any other part count is `TypeLineFaceMismatch` and such faces keep no type
+    // line (never the whole combined line, whose words would land in the wrong face).
+    if multi && raw.iter().any(|f| f.type_line.is_none()) {
+        let line = top_type_line.as_deref().unwrap_or_default();
         let parts: Vec<&str> = line.split(" // ").collect();
         if parts.len() == raw.len() {
             for (f, p) in raw.iter_mut().zip(parts) {
-                f.type_line = Some(p.to_owned());
+                if f.type_line.is_none() {
+                    f.type_line = Some(p.to_owned());
+                }
             }
         } else if parts.len() == 1 && !line.is_empty() {
             for f in &mut raw {
-                f.type_line = Some(line.clone());
+                if f.type_line.is_none() {
+                    f.type_line = Some(line.to_owned());
+                }
             }
         } else if !line.is_empty() {
             diagnostics.insert(Diagnostic::TypeLineFaceMismatch);
-        }
-    } else if multi {
-        for f in &mut raw {
-            if f.type_line.is_none() {
-                f.type_line.clone_from(&top_type_line);
-            }
         }
     }
 
@@ -672,7 +686,10 @@ pub struct OracleImport {
 /// [`ArrayError`] when the file is not a JSON array at all.
 pub fn import_oracle_cards(bytes: &[u8]) -> Result<OracleImport, ArrayError> {
     let mut out = OracleImport::default();
-    for (index, slice) in split_array(bytes)?.into_iter().enumerate() {
+    // Streamed (R12): no index of the elements; a structural error found after some elements
+    // discards everything built so far, so the result equals the all-or-nothing split.
+    for (index, slice) in ArrayElements::new(bytes).enumerate() {
+        let slice = slice?;
         let Ok(v) = serde_json::from_slice::<Value>(slice) else {
             out.rejected.push(Rejection {
                 index,
@@ -732,7 +749,9 @@ pub fn import_rulings(
     records: &BTreeMap<String, NormalizedCardRecord>,
 ) -> Result<RulingsImport, ArrayError> {
     let mut out = RulingsImport::default();
-    for slice in split_array(bytes)? {
+    // Streamed like `import_oracle_cards` (R12).
+    for slice in ArrayElements::new(bytes) {
+        let slice = slice?;
         let ruling = serde_json::from_slice::<Value>(slice).ok().and_then(|v| {
             let o = v.as_object()?;
             let id = o.get("oracle_id")?.as_str().filter(|s| is_uuid_shape(s))?;

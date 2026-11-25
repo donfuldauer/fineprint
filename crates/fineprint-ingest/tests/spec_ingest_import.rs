@@ -21,8 +21,13 @@ use fineprint_ingest::import::fetch::{
     BULK_DATA_URL, CachedFile, FetchOptions, Http, MTGJSON_ATOMIC_URL, Request, SourceMeta, fetch,
     parse_source_meta, render_source_meta, user_agent,
 };
+use fineprint_ingest::import::json_array::{
+    ArrayElements, ArrayError, split_array, validate_array,
+};
+use fineprint_ingest::import::mtgjson::{Atomic, AtomicError, cross_check, parse_atomic};
 use fineprint_ingest::import::normalize::{
-    Diagnostic, NormalizedCardRecord, RejectReason, import_oracle_cards, normalize_card,
+    Diagnostic, NormalizedCardRecord, RejectReason, import_oracle_cards, import_rulings,
+    normalize_card,
 };
 use fineprint_ingest::import::{DEFAULT_CACHE, cli};
 use serde_json::{Value, json};
@@ -173,6 +178,8 @@ fn list_files(dir: &Path) -> Vec<PathBuf> {
             let path = e.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == ".lock") {
+                // Fetch lock files (`<group>/.lock`) are not cache content.
             } else {
                 out.push(path.strip_prefix(dir).unwrap().to_path_buf());
             }
@@ -648,8 +655,9 @@ fn import_keys_order_duplicates_and_rejections() {
 }
 
 /// REQ-ING-001: the output records each source's `updatedAt`, recomputed sha256 and byte
-/// count; a tampered cache file yields a warning and the recomputed hash; a missing
-/// `source.json` is a warning, not an error.
+/// count; a tampered cache file yields a warning, the recomputed hash and a null `updatedAt`
+/// (the recorded timestamp belongs to other bytes; review F38); a missing `source.json` is a
+/// warning, not an error.
 #[test]
 fn import_records_source_provenance() {
     let cache = scratch("import-prov");
@@ -678,6 +686,15 @@ fn import_records_source_provenance() {
         sha256(&tampered).to_hex()
     );
     assert_eq!(v["warnings"], json!(["sourceHashMismatch:oracleCards"]));
+    assert_eq!(
+        v["sources"]["oracleCards"]["updatedAt"],
+        Value::Null,
+        "a mismatching digest drops the stale timestamp"
+    );
+    assert_eq!(
+        v["sources"]["rulings"]["updatedAt"], "2026-01-02T09:00:00.000+00:00",
+        "a matching digest keeps it"
+    );
 
     std::fs::remove_file(cache.join("scryfall/source.json")).unwrap();
     assert_eq!(code(&import(&cache, &[])), 0);
@@ -1249,7 +1266,8 @@ fn write_atomic(cache: &Path, data: Value) {
 }
 
 /// REQ-ING-001: the MTGJSON cross-check reports each disagreeing characteristic per
-/// `oracle_id` and field (no names or text), counts and lists ids found in only one source, is
+/// `oracle_id` and field (card-wide fields first, then per-face fields with their `face` index;
+/// no names or text), counts and lists ids found in only one source, is
 /// deterministic and leaves the normalized records unchanged; without the MTGJSON file the flag
 /// is exit 2 naming `fetch --mtgjson`.
 #[test]
@@ -1305,15 +1323,15 @@ fn mtgjson_cross_check_report() {
         json!([
             {"oracleId": oid(2), "fields": [
                 {"field": "manaValue", "scryfall": 2, "mtgjson": 5.0},
-                {"field": "colors", "scryfall": "G", "mtgjson": "R"},
                 {"field": "colorIdentity", "scryfall": "G", "mtgjson": "RG"},
-                {"field": "types", "scryfall": "list(1)", "mtgjson": "list(2)"},
-                {"field": "power", "scryfall": "string", "mtgjson": "string"},
-                {"field": "toughness", "scryfall": "string", "mtgjson": "number"},
+                {"face": 0, "field": "colors", "scryfall": "G", "mtgjson": "R"},
+                {"face": 0, "field": "types", "scryfall": "list(1)", "mtgjson": "list(2)"},
+                {"face": 0, "field": "power", "scryfall": "string", "mtgjson": "string"},
+                {"face": 0, "field": "toughness", "scryfall": "string", "mtgjson": "number"},
             ]},
             {"oracleId": oid(3), "fields": [
                 {"field": "manaValue", "scryfall": 2, "mtgjson": "string"},
-                {"field": "loyalty", "scryfall": "absent", "mtgjson": "string"},
+                {"face": 0, "field": "loyalty", "scryfall": "absent", "mtgjson": "string"},
             ]},
         ])
     );
@@ -1540,4 +1558,418 @@ fn colors_cross_check_double_faced() {
         v["colors"] = json!(["U"]);
         assert_eq!(diags(&norm(&v)), vec!["colorsMismatch"], "{layout}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 02-state-objects review round 1 (F8, F9, F10, F16, F17, F26, F32, F38)
+// ---------------------------------------------------------------------------------------------
+
+/// Runs `import` in process through `cli::run_import`; returns the exit code and stderr.
+fn run_import_lib(args: &[&str]) -> (i32, String) {
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let c = cli::run_import(&args, &mut out, &mut err);
+    (c, String::from_utf8_lossy(&err).into_owned())
+}
+
+/// REQ-ING-001, REQ-NFR-004 (review F8): the records file and `--mtgjson-report` naming the
+/// same file (the default records path, the same spelling twice, `.`/`..` spellings, a
+/// symlinked directory) is a usage error (exit 2) that writes neither file; distinct files and
+/// a single stdout destination still work; stdout for both stays a usage error.
+#[test]
+fn import_rejects_aliased_output_files() {
+    let cache = scratch("import-alias");
+    write_cache(&cache, &json!([card(1, json!({}))]), None, true);
+    write_atomic(&cache, json!({"test.card_1": [atomic_entry(1, json!({}))]}));
+    let c = p(&cache);
+    std::fs::create_dir_all(cache.join("a")).unwrap();
+
+    // The default records path given as the report.
+    let default = cache.join("normalized/cards.json");
+    let (code, err) = run_import_lib(&["--cache", c, "--mtgjson-report", p(&default)]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("same file") && err.contains("usage:"), "{err}");
+    assert!(!default.exists(), "nothing written");
+
+    let target = cache.join("a/out.json");
+    let mut same = vec![
+        p(&target).to_owned(),
+        format!("{c}/a/../a/out.json"),
+        format!("{c}/./a/out.json"),
+        format!("{c}/normalized/../a/out.json"),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(cache.join("a"), cache.join("link")).unwrap();
+        same.push(format!("{c}/link/out.json"));
+    }
+    for report in &same {
+        for (out, rep) in [(p(&target), report.as_str()), (report.as_str(), p(&target))] {
+            let (code, err) =
+                run_import_lib(&["--cache", c, "--out", out, "--mtgjson-report", rep]);
+            assert_eq!(code, 2, "{out} / {rep}: {err}");
+            assert!(err.contains("usage:"), "{err}");
+            assert!(!target.exists(), "{out} / {rep}: nothing written");
+        }
+    }
+
+    // Distinct files: both written, the records file holds the records.
+    let report = cache.join("a/report.json");
+    let (code, err) = run_import_lib(&[
+        "--cache",
+        c,
+        "--out",
+        p(&target),
+        "--mtgjson-report",
+        p(&report),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(read_json(&target)["formatVersion"], 1);
+    assert_eq!(read_json(&report)["matched"], 1);
+    // The default records path and a report elsewhere.
+    let (code, err) = run_import_lib(&["--cache", c, "--mtgjson-report", p(&report)]);
+    assert_eq!(code, 0, "{err}");
+    assert!(read_json(&default)["records"].is_array());
+    // One stdout destination is fine; two are a usage error.
+    let (code, err) = run_import_lib(&["--cache", c, "--out", "-", "--mtgjson-report", p(&report)]);
+    assert_eq!(code, 0, "{err}");
+    let (code, err) = run_import_lib(&["--cache", c, "--mtgjson-report", "-"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, err) = run_import_lib(&["--cache", c, "--out", "-", "--mtgjson-report", "-"]);
+    assert_eq!(code, 2, "{err}");
+}
+
+/// A synthetic multi-face card object with `n` faces, none with its own type line.
+fn many_faces(n: usize) -> Value {
+    let fs: Vec<Value> = (0..n)
+        .map(|i| json!({"name": format!("test.face_{i}"), "mana_cost": "{1}"}))
+        .collect();
+    json!({
+        "oracle_id": oid(40), "name": "test.many", "layout": "split", "cmc": 1.0,
+        "type_line": "Instant \u{2014} Test Folk", "card_faces": fs,
+    })
+}
+
+/// REQ-ING-002, R12 (review F9): at most `MAX_FACES` (16) faces; 17 or more faces reject the
+/// object with `tooManyFaces` (never a panic, the other objects still import); 16 pass.
+#[test]
+fn too_many_faces_are_rejected() {
+    use fineprint_ingest::import::normalize::MAX_FACES;
+    assert_eq!(MAX_FACES, 16);
+    let r = norm(&many_faces(16));
+    assert_eq!(r.faces.len(), 16);
+    assert_eq!(r.faces[15].subtypes, vec!["Test", "Folk"]);
+    assert_eq!(
+        normalize_card(&many_faces(17)).unwrap_err(),
+        RejectReason::TooManyFaces
+    );
+    assert_eq!(RejectReason::TooManyFaces.as_string(), "tooManyFaces");
+    let mut big = many_faces(2000);
+    big["oracle_id"] = json!(oid(41));
+    let arr = json!([many_faces(17), card(1, json!({})), big]);
+    let out = import_oracle_cards(&bytes_of(&arr)).unwrap();
+    assert_eq!(
+        out.records.keys().cloned().collect::<Vec<_>>(),
+        vec![oid(1)]
+    );
+    let rej: Vec<Value> = out.rejected.iter().map(|r| r.to_json_value()).collect();
+    assert_eq!(
+        rej,
+        vec![
+            json!({"index": 0, "oracleId": oid(40), "reason": "tooManyFaces"}),
+            json!({"index": 2, "oracleId": oid(41), "reason": "tooManyFaces"}),
+        ]
+    );
+}
+
+/// A two-face `adventure`-layout object whose first face has its own type line and whose
+/// second face has none; `top` is the top-level type line.
+fn mixed_lines(top: &str) -> Value {
+    json!({
+        "oracle_id": oid(50), "name": "test.main // test.side", "layout": "adventure", "cmc": 2.0,
+        "type_line": top,
+        "card_faces": [
+            {"name": "test.main", "mana_cost": "{1}{G}", "type_line": "Creature \u{2014} Test Folk", "power": "2", "toughness": "2"},
+            {"name": "test.side", "mana_cost": "{G}"},
+        ]
+    })
+}
+
+/// REQ-ING-002 (review F10): a face without its own type line takes the matching part of a
+/// combined top-level line (never the whole line); a single-part line is copied; any other part
+/// count is `typeLineFaceMismatch` with that face's types left empty; explicit face lines win.
+#[test]
+fn face_without_type_line_takes_its_part() {
+    let r = norm(&mixed_lines(
+        "Creature \u{2014} Test Folk // Sorcery \u{2014} Test Tale",
+    ));
+    assert_eq!(r.faces[0].card_types, vec!["Creature"]);
+    assert_eq!(r.faces[0].subtypes, vec!["Test", "Folk"]);
+    assert_eq!(r.faces[1].card_types, vec!["Sorcery"]);
+    assert_eq!(r.faces[1].subtypes, vec!["Test", "Tale"]);
+    assert!(r.faces[1].supertypes.is_empty());
+    assert!(!diags(&r).contains(&"typeLineFaceMismatch"));
+
+    // One part: copied to the face without a line; the explicit line stays.
+    let r = norm(&mixed_lines("Legendary Artifact"));
+    assert_eq!(r.faces[0].card_types, vec!["Creature"]);
+    assert_eq!(r.faces[1].supertypes, vec!["Legendary"]);
+    assert_eq!(r.faces[1].card_types, vec!["Artifact"]);
+    assert!(!diags(&r).contains(&"typeLineFaceMismatch"));
+
+    // Three parts for two faces: a mismatch, the face's types stay empty.
+    let r = norm(&mixed_lines("Instant // Sorcery // Instant"));
+    assert!(
+        diags(&r).contains(&"typeLineFaceMismatch"),
+        "{:?}",
+        r.diagnostics
+    );
+    assert!(r.faces[1].supertypes.is_empty());
+    assert!(r.faces[1].card_types.is_empty());
+    assert!(r.faces[1].subtypes.is_empty());
+    assert_eq!(r.faces[0].card_types, vec!["Creature"]);
+
+    // The MTGJSON cross-check (per face) agrees with the per-face split.
+    let rec = norm(&mixed_lines(
+        "Creature \u{2014} Test Folk // Sorcery \u{2014} Test Tale",
+    ));
+    let atomic = parse_atomic(&bytes_of(&json!({"data": {"test.main": [
+        {"side": "a", "manaValue": 2.0, "colors": ["G"], "colorIdentity": ["G"], "types": ["Creature"], "supertypes": [], "subtypes": ["Folk", "Test"], "power": "2", "toughness": "2", "identifiers": {"scryfallOracleId": oid(50)}},
+        {"side": "b", "manaValue": 2.0, "colors": ["G"], "colorIdentity": ["G"], "types": ["Sorcery"], "supertypes": [], "subtypes": ["Tale", "Test"], "identifiers": {"scryfallOracleId": oid(50)}},
+    ]}})))
+    .unwrap();
+    let records = BTreeMap::from([(oid(50), rec)]);
+    let report = cross_check(&records, &atomic, &Value::Null);
+    assert_eq!(report["disagreements"], json!([]), "{report}");
+    assert_eq!(report["agreed"], 1);
+}
+
+/// The MTGJSON entries matching `two_face()`: side `b` first in source order (the cross-check
+/// orders by `side`); `back` overrides members of the back face.
+fn two_face_atomic(back: Value) -> Atomic {
+    let id = json!({"scryfallOracleId": oid(10)});
+    let mut b = json!({"side": "b", "manaValue": 3.0, "colors": ["W"], "colorIdentity": ["G", "W"], "types": ["Planeswalker"], "supertypes": ["Legendary"], "subtypes": ["Testwalker"], "loyalty": "X", "identifiers": id});
+    if let (Value::Object(m), Value::Object(e)) = (&mut b, back) {
+        m.extend(e);
+    }
+    let a = json!({"side": "a", "manaValue": 3.0, "colors": ["G"], "colorIdentity": ["G", "W"], "types": ["Creature"], "supertypes": [], "subtypes": ["Folk", "Test"], "power": "*", "toughness": "1+*", "identifiers": id});
+    parse_atomic(&bytes_of(&json!({"data": {"test.front": [b, a]}}))).unwrap()
+}
+
+/// REQ-ING-001 (review F16): every face is cross-checked against the MTGJSON entry of the same
+/// `side`: a two-face card agreeing everywhere has no entries; a disagreement only on face 1's
+/// subtypes is reported for face 1 only; a different face count is the field `faces`; a
+/// single-face card is compared as before (face 0).
+#[test]
+fn mtgjson_cross_check_every_face() {
+    let records = BTreeMap::from([(oid(10), norm(&two_face()))]);
+    let report = cross_check(&records, &two_face_atomic(json!({})), &Value::Null);
+    assert_eq!(report["disagreements"], json!([]), "{report}");
+    assert_eq!(
+        (report["matched"].clone(), report["agreed"].clone()),
+        (json!(1), json!(1))
+    );
+
+    let report = cross_check(
+        &records,
+        &two_face_atomic(json!({"subtypes": ["Testwalker", "Extra"]})),
+        &Value::Null,
+    );
+    assert_eq!(
+        report["disagreements"],
+        json!([{"oracleId": oid(10), "fields": [
+            {"face": 1, "field": "subtypes", "scryfall": "list(1)", "mtgjson": "list(2)"},
+        ]}])
+    );
+    assert_eq!(report["agreed"], 0);
+
+    // A back-face difference alone is no longer counted as agreed.
+    let report = cross_check(
+        &records,
+        &two_face_atomic(json!({"loyalty": "4"})),
+        &Value::Null,
+    );
+    assert_eq!(
+        report["disagreements"][0]["fields"],
+        json!([{"face": 1, "field": "loyalty", "scryfall": "string", "mtgjson": "string"}])
+    );
+
+    // A different face count: the front face alone in MTGJSON.
+    let one = parse_atomic(&bytes_of(&json!({"data": {"test.front": [
+        {"side": "a", "manaValue": 3.0, "colors": ["G"], "colorIdentity": ["G", "W"], "types": ["Creature"], "supertypes": [], "subtypes": ["Folk", "Test"], "power": "*", "toughness": "1+*", "identifiers": {"scryfallOracleId": oid(10)}},
+    ]}})))
+    .unwrap();
+    let report = cross_check(&records, &one, &Value::Null);
+    assert_eq!(
+        report["disagreements"][0]["fields"],
+        json!([{"field": "faces", "scryfall": 2, "mtgjson": 1}])
+    );
+
+    // Single-face: agreement, and a disagreement reported for face 0.
+    let records = BTreeMap::from([(oid(1), norm(&card(1, json!({}))))]);
+    let atomic = parse_atomic(&bytes_of(
+        &json!({"data": {"test.card_1": [atomic_entry(1, json!({}))]}}),
+    ))
+    .unwrap();
+    assert_eq!(cross_check(&records, &atomic, &Value::Null)["agreed"], 1);
+    let atomic = parse_atomic(&bytes_of(
+        &json!({"data": {"test.card_1": [atomic_entry(1, json!({"power": "3"}))]}}),
+    ))
+    .unwrap();
+    assert_eq!(
+        cross_check(&records, &atomic, &Value::Null)["disagreements"][0]["fields"],
+        json!([{"face": 0, "field": "power", "scryfall": "string", "mtgjson": "string"}])
+    );
+}
+
+/// REQ-ING-001 (review F32): `defense` is compared like power and toughness (string equality,
+/// kinds only); absent on both sides agrees.
+#[test]
+fn mtgjson_cross_check_defense() {
+    let records = BTreeMap::from([(oid(1), norm(&card(1, json!({"defense": "4"}))))]);
+    let check = |extra: Value| {
+        let atomic = parse_atomic(&bytes_of(
+            &json!({"data": {"test.card_1": [atomic_entry(1, extra)]}}),
+        ))
+        .unwrap();
+        cross_check(&records, &atomic, &Value::Null)
+    };
+    assert_eq!(check(json!({"defense": "4"}))["agreed"], 1);
+    assert_eq!(
+        check(json!({"defense": "5"}))["disagreements"][0]["fields"],
+        json!([{"face": 0, "field": "defense", "scryfall": "string", "mtgjson": "string"}])
+    );
+    assert_eq!(
+        check(json!({}))["disagreements"][0]["fields"],
+        json!([{"face": 0, "field": "defense", "scryfall": "string", "mtgjson": "absent"}])
+    );
+    let records = BTreeMap::from([(oid(1), norm(&card(1, json!({}))))]);
+    let atomic = parse_atomic(&bytes_of(
+        &json!({"data": {"test.card_1": [atomic_entry(1, json!({}))]}}),
+    ))
+    .unwrap();
+    assert_eq!(cross_check(&records, &atomic, &Value::Null)["agreed"], 1);
+}
+
+/// REQ-ING-001, R12 (review F26): `parse_atomic` moves the entries into the index: every usable
+/// entry once, in source order per `oracle_id` (lists in `data` key order), unusable elements
+/// counted; a file without a `data` object is refused.
+#[test]
+fn parse_atomic_moves_entries_in_order() {
+    let e = |n: u32, side: &str| json!({"side": side, "identifiers": {"scryfallOracleId": oid(n)}});
+    let a = parse_atomic(&bytes_of(&json!({"meta": {}, "data": {
+        "test.b": [e(2, "a"), 3, e(2, "b")],
+        "test.a": [e(1, "b"), e(1, "a"), {"identifiers": {"scryfallOracleId": "bad"}}],
+        "test.c": "x",
+    }})))
+    .unwrap();
+    assert_eq!(
+        a.by_oracle_id,
+        BTreeMap::from([
+            (oid(1), vec![e(1, "b"), e(1, "a")]),
+            (oid(2), vec![e(2, "a"), e(2, "b")]),
+        ])
+    );
+    assert_eq!(a.invalid_entries, 3);
+    assert_eq!(parse_atomic(b"[]").unwrap_err(), AtomicError::NoData);
+    assert_eq!(
+        parse_atomic(b"{\"data\": []}").unwrap_err(),
+        AtomicError::NoData
+    );
+    assert_eq!(parse_atomic(b"{").unwrap_err(), AtomicError::NotJson);
+}
+
+/// R12, REQ-ING-001 (review F17): `ArrayElements` yields exactly the elements of `split_array`
+/// and the same error, one element at a time (the elements before a late structural error are
+/// yielded first, then the error once, then nothing).
+#[test]
+fn array_elements_match_split_array() {
+    let inputs: Vec<&[u8]> = vec![
+        b"[]",
+        b"  [ ]  ",
+        b"[1]",
+        b"[1, 2 ,3]",
+        b"[{\"a\": [1, {\"b\": \"]\"}]}, \"x,y\", [[]]]",
+        b"[\"esc \\\" ] , [\", \"\\\\\"]",
+        b"[1,,2]",
+        b"[1,]",
+        b"[1] x",
+        b"[1}",
+        b"[1, \"abc",
+        b"[[1, 2]",
+        b"{}",
+        b"",
+        b"   ",
+        b"\xff[1]",
+        b"[\"\xc3\x28\"]",
+    ];
+    for input in inputs {
+        let streamed: Vec<Result<&[u8], ArrayError>> = ArrayElements::new(input).collect();
+        let collected: Result<Vec<&[u8]>, ArrayError> = ArrayElements::new(input).collect();
+        assert_eq!(collected, split_array(input), "{input:?}");
+        // At most one error, and only as the last item.
+        let errs = streamed.iter().filter(|r| r.is_err()).count();
+        assert!(errs <= 1, "{input:?}");
+        if errs == 1 {
+            assert!(streamed.last().unwrap().is_err(), "{input:?}");
+        }
+        let mut it = ArrayElements::new(input);
+        for _ in it.by_ref() {}
+        assert!(it.next().is_none(), "fused: {input:?}");
+        assert_eq!(
+            validate_array(input).is_ok(),
+            split_array(input)
+                .is_ok_and(|v| v.iter().all(|s| serde_json::from_slice::<Value>(s).is_ok())),
+            "{input:?}"
+        );
+    }
+    // Streaming: the elements before a late error come first.
+    let mut it = ArrayElements::new(b"[1, 2, \"open");
+    assert_eq!(it.next(), Some(Ok(&b"1"[..])));
+    assert_eq!(it.next(), Some(Ok(&b"2"[..])));
+    assert_eq!(it.next(), Some(Err(ArrayError::Malformed)));
+    assert_eq!(it.next(), None);
+    assert_eq!(
+        ArrayElements::new(b"x").next(),
+        Some(Err(ArrayError::NotArray))
+    );
+    assert_eq!(
+        ArrayElements::new(b"[1]\xff").next(),
+        Some(Err(ArrayError::NotUtf8))
+    );
+    // A late structural error still fails the whole import (all or nothing).
+    let mut late = bytes_of(&json!([card(1, json!({}))]));
+    late.extend_from_slice(b" x");
+    assert_eq!(
+        import_oracle_cards(&late).unwrap_err(),
+        ArrayError::Malformed
+    );
+    assert!(import_rulings(&late, &BTreeMap::new()).is_err());
+}
+
+/// R12, REQ-ING-001 (review F17): a 1 M-element array is scanned one element at a time
+/// (`ArrayElements` yields every element without an index), validated and imported (each
+/// element rejected on its own).
+#[test]
+fn million_element_array_streams() {
+    const N: usize = 1_000_000;
+    let mut big = Vec::with_capacity(2 * N + 1);
+    big.push(b'[');
+    for i in 0..N {
+        if i > 0 {
+            big.push(b',');
+        }
+        big.push(b'1');
+    }
+    big.push(b']');
+    let mut it = ArrayElements::new(&big);
+    assert_eq!(it.next(), Some(Ok(&b"1"[..])));
+    assert_eq!(it.size_hint().1, None, "no precomputed index");
+    assert_eq!(1 + it.map(|r| r.unwrap()).filter(|s| *s == b"1").count(), N);
+    assert_eq!(validate_array(&big), Ok(N));
+    let out = import_oracle_cards(&big).unwrap();
+    assert!(out.records.is_empty());
+    assert_eq!(out.rejected.len(), N);
+    assert_eq!(out.rejected[N - 1].index, N - 1);
+    assert_eq!(out.rejected[N - 1].reason, RejectReason::NotObject);
 }
