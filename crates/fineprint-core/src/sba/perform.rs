@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use fineprint_base::ids::{IdGenerator, ObjectId, PlayerId};
 
 use super::registry::{
-    LegendGroup, SbaAction, SbaRegistry, SbaView, counter_removal, legend_groups,
+    LegendGroup, ProtectorAsk, SbaAction, SbaRegistry, SbaView, counter_removal, legend_groups,
+    protector_asks,
 };
-use super::types::{LOST_THE_GAME, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject};
+use super::types::{LOST_THE_GAME, SPEED, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject};
 use crate::choice::{
     ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceReason,
     ChoiceResponse, ChoiceType, PendingChoiceRequest, RequestId,
@@ -135,12 +136,18 @@ struct Plan {
     /// remove counters of one kind from one object, the larger amount is removed (decision
     /// #42 FP-041).
     counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    /// CR 704.5x, CR 704.5y: the protector choices, in asking order (CR 101.4: the
+    /// controller's APNAP rank, then ascending battle id). A battle that is also a CR 704.5v or
+    /// CR 704.5w finding goes to the graveyard anyway and has none (decision #43 FP-042).
+    protector_asks: Vec<ProtectorAsk>,
 }
 
 impl Plan {
     fn new(registry: &SbaRegistry, view: &SbaView<'_>, findings: &[SbaFinding]) -> Plan {
         let mut legend_subjects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>> = BTreeMap::new();
+        let mut protector_battles: BTreeMap<ObjectId, &'static str> = BTreeMap::new();
+        let mut zero_defense: BTreeSet<ObjectId> = BTreeSet::new();
         for finding in findings {
             let (Some(entry), SbaSubject::Object(o)) =
                 (registry.get(finding.entry_id), finding.subject)
@@ -158,7 +165,15 @@ impl Plan {
                         *slot = (*slot).max(amount);
                     }
                 }
+                // CR 704.5x, CR 704.5y (mutually exclusive for one battle in one check).
+                SbaAction::ChooseProtector => {
+                    protector_battles.insert(o, entry.cr_ref);
+                }
                 _ => {}
+            }
+            // CR 704.5v, CR 704.5w: the battle goes to its owner's graveyard anyway.
+            if matches!(finding.entry_id, "704.5v" | "704.5w") {
+                zero_defense.insert(o);
             }
         }
         let legend_groups = if legend_subjects.is_empty() {
@@ -169,9 +184,16 @@ impl Plan {
                 .filter(|g| g.members.iter().all(|id| legend_subjects.contains(id)))
                 .collect()
         };
+        protector_battles.retain(|b, _| !zero_defense.contains(b));
+        let protector_asks = if protector_battles.is_empty() {
+            Vec::new()
+        } else {
+            protector_asks(view, &protector_battles)
+        };
         Plan {
             legend_groups,
             counter_removals,
+            protector_asks,
         }
     }
 }
@@ -220,6 +242,21 @@ impl Plan {
 ///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
+/// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): after the
+///   legend-rule choices and before anything changes, the (evaluated) controller of each battle
+///   that has no player in the game as its protector, or whose protector can't be its
+///   protector, and that is not being attacked, is asked ONE `CHOOSE_PLAYER` choice (CR 101.4:
+///   in APNAP order of the controllers, then ascending battle id; reason `CR 704.5x` or
+///   `CR 704.5y`; candidates the appropriate players ascending: for a Siege the opponents of its
+///   controller, for a battle with no battle type its controller, each allowed by
+///   [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
+///   answer that is not a candidate is [`ChoiceError::Invalid`]. A battle with no candidate is
+///   moved to its owner's graveyard with the batch below, without a request; a battle that is
+///   also a CR 704.5v or CR 704.5w finding gets no request. After the pass succeeded each chosen
+///   protector is recorded through [`SbaEnvironment::set_battle_protector`] and reported in
+///   [`SbaOutcome::protectors_chosen`].
+/// - **Speed** (CR 704.5aa, CR 702.179a): each player found gets the [`SPEED`] designation
+///   `Int(1)` once, reported in [`SbaOutcome::speed_set`]; not an event.
 /// - **Removing a dungeon from the game** (CR 704.5t, CR 309.7): like ceasing to exist below
 ///   (no zone change, last known information captured), reported in
 ///   [`SbaOutcome::removed_from_game`].
@@ -247,17 +284,18 @@ impl Plan {
 ///
 /// [`SbaOutcome::performed`] is `true` exactly when the pass changed the game state: a move, a
 /// counter removal or an unattach event occurred, an object ceased to exist
-/// or was removed from the game, a player lost, or the replacement registry changed
+/// or was removed from the game, a player lost, a protector was chosen, a speed was set, or the
+/// replacement registry changed
 /// (for example a one-use effect was consumed). A finding whose only move a replacement
 /// skipped is reported in [`SbaOutcome::findings`] but is not performed; the heartbeat
 /// repeats the check while `performed` (CR 704.3).
 ///
 /// # Errors
-/// [`BusInterrupt::Pending`] when a player must choose a replacement effect or the legend-rule
-/// survivors (propagate it to the [`ChoiceSession`](crate::choice::ChoiceSession), which
+/// [`BusInterrupt::Pending`] when a player must choose a replacement effect, the legend-rule
+/// survivors or a battle protector (propagate it to the [`ChoiceSession`](crate::choice::ChoiceSession), which
 /// re-runs the pass from the base state); [`BusInterrupt::Error`] on a failure, including a
 /// legend-rule answer that is not a selection or not a maximal set of candidates no two of
-/// which have the same name ([`ChoiceError::Invalid`] with the request's id, which a
+/// which have the same name, or a protector answer that is not a candidate ([`ChoiceError::Invalid`] with the request's id, which a
 /// [`ChoiceSession`](crate::choice::ChoiceSession) rejects without recording, the request
 /// staying pending). In both cases every component of `ctx`, the replacement registry and the flags of `env` are exactly as before the call.
 pub fn perform_all(
@@ -291,6 +329,11 @@ pub fn perform_all(
             // CR 704.3: "If any state-based actions are performed as a result of a check, the
             // check is repeated": performed means the pass changed the state.
             outcome.performed |= *replacements != replacements_before;
+            // CR 704.5x, CR 704.5y, CR 310.9f: record each chosen protector, ascending by
+            // battle, only now that the pass succeeded.
+            for &(battle, protector) in &outcome.protectors_chosen {
+                env.set_battle_protector(battle, protector);
+            }
             // CR 704.5h: "since the last time state-based actions were checked".
             env.clear_deathtouch_damaged();
             Ok(outcome)
@@ -329,6 +372,24 @@ fn perform_findings(
         );
     }
 
+    // CR 704.5x, CR 704.5y, CR 310.11: every protector choice is asked before any state change
+    // too, after the legend-rule choices (decision #43 FP-042). A battle no player can protect is
+    // put into its owner's graveyard with the batch, without a request.
+    let mut protectors_chosen: Vec<(ObjectId, PlayerId)> = Vec::new();
+    let mut unprotectable: BTreeSet<ObjectId> = BTreeSet::new();
+    for ask in &plan.protector_asks {
+        match ask.controller {
+            Some(controller) if !ask.candidates.is_empty() => {
+                let chosen = ask_protector_choice(choices, ask, controller)?;
+                protectors_chosen.push((ask.battle, chosen));
+            }
+            _ => {
+                unprotectable.insert(ask.battle);
+            }
+        }
+    }
+    protectors_chosen.sort_unstable();
+
     // CR 704.5b, CR 121.4: the check consumes the flag. Taken before the batch so that an
     // empty-library draw made by a replacement during the batch counts for the next check.
     ctx.events.take_empty_library_draws();
@@ -342,6 +403,12 @@ fn perform_findings(
     for &o in &legend_losers {
         moving.insert(o, ZoneChangeCause::StateBasedAction);
     }
+    // CR 704.5x, CR 704.5y: no player can be chosen: its owner's graveyard.
+    for &o in &unprotectable {
+        moving.entry(o).or_insert(ZoneChangeCause::StateBasedAction);
+    }
+    // CR 704.5aa: the players whose speed becomes 1 (once per player).
+    let mut speed_set: BTreeSet<PlayerId> = BTreeSet::new();
     for finding in &findings {
         let Some(entry) = registry.get(finding.entry_id) else {
             continue;
@@ -372,6 +439,10 @@ fn perform_findings(
             // CR 704.5t
             (SbaAction::RemoveFromGame, SbaSubject::Object(o)) => {
                 dungeons.insert(o);
+            }
+            // CR 704.5aa, CR 702.179a
+            (SbaAction::SetSpeed, SbaSubject::Player(p)) => {
+                speed_set.insert(p);
             }
             // CR 704.5j (asked above) and CR 704.5q, CR 704.5r (from the plan).
             _ => {}
@@ -584,13 +655,22 @@ fn perform_findings(
             p.set_designation(LOST_THE_GAME, DesignationValue::Flag);
         }
     }
+    // CR 704.5aa, CR 702.179a: "that player's speed becomes 1" (decision #43 FP-042: the
+    // `speed` designation, `Int(1)`). Not an event.
+    for &player in &speed_set {
+        if let Some(mut p) = ctx.game.player_mut(player) {
+            p.set_designation(SPEED, DesignationValue::Int(1));
+        }
+    }
 
     // CR 704.3: performed means the state changed (perform_all adds a registry change).
     let performed = !executed.is_empty()
         || !ceased.is_empty()
         || !loss_reasons.is_empty()
         || !unattached.is_empty()
-        || !removed_from_game.is_empty();
+        || !removed_from_game.is_empty()
+        || !protectors_chosen.is_empty()
+        || !speed_set.is_empty();
     Ok(SbaOutcome {
         performed,
         lost_players: loss_reasons.keys().copied().collect(),
@@ -600,7 +680,77 @@ fn perform_findings(
         ceased,
         unattached,
         removed_from_game,
+        protectors_chosen,
+        speed_set: speed_set.into_iter().collect(),
     })
+}
+
+/// CR 704.5x, CR 704.5y, CR 310.11: asks `controller`, the controller of the battle of `ask`,
+/// to choose its protector as ONE `CHOOSE_PLAYER` choice: candidates the appropriate players
+/// ascending, min 1, max 1, default the lowest candidate.
+///
+/// # Errors
+/// [`BusInterrupt::Pending`] until answered; [`BusInterrupt::Error`] with
+/// [`ChoiceError::Invalid`] (this request's id) if the answer is not a candidate.
+fn ask_protector_choice(
+    choices: &mut ChoiceContext<'_>,
+    ask: &ProtectorAsk,
+    controller: PlayerId,
+) -> Result<PlayerId, BusInterrupt> {
+    let request_id = choices.next_request_id();
+    let lowest = ask.candidates[0];
+    let request = PendingChoiceRequest {
+        request_id,
+        chooser: controller,
+        choice_type: ChoiceType::ChoosePlayer,
+        reason: ChoiceReason {
+            cr: ask.cr.to_owned(),
+            source: None,
+        },
+        min: 1,
+        max: 1,
+        hidden: false,
+        reveal_to: Vec::new(),
+        default_on_timeout: ChoiceResponse::SubmitPlayer { player: lowest },
+        options: ChoiceOptions::Enumerated(
+            ask.candidates
+                .iter()
+                .map(|&p| ChoiceOption::Player(p))
+                .collect(),
+        ),
+        payload: ChoicePayload::ChoosePlayer {
+            players: ask.candidates.clone(),
+        },
+    };
+    protector_answer(ask, request_id, choices.ask(request)?)
+}
+
+/// CR 704.5x, CR 704.5y: the protector the answer `response` to request `request_id` chooses
+/// for the battle of `ask`.
+///
+/// # Errors
+/// [`BusInterrupt::Error`] with [`ChoiceError::Invalid`] naming `request_id` if the answer is
+/// not a `SubmitPlayer` of a candidate (the convention of [`legend_survivors`]: the session
+/// rejects it without recording it).
+pub(super) fn protector_answer(
+    ask: &ProtectorAsk,
+    request_id: RequestId,
+    response: ChoiceResponse,
+) -> Result<PlayerId, BusInterrupt> {
+    let protocol = |explanation: String| {
+        BusInterrupt::Error(BusError::Choice(ChoiceError::Invalid {
+            request_id,
+            explanation,
+        }))
+    };
+    match response {
+        ChoiceResponse::SubmitPlayer { player } if ask.candidates.contains(&player) => Ok(player),
+        ChoiceResponse::SubmitPlayer { player } => Err(protocol(format!(
+            "{player:?} can't be the protector of {:?}",
+            ask.battle
+        ))),
+        other => Err(protocol(format!("unexpected answer {}", other.wire_name()))),
+    }
 }
 
 /// CR 704.5j, CR 201.2a: asks the controller of `group` which permanents stay, as ONE

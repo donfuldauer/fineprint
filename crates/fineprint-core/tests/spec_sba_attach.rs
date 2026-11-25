@@ -293,6 +293,12 @@ fn req_sba_001_704_5p_battle_attached() {
     let host = s.creature(P1, "test.vanilla_2_2", 2, 2);
     let battle = s.permanent(P2, P2, battle_chars("test.battle_a"));
     let battle_on_player = s.permanent(P2, P2, battle_chars("test.battle_b"));
+    // FP-042 (CR 704.5w, 704.5x): give each battle defense and a legal protector (its
+    // controller, it has no battle type) so only CR 704.5p applies.
+    for b in [battle, battle_on_player] {
+        s.set_defense(b, 1);
+        s.env.battle_protectors.insert(b, P2);
+    }
     s.attach_to(battle, host);
     s.attach(battle_on_player, AttachTarget::Player(P1));
     assert_eq!(

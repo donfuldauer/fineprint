@@ -18,6 +18,13 @@ use crate::permanent::AttachTarget;
 /// [`SbaOutcome::lost_players`]; deciding a draw or a winner (CR 104.4a) is the caller's.
 pub const LOST_THE_GAME: &str = "lostTheGame";
 
+/// The player designation that holds a player's speed (REQ-SBA-001, CR 704.5aa, CR 702.179a,
+/// CR 702.179b). Its value is `DesignationValue::Int(n)`; a player without this designation has
+/// no speed (CR 702.179b). CR 704.5aa sets it to `Int(1)` for a player who controls a permanent
+/// with start your engines! and has no speed; the change is reported in
+/// [`SbaOutcome::speed_set`].
+pub const SPEED: &str = "speed";
+
 /// The kind of game whose state-based actions are checked (REQ-SBA-001). Some entries are
 /// inactive in some variants (CR 704.5c: ignored in Two-Headed Giant games).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,7 +43,7 @@ pub enum GameVariant {
 pub enum SbaSubject {
     /// A player (CR 704.5a, CR 704.5b, CR 704.5c).
     Player(PlayerId),
-    /// An object (CR 704.5d-704.5t).
+    /// An object (CR 704.5d-704.5t, CR 704.5v-704.5z).
     Object(ObjectId),
 }
 
@@ -53,7 +60,9 @@ pub struct SbaFinding {
 /// hold yet (REQ-SBA-001). Every method has a default (a standard game with no copies, no
 /// exemption, every world permanent stamped 0, every Aura, Equipment and Fortification
 /// attachment legal as far as effects go, no counter limits,
-/// no Saga chapter abilities, no pending chapter or room abilities and no completed dungeon)
+/// no Saga chapter abilities, no pending chapter or room abilities, no completed dungeon, no
+/// battle protector, every player allowed as a protector by effects, no pending battle ability and
+/// every attachment stamped 0)
 /// except the deathtouch pair [`SbaEnvironment::deathtouch_damaged`] and
 /// [`SbaEnvironment::clear_deathtouch_damaged`], which every implementation provides together.
 ///
@@ -317,6 +326,126 @@ pub trait SbaEnvironment {
         false
     }
 
+    /// The player designated as the protector of battle `battle` (CR 310.9, CR 310.9e), if
+    /// any. A battle whose protector is `None`, or a player who has left the game or lost it,
+    /// has no player in the game designated as its protector (CR 704.5x). Default: `None`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert_eq!(Plain.battle_protector(ObjectId::new(1)), None);
+    /// ```
+    fn battle_protector(&self, battle: ObjectId) -> Option<PlayerId> {
+        let _ = battle;
+        None
+    }
+
+    /// Whether `player` may be the protector of battle `battle` as far as rules and effects
+    /// other than its battle type are concerned (CR 704.5y, CR 310.11). The engine itself checks
+    /// the battle type (CR 310.9a, CR 310.12a: a Siege's protector is an opponent of its
+    /// controller; a battle with no battle type is protected by its controller) and that the
+    /// player is in the game. Default: `true`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(Plain.can_be_protector(ObjectId::new(1), PlayerId::new(2)));
+    /// ```
+    fn can_be_protector(&self, battle: ObjectId, player: PlayerId) -> bool {
+        let _ = (battle, player);
+        true
+    }
+
+    /// Whether the battle is the source of an ability that has triggered but not yet left the
+    /// stack: waiting to be put on the stack, or on the stack (CR 704.5v). Any triggered
+    /// ability counts. Default: `false`.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert!(!Plain.battle_ability_pending(ObjectId::new(1)));
+    /// ```
+    fn battle_ability_pending(&self, battle: ObjectId) -> bool {
+        let _ = battle;
+        false
+    }
+
+    /// The timestamp of `attachment` as an attached Aura (CR 704.5z, CR 613.7e: an Aura receives
+    /// a new timestamp each time it becomes attached), as a caller-supplied monotonic stamp: a
+    /// LARGER stamp is MORE recent. Default: `0` (every attachment tied).
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// assert_eq!(Plain.attachment_timestamp(ObjectId::new(1)), 0);
+    /// ```
+    fn attachment_timestamp(&self, attachment: ObjectId) -> u64 {
+        let _ = attachment;
+        0
+    }
+
+    /// Records `protector` as the protector of battle `battle` (CR 704.5x, CR 704.5y,
+    /// CR 310.9f: the previous protector stops being its protector).
+    /// [`perform_all`](super::perform_all) calls it once per chosen protector, ascending by
+    /// battle, only after the pass succeeded (never on `BusInterrupt::Pending` or an error).
+    /// Default: does nothing.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use fineprint_base::ids::{ObjectId, PlayerId};
+    /// use fineprint_core::sba::SbaEnvironment;
+    ///
+    /// struct Plain;
+    /// impl SbaEnvironment for Plain {
+    ///     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+    ///         BTreeSet::new()
+    ///     }
+    ///     fn clear_deathtouch_damaged(&mut self) {}
+    /// }
+    /// let mut env = Plain;
+    /// env.set_battle_protector(ObjectId::new(1), PlayerId::new(2));
+    /// assert_eq!(env.battle_protector(ObjectId::new(1)), None);
+    /// ```
+    fn set_battle_protector(&mut self, battle: ObjectId, protector: PlayerId) {
+        let _ = (battle, protector);
+    }
+
     /// The objects that have been dealt damage (more than 0, CR 120.8) by a source with
     /// deathtouch since the last time state-based actions were checked (CR 704.5h, CR 702.2b).
     ///
@@ -375,6 +504,19 @@ pub struct StoredSbaEnvironment {
     /// The dungeon cards that are the source of a room ability that has triggered but not yet
     /// left the stack (CR 704.5t).
     pub room_pending: BTreeSet<ObjectId>,
+    /// The protector of each battle (CR 310.9, CR 704.5x); a missing battle has none.
+    /// [`SbaEnvironment::set_battle_protector`] writes it.
+    pub battle_protectors: BTreeMap<ObjectId, PlayerId>,
+    /// The (battle, player) pairs where the player can't be the battle's protector because of
+    /// rules or effects other than the battle type (CR 704.5y, CR 101.2); every other pair is
+    /// allowed as far as effects go.
+    pub illegal_protectors: BTreeSet<(ObjectId, PlayerId)>,
+    /// The battles that are the source of an ability that has triggered but not yet left the
+    /// stack (CR 704.5v).
+    pub battle_pending: BTreeSet<ObjectId>,
+    /// The timestamp of each attached Aura (CR 704.5z, CR 613.7e; larger = more recent); a
+    /// missing attachment answers 0.
+    pub attachment_since: BTreeMap<ObjectId, u64>,
 }
 
 impl Default for StoredSbaEnvironment {
@@ -393,6 +535,10 @@ impl Default for StoredSbaEnvironment {
             chapter_pending: BTreeSet::new(),
             bottommost_dungeons: BTreeSet::new(),
             room_pending: BTreeSet::new(),
+            battle_protectors: BTreeMap::new(),
+            illegal_protectors: BTreeSet::new(),
+            battle_pending: BTreeSet::new(),
+            attachment_since: BTreeMap::new(),
         }
     }
 }
@@ -451,6 +597,26 @@ impl SbaEnvironment for StoredSbaEnvironment {
         self.room_pending.contains(&dungeon)
     }
 
+    fn battle_protector(&self, battle: ObjectId) -> Option<PlayerId> {
+        self.battle_protectors.get(&battle).copied()
+    }
+
+    fn can_be_protector(&self, battle: ObjectId, player: PlayerId) -> bool {
+        !self.illegal_protectors.contains(&(battle, player))
+    }
+
+    fn battle_ability_pending(&self, battle: ObjectId) -> bool {
+        self.battle_pending.contains(&battle)
+    }
+
+    fn attachment_timestamp(&self, attachment: ObjectId) -> u64 {
+        self.attachment_since.get(&attachment).copied().unwrap_or(0)
+    }
+
+    fn set_battle_protector(&mut self, battle: ObjectId, protector: PlayerId) {
+        self.battle_protectors.insert(battle, protector);
+    }
+
     fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
         self.deathtouch.clone()
     }
@@ -466,7 +632,8 @@ pub struct SbaOutcome {
     /// Whether the pass changed the game state (CR 704.3: "If any state-based actions are
     /// performed as a result of a check, the check is repeated"): a move, a counter removal or
     /// an unattach event occurred, an object ceased to exist or was removed from the game, a
-    /// player lost the game, or the replacement registry changed (for
+    /// player lost the game, a battle protector was chosen (CR 704.5x, CR 704.5y), a player's
+    /// speed was set (CR 704.5aa), or the replacement registry changed (for
     /// example a one-use replacement effect was consumed). A finding whose only move a
     /// replacement effect skipped, with nothing else to do, is not performed. Consuming the empty-library-draw and
     /// deathtouch flags alone does not count.
@@ -499,4 +666,11 @@ pub struct SbaOutcome {
     /// The dungeon cards their owners removed from the game (CR 704.5t, CR 309.7), ascending.
     /// Removing a dungeon is not a zone change: no `ZoneChange` event, nothing in `executed`.
     pub removed_from_game: Vec<ObjectId>,
+    /// The protectors chosen in this pass (CR 704.5x, CR 704.5y): (battle, protector),
+    /// ascending by battle. Each was recorded through
+    /// [`SbaEnvironment::set_battle_protector`].
+    pub protectors_chosen: Vec<(ObjectId, PlayerId)>,
+    /// The players whose speed became 1 in this pass (CR 704.5aa, CR 702.179a), ascending:
+    /// recorded as the [`SPEED`] designation `Int(1)`. Not an event: nothing in `executed`.
+    pub speed_set: Vec<PlayerId>,
 }

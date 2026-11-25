@@ -344,6 +344,11 @@ impl Transactional for World {
         bytes.extend(encode_to_vec(&self.events));
         bytes.extend(encode_to_vec(&self.registry));
         bytes.extend(encode_to_vec(&self.env.deathtouch));
+        // CR 704.5x, CR 704.5y: the recorded protectors are part of what a pass may change.
+        for (battle, protector) in &self.env.battle_protectors {
+            bytes.extend(encode_to_vec(battle));
+            bytes.extend(encode_to_vec(protector));
+        }
         leaf_digest(&bytes)
     }
 
@@ -463,9 +468,10 @@ fn player(n: u64) -> SbaSubject {
 // Registry shape
 // ---------------------------------------------------------------------------------------------
 
-// REQ-SBA-001, SRS 9: one entry per rule CR 704.5a-704.5t (no 704.5l, no 704.5o), in order, with
-// id, crRef, action and variant gate; CR 704.5c is inactive in Two-Headed Giant games, every
-// other entry (CR 704.5a and all of CR 704.5j-704.5t included) is active.
+// REQ-SBA-001, SRS 9: one entry per rule CR 704.5a-704.5t and CR 704.5v-704.5aa (no 704.5l, no
+// 704.5o, no 704.5u), in order, with id, crRef, action and variant gate; CR 704.5c is inactive in
+// Two-Headed Giant games, every other entry (CR 704.5a, CR 704.5j-704.5t and CR 704.5v-704.5aa
+// included) is active.
 #[test]
 fn registry_shape() {
     let r = SbaRegistry::standard();
@@ -475,7 +481,7 @@ fn registry_shape() {
         [
             "704.5a", "704.5b", "704.5c", "704.5d", "704.5e", "704.5f", "704.5g", "704.5h",
             "704.5i", "704.5j", "704.5k", "704.5m", "704.5n", "704.5p", "704.5q", "704.5r",
-            "704.5s", "704.5t"
+            "704.5s", "704.5t", "704.5v", "704.5w", "704.5x", "704.5y", "704.5z", "704.5aa"
         ]
     );
     for entry in r.entries() {
@@ -515,6 +521,12 @@ fn registry_shape() {
             SbaAction::RemoveCounters,
             SbaAction::Sacrifice,
             SbaAction::RemoveFromGame,
+            SbaAction::PutIntoGraveyard,
+            SbaAction::PutIntoGraveyard,
+            SbaAction::ChooseProtector,
+            SbaAction::ChooseProtector,
+            SbaAction::PutIntoGraveyard,
+            SbaAction::SetSpeed,
         ]
     );
     for gone in ["704.5l", "704.5o", "704.5u"] {
@@ -522,10 +534,11 @@ fn registry_shape() {
     }
     for id in [
         "704.5j", "704.5k", "704.5m", "704.5n", "704.5p", "704.5q", "704.5r", "704.5s", "704.5t",
+        "704.5v", "704.5w", "704.5x", "704.5y", "704.5z", "704.5aa",
     ] {
         assert_eq!(r.get(id).unwrap().gate, VariantGate::All);
     }
-    assert_eq!(r.clone().entries().len(), 18);
+    assert_eq!(r.clone().entries().len(), 24);
 }
 
 // REQ-SBA-001: the default environment is a standard game with no copies, no deathtouch and the
@@ -2573,6 +2586,7 @@ fn sba_704_5m_aura_battle() {
     let mut c = aura();
     c.card_types = set(&["Battle", "Enchantment"]);
     let a = w.create(1, ZoneKind::Battlefield, c);
+    w.stable_battle(a, 1);
     w.attach(a, AttachTarget::Permanent(host));
     // Check 1.
     assert_eq!(w.found(obj(a)), ["704.5p"]);
@@ -2603,6 +2617,7 @@ fn sba_704_5m_aura_battle_illegal_host() {
     let mut c = aura();
     c.card_types = set(&["Battle", "Enchantment"]);
     let a = w.create(1, ZoneKind::Battlefield, c);
+    w.stable_battle(a, 1);
     w.attach(a, AttachTarget::Permanent(host));
     w.env
         .illegal_aura_targets
@@ -2701,6 +2716,7 @@ fn sba_704_5p_cannot_be_attached() {
         ZoneKind::Battlefield,
         noncreature("test.battle", "Battle"),
     );
+    w.stable_battle(battle, 1);
     let rock = w.create(
         1,
         ZoneKind::Battlefield,
@@ -4416,4 +4432,973 @@ fn illegal_link_without_replacement_is_still_unattached_once() {
     assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
     assert_eq!(out.unattached, [eq]);
     assert_eq!((w.counter(q, "+1/+1"), w.counter(q, "-1/-1")), (0, 0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// CR 704.5v-704.5aa (FP-042): battles, protectors, the Role rule and speed
+// ---------------------------------------------------------------------------------------------
+
+/// A synthetic battle; a Siege (CR 310.12, CR 205.3q) if `siege`, otherwise with no battle type.
+fn battle(siege: bool) -> Characteristics {
+    let c = noncreature("test.battle", "Battle");
+    if siege {
+        with_subtypes(c, &["Siege"])
+    } else {
+        c
+    }
+}
+
+/// A synthetic Role (CR 303.7): an Aura with the subtype Role.
+fn role() -> Characteristics {
+    with_subtypes(noncreature("test.role", "Enchantment"), &["Aura", "Role"])
+}
+
+/// A synthetic creature with start your engines! (CR 702.179a).
+fn engine_creature() -> Characteristics {
+    let mut c = creature("test.engine_1_3", 3);
+    c.abilities = vec![keyword("START_YOUR_ENGINES")];
+    c
+}
+
+fn submit_player(n: u64) -> ChoiceResponse {
+    ChoiceResponse::SubmitPlayer { player: p(n) }
+}
+
+impl World {
+    /// Gives battle `id` 3 defense counters (CR 310.4c) and `protector` as its protector.
+    fn stable_battle(&mut self, id: ObjectId, protector: u64) {
+        self.counters(id, "defense", 3);
+        self.env.battle_protectors.insert(id, p(protector));
+    }
+
+    /// A battle of `owner` controlled by `controller` with `defense` defense counters and
+    /// protector `protector`.
+    fn new_battle(
+        &mut self,
+        owner: u64,
+        controller: u64,
+        siege: bool,
+        defense: i64,
+        protector: Option<u64>,
+    ) -> ObjectId {
+        let id = self.create_controlled(owner, controller, battle(siege));
+        if defense > 0 {
+            self.counters(id, "defense", defense);
+        }
+        if let Some(pr) = protector {
+            self.env.battle_protectors.insert(id, p(pr));
+        }
+        id
+    }
+
+    /// `attacker` attacks battle `target` (CR 508.1).
+    fn attack_battle(&mut self, attacker: ObjectId, target: ObjectId) {
+        self.permanents
+            .set_attack(
+                attacker,
+                crate::permanent::AttackState::Attacking(Some(
+                    crate::permanent::AttackTarget::Permanent(target),
+                )),
+            )
+            .unwrap();
+    }
+
+    /// A Role of `owner` controlled by `controller` attached to `target` with timestamp `stamp`.
+    fn role_on(&mut self, owner: u64, controller: u64, target: ObjectId, stamp: u64) -> ObjectId {
+        let id = self.create_controlled(owner, controller, role());
+        self.attach(id, AttachTarget::Permanent(target));
+        self.env.attachment_since.insert(id, stamp);
+        id
+    }
+
+    fn speed(&self, player: u64) -> Option<DesignationValue> {
+        self.game
+            .player(p(player))
+            .unwrap()
+            .designation(SPEED)
+            .cloned()
+    }
+
+    fn set_speed(&mut self, player: u64, n: i64) {
+        self.game
+            .player_mut(p(player))
+            .unwrap()
+            .set_designation(SPEED, DesignationValue::Int(n));
+    }
+
+    fn lose(&mut self, player: u64) {
+        self.game
+            .player_mut(p(player))
+            .unwrap()
+            .set_designation(LOST_THE_GAME, DesignationValue::Flag);
+    }
+
+    /// The player subjects the check finds for `entry`, ascending.
+    fn players_found_by(&mut self, entry: &str) -> Vec<PlayerId> {
+        self.check()
+            .into_iter()
+            .filter(|f| f.entry_id == entry)
+            .map(|f| match f.subject {
+                SbaSubject::Player(pl) => pl,
+                SbaSubject::Object(_) => panic!("object finding"),
+            })
+            .collect()
+    }
+}
+
+/// Runs one pass on a clone of `w`, answering every request with its default; returns the run
+/// and every request asked.
+fn drive_defaults(w: &World) -> (Run, Vec<PendingChoiceRequest>) {
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let mut asked = Vec::new();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        session.submit_default(pending.request_id).unwrap();
+        asked.push(pending);
+    }
+}
+
+// REQ-SBA-001, CR 704.5v, CR 310.7, CR 310.4c: a Siege with no defense counters (defense 0) is
+// put into its OWNER's graveyard with an SBA cause, without a request; a Siege with defense 1
+// stays; it is not a CR 704.5w finding.
+#[test]
+fn sba_704_5v_siege_at_zero_defense() {
+    let mut w = World::new();
+    let dead = w.new_battle(2, 1, true, 0, Some(2));
+    let alive = w.new_battle(1, 1, true, 1, Some(2));
+    assert_eq!(w.found_by("704.5v"), [dead]);
+    assert!(w.found_by("704.5w").is_empty());
+    assert_eq!(w.found(obj(dead)), ["704.5v"]);
+    let card = w.card_of(dead);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(dead, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+    assert!(w.zones.object(alive).is_some());
+    assert!(!pass(&mut w).performed);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 310.7: a Siege at defense 0 that is the source of an ability that
+// has triggered but not yet left the stack survives; once the ability has left the stack, the
+// repeated check collects it.
+#[test]
+fn sba_704_5v_pending_ability_keeps_the_siege() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, Some(2));
+    w.env.battle_pending.insert(s);
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    assert!(w.zones.object(s).is_some());
+    w.env.battle_pending.clear();
+    assert_eq!(w.found_by("704.5v"), [s]);
+    let card = w.card_of(s);
+    assert!(pass(&mut w).performed);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+}
+
+// REQ-SBA-001, CR 704.5w, CR 310.8: a non-Siege battle at defense 0 goes to its OWNER's
+// graveyard even while it is the source of a pending triggered ability (704.5w has no such
+// clause); defense 2 stays; it is not a CR 704.5v finding.
+#[test]
+fn sba_704_5w_non_siege_at_zero_defense() {
+    let mut w = World::new();
+    let dead = w.new_battle(2, 1, false, 0, Some(1));
+    let alive = w.new_battle(1, 1, false, 2, Some(1));
+    w.env.battle_pending = BTreeSet::from([dead, alive]);
+    assert_eq!(w.found_by("704.5w"), [dead]);
+    assert!(w.found_by("704.5v").is_empty());
+    let card = w.card_of(dead);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(dead, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+    assert!(w.zones.object(alive).is_some());
+}
+
+// REQ-SBA-001, CR 704.5x, CR 310.12a, CR 310.9f: a Siege with no protector, not attacked: its
+// controller is asked ONE CHOOSE_PLAYER request (reason CR 704.5x, candidates the opponents,
+// enumerated, min = max = 1, default the lowest); the answer is recorded through
+// `set_battle_protector`, reported in `protectors_chosen`, the pass is performed with no event,
+// and the repeated check finds nothing.
+#[test]
+fn sba_704_5x_siege_without_protector() {
+    let mut w = World::new();
+    let s = w.new_battle(2, 1, true, 3, None);
+    assert_eq!(w.found(obj(s)), ["704.5x"]);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    let r = &asked[0];
+    assert_eq!(r.chooser, p(1));
+    assert_eq!(r.choice_type, ChoiceType::ChoosePlayer);
+    assert_eq!(r.reason.cr, "CR 704.5x");
+    assert_eq!(r.reason.source, None);
+    assert_eq!((r.min, r.max), (1, 1));
+    assert_eq!(
+        r.payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(2)]
+        }
+    );
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Enumerated(vec![ChoiceOption::Player(p(2))])
+    );
+    assert_eq!(r.default_on_timeout, submit_player(2));
+    let out = run.out.unwrap();
+    assert!(out.performed);
+    assert!(out.executed.is_empty());
+    assert_eq!(out.protectors_chosen, [(s, p(2))]);
+    let mut w = run.state;
+    assert_eq!(w.env.battle_protectors.get(&s), Some(&p(2)));
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 310.9a: a battle with no battle type only offers its controller
+// (even when another player owns it).
+#[test]
+fn sba_704_5x_typeless_battle_offers_only_its_controller() {
+    let mut w = World::three([1, 2, 3], 1);
+    let b = w.new_battle(3, 2, false, 3, None);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(2)]
+        }
+    );
+    assert_eq!(run.out.unwrap().protectors_chosen, [(b, p(2))]);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 310.12a: a Siege controlled by player 2 in a three-player game
+// offers exactly its controller's opponents, ascending, and never its controller; the
+// controller after layer 2 (CR 613.1b) is the one asked.
+#[test]
+fn sba_704_5x_siege_offers_only_opponents() {
+    let mut w = World::three([1, 2, 3], 1);
+    let s = w.new_battle(1, 1, true, 3, None);
+    w.give_control(1, s, 2);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(1), p(3)]
+        }
+    );
+    assert_eq!(asked[0].default_on_timeout, submit_player(1));
+    assert_eq!(run.out.unwrap().protectors_chosen, [(s, p(3))]);
+    // A lost player is not a candidate.
+    w.lose(3);
+    let (_, asked) = drive_answers(&w, &[submit_player(1)]);
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(1)]
+        }
+    );
+}
+
+// REQ-SBA-001, CR 704.5x, CR 704.3: the protector request is asked before any state change:
+// a pending request leaves every component, the flags and the recorded protectors exactly as
+// before (also asserted inside the procedure).
+#[test]
+fn sba_704_5x_pending_request_leaves_the_state() {
+    let mut w = World::new();
+    let c = w.creature(1, 0);
+    w.new_battle(1, 1, true, 3, None);
+    w.setup(GameEvent::Draw { player: p(2) });
+    w.env.deathtouch = BTreeSet::from([c]);
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let Status::Pending(r) = session.status() else {
+        panic!("not pending");
+    };
+    assert_eq!(r.choice_type, ChoiceType::ChoosePlayer);
+    assert_eq!(session.state_hash(), before);
+    assert!(session.base().env.battle_protectors.is_empty());
+    assert_eq!(session.base().env.deathtouch, BTreeSet::from([c]));
+    assert_eq!(session.base().events.empty_library_draws(), [p(2)]);
+    assert!(session.base().zones.object(c).is_some());
+}
+
+// REQ-SBA-001, CR 704.5x, CR 704.5y: an answer that is not a SubmitPlayer of a candidate is
+// `ChoiceError::Invalid` naming the request (the session rejects it without recording it, the
+// request stays pending); a correct answer then completes the pass.
+#[test]
+fn sba_704_5x_invalid_answer_is_rejected() {
+    let ask = ProtectorAsk {
+        battle: ObjectId::new(5),
+        controller: Some(p(1)),
+        candidates: vec![p(2), p(3)],
+        cr: "CR 704.5x",
+    };
+    let rid = RequestId::new(4);
+    assert_eq!(protector_answer(&ask, rid, submit_player(3)).unwrap(), p(3));
+    for bad in [
+        submit_player(1),
+        submit_player(9),
+        ChoiceResponse::SelectReplacement { index: 0 },
+        select(&[ObjectId::new(5)]),
+    ] {
+        let err = protector_answer(&ask, rid, bad.clone()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BusInterrupt::Error(BusError::Choice(ChoiceError::Invalid { request_id, .. }))
+                    if request_id == rid
+            ),
+            "{bad:?}"
+        );
+    }
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 3, None);
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let pending = session.pending().unwrap().clone();
+    assert!(
+        session
+            .submit(pending.request_id, submit_player(1))
+            .is_err()
+    );
+    assert!(
+        session
+            .submit(pending.request_id, select(&[ObjectId::new(1)]))
+            .is_err()
+    );
+    assert_eq!(session.pending(), Some(&pending));
+    assert!(session.answers().is_empty());
+    assert_eq!(session.state_hash(), w.state_hash());
+    session
+        .submit(pending.request_id, submit_player(2))
+        .unwrap();
+    let Status::Done { output, .. } = session.status() else {
+        panic!("not done");
+    };
+    assert_eq!(output.clone().unwrap().protectors_chosen, [(s, p(2))]);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 101.4: the requests of two controllers are asked in APNAP order
+// (the active player's battle has the HIGHER id and is asked first); one controller's battles
+// in ascending id; nothing changes before every answer; the chosen protectors are ascending by
+// battle.
+#[test]
+fn sba_704_5x_requests_in_apnap_order() {
+    let mut w = World::new();
+    let n1 = w.new_battle(2, 2, true, 3, None);
+    let a1 = w.new_battle(1, 1, true, 3, None);
+    let a2 = w.new_battle(1, 1, false, 3, None);
+    let before = w.state_hash();
+    let mut session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let mut order = Vec::new();
+    for answer in [submit_player(2), submit_player(1), submit_player(1)] {
+        let r = session.pending().unwrap().clone();
+        assert_eq!(session.state_hash(), before);
+        order.push((r.chooser, r.payload.clone()));
+        session.submit(r.request_id, answer).unwrap();
+    }
+    assert_eq!(
+        order,
+        [
+            (
+                p(1),
+                ChoicePayload::ChoosePlayer {
+                    players: vec![p(2)]
+                }
+            ),
+            (
+                p(1),
+                ChoicePayload::ChoosePlayer {
+                    players: vec![p(1)]
+                }
+            ),
+            (
+                p(2),
+                ChoicePayload::ChoosePlayer {
+                    players: vec![p(1)]
+                }
+            ),
+        ]
+    );
+    let Status::Done { state, output } = session.status() else {
+        panic!("not done");
+    };
+    assert_eq!(
+        output.clone().unwrap().protectors_chosen,
+        [(n1, p(1)), (a1, p(2)), (a2, p(1))]
+    );
+    assert_eq!(state.env.battle_protectors.len(), 3);
+    // Three players, turn order 2, 1, 3, active 1: APNAP order 1, 3, 2.
+    let mut w = World::three([2, 1, 3], 1);
+    for c in [3, 2, 1] {
+        w.new_battle(c, c, false, 3, None);
+    }
+    let (_, asked) = drive_defaults(&w);
+    let choosers: Vec<PlayerId> = asked.iter().map(|r| r.chooser).collect();
+    assert_eq!(choosers, [p(1), p(3), p(2)]);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 310.11: no player can be chosen: no request, the battle goes to its
+// OWNER's graveyard with an SBA cause in the one batch (a typeless battle whose controller
+// can't protect it; a Siege whose only opponent has lost the game).
+#[test]
+fn sba_704_5x_no_candidate_goes_to_the_owners_graveyard() {
+    let mut w = World::new();
+    let b = w.new_battle(2, 1, false, 3, None);
+    w.env.illegal_protectors.insert((b, p(1)));
+    let card = w.card_of(b);
+    let out = pass(&mut w);
+    assert_eq!(out.findings.len(), 1);
+    assert_eq!(out.findings[0].entry_id, "704.5x");
+    assert_eq!(
+        batch_shape(&out).0,
+        [(b, ZoneChangeCause::StateBasedAction)]
+    );
+    assert!(out.protectors_chosen.is_empty());
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+
+    let mut w = World::new();
+    let s = w.new_battle(2, 1, true, 3, None);
+    w.lose(2);
+    let card = w.card_of(s);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(s, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+}
+
+// REQ-SBA-001, CR 704.5x, CR 704.5y, CR 310.11, CR 506.4c: a battle being attacked gets no
+// protector request (neither without a protector nor with an illegal one); an attacker whose
+// battle was removed from combat (`Attacking(None)`) attacks nothing and exempts nothing.
+#[test]
+fn sba_704_5x_y_attacked_battle_is_exempt() {
+    let mut w = World::new();
+    let none = w.new_battle(1, 1, true, 3, None);
+    let wrong = w.new_battle(1, 1, true, 3, Some(1));
+    let attacker = w.creature(2, 2);
+    let attacker2 = w.creature(2, 2);
+    w.attack_battle(attacker, none);
+    w.attack_battle(attacker2, wrong);
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    w.permanents
+        .set_attack(attacker, crate::permanent::AttackState::Attacking(None))
+        .unwrap();
+    assert_eq!(w.found_by("704.5x"), [none]);
+    assert!(w.found_by("704.5y").is_empty());
+}
+
+// REQ-SBA-001, CR 704.5x: a protector who lost the game, or who is not a player in the game, is
+// no protector: 704.5x (not 704.5y) applies.
+#[test]
+fn sba_704_5x_protector_left_or_lost() {
+    let mut w = World::three([1, 2, 3], 1);
+    let lost = w.new_battle(1, 1, true, 3, Some(2));
+    let gone = w.new_battle(1, 1, true, 3, Some(9));
+    let fine = w.new_battle(1, 1, true, 3, Some(3));
+    w.lose(2);
+    assert_eq!(w.found_by("704.5x"), [lost, gone]);
+    assert!(w.found_by("704.5y").is_empty());
+    let (run, asked) = drive_answers(&w, &[submit_player(3), submit_player(3)]);
+    assert!(asked.iter().all(|r| r.reason.cr == "CR 704.5x"));
+    assert!(asked.iter().all(|r| r.payload
+        == ChoicePayload::ChoosePlayer {
+            players: vec![p(3)]
+        }));
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(lost, p(3)), (gone, p(3))]);
+    assert_eq!(run.state.env.battle_protectors[&fine], p(3));
+}
+
+// REQ-SBA-001, CR 704.5y, CR 310.11, CR 310.12a, CR 310.9a: a Siege protected by its own
+// controller, a typeless battle protected by an opponent, and a Siege whose protector effects
+// forbid are 704.5y findings; each controller chooses again (reason CR 704.5y; the old
+// protector is not a candidate); with no candidate left the battle goes to its owner's
+// graveyard.
+#[test]
+fn sba_704_5y_illegal_protector() {
+    let mut w = World::new();
+    let own = w.new_battle(1, 1, true, 3, Some(1));
+    let typeless = w.new_battle(1, 1, false, 3, Some(2));
+    let forbidden = w.new_battle(2, 1, true, 3, Some(2));
+    w.env.illegal_protectors.insert((forbidden, p(2)));
+    assert_eq!(w.found_by("704.5y"), [own, typeless, forbidden]);
+    assert!(w.found_by("704.5x").is_empty());
+    let card = w.card_of(forbidden);
+    let (run, asked) = drive_answers(&w, &[submit_player(2), submit_player(1)]);
+    assert_eq!(asked.len(), 2);
+    assert!(asked.iter().all(|r| r.reason.cr == "CR 704.5y"));
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(2)]
+        }
+    );
+    assert_eq!(
+        asked[1].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(1)]
+        }
+    );
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(own, p(2)), (typeless, p(1))]);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(forbidden, ZoneChangeCause::StateBasedAction)]
+    );
+    let mut w = run.state;
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+    assert!(w.check().is_empty());
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5w, CR 704.5x, CR 704.5y: a battle that goes to the graveyard
+// through 704.5v or 704.5w in the same pass gets no protector request; its x/y finding is still
+// reported; it moves once.
+#[test]
+fn sba_704_5x_y_battle_at_zero_defense_asks_nothing() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    let b = w.new_battle(1, 1, false, 0, Some(2));
+    assert_eq!(w.found(obj(s)), ["704.5v", "704.5x"]);
+    assert_eq!(w.found(obj(b)), ["704.5w", "704.5y"]);
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (s, ZoneChangeCause::StateBasedAction),
+            (b, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+    assert_eq!(out.findings.len(), 4);
+    assert!(!w.env.battle_protectors.contains_key(&s));
+}
+
+// REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older
+// goes to its OWNER's graveyard; one Role each of players 1 and 2 on the same creature do not
+// interact; a non-Role Aura is unaffected; a Role controlled by player 1 but owned by player 2
+// groups with player 1's Roles and goes to player 2's graveyard.
+#[test]
+fn sba_704_5z_role_rule() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let older = w.role_on(2, 1, host, 1);
+    let newer = w.role_on(1, 1, host, 5);
+    let other = w.role_on(2, 2, host, 0);
+    let plain = w.create(1, ZoneKind::Battlefield, aura());
+    w.attach(plain, AttachTarget::Permanent(host));
+    w.env.attachment_since.insert(plain, 0);
+    assert_eq!(w.found_by("704.5z"), [older]);
+    let card = w.card_of(older);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(older, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+    assert_eq!(
+        on_battlefield(&w, &[newer, other, plain]),
+        [newer, other, plain]
+    );
+    assert!(!pass(&mut w).performed);
+
+    // Two controllers, two Roles each: each keeps its own most recent one.
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let a_new = w.role_on(1, 1, host, 7);
+    let b_old = w.role_on(2, 2, host, 1);
+    let a_old = w.role_on(1, 1, host, 2);
+    let b_new = w.role_on(2, 2, host, 9);
+    assert_eq!(w.found_by("704.5z"), [b_old, a_old]);
+    pass(&mut w);
+    assert_eq!(
+        on_battlefield(&w, &[a_new, b_old, a_old, b_new]),
+        [a_new, b_new]
+    );
+    // Roles on different permanents do not interact.
+    let mut w = World::new();
+    let h1 = w.creature(1, 3);
+    let h2 = w.creature(1, 3);
+    w.role_on(1, 1, h1, 1);
+    w.role_on(1, 1, h2, 2);
+    assert!(w.check().is_empty());
+}
+
+// REQ-SBA-001, CR 704.5z, CR 613.7m: a tie of the latest timestamp keeps the HIGHER ObjectId
+// (decision #43 FP-042), whatever the creation order of the stamps; three Roles with the two
+// latest tied: both lower ones go.
+#[test]
+fn sba_704_5z_tie_keeps_the_higher_id() {
+    for stamps in [[3, 3, 1], [1, 3, 3], [3, 1, 3]] {
+        let mut w = World::new();
+        let host = w.creature(1, 3);
+        let ids: Vec<ObjectId> = stamps.iter().map(|&s| w.role_on(1, 1, host, s)).collect();
+        let mut gone = ids.clone();
+        let keep = *ids
+            .iter()
+            .zip(stamps)
+            .max_by_key(|&(&id, s)| (s, id))
+            .unwrap()
+            .0;
+        gone.retain(|&id| id != keep);
+        assert_eq!(w.found_by("704.5z"), gone, "{stamps:?}");
+        pass(&mut w);
+        assert_eq!(on_battlefield(&w, &ids), [keep], "{stamps:?}");
+    }
+}
+
+// REQ-SBA-001, CR 704.5z, CR 704.5d, CR 111.7: a token Role that loses goes to its owner's
+// graveyard, then ceases to exist in the next pass (CR 704.5d).
+#[test]
+fn sba_704_5z_token_role_ceases_next_pass() {
+    let mut w = World::new();
+    let host = w.creature(1, 3);
+    let card = w.card(role());
+    w.setup(GameEvent::CreateToken {
+        owner: p(1),
+        card,
+        controller: None,
+    });
+    let token = w.zones.object_of_card(card).unwrap();
+    w.attach(token, AttachTarget::Permanent(host));
+    w.env.attachment_since.insert(token, 1);
+    let newer = w.role_on(1, 1, host, 2);
+    assert_eq!(w.found_by("704.5z"), [token]);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(token, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+    let out = pass(&mut w);
+    assert_eq!(out.ceased.len(), 1);
+    assert_eq!(w.zone_of_card(card), None);
+    assert!(w.zones.object(newer).is_some());
+}
+
+// REQ-SBA-001, CR 704.5aa, CR 702.179a, CR 702.179b: a player with no speed who controls two
+// permanents with start your engines! gets speed 1 once (one finding, `speed_set`, no event);
+// the repeated check finds nothing; a player with speed 3 keeps it.
+#[test]
+fn sba_704_5aa_speed_becomes_one() {
+    let mut w = World::new();
+    w.create(1, ZoneKind::Battlefield, engine_creature());
+    w.create(1, ZoneKind::Battlefield, engine_creature());
+    w.create(2, ZoneKind::Battlefield, engine_creature());
+    w.set_speed(2, 3);
+    assert_eq!(w.players_found_by("704.5aa"), [p(1)]);
+    assert_eq!(w.speed(1), None);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert!(out.executed.is_empty());
+    assert_eq!(out.speed_set, [p(1)]);
+    assert_eq!(w.speed(1), Some(DesignationValue::Int(1)));
+    assert_eq!(w.speed(2), Some(DesignationValue::Int(3)));
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    // A player with no engine gets no speed; a lost player gets none either.
+    let mut w = World::new();
+    w.creature(1, 2);
+    w.create(2, ZoneKind::Battlefield, engine_creature());
+    w.lose(2);
+    assert!(w.players_found_by("704.5aa").is_empty());
+}
+
+// REQ-SBA-001, CR 704.5aa, CR 613.1, CR 613.4: a start your engines! ability granted by a layer-6
+// effect counts; the controller after layer 2 (CR 613.1b) is the one whose speed is set.
+#[test]
+fn sba_704_5aa_layer_granted_engine_counts() {
+    let mut w = World::new();
+    let c = w.creature(1, 2);
+    assert!(w.check().is_empty());
+    w.effects
+        .register(
+            e(1),
+            ContinuousEffect {
+                source: None,
+                controller: p(1),
+                timestamp: Timestamp::new(1),
+                layer: Layer::L6,
+                is_cda: false,
+                origin: EffectOrigin::Resolved,
+                affected: Affected::Objects(BTreeSet::from([c])),
+                modification: LayerModification::AddAbility(keyword("START_YOUR_ENGINES")),
+            },
+        )
+        .unwrap();
+    assert_eq!(w.players_found_by("704.5aa"), [p(1)]);
+    w.give_control(2, c, 2);
+    assert_eq!(w.players_found_by("704.5aa"), [p(2)]);
+    let out = pass(&mut w);
+    assert_eq!(out.speed_set, [p(2)]);
+    assert_eq!(w.speed(1), None);
+}
+
+// REQ-SBA-001, CR 702.26b: a phased-out battle (defense 0, no protector), a phased-out Role and a
+// phased-out engine permanent are ignored by CR 704.5v-704.5aa.
+#[test]
+fn sba_704_5v_to_aa_skip_phased_out() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    let b = w.new_battle(1, 1, false, 0, Some(2));
+    let host = w.creature(1, 3);
+    w.role_on(1, 1, host, 2);
+    let old = w.role_on(1, 1, host, 1);
+    let engine = w.create(1, ZoneKind::Battlefield, engine_creature());
+    for id in [s, b, old, engine] {
+        w.phase(id, true);
+    }
+    assert!(w.check().is_empty());
+    assert!(!pass(&mut w).performed);
+    w.phase(engine, false);
+    assert_eq!(w.players_found_by("704.5aa"), [p(1)]);
+}
+
+/// A board with findings of CR 704.5a, 704.5f, 704.5j and every one of CR 704.5v-704.5aa,
+/// created in ascending or descending order. Returns the world and the named objects:
+/// [legend 1, legend 2, siege, non-siege, unprotected, wrong, older role, newer role, creature].
+fn simultaneity_board(reverse: bool) -> (World, [ObjectId; 9]) {
+    let mut w = World::new();
+    w.set_life(2, 0);
+    let mut ids = [ObjectId::new(0); 9];
+    let mut steps: Vec<usize> = (0..9).collect();
+    if reverse {
+        steps.reverse();
+    }
+    let host = w.creature(1, 3);
+    for i in steps {
+        ids[i] = match i {
+            0 | 1 => w.create_controlled(1, 1, legendary(&["test.legend_a"])),
+            2 => w.new_battle(2, 1, true, 0, Some(2)),
+            3 => w.new_battle(2, 1, false, 0, Some(1)),
+            4 => w.new_battle(1, 1, false, 3, None),
+            5 => w.new_battle(1, 1, true, 3, Some(1)),
+            6 => w.role_on(1, 1, host, 1),
+            7 => w.role_on(1, 1, host, 2),
+            _ => w.creature(1, 0),
+        };
+    }
+    w.create(1, ZoneKind::Battlefield, engine_creature());
+    (w, ids)
+}
+
+// REQ-SBA-001, REQ-TEST-001, CR 704.3, CR 704.5a, CR 704.5f, CR 704.5j, CR 704.5v-704.5aa: all
+// found on one snapshot and performed in ONE pass with ONE batch, in both object-id orders; the
+// legend request comes first, then the protector requests (APNAP, then ascending battle id);
+// nothing remains for the next pass.
+#[test]
+fn sba_704_5v_to_aa_simultaneous_with_old_entries() {
+    for reverse in [false, true] {
+        let (
+            w,
+            [
+                l1,
+                l2,
+                siege,
+                nonsiege,
+                unprotected,
+                wrong,
+                older,
+                newer,
+                dead,
+            ],
+        ) = simultaneity_board(reverse);
+        let mut probe = w.clone();
+        let entries: BTreeSet<&str> = probe.check().into_iter().map(|f| f.entry_id).collect();
+        let expected: BTreeSet<&str> = [
+            "704.5a", "704.5f", "704.5j", "704.5v", "704.5w", "704.5x", "704.5y", "704.5z",
+            "704.5aa",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(entries, expected, "reverse {reverse}");
+        // The typeless battle offers only its controller (1), the Siege only the opponent (2).
+        let x_first = unprotected < wrong;
+        let answers = if x_first {
+            [select(&[l2]), submit_player(1), submit_player(2)]
+        } else {
+            [select(&[l2]), submit_player(2), submit_player(1)]
+        };
+        let (run, asked) = drive_answers(&w, &answers);
+        assert_eq!(asked[0].reason.cr, "CR 704.5j");
+        let protector_order: Vec<&str> = asked[1..].iter().map(|r| r.reason.cr.as_str()).collect();
+        let expected_order = if x_first {
+            ["CR 704.5x", "CR 704.5y"]
+        } else {
+            ["CR 704.5y", "CR 704.5x"]
+        };
+        assert_eq!(protector_order, expected_order, "reverse {reverse}");
+        let out = run.out.unwrap();
+        assert!(out.performed);
+        assert_eq!(out.executed.len(), 1);
+        let mut moved: Vec<ObjectId> = batch_shape(&out).0.into_iter().map(|(o, _)| o).collect();
+        moved.sort();
+        let mut want = vec![l1, siege, nonsiege, older, dead];
+        want.sort();
+        assert_eq!(moved, want, "reverse {reverse}");
+        assert_eq!(out.lost_players, [p(2)]);
+        assert_eq!(out.speed_set, [p(1)]);
+        let mut chosen = vec![(unprotected, p(1)), (wrong, p(2))];
+        chosen.sort();
+        assert_eq!(out.protectors_chosen, chosen);
+        assert!(run.state.zones.object(newer).is_some());
+        // Player 2 lost in this pass, so the Siege's new protector is no longer in the game:
+        // the repeated check (CR 704.3) finds 704.5x for it, and nothing else.
+        let mut w = run.state;
+        assert_eq!(
+            w.check(),
+            [SbaFinding {
+                entry_id: "704.5x",
+                subject: obj(wrong)
+            }],
+            "reverse {reverse}"
+        );
+    }
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.5v-704.5aa: the same input gives the same outcome, requests
+// and state hash twice.
+#[test]
+fn sba_704_5v_to_aa_deterministic() {
+    let (w, _) = simultaneity_board(true);
+    let (a, asked_a) = drive_defaults(&w);
+    let (b, asked_b) = drive_defaults(&w);
+    assert_eq!(a.hash, b.hash);
+    assert_eq!(a.out, b.out);
+    assert_eq!(asked_a, asked_b);
+    assert_eq!(a.state.env, b.state.env);
+}
+
+const FP042_ENTRIES: [&str; 6] = ["704.5v", "704.5w", "704.5x", "704.5y", "704.5z", "704.5aa"];
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, CR 704.5v-704.5aa (property): for seeded random boards of
+// battles (Siege or typeless, defense 0-2, protector none / either player / absent, pending
+// abilities, forbidden protectors, attacked or not), Roles (random controllers, hosts and
+// stamps) and engine permanents: `check` is pure (twice the same, state unchanged); findings are
+// in registry order, then subject order; after one pass answered with the defaults, the
+// repeated check finds no CR 704.5v-704.5aa finding.
+#[test]
+fn property_fp042_entries() {
+    let registry = SbaRegistry::standard();
+    let rank = |id: &str| registry.entries().iter().position(|e| e.id == id).unwrap();
+    let mut rng = Lcg(43);
+    for round in 0..150 {
+        let mut w = World::new();
+        let attacker = w.creature(2, 5);
+        let mut attacked = false;
+        for _ in 0..rng.next(4) {
+            let controller = rng.next(2) + 1;
+            let protector = match rng.next(4) {
+                0 => None,
+                1 => Some(1),
+                2 => Some(2),
+                _ => Some(7),
+            };
+            let defense = i64::try_from(rng.next(3)).unwrap();
+            let b = w.new_battle(
+                rng.next(2) + 1,
+                controller,
+                rng.next(2) == 0,
+                defense,
+                protector,
+            );
+            if rng.next(4) == 0 {
+                w.env.battle_pending.insert(b);
+            }
+            if rng.next(4) == 0 {
+                w.env.illegal_protectors.insert((b, p(rng.next(2) + 1)));
+            }
+            if !attacked && rng.next(4) == 0 {
+                w.attack_battle(attacker, b);
+                attacked = true;
+            }
+        }
+        let hosts = [w.creature(1, 4), w.creature(2, 4)];
+        for _ in 0..rng.next(5) {
+            let host = hosts[rng.index(2)];
+            w.role_on(rng.next(2) + 1, rng.next(2) + 1, host, rng.next(3));
+        }
+        for _ in 0..rng.next(3) {
+            w.create(rng.next(2) + 1, ZoneKind::Battlefield, engine_creature());
+        }
+        if rng.next(3) == 0 {
+            w.set_speed(2, 2);
+        }
+        let before = w.state_hash();
+        let first = w.check();
+        assert_eq!(w.check(), first, "round {round}");
+        assert_eq!(w.state_hash(), before, "round {round}");
+        let keys: Vec<(usize, SbaSubject)> = first
+            .iter()
+            .map(|f| (rank(f.entry_id), f.subject))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "round {round}");
+        let (run, _) = drive_defaults(&w);
+        run.out.expect("the pass failed");
+        let mut after = run.state;
+        let left: Vec<SbaFinding> = after
+            .check()
+            .into_iter()
+            .filter(|f| FP042_ENTRIES.contains(&f.entry_id))
+            .collect();
+        assert!(left.is_empty(), "round {round}: {left:?}");
+    }
+}
+
+// REQ-SBA-001, CR 704.5v-704.5z: the defaults of the new seams (no protector, every player
+// allowed, nothing pending, stamp 0, recording does nothing) and the stored environment's
+// answers.
+#[test]
+fn fp042_environment_defaults() {
+    struct Plain;
+    impl SbaEnvironment for Plain {
+        fn deathtouch_damaged(&self) -> BTreeSet<ObjectId> {
+            BTreeSet::new()
+        }
+        fn clear_deathtouch_damaged(&mut self) {}
+    }
+    let o = ObjectId::new(3);
+    let mut plain = Plain;
+    assert_eq!(plain.battle_protector(o), None);
+    assert!(plain.can_be_protector(o, p(1)));
+    assert!(!plain.battle_ability_pending(o));
+    assert_eq!(plain.attachment_timestamp(o), 0);
+    plain.set_battle_protector(o, p(2));
+    assert_eq!(plain.battle_protector(o), None);
+    let mut stored = StoredSbaEnvironment::default();
+    assert_eq!(stored.battle_protector(o), None);
+    assert!(stored.can_be_protector(o, p(1)));
+    assert!(!stored.battle_ability_pending(o));
+    assert_eq!(stored.attachment_timestamp(o), 0);
+    stored.set_battle_protector(o, p(2));
+    stored.illegal_protectors.insert((o, p(1)));
+    stored.battle_pending.insert(o);
+    stored.attachment_since.insert(o, 8);
+    assert_eq!(stored.battle_protector(o), Some(p(2)));
+    assert!(!stored.can_be_protector(o, p(1)));
+    assert!(stored.can_be_protector(o, p(2)));
+    assert!(stored.battle_ability_pending(o));
+    assert_eq!(stored.attachment_timestamp(o), 8);
+    assert_eq!(SPEED, "speed");
 }

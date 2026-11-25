@@ -7735,3 +7735,141 @@ spec-generated YES_NO text (#28); non-literal CDA evaluation through the layer e
 **Rationale.** Outside issue #57's deliverables.
 
 **Alternatives.** None considered.
+
+## #43 FP-042 — New SbaEnvironment seams for CR 704.5v-704.5aa
+
+**Decision.** Five defaulted methods are added to `SbaEnvironment` (additive; every existing
+implementor compiles unchanged), each with a matching public field of `StoredSbaEnvironment`:
+`battle_protector(battle) -> Option<PlayerId>` default `None` (`battle_protectors`),
+`can_be_protector(battle, player) -> bool` default `true` (`illegal_protectors`, the illegal
+pairs), `battle_ability_pending(battle) -> bool` default `false` (`battle_pending`; any triggered
+ability of the battle waiting to be put on the stack or on the stack), `attachment_timestamp(
+attachment) -> u64` default `0`, larger = more recent (`attachment_since`, missing = 0) and
+`set_battle_protector(battle, protector)` default no-op (writes `battle_protectors`).
+`perform_all` calls `set_battle_protector` once per chosen protector, ascending by battle, only
+after the pass succeeded. `SbaOutcome` gains `protectors_chosen` (ascending by battle) and
+`speed_set` (ascending); `SbaAction` gains `ChooseProtector` and `SetSpeed`. Defense is the number
+of `defense` counters from `LayerEnvironment::counters` (CR 310.4c; none = 0); Siege, Role and
+start your engines! are read from the evaluated characteristics; whether a battle is attacked is
+read from `Permanents` combat state (`Attacking(Some(AttackTarget::Permanent(b)))`). Choosing a
+protector and setting a speed count as performed (CR 704.3), so the check repeats and the next
+pass finds nothing.
+
+**Rationale.** The state model holds no protector designation, no trigger-source tracking and no
+Aura attachment timestamp yet. Following "#41 FP-040 — The SbaEnvironment seam" and "#42 FP-041
+— New SbaEnvironment seams for CR 704.5k-704.5t", facts the state does not hold come from a
+caller seam, every answer a pure function of caller state (REQ-CORE-001). A protector choice is a
+change of the game state, so a pass that only chose a protector must be reported as performed.
+
+**Alternatives.** A protector designation on `Permanents` (rejected: outside the owned paths,
+R1/R2); not counting a protector choice as performed (rejected: the heartbeat would not repeat
+the check after a state change).
+
+## #43 FP-042 — 704.5x and 704.5y exempt a battle being attacked
+
+**Decision.** Both CR 704.5x and CR 704.5y skip a battle that a creature is attacking
+(`Attacking(Some(AttackTarget::Permanent(battle)))` on any permanent); an attacker whose battle
+was removed from combat (`Attacking(None)`, CR 506.4c) attacks nothing and exempts nothing. A
+protector who left the game or has `LOST_THE_GAME` is no protector (704.5x, not 704.5y).
+
+**Rationale.** CR 310.11 states the state-based action for both cases with "a battle that isn't
+being attacked"; the CR 704.5y text has no such clause, but 310.11 is the rule it summarises
+("See rule 310"). Changing the protector of an attacked battle would also remove it from combat
+(CR 506.4), which the rules avoid by the exemption.
+
+**Alternatives.** Exempting only 704.5x (rejected: contradicts 310.11).
+
+## #43 FP-042 — Meaning of "can't be its protector"
+
+**Decision.** A protector in the game "can't be its protector" (CR 704.5y) when it is not an
+appropriate choice for the battle's type (a Siege: not an opponent of the battle's current,
+evaluated controller, CR 310.12a; a battle with no battle type: not its controller, CR 310.9a)
+or `can_be_protector(battle, player)` is false (effects, CR 101.2). The candidates of 704.5x and
+704.5y are the players in the game for which the same test passes, ascending; with Siege as the
+only battle type (CR 205.3q), a battle without the Siege subtype has no battle type. A battle
+whose evaluation names no controller has no candidates.
+
+**Rationale.** The CR does not define the phrase; using one legality test for detection and for
+candidates guarantees the chosen protector is legal and the repeated check finds nothing (the old
+protector is never a candidate again, by construction).
+
+**Alternatives.** Only `can_be_protector` (rejected: a control change would leave a Siege
+protected by its own controller, which 310.12a forbids).
+
+## #43 FP-042 — Order of protector requests
+
+**Decision.** All protector requests of one pass are asked before any state change, AFTER the
+legend-rule requests of the pass, in APNAP order of the choosing controllers (CR 101.4, the same
+`apnap_order` as the legend-rule groups), and within one controller by ascending battle id. A
+battle with no candidate gets no request and is put into its owner's graveyard in the one batch.
+
+**Rationale.** CR 101.4 orders the players; the order of one player's simultaneous choices is
+free, so ascending id is a deterministic stand-in (as "#42 FP-041 — F3 APNAP then lowest id").
+Legend first follows the registry order (704.5j before 704.5x).
+
+**Alternatives.** Interleaving legend and protector requests by player (rejected: no rule asks
+for it; it would complicate the plan for no observable rules difference).
+
+## #43 FP-042 — No protector request for a battle at 0 defense
+
+**Decision.** A battle that is also a CR 704.5v or CR 704.5w finding in the same pass gets no
+protector request and no `protectors_chosen` entry; its 704.5x/704.5y finding is still reported
+in `findings`. It moves once.
+
+**Rationale.** It is put into its owner's graveyard in the same simultaneous event (CR 704.3);
+asking a choice whose result is discarded would only add a meaningless decision to the replay.
+
+**Alternatives.** Asking anyway (rejected: no effect on the game).
+
+## #43 FP-042 — Role rule tie-break
+
+**Decision.** CR 704.5z groups phased-in Auras with subtype Role by (attachment target, the
+Role's evaluated controller). In each group of two or more, the Role with the greatest
+`attachment_timestamp` stays; on a tie the HIGHER ObjectId counts as more recent. Each other
+Role goes to its owner's graveyard; a token Role then ceases to exist by 704.5d in the next pass.
+
+**Rationale.** CR 613.7m makes the relative order of simultaneous timestamps the controller's
+choice; a deterministic stand-in avoids a new choice in the SBA pass (R3). The higher id is the
+object created later, the natural "most recent".
+
+**Alternatives.** Asking the controller (rejected: new choice type and plan for a corner case);
+the lower id (rejected: less natural).
+
+## #43 FP-042 — Start your engines! keyword literal and the speed designation
+
+**Decision.** A permanent has start your engines! when its evaluated abilities (layers included)
+hold a `KEYWORD` ability whose `keyword` is `"START_YOUR_ENGINES"`, the vocabulary id in
+`fineprint-dsl/data/vocab.json`. Speed is the player designation `SPEED = "speed"` with value
+`DesignationValue::Int(n)`; no designation is no speed (CR 702.179b). 704.5aa sets `Int(1)` once
+per player, after every choice of the pass is answered; it is no event and is reported in
+`SbaOutcome::speed_set`.
+
+**Rationale.** The vocabulary id is the stable identifier the ingest pipeline emits for this
+keyword (the existing lowercase `indestructible` literal predates it). Player designations are an
+open registry holding `Int` (SRS 3.1), like `LOST_THE_GAME`.
+
+**Alternatives.** The lowercase name `"start your engines!"` (rejected: not the vocabulary id);
+a new `PlayerState` field (rejected: outside the owned paths).
+
+## #43 FP-042 — Existing 704.5p battle spec test gets defense and a protector
+
+**Decision.** In `spec_sba_attach.rs::req_sba_001_704_5p_battle_attached`, each typeless battle
+gets 1 defense counter and its controller as protector, so that only CR 704.5p applies.
+
+**Rationale.** Under CR 704.5w and 704.5x a battle with no defense counters and no protector is
+now also put into the graveyard, which made that test's assertions wrong. The fix keeps every
+704.5p assertion and models a legal battle (CR 310.4c, CR 310.9a); it is not a weakening (R10).
+
+**Alternatives.** Asserting the extra 704.5w/704.5x findings in that test (rejected: mixes rules,
+and the battles would leave); leaving it failing (rejected).
+
+## #43 FP-042 — Where the FP-042 spec tests live
+
+**Decision.** The issue's owned paths list only `src/sba/`; the independent spec tests live in
+`crates/fineprint-core/tests/spec_sba_{battle,role,speed}.rs` (FP-041 precedent, DEVELOPMENT.md
+`spec_<area>_*.rs`), and the mixed one-pass simultaneity and random-layout property tests sit at
+the end of `spec_sba_battle.rs`.
+
+**Rationale.** Independent Tester paths must be disjoint from the Implementer's (P5).
+
+**Alternatives.** A separate `spec_sba_fp042_property.rs` (rejected: no benefit).

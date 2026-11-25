@@ -38,11 +38,11 @@ use fineprint_core::layers::{
 };
 use fineprint_core::memory::{CharacteristicsProvider, LkiStore, MemoryTable};
 use fineprint_core::objects::Characteristics;
-use fineprint_core::permanent::{AttachTarget, Permanents};
+use fineprint_core::permanent::{AttachTarget, AttackState, AttackTarget, Permanents};
 use fineprint_core::replacement::{BusError, BusInterrupt, ReplacementEffect, ReplacementRegistry};
 use fineprint_core::sba::{
-    GameVariant, LOST_THE_GAME, SbaEnvironment, SbaFinding, SbaOutcome, SbaRegistry, SbaSubject,
-    check, perform_all,
+    GameVariant, LOST_THE_GAME, SPEED, SbaEnvironment, SbaFinding, SbaOutcome, SbaRegistry,
+    SbaSubject, check, perform_all,
 };
 use fineprint_core::state::{DesignationValue, GameState};
 use fineprint_core::txn::Transactional;
@@ -75,11 +75,17 @@ pub fn eid(n: u64) -> EffectId {
 }
 
 /// Every SBA entry id, in registry order (CR 704.5a-704.5i, 704.5j, 704.5k, 704.5m, 704.5n,
-/// 704.5p, 704.5q, 704.5r, 704.5s, 704.5t). The CR has no 704.5l and no 704.5o.
-pub const ENTRY_IDS: [&str; 18] = [
+/// 704.5p, 704.5q, 704.5r, 704.5s, 704.5t, 704.5v, 704.5w, 704.5x, 704.5y, 704.5z, 704.5aa).
+/// The CR has no 704.5l and no 704.5o; 704.5u is out of scope.
+pub const ENTRY_IDS: [&str; 24] = [
     "704.5a", "704.5b", "704.5c", "704.5d", "704.5e", "704.5f", "704.5g", "704.5h", "704.5i",
     "704.5j", "704.5k", "704.5m", "704.5n", "704.5p", "704.5q", "704.5r", "704.5s", "704.5t",
+    "704.5v", "704.5w", "704.5x", "704.5y", "704.5z", "704.5aa",
 ];
+
+/// The entry ids added for CR 704.5v-704.5aa (FP-042), in registry order.
+pub const BATTLE_ROLE_SPEED_IDS: [&str; 6] =
+    ["704.5v", "704.5w", "704.5x", "704.5y", "704.5z", "704.5aa"];
 
 /// The entry ids added for CR 704.5j-704.5t, in registry order.
 pub const NEW_ENTRY_IDS: [&str; 9] = [
@@ -332,6 +338,19 @@ pub struct TestSbaEnv {
     pub bottommost_dungeons: BTreeSet<ObjectId>,
     /// CR 704.5t: dungeons that are the source of a triggered room ability not yet gone.
     pub room_pending: BTreeSet<ObjectId>,
+    /// CR 704.5x, 704.5y, 310.9a: each battle's protector; missing = no protector.
+    pub battle_protectors: BTreeMap<ObjectId, PlayerId>,
+    /// CR 704.5x, 704.5y, 310.11: `(battle, player)` pairs where the player can't be that
+    /// battle's protector.
+    pub illegal_protectors: BTreeSet<(ObjectId, PlayerId)>,
+    /// CR 704.5v, 310.7: battles that are the source of an ability that has triggered but not
+    /// yet left the stack.
+    pub battle_pending: BTreeSet<ObjectId>,
+    /// CR 704.5z, 613.7e: when each attachment last became attached (larger = more recent);
+    /// missing = 0.
+    pub attachment_since: BTreeMap<ObjectId, u64>,
+    /// Every `set_battle_protector` call, in call order (CR 704.5x, 704.5y).
+    pub protector_calls: Vec<(ObjectId, PlayerId)>,
 }
 
 impl Default for TestSbaEnv {
@@ -351,6 +370,11 @@ impl Default for TestSbaEnv {
             chapter_pending: BTreeSet::new(),
             bottommost_dungeons: BTreeSet::new(),
             room_pending: BTreeSet::new(),
+            battle_protectors: BTreeMap::new(),
+            illegal_protectors: BTreeSet::new(),
+            battle_pending: BTreeSet::new(),
+            attachment_since: BTreeMap::new(),
+            protector_calls: Vec::new(),
         }
     }
 }
@@ -417,6 +441,27 @@ impl SbaEnvironment for TestSbaEnv {
     fn room_ability_pending(&self, dungeon: ObjectId) -> bool {
         self.room_pending.contains(&dungeon)
     }
+
+    fn battle_protector(&self, battle: ObjectId) -> Option<PlayerId> {
+        self.battle_protectors.get(&battle).copied()
+    }
+
+    fn can_be_protector(&self, battle: ObjectId, player: PlayerId) -> bool {
+        !self.illegal_protectors.contains(&(battle, player))
+    }
+
+    fn battle_ability_pending(&self, battle: ObjectId) -> bool {
+        self.battle_pending.contains(&battle)
+    }
+
+    fn attachment_timestamp(&self, attachment: ObjectId) -> u64 {
+        self.attachment_since.get(&attachment).copied().unwrap_or(0)
+    }
+
+    fn set_battle_protector(&mut self, battle: ObjectId, protector: PlayerId) {
+        self.battle_protectors.insert(battle, protector);
+        self.protector_calls.push((battle, protector));
+    }
 }
 
 impl TestSbaEnv {
@@ -472,11 +517,32 @@ impl TestSbaEnv {
             &self.chapter_pending,
             &self.bottommost_dungeons,
             &self.room_pending,
+            &self.battle_pending,
         ] {
             out.extend((s.len() as u64).to_le_bytes());
             for id in s {
                 out.extend(id.get().to_le_bytes());
             }
+        }
+        out.extend((self.battle_protectors.len() as u64).to_le_bytes());
+        for (id, p) in &self.battle_protectors {
+            out.extend(id.get().to_le_bytes());
+            out.extend(p.get().to_le_bytes());
+        }
+        out.extend((self.illegal_protectors.len() as u64).to_le_bytes());
+        for (id, p) in &self.illegal_protectors {
+            out.extend(id.get().to_le_bytes());
+            out.extend(p.get().to_le_bytes());
+        }
+        out.extend((self.attachment_since.len() as u64).to_le_bytes());
+        for (id, since) in &self.attachment_since {
+            out.extend(id.get().to_le_bytes());
+            out.extend(since.to_le_bytes());
+        }
+        out.extend((self.protector_calls.len() as u64).to_le_bytes());
+        for (id, p) in &self.protector_calls {
+            out.extend(id.get().to_le_bytes());
+            out.extend(p.get().to_le_bytes());
         }
     }
 }
@@ -1781,4 +1847,219 @@ pub fn unattach_count(r: &SbaRun, attachment: ObjectId) -> usize {
         .into_iter()
         .filter(|a| *a == attachment)
         .count()
+}
+
+// ---------------------------------------------------------------------------------------------
+// FP-042 (CR 704.5v-704.5aa): battles, protectors, Roles and speed
+// ---------------------------------------------------------------------------------------------
+
+/// The keyword of start your engines! (CR 702.179a), as a `KEYWORD` ability.
+pub const ENGINE_KEYWORD: &str = "START_YOUR_ENGINES";
+
+/// A Siege battle named `name` (CR 205.3q, 310.12a).
+pub fn siege_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Battle"], &["Siege"])
+}
+
+/// A Role Aura named `name` (CR 303.7a).
+pub fn role_chars(name: &str) -> Characteristics {
+    typed(&[name], &[], &["Enchantment"], &["Aura", "Role"])
+}
+
+/// An artifact named `name` with start your engines! (CR 702.179a).
+pub fn engine_chars(name: &str) -> Characteristics {
+    with_keyword(artifact_chars(name), ENGINE_KEYWORD)
+}
+
+/// A resolved layer 6 effect (CR 613.1f) granting the start your engines! keyword to the
+/// locked set `targets`.
+pub fn grant_engine_effect(targets: &[ObjectId], ts: u64) -> ContinuousEffect {
+    ContinuousEffect {
+        source: None,
+        controller: P1,
+        timestamp: Timestamp::new(ts),
+        layer: Layer::L6,
+        is_cda: false,
+        origin: EffectOrigin::Resolved,
+        affected: Affected::Objects(targets.iter().copied().collect()),
+        modification: LayerModification::AddAbility(kw_ability(
+            "test.granted:START_YOUR_ENGINES",
+            ENGINE_KEYWORD,
+        )),
+    }
+}
+
+impl Sim {
+    /// Sets the number of defense counters on `id` (CR 310.4c) everywhere the SBA module may
+    /// read it: the markers (non-negative counts only), the layer environment and the provider.
+    /// A negative `n` is written to the layer environment and the provider only.
+    pub fn set_defense(&mut self, id: ObjectId, n: i64) {
+        let current = self.events.markers().counter(id, "defense");
+        if n > current {
+            self.counters(id, "defense", n - current);
+        } else {
+            if n >= 0 && current > n {
+                self.ok(GameEvent::RemoveCounters {
+                    target: CounterTarget::Object(id),
+                    kind: "defense".to_owned(),
+                    amount: current - n,
+                });
+            }
+            self.layer
+                .counters
+                .entry(id)
+                .or_default()
+                .insert("defense".to_owned(), n);
+            self.provider.set_counter(id, "defense", n);
+        }
+    }
+
+    /// A typeless (non-Siege) battle owned by `owner`, controlled by `controller`, with
+    /// `defense` defense counters and protector `protector` (CR 310.4c, 310.9a).
+    pub fn battle(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        defense: i64,
+        protector: Option<PlayerId>,
+    ) -> ObjectId {
+        let id = self.permanent(owner, controller, battle_chars("test.battle_plain"));
+        self.set_defense(id, defense);
+        if let Some(p) = protector {
+            self.env.battle_protectors.insert(id, p);
+        }
+        id
+    }
+
+    /// A Siege battle owned by `owner`, controlled by `controller`, with `defense` defense
+    /// counters and protector `protector` (CR 205.3q, 310.4c, 310.12a).
+    pub fn siege(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        defense: i64,
+        protector: Option<PlayerId>,
+    ) -> ObjectId {
+        let id = self.permanent(owner, controller, siege_chars("test.siege_a"));
+        self.set_defense(id, defense);
+        if let Some(p) = protector {
+            self.env.battle_protectors.insert(id, p);
+        }
+        id
+    }
+
+    /// A Role Aura owned by `owner`, controlled by `controller`, attached to `host`, that
+    /// became attached at stamp `since` (CR 303.7a, 613.7e).
+    pub fn role_aura(
+        &mut self,
+        owner: PlayerId,
+        controller: PlayerId,
+        host: ObjectId,
+        since: u64,
+    ) -> ObjectId {
+        let id = self.permanent(owner, controller, role_chars("test.role_a"));
+        self.attach_to(id, host);
+        self.env.attachment_since.insert(id, since);
+        id
+    }
+
+    /// A Role Aura token created by `owner` (through `CreateToken`), attached to `host` at
+    /// stamp `since` (CR 303.7a, 111.1).
+    pub fn role_token(&mut self, owner: PlayerId, host: ObjectId, since: u64) -> ObjectId {
+        let card = self.fresh_card();
+        let done = self.ok(GameEvent::CreateToken {
+            owner,
+            card,
+            controller: None,
+        });
+        let id = new_id(&done.outcome);
+        self.describe(id, role_chars("test.role_token"));
+        self.attach_to(id, host);
+        self.env.attachment_since.insert(id, since);
+        id
+    }
+
+    /// A battlefield artifact with start your engines! owned by `owner`, controlled by
+    /// `controller` (CR 702.179a).
+    pub fn engine(&mut self, owner: PlayerId, controller: PlayerId) -> ObjectId {
+        self.permanent(owner, controller, engine_chars("test.engine_a"))
+    }
+
+    /// Makes `attacker` an attacking creature attacking `battle` (CR 506.3).
+    pub fn attack_battle(&mut self, attacker: ObjectId, battle: ObjectId) {
+        self.permanents
+            .set_attack(
+                attacker,
+                AttackState::Attacking(Some(AttackTarget::Permanent(battle))),
+            )
+            .expect("a permanent");
+    }
+
+    /// Makes `attacker` an attacking creature attacking nothing (CR 506.4c).
+    pub fn attack_nothing(&mut self, attacker: ObjectId) {
+        self.permanents
+            .set_attack(attacker, AttackState::Attacking(None))
+            .expect("a permanent");
+    }
+
+    /// `p`'s speed designation (CR 702.179b: absent = no speed).
+    pub fn speed(&self, p: PlayerId) -> Option<DesignationValue> {
+        self.game
+            .player(p)
+            .expect("known player")
+            .designation(SPEED)
+            .cloned()
+    }
+
+    /// Sets `p`'s speed to `n` (CR 702.179).
+    pub fn set_speed(&mut self, p: PlayerId, n: i64) {
+        self.game
+            .player_mut(p)
+            .expect("known player")
+            .set_designation(SPEED, DesignationValue::Int(n));
+    }
+}
+
+/// `SubmitPlayer { player }`: the answer choosing `p` as protector (CR 704.5x, 704.5y).
+pub fn submit_player(p: PlayerId) -> ChoiceResponse {
+    ChoiceResponse::SubmitPlayer { player: p }
+}
+
+/// The candidates of a `ChoosePlayer` request (panics on another payload).
+pub fn player_candidates(req: &PendingChoiceRequest) -> Vec<PlayerId> {
+    match &req.payload {
+        ChoicePayload::ChoosePlayer { players } => players.clone(),
+        other => panic!("expected a ChoosePlayer payload, got {other:?}"),
+    }
+}
+
+/// Asserts the shape of a protector request (CR 704.5x, 704.5y, 310.11, SRS 15
+/// `CHOOSE_PLAYER`): chooser, type, reason, candidates (ascending) and the default (the
+/// lowest candidate).
+pub fn assert_protector_request(
+    req: &PendingChoiceRequest,
+    chooser: PlayerId,
+    cr: &str,
+    expected: &[PlayerId],
+) {
+    let mut sorted = expected.to_vec();
+    sorted.sort();
+    assert_eq!(req.chooser, chooser, "the battle's controller chooses");
+    assert_eq!(req.choice_type, ChoiceType::ChoosePlayer);
+    assert_eq!(req.reason.cr, cr);
+    assert_eq!(player_candidates(req), sorted, "candidates ascending");
+    assert_eq!(
+        req.default_on_timeout,
+        submit_player(sorted[0]),
+        "default: the lowest candidate"
+    );
+}
+
+/// The findings of `findings` whose entry is one of CR 704.5v-704.5aa.
+pub fn fp042_findings(findings: &[SbaFinding]) -> Vec<SbaFinding> {
+    findings
+        .iter()
+        .filter(|f| BATTLE_ROLE_SPEED_IDS.contains(&f.entry_id))
+        .cloned()
+        .collect()
 }
