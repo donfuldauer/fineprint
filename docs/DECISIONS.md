@@ -9077,3 +9077,21 @@ ceases to exist while still on the battlefield.
 
 **Alternatives:** Report from `Permanents::leave` (rejected: the permanent container is not owned
 here and has no log). Change `perform.rs` here (rejected: R1).
+
+## #180 FP-143 — CR-004 lands as its own commit in the issue PR
+
+**Decision:** The CR-004 entry (`contracts/CHANGE_REQUESTS.md`) is the first commit of the #180
+branch, touching only that file, and merges in the issue's PR rather than in a separate
+contract-only PR. The `Status` is set to merged when the PR merges.
+
+**Rationale:** #180 is the plan unit that the plan itself scheduled for this contract change
+(its first deliverable is the R2 change to the outcome encoding), as #169 FP-142 did for CR-001
+(merged in #235). The change is breaking only in its canonical bytes (new trailing sequence on
+`ExecutedEvent`, new tag 17); no tag, field or signature changes, no replay or state-hash golden
+exists yet (replay lands in #83/#106; `EventState` is not in the `GameState` hash), and it lands
+right after the phase 02 gate (#235), at a phase boundary. The scheduled-session chain advances
+only on merged `issue/` branches, so a separate contract branch would also stall the chain.
+
+**Alternatives:** A separate `contract/` PR merged first (rejected: no extra review value for a
+plan-scheduled change, an extra unauthorised branch, and it would leave the contract on `main`
+without its implementation).
