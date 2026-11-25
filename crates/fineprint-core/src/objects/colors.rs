@@ -38,6 +38,9 @@ pub fn symbol_colors(symbol: ManaSymbol) -> ColorBitmask {
         }
         // CR 107.4e: {n/c} is c; CR 107.4f, 202.2d: {c/P} is c.
         ManaSymbol::GenericHybrid(_, c) | ManaSymbol::Phyrexian(c) => color_mask(c),
+        // CR 107.4e, 202.2d: {C/c} is a colored symbol of exactly the one color c (colorless is
+        // not a color).
+        ManaSymbol::ColorlessHybrid(c) => color_mask(c),
         // CR 107.4b, 107.4c, 107.4h, 202.2b: generic, variable, colorless and snow have no color.
         ManaSymbol::Generic(_)
         | ManaSymbol::Colorless
@@ -96,5 +99,41 @@ pub fn base_colors(
         CdaColors::Add(mask) => union_colors(printed, mask),
         // CR 604.3, 702.114a: the CDA overrides the printed colors.
         CdaColors::Set(mask) => mask,
+    }
+}
+
+#[cfg(test)]
+mod colorless_hybrid_tests {
+    //! REQ-OBJ-001, REQ-DSL-002: colors of colorless-hybrid symbols (CR 107.4e, 202.2d).
+
+    use fineprint_dsl::card::ColorBitmask;
+    use fineprint_dsl::mana::{Color, ManaCostDSL, ManaSymbol};
+
+    use super::{color_mask, colors_of_mana_cost, symbol_colors, union_colors};
+
+    fn colors(text: &str) -> ColorBitmask {
+        colors_of_mana_cost(Some(&ManaCostDSL::parse(text).expect("cost")))
+    }
+
+    /// REQ-OBJ-001 (CR 107.4e, 202.2d): `{C/c}` is exactly the color c, never colorless.
+    #[test]
+    fn req_obj_001_cr_107_4e_colorless_hybrid_is_its_color() {
+        for c in Color::ALL {
+            let mask = symbol_colors(ManaSymbol::ColorlessHybrid(c));
+            assert_eq!(mask, color_mask(c));
+            assert_ne!(mask, ColorBitmask::NONE);
+        }
+        assert_eq!(colors("{C/W}"), ColorBitmask::WHITE);
+    }
+
+    /// REQ-OBJ-001, REQ-DSL-002 (CR 202.2, 202.2d): a cost is all the colors of its `{C/c}`
+    /// symbols.
+    #[test]
+    fn req_obj_001_cr_202_2d_colorless_hybrid_cost_colors() {
+        assert_eq!(
+            colors("{C/W}{C/U}"),
+            union_colors(ColorBitmask::WHITE, ColorBitmask::BLUE)
+        );
+        assert_eq!(colors("{C}{C/G}{1}"), ColorBitmask::GREEN);
     }
 }

@@ -12,6 +12,8 @@
 //! repository root, where it is git-ignored). `import` writes `<cache>/normalized/cards.json`
 //! unless `--out` names another file (`-` is stdout; the summary line then goes to stderr).
 //! Files are written atomically (a temporary file next to the destination, then a rename).
+//! The records file and the MTGJSON report must be different files (compared after resolving
+//! the parent directory), and at most one of them may be stdout.
 //! An option never takes another option as its value. Exit codes: 0 success, 1 violations
 //! (`import --strict` with a rejection or diagnostic), 2 usage or input error. Messages never
 //! quote card data.
@@ -186,12 +188,17 @@ pub fn run_fetch_with(
     }
 }
 
+/// The provenance of `bytes` and whether it differs from the cached digest. The cached
+/// `updated_at` belongs to the bytes that were fetched, so it is kept only when the recomputed
+/// digest matches the recorded one; otherwise `updatedAt` is unknown (`None`).
 fn source_info(bytes: &[u8], cached: Option<&super::fetch::CachedFile>) -> (SourceInfo, bool) {
     let hash = sha256(bytes).to_hex();
     let mismatch = cached.is_some_and(|c| c.sha256 != hash);
     (
         SourceInfo {
-            updated_at: cached.and_then(|c| c.updated_at.clone()),
+            updated_at: cached
+                .filter(|c| c.sha256 == hash)
+                .and_then(|c| c.updated_at.clone()),
             sha256: hash,
             byte_count: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         },
@@ -311,6 +318,36 @@ fn emit(
     Ok(path.display().to_string())
 }
 
+/// The file a non-stdout destination names, for comparing two destinations: the parent
+/// directory canonicalized (symlinks and `.`/`..` resolved) joined with the file name. When the
+/// parent cannot be resolved (it does not exist), the path is kept as written; writing to it
+/// then fails on its own.
+fn resolve_dest(dest: &Path) -> PathBuf {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    match (dest.file_name(), std::fs::canonicalize(parent)) {
+        (Some(name), Ok(dir)) => dir.join(name),
+        _ => std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()),
+    }
+}
+
+/// True when `report` already exists and is the same file as `records` (same device and inode
+/// on Unix, the equivalent file identity on Windows): two names that alias on the file system,
+/// such as names differing only in case on a case-insensitive file system, which a spelling
+/// comparison cannot tell apart. A missing file, or an unreadable one, is not the same file.
+/// A symbolic link as the report is never checked: the atomic rename replaces the link itself
+/// and cannot reach the records file (REQ-ING-001, REQ-NFR-004).
+fn report_aliases_records(records: &Path, report: &Path) -> bool {
+    if std::fs::symlink_metadata(report).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    same_file::is_same_file(records, report).unwrap_or(false)
+}
+
+const SAME_FILE_MESSAGE: &str = "the records file and --mtgjson-report name the same file";
+
 /// Runs `import`; returns the exit code.
 pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let a = match parse_import_args(args) {
@@ -348,6 +385,15 @@ pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Wr
             return 2;
         }
     }
+    // Two file destinations naming one file would let the report replace the records.
+    if let Some((dest, _)) = &report
+        && out != "-"
+        && *dest != "-"
+        && resolve_dest(Path::new(&out)) == resolve_dest(Path::new(dest))
+    {
+        let _ = writeln!(stderr, "import: {SAME_FILE_MESSAGE}\n{IMPORT_USAGE}");
+        return 2;
+    }
     let to_stdout = out == "-" || report.as_ref().is_some_and(|(d, _)| *d == "-");
     let written = match emit(&out, &result.to_bytes(), stdout, stderr, "records") {
         Ok(w) => w,
@@ -355,6 +401,12 @@ pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Wr
     };
     let mut report_note = String::new();
     if let Some((dest, bytes)) = &report {
+        // Names that alias only on the file system (case-insensitive) have no identity before
+        // the records exist: check now, before the report could replace them.
+        if out != "-" && *dest != "-" && report_aliases_records(Path::new(&out), Path::new(dest)) {
+            let _ = writeln!(stderr, "import: {SAME_FILE_MESSAGE}\n{IMPORT_USAGE}");
+            return 2;
+        }
         match emit(dest, bytes, stdout, stderr, "MTGJSON report") {
             Ok(w) => report_note = format!("; MTGJSON report to {w}"),
             Err(c) => return c,
@@ -375,5 +427,52 @@ pub fn run_import(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Wr
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report_aliases_records;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A fresh scratch directory (exclusive `create_dir`; the leaf only needs to be unique).
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("fp-ingest-cli-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir(&d).expect("create scratch dir");
+        d
+    }
+
+    /// REQ-ING-001, REQ-NFR-004 (gate review R4): the identity helper. Two names of one file
+    /// are the same; two distinct files and a missing report are not; a symbolic link as the
+    /// report is not checked.
+    #[test]
+    fn destination_identity_helper() {
+        let d = scratch();
+        let records = d.join("records.json");
+        std::fs::write(&records, b"{}").unwrap();
+        // The same path is the same file.
+        assert!(report_aliases_records(&records, &records));
+        // A distinct file is not.
+        let other = d.join("other.json");
+        std::fs::write(&other, b"{}").unwrap();
+        assert!(!report_aliases_records(&records, &other));
+        // A missing report is not.
+        assert!(!report_aliases_records(&records, &d.join("missing.json")));
+        #[cfg(unix)]
+        {
+            // A hard link is another name of the same file.
+            let link = d.join("hard.json");
+            std::fs::hard_link(&records, &link).unwrap();
+            assert!(report_aliases_records(&records, &link));
+            // A symbolic link report is never checked, even when it points at the records.
+            let sym = d.join("sym.json");
+            std::os::unix::fs::symlink(&records, &sym).unwrap();
+            assert!(!report_aliases_records(&records, &sym));
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

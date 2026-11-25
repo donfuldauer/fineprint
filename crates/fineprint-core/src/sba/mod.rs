@@ -15,13 +15,17 @@
 //! (CR 704.8: last known information from before the pass), together with the counter
 //! removals (CR 704.5q, CR 704.5r) and the unattach events (CR 704.5n, CR 704.5p) of every
 //! applicable permanent, including one that also moves; the legend-rule choices
-//! (CR 704.5j) and the battle protector choices (CR 704.5x, CR 704.5y), asked in APNAP order
-//! (CR 101.4) before anything changes; ceasing to exist
+//! (CR 704.5j) and the battle protector choices (CR 704.5x, CR 704.5y), asked as ONE sequence
+//! in APNAP order of the choosing players (CR 101.4) before anything changes; ceasing to exist
 //! (CR 704.5d, CR 704.5e); removing a completed dungeon from the game (CR 704.5t); and the
 //! [`LOST_THE_GAME`] designation (CR 704.5a-704.5c); the [`SPEED`] designation (CR 704.5aa).
 //! The loop
 //! of CR 704.3 (repeat while something was performed, then put waiting triggers on the stack)
-//! belongs to the heartbeat.
+//! belongs to the heartbeat. [`perform_all_relayered`] is the same pass with the layer inputs
+//! of the state after the batch supplied by the caller, for the protector choice of a
+//! zero-defense battle that stays on the battlefield (CR 704.5x, CR 614.6);
+//! [`perform_all_post_batch`] also takes a read-only view of the protector facts of that
+//! state from the caller.
 //!
 //! **Inputs.** Toughness, abilities and card types are the evaluated characteristics
 //! (CR 613.1, CR 613.4) from the caller's [`ContinuousEffects`](crate::layers::ContinuousEffects)
@@ -35,7 +39,7 @@
 //! protectors, protector legality by effects and pending battle abilities (CR 704.5v-704.5y) and
 //! attachment timestamps (CR 704.5z, CR 613.7e) come from the caller's [`SbaEnvironment`]. Names, supertypes, subtypes, counters and controllers
 //! (CR 613.1b) are evaluated characteristics and the layer environment's counters; attachments
-//! and combat (whether a battle is being attacked, CR 310.11) come from the permanent container;
+//! and combat (whether a battle is being attacked, CR 704.5x) come from the permanent container;
 //! a player's speed is the [`SPEED`] player designation (CR 702.179b).
 //!
 //! **Not modelled here.** Regeneration (CR 701.8c), the Two-Headed Giant team checks
@@ -61,7 +65,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use perform::{check, perform_all};
+pub use perform::{
+    PostBatchLayers, PostBatchState, check, perform_all, perform_all_post_batch,
+    perform_all_relayered,
+};
 pub use registry::{SbaAction, SbaEntry, SbaRegistry, VariantGate};
 pub use types::{
     GameVariant, LOST_THE_GAME, SPEED, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject,

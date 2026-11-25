@@ -1091,6 +1091,11 @@ fn non_siege_zero_defense(view: &SbaView<'_>) -> Vec<SbaSubject> {
 }
 
 impl SbaView<'_> {
+    /// CR 101.4: the players of the snapshot in APNAP order ([`apnap_order`]).
+    pub(super) fn apnap_order(&self) -> Vec<PlayerId> {
+        apnap_order(self.game)
+    }
+
     /// CR 310.11, CR 506.4c: whether a creature is attacking battle `battle` (an attacker whose
     /// battle was removed from combat attacks nothing).
     fn battle_attacked(&self, battle: ObjectId) -> bool {
@@ -1123,18 +1128,25 @@ impl SbaView<'_> {
         by_type && self.remaining(player) && self.env.can_be_protector(battle, player)
     }
 
-    /// The phased-in battles that are not being attacked (CR 310.11), with their protector
-    /// if it is a player in the game (CR 704.5x).
-    fn unattacked_battles(
-        &self,
-    ) -> impl Iterator<Item = (ObjectId, &PermanentFacts, Option<PlayerId>)> + '_ {
+    /// The phased-in battles, attacked or not, with their protector if it is a player in the
+    /// game (CR 704.5x, CR 704.5y).
+    fn battles(&self) -> impl Iterator<Item = (ObjectId, &PermanentFacts, Option<PlayerId>)> + '_ {
         self.permanents
             .iter()
-            .filter(|&(&id, f)| f.battle && !self.battle_attacked(id))
+            .filter(|(_, f)| f.battle)
             .map(|(&id, f)| {
                 let protector = self.env.battle_protector(id).filter(|&p| self.remaining(p));
                 (id, f, protector)
             })
+    }
+
+    /// The phased-in battles that no attacking creature is attacking (CR 704.5x), with their
+    /// protector if it is a player in the game.
+    fn unattacked_battles(
+        &self,
+    ) -> impl Iterator<Item = (ObjectId, &PermanentFacts, Option<PlayerId>)> + '_ {
+        self.battles()
+            .filter(|&(id, _, _)| !self.battle_attacked(id))
     }
 }
 
@@ -1196,9 +1208,11 @@ fn battle_without_protector(view: &SbaView<'_>) -> Vec<SbaSubject> {
 
 // CR 704.5y, CR 310.11: its protector, a player in the game, can't be its protector (decision
 // #43 FP-042: not appropriate for its battle type, or not allowed by effects). A battle being
-// attacked is exempt (CR 310.11).
+// attacked is NOT exempt: CR 704.5y has no attack condition, only CR 704.5x has (decision
+// "Gate 02-state-objects F4 — CR 704.5y applies to an attacked battle"; changing its protector
+// removes it from combat, CR 506.4, which the combat code applies).
 fn battle_with_illegal_protector(view: &SbaView<'_>) -> Vec<SbaSubject> {
-    view.unattacked_battles()
+    view.battles()
         .filter(|&(id, f, protector)| {
             protector.is_some_and(|p| !view.appropriate_protector(id, f, p))
         })
@@ -1206,19 +1220,19 @@ fn battle_with_illegal_protector(view: &SbaView<'_>) -> Vec<SbaSubject> {
         .collect()
 }
 
-// CR 704.5z, CR 303.7a, CR 613.7e, CR 613.7m: the Roles attached to one permanent or player,
-// grouped by the Role's (evaluated) controller; in each group of two or more every Role but
-// the most recent goes. A tie of the latest timestamp keeps the higher ObjectId (decision
-// #43 FP-042).
+// CR 704.5z, CR 303.7a, CR 613.7e, CR 613.7m: the Roles attached to one PERMANENT (CR 704.5z
+// "a permanent"; a Role enchanting a player is never grouped), grouped by the Role's
+// (evaluated) controller; in each group of two or more every Role but the most recent goes. A
+// tie of the latest timestamp keeps the higher ObjectId (decision #43 FP-042).
 fn role_rule(view: &SbaView<'_>) -> Vec<SbaSubject> {
-    let mut groups: BTreeMap<(AttachTarget, PlayerId), Vec<(u64, ObjectId)>> = BTreeMap::new();
+    let mut groups: BTreeMap<(ObjectId, PlayerId), Vec<(u64, ObjectId)>> = BTreeMap::new();
     for (id, f, target) in view.attachments() {
-        let Some(controller) = f.controller else {
+        let (AttachTarget::Permanent(host), Some(controller)) = (target, f.controller) else {
             continue;
         };
         if f.aura && f.role {
             groups
-                .entry((target, controller))
+                .entry((host, controller))
                 .or_default()
                 .push((view.env.attachment_timestamp(id), id));
         }

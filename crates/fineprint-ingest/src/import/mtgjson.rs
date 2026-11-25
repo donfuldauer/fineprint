@@ -5,12 +5,16 @@
 //! MTGJSON `AtomicCards` cross-validation (REQ-ING-001: "Any disagreement in a characteristic
 //! SHALL be reported").
 //!
-//! Entries are matched to records through `identifiers.scryfallOracleId`. The list elements
-//! under one name are the faces, in order; the first is compared with the record's front face.
-//! Compared: `manaValue` (the `*2` integer rule), `colors` and `colorIdentity` (letters),
-//! `types`, `supertypes`, `subtypes` (sorted lists) and `power`, `toughness`, `loyalty`
-//! (string equality). The report prints numbers and color letters, and only the kind of any
-//! other value (never names or text, R12). It never changes the normalized records.
+//! Entries are matched to records through `identifiers.scryfallOracleId`. The entries of one
+//! `oracle_id` are its faces, ordered by their `side` (`a`, `b`, ...; source order when any
+//! entry has no string `side`), and face `i` is compared with the record's face `i`.
+//! Card-wide, compared once (from the first entry): `manaValue` (the `*2` integer rule) and
+//! `colorIdentity` (letters). Per face, each disagreement carrying its `face` index: `colors`
+//! (letters), `types`, `supertypes`, `subtypes` (sorted lists) and `power`, `toughness`,
+//! `loyalty`, `defense` (string equality). A different number of faces is the field `faces`
+//! (the common leading faces are still compared). The report prints numbers and color letters,
+//! and only the kind of any other value (never names or text, R12). It never changes the
+//! normalized records.
 
 use std::collections::BTreeMap;
 
@@ -57,12 +61,17 @@ pub struct Atomic {
 /// [`AtomicError`].
 pub fn parse_atomic(bytes: &[u8]) -> Result<Atomic, AtomicError> {
     let v: Value = serde_json::from_slice(bytes).map_err(|_| AtomicError::NotJson)?;
-    let Some(Value::Object(data)) = v.get("data") else {
+    // Take the `data` object out of the tree and move its entries into the index (no copy).
+    let Value::Object(mut root) = v else {
         return Err(AtomicError::NoData);
     };
+    let Some(Value::Object(data)) = root.remove("data") else {
+        return Err(AtomicError::NoData);
+    };
+    drop(root);
     let mut out = Atomic::default();
-    for list in data.values() {
-        let Some(list) = list.as_array() else {
+    for list in data.into_iter().map(|(_, l)| l) {
+        let Value::Array(list) = list else {
             out.invalid_entries += 1;
             continue;
         };
@@ -71,14 +80,10 @@ pub fn parse_atomic(bytes: &[u8]) -> Result<Atomic, AtomicError> {
                 .get("identifiers")
                 .and_then(|i| i.get("scryfallOracleId"))
                 .and_then(Value::as_str)
-                .filter(|s| is_uuid_shape(s));
+                .filter(|s| is_uuid_shape(s))
+                .map(str::to_owned);
             match id {
-                Some(id) if e.is_object() => {
-                    out.by_oracle_id
-                        .entry(id.to_owned())
-                        .or_default()
-                        .push(e.clone());
-                }
+                Some(id) if e.is_object() => out.by_oracle_id.entry(id).or_default().push(e),
                 _ => out.invalid_entries += 1,
             }
         }
@@ -127,7 +132,8 @@ fn letters(v: Option<&Value>) -> Option<fineprint_dsl::card::ColorBitmask> {
     }
 }
 
-fn compare(r: &NormalizedCardRecord, front: &NormalizedFace, m: &Value) -> Vec<Value> {
+/// The card-wide characteristics: `manaValue` and `colorIdentity`, compared once.
+fn compare_card(r: &NormalizedCardRecord, m: &Value) -> Vec<Value> {
     let mut out = Vec::new();
     // manaValue: numbers may be printed.
     let mv = m.get("manaValue");
@@ -141,42 +147,55 @@ fn compare(r: &NormalizedCardRecord, front: &NormalizedFace, m: &Value) -> Vec<V
             "mtgjson": mv.filter(|v| v.is_number()).cloned().unwrap_or(Value::String(kind(mv).to_owned())),
         }));
     }
-    // colors and colorIdentity: color letters may be printed.
-    for (field, ours) in [
-        ("colors", front.computed_colors),
-        ("colorIdentity", r.color_identity),
-    ] {
-        let theirs = letters(m.get(field));
-        if theirs != Some(ours) {
-            out.push(json!({
-                "field": field,
-                "scryfall": mask_letters(ours),
-                "mtgjson": theirs.map_or_else(|| "invalid".to_owned(), mask_letters),
-            }));
-        }
+    // colorIdentity: color letters may be printed.
+    let theirs = letters(m.get("colorIdentity"));
+    if theirs != Some(r.color_identity) {
+        out.push(json!({
+            "field": "colorIdentity",
+            "scryfall": mask_letters(r.color_identity),
+            "mtgjson": theirs.map_or_else(|| "invalid".to_owned(), mask_letters),
+        }));
+    }
+    out
+}
+
+/// The per-face characteristics of face `index` (`face` is the record's, `m` the matching
+/// MTGJSON entry); each disagreement carries `"face": index`.
+fn compare_face(index: usize, face: &NormalizedFace, m: &Value, out: &mut Vec<Value>) {
+    // colors: color letters may be printed.
+    let theirs = letters(m.get("colors"));
+    if theirs != Some(face.computed_colors) {
+        out.push(json!({
+            "face": index,
+            "field": "colors",
+            "scryfall": mask_letters(face.computed_colors),
+            "mtgjson": theirs.map_or_else(|| "invalid".to_owned(), mask_letters),
+        }));
     }
     // Type words: only the kinds and counts.
     for (field, ours) in [
-        ("types", &front.card_types),
-        ("supertypes", &front.supertypes),
-        ("subtypes", &front.subtypes),
+        ("types", &face.card_types),
+        ("supertypes", &face.supertypes),
+        ("subtypes", &face.subtypes),
     ] {
         let mut ours = ours.clone();
         ours.sort();
         let theirs = sorted_strings(m.get(field));
         if theirs.as_ref() != Some(&ours) {
             out.push(json!({
+                "face": index,
                 "field": field,
                 "scryfall": format!("list({})", ours.len()),
                 "mtgjson": theirs.map_or_else(|| kind(m.get(field)).to_owned(), |t| format!("list({})", t.len())),
             }));
         }
     }
-    // P/T and loyalty: string equality, kinds only.
+    // P/T, loyalty and defense: string equality, kinds only.
     for (field, ours) in [
-        ("power", front.power.as_ref()),
-        ("toughness", front.toughness.as_ref()),
-        ("loyalty", front.loyalty.as_ref()),
+        ("power", face.power.as_ref()),
+        ("toughness", face.toughness.as_ref()),
+        ("loyalty", face.loyalty.as_ref()),
+        ("defense", face.defense.as_ref()),
     ] {
         let theirs = m.get(field);
         let equal = match (ours, theirs) {
@@ -186,10 +205,91 @@ fn compare(r: &NormalizedCardRecord, front: &NormalizedFace, m: &Value) -> Vec<V
         };
         if !equal {
             out.push(json!({
+                "face": index,
                 "field": field,
                 "scryfall": str_kind(ours),
                 "mtgjson": kind(theirs),
             }));
+        }
+    }
+}
+
+/// The MTGJSON entries of one card in face order: by `side` when every entry has a string
+/// `side` (a stable sort, so equal sides keep source order), else in source order.
+fn ordered_faces(entries: &[Value]) -> Vec<&Value> {
+    let mut faces: Vec<&Value> = entries.iter().collect();
+    if faces
+        .iter()
+        .all(|e| e.get("side").is_some_and(Value::is_string))
+    {
+        faces.sort_by(|a, b| {
+            let side = |v: &Value| {
+                v.get("side")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            side(a).cmp(&side(b))
+        });
+    }
+    faces
+}
+
+/// The index of the normalized face an MTGJSON entry describes by its `side`, when EVERY entry
+/// has a single-letter lowercase `side` in `a..=z` (`a` is face 0); `None` otherwise, when the
+/// entries pair with the faces by position.
+fn side_indices(entries: &[&Value]) -> Option<Vec<usize>> {
+    entries
+        .iter()
+        .map(|e| {
+            let side = e.get("side")?.as_str()?;
+            let mut chars = side.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c @ 'a'..='z'), None) => Some(usize::from(c as u8 - b'a')),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Every disagreement of record `r` with its MTGJSON entries `faces` (non-empty, in face
+/// order): card-wide fields, then `faces` when the counts differ, then each common face. Entries
+/// that all carry a letter `side` pair with the face that letter names (a lone back face is
+/// compared with the back face); an entry whose letter names a face the record lacks is a
+/// `side` disagreement. Otherwise they pair by position.
+fn compare(r: &NormalizedCardRecord, faces: &[&Value]) -> Vec<Value> {
+    let Some(first) = faces.first() else {
+        return Vec::new();
+    };
+    let mut out = compare_card(r, first);
+    if faces.len() != r.faces.len() {
+        out.push(json!({
+            "field": "faces",
+            "scryfall": r.faces.len(),
+            "mtgjson": faces.len(),
+        }));
+    }
+    match side_indices(faces) {
+        Some(indices) => {
+            for (index, m) in indices.into_iter().zip(faces) {
+                if let Some(face) = r.faces.get(index) {
+                    compare_face(index, face, m, &mut out);
+                } else {
+                    // The entry names a face the record lacks: report it (kinds only, never
+                    // the entry's own text) instead of dropping it.
+                    out.push(json!({
+                        "face": index,
+                        "field": "side",
+                        "scryfall": "absent",
+                        "mtgjson": "present",
+                    }));
+                }
+            }
+        }
+        None => {
+            for (i, (face, m)) in r.faces.iter().zip(faces).enumerate() {
+                compare_face(i, face, m, &mut out);
+            }
         }
     }
     out
@@ -207,15 +307,15 @@ pub fn cross_check(
     let mut agreed = 0usize;
     let mut only_scryfall = Vec::new();
     for (id, r) in records {
-        let (Some(faces), Some(front)) = (atomic.by_oracle_id.get(id), r.faces.first()) else {
+        let Some(entries) = atomic.by_oracle_id.get(id) else {
             only_scryfall.push(id.clone());
             continue;
         };
-        let Some(m) = faces.first() else {
+        if entries.is_empty() || r.faces.is_empty() {
             only_scryfall.push(id.clone());
             continue;
-        };
-        let fields = compare(r, front, m);
+        }
+        let fields = compare(r, &ordered_faces(entries));
         if fields.is_empty() {
             agreed += 1;
         } else {

@@ -8372,3 +8372,604 @@ an implementation detail for black-box tests.
 **Alternatives.** Keep the SRS shorthand and assert rejection (rejected: loses the round-trip
 coverage of the examples); pin the exact nesting boundary in spec tests (rejected: couples the
 black-box tests to wrapper depth).
+
+## #169 FP-142 — Colorless-hybrid ManaSymbol variant
+
+**Decision.** `{C/W}`, `{C/U}`, `{C/B}`, `{C/R}`, `{C/G}` are represented by a new variant
+`ManaSymbol::ColorlessHybrid(Color)`, appended last (CR-001, additive) so existing variant order
+and the derived `Ord` are unchanged. The parser accepts only the `C`-first uppercase spelling;
+`{W/C}`, `{C/P}`, `{C/C}`, lowercase forms and the like stay `UnknownSymbol`. Mana value is 1
+(CR 202.3f: largest component of {C} and {c}); colors are exactly c (CR 107.4e, 202.2d); color
+identity picks this up unchanged through `symbol_colors` (CR 903.4). The owned paths were
+extended to the two `ManaSymbol` matches in `crates/fineprint-ingest/src/import/recompute.rs`
+(`symbol_colors`, `symbol_mana_value`) plus an inline test module there: both matches are
+exhaustive, so the workspace does not compile without the new arms. This entry supersedes the
+citation in "#21 FP-020 — `{C/W}` is not representable in `ManaSymbol`", which credited "colored
+with mana value 1" to CR 107.4e alone: the correct citation is CR 107.4/107.4e for the symbol and
+its color, and CR 202.3f for its mana value. The follow-up that entry described has now landed.
+**Rationale.** A dedicated variant keeps `GenericHybrid`'s `n >= 1` rule and `{1/W}` semantics
+intact, and appending it is the only additive change allowed by R2.
+**Alternatives.** Encode `{C/c}` as `GenericHybrid(0, c)` or `GenericHybrid(1, c)` (rejected:
+changes the meaning and validity of existing symbols and their canonical text); a generic
+`Hybrid`-with-colorless enum for the left half (rejected: changes an existing variant, breaking);
+add a wildcard arm in ingest instead of explicit arms (rejected: would silently mis-handle future
+symbols).
+
+## Gate 02-state-objects — Review baseline after the history rewrite, and tags this environment cannot push
+
+**Decision.** The first gate review (phase `02-state-objects`, review PR #236) uses
+`review-base/02-state-objects` at `16ca856` (the PR #220 merge on `main`) as its base. PROCESS.md P6
+and the `work-issue` skill name `60024a4` as the `reviewed/baseline` commit, but `main` no longer
+contains it after a history rewrite; `16ca856` is the same merge with an identical tree
+(`5eb310e8…`). The `reviewed/baseline` tag should point at `16ca856`. The Claude Code web session's
+proxy refuses tag pushes (git and REST), so the `reviewed/baseline`, `reviewed/02-state-objects` and
+`phase-02-green` tags are created by a person (P8 item in `docs/HUMAN_QUEUE.md`); until
+`reviewed/baseline` exists, a later gate that finds no `reviewed/*` tag uses `16ca856` as its base.
+
+**Rationale.** The tree-identical commit preserves the intended review range (everything since the
+former per-PR rhythm ended); P6 forbids pausing for a person, so the review proceeds on the branch,
+which the proxy does allow, and only the tags wait.
+
+**Alternatives.** Basing the review on the root commit (rejected: re-reviews everything already
+reviewed per PR); skipping the gate until tags can be pushed (rejected: P6 and R8).
+
+## Gate 02-state-objects F3 — Battle protector candidates and OPPONENTS are team-unaware until #134
+
+**Decision.** In the supported scope (no team model) a player's opponents are every other player in the game. The battle-protector candidate test (`appropriate_protector` in `crates/fineprint-core/src/sba/registry.rs`, CR 310.12a "Only an opponent of a Siege's controller can be its protector") and the interpreter's `OPPONENTS` / `TEAMMATES` references (`interp/resolve.rs`: `TEAMMATES` is empty) do not consult teams. `FormatConfig.players.teams` is only a count; the engine has no team model (decision #41 FP-040 "Two-Headed Giant gating" keeps team formats gated off). #134 FP-132 (Two-Headed Giant) adds the team-aware opponent predicate (CR 102.3: "In a multiplayer game between teams, a player's teammates are the other players on their team, and the player's opponents are all players not on their team") and applies it to the protector candidates and legality test and to `OPPONENTS` / `TEAMMATES`.
+
+**Rationale.** CR 102.2 ("In a two-player game, a player's opponent is the other player") and free-for-all multiplayer need no team data; team games are not reachable until #134 lifts the gating, so no supported game can get a teammate as protector. The finding is correct for team games and is carried to the issue that introduces them.
+
+**Alternatives.** Adding a partial team model now (rejected: it is #134's contract and would be dead code until then).
+
+## Gate 02-state-objects F11 — `oracleTextHash` is a text-only placeholder until #98
+
+**Decision.** `oracleTextHash` as computed by the Scryfall import (`crates/fineprint-ingest/src/import/normalize.rs`) hashes the normalized Oracle text only. REQ-ING-012 defines it as `sha256(normalized oracle_text ⊕ type_line ⊕ mana_cost ⊕ P/T/loyalty/defense)` per face; the full definition lands with #98 FP-096 ("oracleTextHash exactly as REQ-ING-012 defines"), which is the first consumer (change detection and status demotion). Nothing reads the current value before then.
+
+**Rationale.** The text-only value is an import-time placeholder; computing the final definition belongs with the code that compares it against a definition's `source.oracleTextHash`, so it is defined once and tested against the requirement there.
+
+**Alternatives.** Computing the full definition now (rejected: duplicate of #98's deliverable with no consumer to test it against).
+
+## Gate 02-state-objects F4 — CR 704.5y applies to an attacked battle
+
+Supersedes "#43 FP-042 — 704.5x and 704.5y exempt a battle being attacked".
+
+**Decision.** CR 704.5y is operative as written: a battle whose protector (a player in the game)
+can't be its protector is a 704.5y finding whether or not a creature is attacking it, and its
+controller is asked to choose a new protector (reason `CR 704.5y`; with no candidate the battle
+goes to its owner's graveyard). Only CR 704.5x keeps the attack condition: a battle being
+attacked with no player in the game as its protector is not a finding. An attacker whose battle
+was removed from combat (`Attacking(None)`, CR 506.4c) still attacks nothing and exempts nothing.
+A protector who left the game or has `LOST_THE_GAME` is still no protector (704.5x, not 704.5y).
+In code, `SbaView::battles()` lists every phased-in battle (704.5y);
+`SbaView::unattacked_battles()` filters it to the unattacked ones (704.5x only).
+
+Changing the protector of a battle that is being attacked removes that battle from combat
+(CR 506.4: "A permanent is removed from combat if ... its controller or protector changes ... A
+planeswalker or battle that's removed from combat stops being attacked"; CR 506.4c: its attackers
+continue to be attacking creatures that attack no player, planeswalker or battle, and deal no
+combat damage if unblocked). Combat is not modelled yet, so the SBA pass reports the change only
+through `SbaOutcome::protectors_chosen` and does not touch combat state; the combat work units
+(phase 09: #67, #68, #69) and #221 (which consumes the SBA outcome) must apply CR 506.4 / 506.4c
+from that report.
+
+**Rationale.** R8 judgement call. CR 704.5y reads "If a battle's protector is a player who can't
+be its protector, that battle's controller chooses an appropriate player to become its
+protector" with no "being attacked" clause, whereas CR 704.5x explicitly adds "and no attacking
+creatures are currently attacking that battle". CR 310.11 reads "If a battle that isn't being
+attacked has no player designated as its protector, or its protector is a player who can't be
+its protector, its controller chooses an appropriate player to be its protector. ... This is a
+state-based action (see rule 704)", which grammatically applies the attack condition to both
+cases. The tension is resolved in favour of the more specific state-based-action rule 704.5y:
+CR 704 is the rule that defines what the state-based actions are, and CR 310.11 points to it
+("see rule 704"); 310.11 is read as a summary. The deliberate difference between the 704.5x and
+704.5y texts (the attack clause on one only) is the stronger signal. The combat consequence
+(CR 506.4) is real but is a consequence the rules provide for, not a reason to skip the action.
+
+**Alternatives.** Keep exempting both (the superseded decision; rejected: contradicts the text
+of 704.5y, finding F4 of the phase 02 gate review). Exempt neither (rejected: 704.5x states its
+attack condition explicitly). Remove the battle from combat inside the SBA pass (rejected: combat
+state is owned by the phase 09 combat units; the pass reports, combat applies).
+
+## Gate 02-state-objects F2 — One APNAP request sequence per SBA pass
+
+Supersedes "#43 FP-042 — Order of protector requests".
+
+**Decision.** The legend-rule requests (CR 704.5j) and the battle protector requests
+(CR 704.5x, CR 704.5y) of one SBA pass form ONE request sequence, ordered by (1) the APNAP rank of
+the choosing player (CR 101.4, the same `apnap_order` as before: turn order starting from the
+active player, players not in the turn order last ascending), then (2) within one player, every
+legend-rule group before every protector request, then (3) the existing tie-break: the legend
+group's lowest member id, or ascending battle id. Request ids are assigned in this asking order.
+All requests are still asked before any state change (a pending request leaves the state and
+registries untouched), and every move, protector record and unprotectable-battle move is applied
+together afterwards in the one batch. A battle with no candidate (or no controller) still gets
+no request and goes to its owner's graveyard; a battle that is also a 704.5v / 704.5w finding
+still gets no request. The old rule "every legend request first, then every protector request"
+is gone; "legend before protector" survives only as the within-player tie-break (2).
+
+**Rationale.** CR 101.4 orders choices per PLAYER, not per kind of choice: "the active player
+... makes any choices required, then the next player in turn order ... makes any choices
+required, followed by the remaining nonactive players in turn order. Then the actions happen
+simultaneously." The legend and protector choices come from the same check (CR 704.3), so an
+active player's protector choice precedes a nonactive player's legend choice (finding F2 of the
+phase 02 gate review). The order of one player's own simultaneous choices is free; legend first
+(registry order, 704.5j before 704.5x) then ascending id is a deterministic stand-in (R3).
+
+**Alternatives.** Keep kind-first ordering (the superseded decision; rejected: violates CR 101.4
+when two different players choose). Within one player, protector before legend (rejected: no
+rules difference; legend first keeps the previous behaviour for a single chooser, so existing
+single-player tests and replays keep their request order).
+
+## Gate 02-state-objects F5 — Battle protector pair is a required pair (documentation)
+
+**Decision.** `SbaEnvironment::battle_protector` and `SbaEnvironment::set_battle_protector` keep
+their defaults (`None` / no-op) and their signatures, and are documented as a REQUIRED PAIR for
+any environment whose game can have a battle, in the style of the deathtouch pair: an environment
+that answers `battle_protector` MUST remember what `set_battle_protector` stored;
+`perform_all` writes the chosen protectors only after the whole pass succeeded (never on
+`BusInterrupt::Pending` or an error); an environment implementing neither re-asks the protector
+at every check; `StoredSbaEnvironment` implements both. No error path is added.
+
+**Rationale.** The brief forbids changing `SbaEnvironment` methods or `SbaOutcome` fields; the
+default pair is consistent (a no-op setter with a `None` getter never claims to remember), and
+the write is already after the last fallible step. Existing tests prove a stored environment
+does not re-ask after a pass (`sba::tests::sba_704_5x_siege_without_protector`: the repeated
+check is empty and the next pass performs nothing) and pin the defaults
+(`sba::tests::fp042_environment_defaults`).
+
+**Alternatives.** Make `set_battle_protector` return a `Result` and fail the pass on an
+unsupported write (rejected: an API change to a contract-facing trait, outside this fix's
+scope; it would go through `contracts/CHANGE_REQUESTS.md`). Remove the defaults (rejected:
+breaking for every environment that has no battles).
+
+## Gate 02-state-objects F1 — Protector request names its battle
+
+**Decision.** A battle protector request (`CHOOSE_PLAYER`, CR 704.5x / 704.5y) carries the
+battle in `reason.source` (`Some(battle)`); the payload and options stay the candidate players.
+
+**Rationale.** Two requests with identical candidate lists (one controller, two Sieges) must be
+distinguishable by the client; `ChoiceReason::source` is the existing field for the object a
+choice is about, so no wire-shape change is needed.
+
+**Alternatives.** Add the battle to the `ChoosePlayer` payload (rejected: a wire-shape change to
+the choice protocol contract).
+
+## Gate 02-state-objects F24 — DISTINCT over SOURCE_LKI reads the captured view
+
+**Decision.** Amends the section "#57 FP-055 - Interpretations" item 8. `DISTINCT` over the
+selector `Ref(SOURCE_LKI)` reads each object's view through the same function as `ATTR(SOURCE_LKI)`
+(`reference_view` in `interp/expr.rs`): the captured last known information of the source first,
+the current view when nothing was captured. Every other selector keeps reading the current view
+first. Tap status (F28): `TAPPED` and `UNTAPPED` hold only for an object in the battlefield zone
+(CR 110.5d); `FACE_UP` stays "not face down".
+
+**Rationale.** Two reads of one reference must agree for a source that left the battlefield
+(REQ-DSL-003). A filter selector never names the source through LKI, so it keeps the current view.
+
+**Alternatives.** Applying the LKI policy to any selector that happens to contain the source id
+(rejected: the policy belongs to the reference form); leaving `DISTINCT` on current views
+(rejected: contradicts `ATTR`).
+
+## Gate 02-state-objects F7 - Retroactive Card DSL change requests; no dslVersion bump
+
+**Decision.** Record #159 (validation of AST members on seal and load) as CR-002 and #161 (abilities
+hold the real `effect::Instruction`, which narrows the accepted ability set) as CR-003, both breaking,
+both merged without an R2 entry and recorded retroactively by the phase 02 gate. `dslVersion` stays
+"1.0": no bump and no migration tool. The migration of in-repo consumers is #232 FP-164.
+
+**Rationale.** The rejected placeholder content (`power: 1`, instructions with arbitrary `op`) was
+never a valid SRS section 14 AST. No definitions are persisted yet (REQ-ING-007 definitions are the
+client's), the project is pre-release, and the change landed at a phase boundary, which R2 requires
+for breaking changes. Strict validation is kept (REQ-DSL-010, REQ-DSL-012).
+
+**Alternatives.** Bump to "1.1" and keep a legacy reader for the placeholder shapes: rejected, as it
+would preserve invalid content and add a code path with no users.
+
+## Gate 02-state-objects F12 — curl 8.4.0 minimum and a capped metadata read
+
+**Decision.** The bulk-data metadata response is read from curl's piped stdout through
+`take(MAX_METADATA_BYTES + 1)`; past the 1 MiB cap the child is killed and the run fails with an
+error naming the cap (`run_capped`, `read_stream_capped` in `import/fetch.rs`). Bulk downloads keep
+curl's `--max-filesize` cap and require curl 8.4.0 or later, checked once per process with
+`curl --disable --version` before the first download: an older parsed version is an error naming
+8.4.0 and the cap; an unparsable version proceeds with a warning on stderr. Documented in
+`docs/DEVELOPMENT.md` (`fetch` paragraph).
+**Rationale.** Before 8.4.0 curl ignores `--max-filesize` when the size is unknown at the start of
+the transfer, so the cap must not rely on it for metadata (read in-process) and must be guaranteed
+for bulk files (version floor). Streaming the multi-GB bulk files through the process to count bytes
+would duplicate what curl already does; an unparsable version string is treated as a warning so that
+vendor builds with unusual banners still work.
+**Alternatives.** Stream bulk downloads through stdout into the part file with an in-process cap
+(more code and an extra copy of every byte); refuse an unparsable version (breaks unusual builds).
+
+## Gate 02-state-objects F13 — Three-step group commit instead of generation directories
+
+**Decision.** `fetch` commits a cache group in three steps under the group lock: (1) atomically
+rewrite `source.json` with the entries of the files about to be replaced removed (skipped when no
+entry is removed), (2) rename each staged part file into place, (3) atomically write the full new
+`source.json`. A file with no metadata entry is "not fetched": it is stale and refetched next run,
+never trusted. A failure at any step leaves every file either absent from the metadata or consistent
+with it; remaining part files are removed. This amends "#87 FP-085 — 24-hour cache, clock injection
+and cache metadata" (its "a failure leaves the group unchanged" now holds for failures before the
+commit; a failure during the commit leaves the group consistent rather than unchanged).
+**Rationale.** It meets the integrity goal of the finding (an incomplete generation is never treated
+as fresh) while keeping the fixed, documented cache layout (`scryfall/oracle-cards.json`, ...) that
+`import` and users read directly.
+**Alternatives.** Generation directories published by one atomic switch (a directory rename or a
+pointer file): considered and not chosen, because it changes the documented cache layout that
+`import` reads and a portable atomic directory replacement does not exist in the standard library.
+
+## Gate 02-state-objects F14 — Group lock and per-run part files
+
+**Decision.** Each group directory is created first, then `fetch` takes an exclusive
+`std::fs::File::lock` on `<group>/.lock`, held from reading `source.json` through staging and
+commit. The lock file is left in place (removing it would race with a waiting run). Part files are
+per run, `{file}.{pid}.part`, opened with `create_new` (a leftover of a crashed run with the same pid
+is removed under the lock and creation retried), and removed on every failure path.
+**Rationale.** Serializing the whole read-stage-commit sequence means a second run sees the first
+run's fresh metadata and downloads nothing; per-run names keep a part file owned by one run.
+**Alternatives.** Merging metadata against the current generation without serializing downloads
+(duplicate downloads, more complex); random part names (not needed under the lock).
+
+## Gate 02-state-objects F15 — curl as the HTTP client: no redirects, --disable, --globoff
+
+**Decision.** Amends "#87 FP-085 — curl as the HTTP client, behind an Http trait": curl now runs
+with `--disable` as the first argument (no `~/.curlrc`; proxy and CA settings still come from the
+environment), then `--fail --silent --show-error --globoff --proto =https --max-filesize
+--max-time`, the headers, `--output <dest>` passed as the native `OsString` path, and `--url`.
+`--location` and `--proto-redir` are dropped: no redirect is followed (the live bulk hosts answer
+200 directly; a 3xx answer fails body validation and its part file is discarded). A curl failure is
+reported as `curl failed for <role> (exit N)` plus the first stderr line cut to 200 bytes with
+control characters replaced, never the URL (F34). (Also covers F33, F35, F36.)
+**Rationale.** Following redirects to any https host defeats the download host allowlist (R12); a
+user curlrc can disable certificate checks; URL globbing can turn one validated URI into several
+transfers; lossy path conversion can write to the wrong file; URIs can carry query strings that
+must not reach error text.
+**Alternatives.** Following redirects and validating each hop (curl cannot apply a host policy per
+hop without a custom client).
+
+## Gate 02-state-objects F37 — download_uri host policy excludes the API host
+
+**Decision.** Amends "#87 FP-085 — 24-hour cache, clock injection and cache metadata" (its last
+sentence on `download_uri`): `download_uri` must be `https://` on `scryfall.com`, `*.scryfall.com` or
+`*.scryfall.io` with lowercase labels, except the exact host `api.scryfall.com`, with no credentials,
+no port, no whitespace, control characters or backslash, and no curl glob character `[ ] { }`. The
+metadata endpoint keeps its own request path (`BULK_DATA_URL`).
+**Rationale.** A `download_uri` naming the API host would cause a second API request per run before
+the body validator could reject it (REQ-ING-001: one API request per run). Upper-case hosts are
+already rejected by the label rule, so the exact-match exclusion covers every accepted spelling.
+**Alternatives.** An explicit list of known file hosts (`data.scryfall.io`, ...): rejected because
+Scryfall has changed file hosts before and `c2.scryfall.com` is still asserted valid.
+
+## Gate 02-state-objects F8 — The records file and the MTGJSON report must be different files
+
+**Decision.** Before writing anything, `import` resolves each non-`-` destination (the records
+file, default `<cache>/normalized/cards.json` with its directory created first, and
+`--mtgjson-report`) by canonicalizing the parent directory and joining the file name; when both
+resolve to the same path it exits 2 with a usage message (`the records file and
+--mtgjson-report name the same file` plus the usage line) and writes neither file. A parent that
+cannot be canonicalized (it does not exist) is compared as written; the write then fails with
+exit 2 as before. `-` for both stays the existing parse-time usage error; one stdout destination
+is valid.
+**Rationale.** REQ-ING-001 / REQ-NFR-004: an exit 0 with the records replaced by the report
+loses the records artifact. Canonicalizing the parent catches `.`/`..` spellings and symlinked
+directories without requiring the file itself to exist.
+**Alternatives.** Comparing the strings as written (misses equivalent spellings); canonicalizing
+the whole file path (fails for a file that does not exist yet; a symlinked file is replaced by
+the atomic rename, not written through, so it cannot alias).
+
+## Gate 02-state-objects F9 — At most 16 faces per Scryfall card object
+
+**Decision.** `normalize::MAX_FACES = 16`. A `card_faces` array longer than that rejects the
+object with the new `RejectReason::TooManyFaces` (wire string `tooManyFaces`, additive) before
+any `RawFace` is built or the shared type line is copied; the other objects still import.
+**Rationale.** R12: per-object work and memory must be bounded; one 30 KB type line copied and
+split for thousands of faces is a large amplification. Real multi-face layouts have two faces;
+16 leaves ample headroom. The layout unit has no explicit face-count limit to reuse (it only
+checks counts per layout after normalization, too late to prevent the allocations).
+**Alternatives.** A limit of 2 (would turn future layouts into rejections rather than layout
+diagnostics); a byte budget on the type line (does not bound the per-face work).
+
+## Gate 02-state-objects F10 — A face without its own type line takes only its part of the combined line
+
+**Decision.** When at least one face of a multi-face object has no `type_line`, the top-level
+line is split on ` // `: with one part per face, each face without its own line takes its
+matching part; with exactly one part, that line is copied to each face without its own line;
+any other part count (on a non-empty line) adds `typeLineFaceMismatch` and those faces keep no
+type line (empty types, plus `typeLineEmpty`). Faces with their own line always keep it. This
+one rule replaces the former two branches (no face lines / some face lines), whose results for
+the no-face-line case it reproduces.
+**Rationale.** The former fallback copied the whole combined line, so a second face got the
+first face's subtypes and the literal `//` as a subtype, which also made the per-face MTGJSON
+cross-check disagree.
+**Alternatives.** Keeping the whole-line copy (wrong types); always rejecting such objects
+(normalization flags shape problems with diagnostics, it does not reject them).
+
+## Gate 02-state-objects F16 — The MTGJSON cross-check compares every face
+
+**Decision.** The MTGJSON entries of an `oracle_id` are put in face order by `side` (stable
+sort) when every entry has a string `side`, else kept in source order; entry `i` is compared
+with the record's face `i`. `manaValue` and `colorIdentity` are card-wide, compared once from
+the first entry; `colors`, `types`, `supertypes`, `subtypes`, `power`, `toughness`, `loyalty`
+and `defense` are per face, each disagreement written `{"face": i, "field": ..., "scryfall":
+..., "mtgjson": ...}`. A different number of faces adds `{"field": "faces", "scryfall": n,
+"mtgjson": m}` and the common leading faces are still compared. Order within a card's `fields`:
+card-wide fields, then `faces`, then each face's fields in face order. A card is `agreed` only
+when nothing disagrees. The per-face `colors` entry moves after `colorIdentity` in the report
+(the existing report test is updated accordingly).
+**Rationale.** REQ-ING-001: "Any disagreement in a characteristic SHALL be reported"; checking
+only the front face counted back-face disagreements as agreement.
+**Alternatives.** Matching faces by name (would need names in the comparison path; `side` is the
+source's face identifier); reporting only the face count when it differs (hides real
+characteristic disagreements on the common faces).
+
+## Gate 02-state-objects F17 — The bulk-array scanner streams; amends "#87 FP-085 — Output shapes, default paths and --strict"
+
+**Decision.** `json_array::ArrayElements` is a public iterator that yields one top-level element
+slice at a time (`Result<&[u8], ArrayError>`, the same elements and error values as
+`split_array`, an error yielded once after the elements that precede it, then fused).
+`validate_array`, `import_oracle_cards` and `import_rulings` iterate it, so no per-element
+index is built; a late structural error still fails the whole import (what was built is
+discarded). `split_array` stays as the collecting wrapper. This amends the sentence of "#87
+FP-085 — Output shapes, default paths and --strict" that says bulk arrays are split by a small
+scanner "so memory is bounded by the largest element": until this change the splitter built a
+`Vec<&[u8]>` of every element first (up to several times the input size for small elements);
+memory is now bounded by the input plus the largest element.
+**Rationale.** R12: bounded memory for untrusted bulk input; the decision text claimed a
+property the code did not have.
+**Alternatives.** A two-pass scan (validate structure, then process; same result, twice the
+scanning); a full streaming JSON parser (larger change, not needed).
+
+## Gate 02-state-objects F38 — No stale `updatedAt` for bytes that do not match the recorded digest
+
+**Decision.** The provenance `updatedAt` of an imported file (normalized output and MTGJSON
+report) is copied from the cache metadata only when the recomputed sha256 equals the recorded
+one; otherwise it is null. The `sourceHashMismatch:*` warning (and the report's `hashMismatch`)
+and the recomputed hash are unchanged. Amends "#87 FP-085 — Output shapes, default paths and
+--strict" (the recorded `updatedAt` no longer accompanies a digest mismatch).
+**Rationale.** REQ-ING-001 provenance: a timestamp describing other bytes would be false
+provenance for the bytes actually read.
+**Alternatives.** Keeping the timestamp beside the warning (pairs a stale timestamp with a new
+hash).
+
+## Gate 02-state-objects F40 — Multi-word subtype self-reference
+
+**Decision.** `Lexicon::new` recovers multi-word subtype boundaries from the rules vocabulary: every multi-word subtype phrase in the vocabulary whose words appear consecutively (case-insensitive) in the face's own subtypes also gets the key `this <phrase>` as a SELF entry. The importer's word-level subtype output is unchanged.
+
+**Rationale.** Keeps `mtgjson.rs` subtype comparison intact and needs no contract or importer change; longest-match marking then covers the whole phrase.
+
+**Alternatives.** Changing the importer to store whole phrases (rejected: breaks the mtgjson comparison); joining every adjacent subtype pair (rejected: would invent phrases).
+
+## Gate 02-state-objects F20 — Late gate after any routine merge
+
+**Decision.** The gate check and the merge are not atomic, so after every routine merge the merging session re-queries the open `work-unit` issues of the merged issue's phase label and milestone. If none remain and no `reviewed/<gate>` tag exists, it runs a "late gate" at once: branch `gate/<gate>` from the merge commit on `main` carrying the gate `docs/RUN_LOG.md` row, a PR from it to `main` (no `Closes`) in the role of the gate issue's PR, a review PR against `review-base/<gate>` (cumulative since the last `reviewed/*` tag), then P6 steps 3-7 (full review, dispositions, resolved threads, merge, review PR closed unmerged, tags). It covers unlabelled final issues; a `review:gate` label on the planned final issue still takes the normal pre-merge path. Written into docs/PROCESS.md P6 "Late gate", work-issue §5 step 2 and §7 step 2, run-plan §2.
+
+**Rationale.** No lock orders rechecks and merges across parallel sessions (run-plan runs three at once); a post-merge check is the only mechanism that needs no external state and is idempotent (the `reviewed/<gate>` tag marks completion).
+
+**Alternatives.** A merge-time lock or label claim (needs shared mutable state, can deadlock); requiring `review:gate` on every phase's last issue (does not cover the race for an unlabelled final issue); serialising same-phase merges (loses parallelism).
+
+## Gate 02-state-objects F22 F23 — Split gate reviews: no-overlay areas, area heads, path coverage
+
+**Decision.** Area review branches are built with `git checkout --no-overlay <gate head> -- <paths>` and rebuilt from the current gate head after each push. Each is verified by `git diff --name-status <base> review/<gate>-<area>` equal to `git diff --name-status <base> <gate head> -- <paths>`, and the union of the area paths must cover `git diff --name-only <base> <gate head>` (deletions included). Each area PR's approval must cover that area branch's own current head, not the shared gate head. Amends the P6 step 3 and step 6 wording.
+
+**Rationale.** Overlay checkout keeps base files the gate deleted; area heads can never equal the gate head, so the old condition was unsatisfiable.
+
+**Alternatives.** Merging the gate head into each area branch (puts the whole diff in every area); approving only the largest area.
+
+## Gate 02-state-objects F43 — Installer never replaces an existing hook setup
+
+**Decision.** `scripts/install-git-hooks.sh` sets `core.hooksPath=.githooks` only when it is unset or already `.githooks` AND `git rev-parse --git-path hooks` holds no non-`.sample` file. Otherwise it leaves the setting, prints a warning on stderr naming what exists and the manual command (`git config core.hooksPath .githooks`, calling existing hooks from `.githooks`), and exits 0. `FINEPRINT_FORCE_HOOKS=1` forces the replacement. `fineprint.coauthor` resolution is unchanged and always happens. The warning repeats each session while the conflict stands.
+
+**Rationale.** Git uses one hooks directory, so replacing it silently disables a contributor's checks; the script runs at SessionStart so it must never fail or block.
+
+**Alternatives.** Chaining existing hooks automatically (fragile, executes unknown scripts); prompting (impossible at SessionStart); keeping the unconditional replacement.
+
+## Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense battle
+
+**Decision.** This SUPERSEDES the decision "#43 FP-042 — No protector request for a battle at 0
+defense", whose Decision read: "A battle that is also a CR 704.5v or CR 704.5w finding in the same
+pass gets no protector request and no `protectors_chosen` entry; its 704.5x/704.5y finding is still
+reported in `findings`. It moves once." That decision is superseded as follows. Before the batch,
+nothing changes: a battle that is also a CR 704.5v or CR 704.5w finding still gets no protector
+request, and the pre-batch request sequence (request ids included) is unchanged. The pass now
+remembers each such battle with the CR reference of its CR 704.5x or CR 704.5y finding
+(`Plan::retained_battles`). After the batch, if a remembered battle is still on the battlefield
+as the same object (same `ObjectId`; a battle that moved has another id or zone) and is still a
+CR 704.5x or CR 704.5y subject in a fresh view of the state after the batch, it means a replacement
+effect replaced its graveyard move (CR 614.6, CR 704.7). Its controller is then asked the usual
+protector choice in the same pass: one `CHOOSE_PLAYER`, with the request shape of a pre-batch
+protector choice and candidates computed from the post-batch view. These requests come after
+every pre-batch request and every request raised by the batch. They are ordered by the chooser's
+APNAP rank, then ascending battle id, and use `choices.next_request_id()` at that point. Each
+answer goes into `protectors_chosen` (sorted by battle; recorded through
+`SbaEnvironment::set_battle_protector` only when the pass succeeds), which makes the pass
+`performed`. A retained battle without a controller or without a candidate gets no request and
+the next pass finds it again. A battle that actually leaves gets no request and no
+`protectors_chosen` entry, as before. A pending or failed post-batch request rolls the whole pass
+back like any other request.
+
+**Rationale.** The rules-researcher's answers (CR 2026-11-06):
+(1) CR 704.5x applies independently of CR 704.5v and CR 704.5w. If the graveyard move is
+replaced, the battle stays and ends the event with the chosen protector.
+(2) A no-candidate graveyard move is part of the same event, and per CR 704.7 a single
+replacement replaces both moves.
+(3) When the move goes through, skipping the choice cannot be observed: the protector designation
+leaves with the object, and its last known information comes from before the state-based actions
+(CR 704.8). Asking only matters when the move is replaced.
+So suppressing the request for a battle that actually leaves is still correct. A battle whose move
+was replaced must get its protector choice, otherwise it would stay on the battlefield with no
+protector forever (gate review round 2, finding R3). Asking only after the batch keeps the replay
+of every normal game unchanged.
+
+**Alternatives.** Asking every zero-defense battle before the batch. Rejected: it adds a
+meaningless decision to the replay of every normal case and changes existing replay logs. Skipping
+forever (the superseded behaviour). Rejected: a battle whose move a replacement keeps skipping
+would stay unprotected and never be asked.
+
+## Gate 02-state-objects R5 — Bulk downloads are capped in-process
+
+Amends "Gate 02-state-objects F12 — curl 8.4.0 minimum and a capped metadata read" (its curl
+version floor and its fail-open handling of an unparseable version).
+
+**Decision.** `Curl::download_to_file` runs curl without `--output`: curl writes the body to
+stdout and this program streams it, through a fixed 64 KiB buffer, into the existing part file
+(opened for writing and truncated, never created there; flushed at the end) with a byte cap of
+`Request.max_bytes` (`run_capped_to_file`, built on `copy_stream_capped`). At most `cap + 1`
+bytes are read and at most `cap` bytes are written; as soon as more than `cap` bytes arrive the
+curl process is killed and waited, and the caller (`stage`) removes the part file. The metadata
+read keeps its in-memory 1 MiB cap (`run_capped`). The curl version check is advisory only:
+`check_curl_version` returns `Ok(None)` for 8.4.0 or later and `Ok(Some(warning))` for an older or
+unparseable version (never `Err`), and at most one warning per process is printed on stderr; a
+failure to read `curl --version` is also only a warning (a missing curl still fails at the
+download's spawn). `--max-filesize <cap>` stays in the arguments as a second line of defence.
+
+**Rationale.** `curl --version` reports the curl frontend version, which need not be the version
+of the linked libcurl that actually enforces `--max-filesize` on a response of unknown size; an
+unparseable banner was fail-open; and with `--output` curl writes the file itself, so no
+in-process count could stop an oversized body before it reached the disk (the later
+`read_capped` only rejected it after it was written). Counting the bytes in this process makes
+the cap hold whatever curl or libcurl is installed (R12, REQ-NFR-004).
+
+**Alternatives.** Parse the `libcurl/x.y.z` token and fail closed on an older or unknown
+version (rejected: it still trusts the library's behaviour, and it breaks unusual or vendor
+builds whose banner differs). Keep `--output` and check the file size afterwards (rejected: the
+oversized body is already on disk by then).
+
+## Gate 02-state-objects R4 — Destination identity check after the records are written
+
+**Amends:** "Gate 02-state-objects F8 — The records file and the MTGJSON report must be different files" (the spelling pre-check stays).
+
+**Decision.** `import` keeps the pre-write spelling check (`resolve_dest`, exit 2 before anything is written). It adds an identity check: after the records file is written and before the report is written, when both destinations are files and the report destination exists and is the same file as the records destination (`same_file::is_same_file`: device and inode on Unix, the volume serial and file index on Windows), `import` exits 2 with the usage message "the records file and --mtgjson-report name the same file" and writes no report; the records file just written stays intact. The check is skipped when the report destination is a symbolic link, since the atomic rename replaces the link itself and cannot reach the records. The `same-file` crate, exact-pinned (`=1.0.6`, already in Cargo.lock through another package), is added as a workspace dependency used by `fineprint-ingest` only; it does not enter the rules crates.
+
+**Rationale.** Names such as `cards.json` and `Cards.json` differ in spelling but name one file on a case-insensitive file system (APFS, NTFS), so a spelling comparison lets the report replace the records and the command succeeds. File identity is the only reliable test, and it needs the file to exist: when neither file exists there is no identity yet, so a check before writing is impossible; the records file is therefore written first and the report destination tested next. One crate on every platform means one code path and no unsafe.
+
+**Alternatives.** Std-only `MetadataExt` (dev+ino) on Unix plus the crate on Windows (rejected: two code paths for no saving). Comparing lower-cased names (rejected: wrong on case-sensitive file systems, where case-distinct names are valid). Probing the directory's case sensitivity (rejected: racy and per directory).
+
+## Gate 02-state-objects R3b — Post-batch layer inputs for the retained-battle request
+
+Amends "Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense
+battle" (CodeRabbit gate round 3, thread 4697581022).
+
+**Decision.** `fineprint_core::sba` gains one additive entry point,
+`perform_all_relayered(registry, ctx, replacements, effects, layer_env, env, choices, post_batch)`,
+and one type alias,
+`PostBatchLayers<'a> = &'a mut dyn FnMut(&EventContext<'_>, &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment))`.
+After the batch, once the `&mut ctx` borrow of the bus has ended, the pass calls `post_batch` with
+the post-batch `EventContext`; the caller builds the layer inputs of that state and calls the inner
+closure with them, inside which the engine builds the post-batch `SbaView` used for BOTH the
+"still a CR 704.5x/704.5y subject" test and `protector_asks` (controller and candidates) of
+`Plan::retained_battles`. The provider is called at most once per pass, and only when a retained
+battle is still on the battlefield (an ordinary pass never calls it). Everything before the batch
+(check, `Plan::new`, the pre-batch request sequence and request ids, the batch) still reads
+`effects`/`layer_env`. `perform_all` keeps its signature and behaviour: it delegates to
+`perform_all_relayered` with a provider that hands back the same pre-batch `effects`/`layer_env`,
+and its rustdoc says so and points callers whose layer inputs depend on state the batch changes
+(unattach, counter removal, zone changes) to the new entry point. The name `perform_all_relayered`
+is the brief's recommendation and is kept.
+
+**Rationale.** `LayerEnvironment` is a caller-implemented trait (a pure function of the caller's
+state); the engine cannot rebuild it from `ctx`, and it cannot read the mutated context while the
+batch holds `&mut ctx`. Only the caller can supply post-batch layer inputs, so the engine hands it
+the post-batch context through a callback. The callback shape keeps the inputs inside the call
+(no lifetime escape, no unsafe code, no engine-side clone of the whole state), and calling it
+inside the pass keeps the rollback guarantee: a Pending post-batch request still restores every
+component through `perform_all`'s `Saved` restore.
+
+**Alternatives.** Change the `perform_all` signature (rejected: a breaking change to about twelve
+callers and to the public API, R2). A second pass that asks the retained battles with fresh inputs
+(rejected: the zero-defense finding would suppress the request again, since `Plan::new` cannot
+know the move was replaced). Keep the stale pre-batch inputs (rejected: wrong chooser or
+candidates when the batch changes a controller or counters that a layer effect reads).
+
+## Gate 02-state-objects R8b — An MTGJSON side that names an absent face is a disagreement
+
+Amends "Gate 02-state-objects R8" (the face pairing by `side`).
+
+**Decision.** In the MTGJSON cross-check, when every entry of a card carries a single lowercase letter `side` and an entry's letter names a face the normalized record does not have, that entry is reported as one disagreement `{"face": <index>, "field": "side", "scryfall": "absent", "mtgjson": "present"}` (`b` is index 1). It is emitted in entry order, after the card-wide and `faces` count disagreements, interleaved with the per-face ones. The `faces` count disagreement is unchanged, and so is the source-order pairing used when any `side` is unusable.
+
+**Rationale.** Silently skipping the entry made a card whose only face was never compared look agreed. The shape follows the per-face shape (`face`, `field`, `scryfall`, `mtgjson`) and carries kind words only, so untrusted MTGJSON text never enters the report.
+
+**Alternatives.** A top-level `unmatchedSides` list (rejected: changes the report layout and the `fields` consumers). Reusing `field: "faces"` with counts (rejected: counts can be equal, so it would not identify the entry). Rejecting the entry in `parse_atomic` (rejected: the card's other entries are still comparable, and a rejected record would hide the card from the report).
+
+## Gate 02-state-objects R3c — Post-batch eligibility, CR reference and lost controller for the retained-battle request
+
+Amends "Gate 02-state-objects R3b — Post-batch layer inputs for the retained-battle request" and
+"Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense battle"
+(review threads 4698236604, 4698236617, 4698236625).
+
+**Decision.**
+1. Additive eligibility-view entry point: `pub type PostBatchState<'a>` (a provider that calls its
+   callback once with the post-batch `&ContinuousEffects`, `&dyn LayerEnvironment` and a READ-ONLY
+   `&dyn SbaEnvironment`) and `pub fn perform_all_post_batch(...)` (same arguments as
+   `perform_all_relayered`, `post_batch: PostBatchState<'_>`), re-exported from `sba`. The
+   post-batch `SbaView` of the retained battles reads `battle_protector` and `can_be_protector`
+   from that view (both the CR 704.5x/704.5y subject test and the candidates). Internally all three
+   entry points share one private pass whose provider callback takes
+   `Option<&dyn SbaEnvironment>`; `perform_all_relayered` passes `None` (the pass's own `env`), so
+   its behaviour is byte-for-byte unchanged and `PostBatchLayers` is unchanged. Writes
+   (`set_battle_protector`, the deathtouch flag) stay on the original `&mut dyn SbaEnvironment`
+   after the pass succeeds. The game variant is still read from the pass's own `env`.
+2. CR reference from the post-batch entry: `plan.retained_battles` only selects the deferred battle
+   ids; each battle's `ProtectorAsk.cr` (and so the request's `reason.cr`) is the `cr_ref` of the
+   post-batch ChooseProtector entry that flags it (if two entries ever flagged one battle, the
+   first in registry order wins).
+3. Lost controller: in the deferred stage only, a retained battle whose controller has the
+   `LOST_THE_GAME` designation after the batch (or is not a player of the game) takes the same
+   no-request path as a battle without a controller: no request, no request id consumed, nothing
+   pending, not in `protectors_chosen`; the next pass finds it again. The shared `protector_asks`
+   and the pre-batch request sequence are unchanged.
+
+**Rationale.** `SbaEnvironment` is caller-supplied state, like `LayerEnvironment`, and the engine
+cannot ask the caller to re-read it while the batch holds `&mut ctx`; only the caller can describe
+the post-batch eligibility, and only read-only, so the writes remain where the rollback contract
+expects them. The engine takes the CR reference from the rule that actually flags the battle after
+the batch (a protector who lost the game in the same pass turns a CR 704.5y subject into a
+CR 704.5x one). A player who has lost the game cannot answer; the request would stay Pending until
+its default fires.
+
+**Alternatives.** Change `PostBatchLayers` to add the view (rejected: breaks the R3b public type,
+even if unreleased, and its callers). A second pass (rejected as in R3b). Apply the lost-controller
+check in the shared `protector_asks` (rejected: it would change the pre-batch request sequence).
+Keep the pre-batch CR reference (rejected: names a rule that no longer flags the battle).
+Open rules question for the rules-researcher: whether such a battle should instead leave with the
+player who lost, or another player choose; a follow-up decision amends this one if needed.
+Answered in R3d: CR 800.4a, CR 800.4h.
+
+## Gate 02-state-objects R3d — No protector request to a controller who lost the game, on every path
+
+**Decision.** Amends "Gate 02-state-objects R3c". The live-controller check of the post-batch
+retained-battle request (the controller is a player of the game without the `LOST_THE_GAME`
+designation) now applies to the ordinary, pre-batch protector requests too, through one shared
+helper (`can_choose_protector` in `crates/fineprint-core/src/sba/perform.rs`). On either path a
+CR 704.5x or CR 704.5y battle whose controller has lost the game, or is not a player of the game,
+gets no request and consumes no request id. On the ordinary path that battle also does not move:
+it stays on the battlefield without a protector, and the next pass finds it again (the same
+outcome as the deferred path). A battle with no candidate still goes to its owner's graveyard
+without a request, as before; for example, a typeless battle whose controller lost the game has
+no candidate because its only appropriate player has left. Requests to live controllers, their
+order (CR 101.4) and their request ids are unchanged.
+
+**Rationale.** CR 704.5x and CR 704.5y name "that battle's controller" as the chooser. CR 800.4a
+removes (exiles) the battle when that player leaves the game, so normally no choice remains. CR
+800.4h says: "If a rule requires a player who has left the game to make a choice, the next player
+in turn order makes that choice." That is reachable only if such a choice survives the departure.
+The engine marks a player who lost with the [`LOST_THE_GAME`] designation but does not yet perform
+the departure (#125), so asking that player would suspend the pass on a choice nobody can answer. This can happen on the ordinary path
+(CodeRabbit thread 4699044484). In pass 1, a Siege at defense 0 has its graveyard move replaced
+by a defense counter while its controller loses the game. In pass 2, the Siege is at defense 1,
+is a CR 704.5x subject, and is planned as an ordinary request. CR 800.4a makes the leaving
+player's objects leave the game or be exiled. Performing that is the caller's job (player
+removal), not the SBA pass's, so the pass does not invent a graveyard move for such a battle.
+Leaving the battle in place keeps the two paths identical and lets the player-leaves-game
+procedure deal with it. One helper keeps the two checks from drifting apart.
+
+**Alternatives.** (1) Treat a lost controller like a missing controller on the ordinary path, so
+the battle goes to the graveyard with the batch. Rejected: no rule supports a graveyard move for
+this reason, the move would pre-empt CR 800.4a exile and the triggers that look at it, and it
+would differ from the deferred path. (2) Hand the choice to another player, such as the next
+player in APNAP order. Rejected: CR 800.4a applies first and removes the battle when the player
+leaves (performed by the player-leaves-game procedure, #125), and CR 800.4h applies only to a
+player who has left the game and only to a choice that survives departure. Routing such a
+surviving choice to the next player in turn order (CR 800.4h, not APNAP) belongs with #125
+(rules-researcher, CR 2026-11-06).
+(3) Keep the check on the deferred path only. Rejected: that is the reported suspension defect.

@@ -144,6 +144,33 @@ impl CharacteristicsProvider for Snapshot {
     }
 }
 
+/// The layer environment over `zones` and the object markers of `events`, with the synthetic
+/// characteristics `chars` per card.
+fn snapshot_of(
+    zones: &Zones,
+    events: &EventState,
+    chars: &BTreeMap<CardId, Characteristics>,
+) -> Snapshot {
+    let mut bases = BTreeMap::new();
+    let mut counters = BTreeMap::new();
+    for id in zones.all_object_ids() {
+        let record = zones.object(id).unwrap();
+        let Some(c) = chars.get(&record.card) else {
+            continue;
+        };
+        bases.insert(
+            id,
+            ObjectBase {
+                characteristics: c.clone(),
+                controller: Some(record.controller),
+                on_battlefield: record.zone == ZoneId::Battlefield,
+            },
+        );
+        counters.insert(id, events.markers().counters(id));
+    }
+    Snapshot { bases, counters }
+}
+
 impl World {
     /// Two players at 20 life, turn 1, active player 1.
     fn new() -> World {
@@ -211,24 +238,7 @@ impl World {
     }
 
     fn snapshot(&self) -> Snapshot {
-        let mut bases = BTreeMap::new();
-        let mut counters = BTreeMap::new();
-        for id in self.zones.all_object_ids() {
-            let record = self.zones.object(id).unwrap();
-            let Some(c) = self.chars.get(&record.card) else {
-                continue;
-            };
-            bases.insert(
-                id,
-                ObjectBase {
-                    characteristics: c.clone(),
-                    controller: Some(record.controller),
-                    on_battlefield: record.zone == ZoneId::Battlefield,
-                },
-            );
-            counters.insert(id, self.events.markers().counters(id));
-        }
-        Snapshot { bases, counters }
+        snapshot_of(&self.zones, &self.events, &self.chars)
     }
 
     /// Executes `event` directly (no bus), for setup.
@@ -396,6 +406,17 @@ fn run_pass(w: &mut World, ch: &mut ChoiceContext<'_>) -> Result<Out, Interrupt>
         provider: &snap,
     };
     let result = perform_all(&registry, &mut ctx, replacements, effects, &snap, env, ch);
+    settle(w, before, result)
+}
+
+/// The session result of one pass of `w` whose hash before the pass was `before`: a pending
+/// choice or an error asserts that the world is exactly as before the call, then propagates
+/// (an invalid answer through `Interrupt::from`); every other error is the run's output.
+fn settle(
+    w: &World,
+    before: Digest,
+    result: Result<SbaOutcome, BusInterrupt>,
+) -> Result<Out, Interrupt> {
     match result {
         Ok(outcome) => Ok(Ok(outcome)),
         Err(BusInterrupt::Pending(r)) => {
@@ -4648,7 +4669,7 @@ fn sba_704_5x_siege_without_protector() {
     assert_eq!(r.chooser, p(1));
     assert_eq!(r.choice_type, ChoiceType::ChoosePlayer);
     assert_eq!(r.reason.cr, "CR 704.5x");
-    assert_eq!(r.reason.source, None);
+    assert_eq!(r.reason.source, Some(s));
     assert_eq!((r.min, r.max), (1, 1));
     assert_eq!(
         r.payload,
@@ -4886,11 +4907,13 @@ fn sba_704_5x_no_candidate_goes_to_the_owners_graveyard() {
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
 }
 
-// REQ-SBA-001, CR 704.5x, CR 704.5y, CR 310.11, CR 506.4c: a battle being attacked gets no
-// protector request (neither without a protector nor with an illegal one); an attacker whose
-// battle was removed from combat (`Attacking(None)`) attacks nothing and exempts nothing.
+// REQ-SBA-001, CR 704.5x, CR 704.5y, CR 506.4c (gate 02-state-objects F4): a battle being
+// attacked with NO protector gets no request (CR 704.5x has the attack condition), but a battle
+// being attacked whose protector can't be its protector IS a CR 704.5y finding and is asked;
+// an attacker whose battle was removed from combat (`Attacking(None)`) attacks nothing and
+// exempts nothing.
 #[test]
-fn sba_704_5x_y_attacked_battle_is_exempt() {
+fn sba_704_5x_attacked_exempt_but_704_5y_attacked_asked() {
     let mut w = World::new();
     let none = w.new_battle(1, 1, true, 3, None);
     let wrong = w.new_battle(1, 1, true, 3, Some(1));
@@ -4898,13 +4921,18 @@ fn sba_704_5x_y_attacked_battle_is_exempt() {
     let attacker2 = w.creature(2, 2);
     w.attack_battle(attacker, none);
     w.attack_battle(attacker2, wrong);
-    assert!(w.check().is_empty());
-    assert!(!pass(&mut w).performed);
+    assert!(w.found_by("704.5x").is_empty());
+    assert_eq!(w.found_by("704.5y"), [wrong]);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(asked[0].reason.source, Some(wrong));
+    assert_eq!(run.out.unwrap().protectors_chosen, [(wrong, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&wrong), Some(&p(2)));
     w.permanents
         .set_attack(attacker, crate::permanent::AttackState::Attacking(None))
         .unwrap();
     assert_eq!(w.found_by("704.5x"), [none]);
-    assert!(w.found_by("704.5y").is_empty());
 }
 
 // REQ-SBA-001, CR 704.5x: a protector who lost the game, or who is not a player in the game, is
@@ -4991,6 +5019,959 @@ fn sba_704_5x_y_battle_at_zero_defense_asks_nothing() {
     );
     assert_eq!(out.findings.len(), 4);
     assert!(!w.env.battle_protectors.contains_key(&s));
+}
+
+// Gate 02-state-objects R3: a battle at defense 0 whose graveyard move a replacement effect
+// skipped stays on the battlefield and gets its protector choice after the batch.
+
+impl World {
+    /// A persistent `Skip` of the state-based graveyard move of `object` (CR 614.6).
+    fn skip_sba_move(&mut self, effect: u64, object: ObjectId) {
+        self.registry
+            .add(ReplacementEffect::new(
+                e(effect),
+                sba_move_of(object),
+                Action::Skip,
+            ))
+            .unwrap();
+    }
+}
+
+/// Runs the retained-battle scenario of `w` (battle `b`, expected entries `entries`, reason
+/// `cr`, one candidate `candidate`): exactly one request after the batch, a pending pass leaves
+/// the state unchanged, the answer is recorded, the pass is deterministic, and the next pass asks
+/// nothing and still skips the move. Returns the world after the first pass.
+fn assert_retained_battle_asked(
+    mut w: World,
+    b: ObjectId,
+    entries: [&str; 2],
+    cr: &str,
+    candidate: u64,
+) -> World {
+    assert_eq!(w.found(obj(b)), entries);
+    let before = w.state_hash();
+    // Pending: the request is the only one, and the state is exactly as before the pass (also
+    // asserted inside the procedure).
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(pending.choice_type, ChoiceType::ChoosePlayer);
+    assert_eq!(pending.chooser, p(1));
+    assert_eq!(pending.reason.cr, cr);
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!((pending.min, pending.max), (1, 1));
+    assert!(!pending.hidden);
+    assert_eq!(pending.default_on_timeout, submit_player(candidate));
+    assert_eq!(
+        pending.options,
+        ChoiceOptions::Enumerated(vec![ChoiceOption::Player(p(candidate))])
+    );
+    assert_eq!(
+        pending.payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(candidate)]
+        }
+    );
+    let (run, asked) = drive_answers(&w, &[submit_player(candidate)]);
+    assert_eq!(asked, [pending]);
+    let out = run.out.as_ref().unwrap().clone();
+    assert_eq!(out.protectors_chosen, [(b, p(candidate))]);
+    assert!(out.performed);
+    assert!(out.executed.is_empty());
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(run.state.env.battle_protectors.get(&b), Some(&p(candidate)));
+    // CR 704.3, REQ-CORE-001: the same requests (ids included) and the same result again.
+    let (again, asked_again) = drive_answers(&w, &[submit_player(candidate)]);
+    assert_eq!(asked_again, asked);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+    // T2: the next pass asks nothing more for it; the move is still skipped.
+    w = run.state;
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.executed.is_empty());
+    assert!(!out.performed);
+    assert_eq!(out.findings.len(), 1);
+    assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    w
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects R3): a non-Siege
+// battle at defense 0 with no protector whose graveyard move a persistent replacement skips stays
+// on the battlefield: its controller is asked its protector after the batch (one CHOOSE_PLAYER,
+// reason CR 704.5x, source the battle); the next pass asks nothing.
+#[test]
+fn sba_704_5w_x_retained_battle_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, b);
+    assert_retained_battle_asked(w, b, ["704.5w", "704.5x"], "CR 704.5x", 1);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 614.6 (gate 02-state-objects R3): the same for a Siege at
+// defense 0 (its candidates are its controller's opponents).
+#[test]
+fn sba_704_5v_x_retained_siege_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    assert_retained_battle_asked(w, s, ["704.5v", "704.5x"], "CR 704.5x", 2);
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5y, CR 614.6 (gate 02-state-objects R3): the same for a
+// typeless battle at defense 0 whose protector (an opponent) can't be its protector: reason
+// CR 704.5y, the old protector replaced.
+#[test]
+fn sba_704_5w_y_retained_battle_is_asked_after_the_batch() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, Some(2));
+    w.skip_sba_move(1, b);
+    let w = assert_retained_battle_asked(w, b, ["704.5w", "704.5y"], "CR 704.5y", 1);
+    assert_eq!(w.env.battle_protectors[&b], p(1));
+}
+
+// REQ-SBA-001, CR 704.3, CR 704.5f, CR 704.5w, CR 704.5x, CR 704.8 (gate 02-state-objects R3):
+// the post-batch request of a retained battle comes after a batch that changed the state (a
+// creature died); a pending post-batch request still leaves every component exactly as before
+// the pass, and answering it completes the pass with both results.
+#[test]
+fn sba_704_5x_retained_request_pending_after_a_real_batch_restores() {
+    let mut w = World::new();
+    let c = w.creature(2, 0);
+    let c_card = w.card_of(c);
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, b);
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), run_pass).unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!(session.state_hash(), before);
+    assert!(session.base().zones.object(c).is_some());
+    let (run, asked) = drive_answers(&w, &[submit_player(1)]);
+    assert_eq!(asked, [pending]);
+    let out = run.out.unwrap();
+    // The skipped move of the battle never happens; only the creature's move occurred.
+    assert_eq!(
+        batch_shape(&out).0,
+        [(c, ZoneChangeCause::StateBasedAction)]
+    );
+    assert_eq!(out.protectors_chosen, [(b, p(1))]);
+    assert_eq!(
+        run.state.zone_of_card(c_card),
+        Some(ZoneId::Graveyard(p(2)))
+    );
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+}
+
+// REQ-SBA-001, CR 704.5x, CR 704.5w, CR 614.6 (gate 02-state-objects R3): two retained battles of
+// different controllers are asked in APNAP order of the choosers (the active player's battle has
+// the HIGHER id and is asked first), then ascending battle id; a retained battle comes after an
+// ordinary pre-batch protector request even when the ordinary chooser is later in APNAP order.
+#[test]
+fn sba_704_5x_retained_requests_in_apnap_order_after_the_pre_batch_ones() {
+    let mut w = World::new();
+    let n = w.new_battle(2, 2, false, 0, None);
+    let a1 = w.new_battle(1, 1, false, 0, None);
+    let a2 = w.new_battle(1, 1, true, 0, None);
+    for (i, b) in [n, a1, a2].into_iter().enumerate() {
+        w.skip_sba_move(u64::try_from(i).unwrap() + 1, b);
+    }
+    let (run, asked) = drive_answers(&w, &[submit_player(1), submit_player(2), submit_player(2)]);
+    let order: Vec<(PlayerId, Option<ObjectId>)> =
+        asked.iter().map(|r| (r.chooser, r.reason.source)).collect();
+    assert_eq!(order, [(p(1), Some(a1)), (p(1), Some(a2)), (p(2), Some(n))]);
+    assert!(asked.windows(2).all(|r| r[0].request_id < r[1].request_id));
+    assert_eq!(
+        run.out.unwrap().protectors_chosen,
+        [(n, p(2)), (a1, p(1)), (a2, p(2))]
+    );
+
+    // An ordinary protector choice of player 2 (asked before the batch) comes before the
+    // retained battle of the active player 1 (asked after it).
+    let mut w = World::new();
+    let ordinary = w.new_battle(2, 2, false, 3, None);
+    let retained = w.new_battle(1, 1, false, 0, None);
+    w.skip_sba_move(1, retained);
+    let (run, asked) = drive_answers(&w, &[submit_player(2), submit_player(1)]);
+    let order: Vec<(PlayerId, Option<ObjectId>)> =
+        asked.iter().map(|r| (r.chooser, r.reason.source)).collect();
+    assert_eq!(order, [(p(2), Some(ordinary)), (p(1), Some(retained))]);
+    assert!(asked[0].request_id < asked[1].request_id);
+    assert_eq!(
+        run.out.unwrap().protectors_chosen,
+        [(ordinary, p(2)), (retained, p(1))]
+    );
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5w, CR 704.5x, CR 704.8 (gate 02-state-objects R3): a battle at
+// defense 0 whose move is NOT replaced leaves with the batch and gets no request, not even after
+// the batch; the pass consumes no request id (the next request has the same id as in a world
+// without that battle).
+#[test]
+fn sba_704_5x_leaving_battle_consumes_no_request_id() {
+    let mut base = World::new();
+    let ordinary = base.new_battle(2, 2, false, 3, None);
+    let (_, asked_base) = drive_answers(&base, &[submit_player(2)]);
+    let mut w = base.clone();
+    let s = w.new_battle(1, 1, true, 0, None);
+    let b = w.new_battle(1, 1, false, 0, None);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.source, Some(ordinary));
+    assert_eq!(asked[0].request_id, asked_base[0].request_id);
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(ordinary, p(2))]);
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (s, ZoneChangeCause::StateBasedAction),
+            (b, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+}
+
+// REQ-SBA-001, CR 704.5w, CR 704.5x, CR 614.6 (gate 02-state-objects R3): a retained battle with
+// no candidate (its controller can't protect it) gets no request and no panic; the pass is not
+// performed by it and the state is unchanged.
+#[test]
+fn sba_704_5x_retained_battle_without_candidate_asks_nothing() {
+    let mut w = World::new();
+    let b = w.new_battle(1, 1, false, 0, None);
+    w.env.illegal_protectors.insert((b, p(1)));
+    w.skip_sba_move(1, b);
+    let before = w.state_hash();
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(!out.performed);
+    assert_eq!(out.findings.len(), 2);
+    assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(w.state_hash(), before);
+}
+
+// Gate 02-state-objects R3b: the retained-battle request reads the layer inputs of the state
+// after the batch, which `perform_all_relayered` receives from the caller's provider.
+
+/// How a test caller of [`perform_all_relayered`] derives its layer inputs (CR 613.1, CR 613.4).
+#[derive(Clone, Copy, Debug)]
+struct Relayer {
+    /// `(equipment, battle, player)`: the caller's own rule "while `equipment` is attached to
+    /// `battle`, a control-changing layer effect gives `battle` to `player`", applied to the
+    /// permanents of the state it describes.
+    rule: Option<(ObjectId, ObjectId, u64)>,
+    /// The provider hands back the PRE-batch inputs instead of inputs of the state after the
+    /// batch (what [`perform_all`] does).
+    stale: bool,
+}
+
+/// `base` plus the control effect of `rule` if its equipment is attached to its battle in
+/// `permanents`.
+fn rule_effects(
+    base: &ContinuousEffects,
+    permanents: &Permanents,
+    rule: Option<(ObjectId, ObjectId, u64)>,
+) -> ContinuousEffects {
+    let mut effects = base.clone();
+    if let Some((equipment, battle, player)) = rule
+        && permanents.attached_to(equipment) == Some(AttachTarget::Permanent(battle))
+    {
+        effects
+            .register(
+                e(90),
+                ContinuousEffect {
+                    source: Some(equipment),
+                    controller: p(player),
+                    timestamp: Timestamp::new(90),
+                    layer: Layer::L2,
+                    is_cda: false,
+                    origin: EffectOrigin::Resolved,
+                    affected: Affected::Objects(BTreeSet::from([battle])),
+                    modification: LayerModification::SetController(p(player)),
+                },
+            )
+            .unwrap();
+    }
+    effects
+}
+
+/// One `perform_all_relayered` pass over `w` whose layer inputs follow `relayer`; every call of
+/// the provider increments `calls`. Pending and error handling as [`run_pass`].
+fn run_pass_relayered(
+    w: &mut World,
+    ch: &mut ChoiceContext<'_>,
+    relayer: Relayer,
+    calls: &std::cell::Cell<usize>,
+) -> Result<Out, Interrupt> {
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    let pre_effects = rule_effects(&w.effects, &w.permanents, relayer.rule);
+    let registry = SbaRegistry::standard();
+    let World {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        registry: replacements,
+        effects,
+        chars,
+        env,
+        ..
+    } = w;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider: &snap,
+    };
+    let mut provider =
+        |after: &EventContext<'_>,
+         view: &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment)| {
+            calls.set(calls.get() + 1);
+            if relayer.stale {
+                view(&pre_effects, &snap);
+                return;
+            }
+            // A fresh snapshot of the context after the batch, and the caller's rule applied
+            // to its permanents.
+            let fresh = snapshot_of(after.zones, after.events, chars);
+            let fresh_effects = rule_effects(effects, after.permanents, relayer.rule);
+            view(&fresh_effects, &fresh);
+        };
+    let result = perform_all_relayered(
+        &registry,
+        &mut ctx,
+        replacements,
+        &pre_effects,
+        &snap,
+        env,
+        ch,
+        &mut provider,
+    );
+    settle(w, before, result)
+}
+
+/// Runs one `perform_all_relayered` pass on a clone of `w` in a choice session, answering
+/// `answers` in order; returns the run, every request asked and the number of provider calls of
+/// each run of the procedure (the start, then one per answer).
+fn drive_relayered(
+    w: &World,
+    answers: &[ChoiceResponse],
+    relayer: Relayer,
+) -> (Run, Vec<PendingChoiceRequest>, Vec<usize>) {
+    let calls = std::cell::Cell::new(0);
+    let mut session =
+        ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+            run_pass_relayered(w, ch, relayer, &calls)
+        })
+        .unwrap();
+    let mut per_run = vec![calls.replace(0)];
+    let mut asked = Vec::new();
+    let mut answers = answers.iter();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                assert!(answers.next().is_none(), "unused answers");
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked, per_run);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        let answer = answers.next().expect("more requests than answers").clone();
+        session.submit(pending.request_id, answer).unwrap();
+        per_run.push(calls.replace(0));
+        asked.push(pending);
+    }
+}
+
+/// A typeless battle `b` of player 2 at defense 0 with no protector whose graveyard move a
+/// persistent replacement skips, with an Equipment `gear` of player 1 attached to it (an
+/// Equipment can't equip a battle, so the batch unattaches it). The caller's rule gives control
+/// of `b` to player 1 while `gear` is attached: before the batch player 1 controls `b`, after it
+/// player 2 does. Returns (world, b, gear, rule).
+fn relayer_world() -> (World, ObjectId, ObjectId, Option<(ObjectId, ObjectId, u64)>) {
+    let mut w = World::new();
+    let b = w.new_battle(2, 2, false, 0, None);
+    w.skip_sba_move(1, b);
+    let gear = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(gear, AttachTarget::Permanent(b));
+    (w, b, gear, Some((gear, b, 1)))
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 704.5w, CR 704.5x, CR 614.6, CR 704.3, CR 613.1 (gate
+// 02-state-objects R3b, thread 4697581022): a retained battle whose controller, through a layer
+// effect, changes with the batch is asked by its controller AFTER the batch, with the candidates
+// of the state after the batch, when the caller supplies post-batch layer inputs. With the
+// pre-batch inputs (a stale provider, or `perform_all`) the request would go to the pre-batch
+// controller: both are asserted, so the test fails if the post-batch view used stale inputs.
+#[test]
+fn sba_704_5x_retained_request_reads_post_batch_layer_inputs() {
+    let (w, b, gear, rule) = relayer_world();
+    let fresh = Relayer { rule, stale: false };
+    let (run, asked, calls) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(calls, [1, 1]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(asked[0].reason.source, Some(b));
+    assert_eq!(
+        asked[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(2)]
+        }
+    );
+    assert_eq!(asked[0].default_on_timeout, submit_player(2));
+    let out = run.out.unwrap();
+    assert_eq!(out.unattached, [gear]);
+    assert_eq!(out.protectors_chosen, [(b, p(2))]);
+    assert_eq!(run.state.permanents.attached_to(gear), None);
+    assert_eq!(run.state.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(run.state.env.battle_protectors.get(&b), Some(&p(2)));
+
+    // The stale pre-batch inputs: the pre-batch controller (player 1) and its candidates.
+    let stale = Relayer { rule, stale: true };
+    let (run_stale, asked_stale, _) = drive_relayered(&w, &[submit_player(1)], stale);
+    assert_eq!(asked_stale.len(), 1);
+    assert_eq!(asked_stale[0].chooser, p(1));
+    assert_eq!(
+        asked_stale[0].payload,
+        ChoicePayload::ChoosePlayer {
+            players: vec![p(1)]
+        }
+    );
+    assert_eq!(asked_stale[0].request_id, asked[0].request_id);
+
+    // T2: `perform_all` with the same pre-batch inputs gives exactly the stale result.
+    let mut w_all = w.clone();
+    w_all.effects = rule_effects(&w.effects, &w.permanents, rule);
+    let (run_all, asked_all) = drive_answers(&w_all, &[submit_player(1)]);
+    assert_eq!(asked_all, asked_stale);
+    assert_eq!(run_all.out, run_stale.out);
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, CR 704.5x, CR 704.5v, CR 704.5w, CR 704.8 (gate
+// 02-state-objects R3b): the provider is never called by a pass without a retained battle (an
+// ordinary protector request before the batch) nor by one whose zero-defense battles all leave
+// with the batch; it is called exactly once per run of a pass with two retained battles, and
+// that pass asks exactly what `perform_all` asks.
+#[test]
+fn sba_704_5x_post_batch_provider_called_only_for_retained_battles() {
+    let plain = Relayer {
+        rule: None,
+        stale: false,
+    };
+    let mut w = World::new();
+    let ordinary = w.new_battle(2, 2, false, 3, None);
+    let leaving = w.new_battle(1, 1, true, 0, None);
+    let (run, asked, calls) = drive_relayered(&w, &[submit_player(2)], plain);
+    assert_eq!(calls, [0, 0]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.source, Some(ordinary));
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [(leaving, ZoneChangeCause::StateBasedAction)]
+    );
+    let (run_all, asked_all) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked_all, asked);
+    assert_eq!(run_all.out.unwrap(), out);
+
+    let mut w = World::new();
+    let a1 = w.new_battle(1, 1, false, 0, None);
+    let a2 = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, a1);
+    w.skip_sba_move(2, a2);
+    let answers = [submit_player(1), submit_player(2)];
+    let (run, asked, calls) = drive_relayered(&w, &answers, plain);
+    assert_eq!(calls, [1, 1, 1]);
+    let sources: Vec<Option<ObjectId>> = asked.iter().map(|r| r.reason.source).collect();
+    assert_eq!(sources, [Some(a1), Some(a2)]);
+    let (run_all, asked_all) = drive_answers(&w, &answers);
+    assert_eq!(asked_all, asked);
+    assert_eq!(run_all.out, run.out);
+    assert_eq!(run_all.hash, run.hash);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(a1, p(1)), (a2, p(2))]);
+}
+
+// REQ-SBA-001, REQ-CORE-001, CR 704.3, CR 704.5x, CR 614.6 (gate 02-state-objects R3b): a
+// pending post-batch request through `perform_all_relayered` leaves the world exactly as before
+// the pass (also asserted inside the procedure), although the provider read the state after the
+// batch; answering completes the pass, and a second run reproduces the same request ids and the
+// same result.
+#[test]
+fn sba_704_5x_relayered_pending_restores_and_replays() {
+    let (w, b, _, rule) = relayer_world();
+    let fresh = Relayer { rule, stale: false };
+    let before = w.state_hash();
+    let calls = std::cell::Cell::new(0);
+    let session = ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+        run_pass_relayered(w, ch, fresh, &calls)
+    })
+    .unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(pending.reason.source, Some(b));
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(session.base().state_hash(), before);
+    let (run, asked, _) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(asked, [pending]);
+    let (again, asked_again, _) = drive_relayered(&w, &[submit_player(2)], fresh);
+    assert_eq!(asked_again, asked);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+    assert_ne!(run.hash, before);
+}
+
+// Gate 02-state-objects R3c: the retained-battle request reads the protector facts of the state
+// after the batch from the caller's read-only view (`perform_all_post_batch`), names the CR
+// rule of the entry that flags the battle after the batch, and is never addressed to a player
+// who has lost the game.
+
+/// How a test caller of [`perform_all_post_batch`] derives its read-only post-batch protector
+/// view from the pre-batch environment and the context after the batch.
+type ViewRule<'a> = &'a dyn Fn(&StoredSbaEnvironment, &EventContext<'_>) -> StoredSbaEnvironment;
+
+/// One `perform_all_post_batch` pass over `w`: fresh layer inputs of the state after the batch,
+/// and the protector view `rule` derives. Pending and error handling as [`run_pass`].
+fn run_pass_post_batch(
+    w: &mut World,
+    ch: &mut ChoiceContext<'_>,
+    rule: ViewRule<'_>,
+) -> Result<Out, Interrupt> {
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    let pre_env = w.env.clone();
+    let registry = SbaRegistry::standard();
+    let World {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        registry: replacements,
+        effects,
+        chars,
+        env,
+        ..
+    } = w;
+    let effects: &ContinuousEffects = effects;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider: &snap,
+    };
+    let mut provider = |after: &EventContext<'_>,
+                        view: &mut dyn FnMut(
+        &ContinuousEffects,
+        &dyn LayerEnvironment,
+        &dyn SbaEnvironment,
+    )| {
+        let fresh = snapshot_of(after.zones, after.events, chars);
+        let facts = rule(&pre_env, after);
+        view(effects, &fresh, &facts);
+    };
+    let result = perform_all_post_batch(
+        &registry,
+        &mut ctx,
+        replacements,
+        effects,
+        &snap,
+        env,
+        ch,
+        &mut provider,
+    );
+    settle(w, before, result)
+}
+
+/// Runs one `perform_all_post_batch` pass on a clone of `w` in a choice session, answering
+/// `answers` in order; returns the run and every request asked.
+fn drive_post_batch(
+    w: &World,
+    answers: &[ChoiceResponse],
+    rule: ViewRule<'_>,
+) -> (Run, Vec<PendingChoiceRequest>) {
+    let mut session =
+        ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+            run_pass_post_batch(w, ch, rule)
+        })
+        .unwrap();
+    let mut asked = Vec::new();
+    let mut answers = answers.iter();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                assert!(answers.next().is_none(), "unused answers");
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        let answer = answers.next().expect("more requests than answers").clone();
+        session.submit(pending.request_id, answer).unwrap();
+        asked.push(pending);
+    }
+}
+
+/// The protector candidates of a `CHOOSE_PLAYER` request.
+fn player_candidates(r: &PendingChoiceRequest) -> Vec<PlayerId> {
+    match &r.payload {
+        ChoicePayload::ChoosePlayer { players } => players.clone(),
+        other => panic!("not a CHOOSE_PLAYER payload: {other:?}"),
+    }
+}
+
+/// Three players (active player 1): a Siege `s` of player 1 at defense 0 with no protector,
+/// unattacked, whose graveyard move a persistent replacement skips, with an Equipment `gear`
+/// attached to it (the batch unattaches it). The caller's environment says player 2
+/// can't be the protector of `s` while `gear` is attached to it. Returns (world, s, gear).
+fn post_batch_eligibility_world() -> (World, ObjectId, ObjectId) {
+    let mut w = World::three([1, 2, 3], 1);
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    let gear = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(gear, AttachTarget::Permanent(s));
+    w.env.illegal_protectors.insert((s, p(2)));
+    (w, s, gear)
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 704.5v, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects
+// R3c, thread 4698236604): the post-batch request of a retained Siege reads who can be its
+// protector from the caller's post-batch view: player 2 becomes eligible when the batch
+// unattaches the Equipment, so the candidates are players 2 and 3; with the pre-batch
+// environment (the view routed back to it, or `perform_all`) they would be player 3 only. The
+// chosen protector is written through the ORIGINAL environment after the pass succeeded (the
+// view is never written back); a pending request leaves the world, its environment flags and
+// recorded protectors included, exactly as before the pass.
+#[test]
+fn sba_704_5x_retained_request_reads_post_batch_eligibility_view() {
+    let (w, s, gear) = post_batch_eligibility_world();
+    assert_eq!(w.clone().found(obj(s)), ["704.5v", "704.5x"]);
+    let unattached = move |pre: &StoredSbaEnvironment, after: &EventContext<'_>| {
+        let mut view = pre.clone();
+        if after.permanents.attached_to(gear) != Some(AttachTarget::Permanent(s)) {
+            view.illegal_protectors.remove(&(s, p(2)));
+        }
+        view
+    };
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+        run_pass_post_batch(w, ch, &unattached)
+    })
+    .unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(session.base().env, w.env);
+    assert_eq!(pending.chooser, p(1));
+    assert_eq!(pending.reason.cr, "CR 704.5x");
+    assert_eq!(pending.reason.source, Some(s));
+    assert_eq!(player_candidates(&pending), [p(2), p(3)]);
+    assert_eq!(pending.default_on_timeout, submit_player(2));
+
+    let (run, asked) = drive_post_batch(&w, &[submit_player(2)], &unattached);
+    assert_eq!(asked, std::slice::from_ref(&pending));
+    let out = run.out.unwrap();
+    assert_eq!(out.unattached, [gear]);
+    assert_eq!(out.protectors_chosen, [(s, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&s), Some(&p(2)));
+    // The view's eligibility never reaches the original environment.
+    assert!(run.state.env.illegal_protectors.contains(&(s, p(2))));
+    assert_eq!(run.state.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+
+    // The view routed back to the pre-batch environment: player 3 only, same request id.
+    let stale = |pre: &StoredSbaEnvironment, _: &EventContext<'_>| pre.clone();
+    let (run_stale, asked_stale) = drive_post_batch(&w, &[submit_player(3)], &stale);
+    assert_eq!(asked_stale.len(), 1);
+    assert_eq!(player_candidates(&asked_stale[0]), [p(3)]);
+    assert_eq!(asked_stale[0].request_id, pending.request_id);
+    // T2: `perform_all` (and so `perform_all_relayered`) reads the pass's own environment.
+    let (run_all, asked_all) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked_all, asked_stale);
+    assert_eq!(run_all.out, run_stale.out);
+    assert_eq!(run_all.hash, run_stale.hash);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 704.5y, CR 614.6 (gate 02-state-objects R3c,
+// thread 4698236617): an unattacked Siege at defense 0 whose protector (player 2) can't be its
+// protector is a CR 704.5y subject before the batch; player 2 loses the game in the same pass,
+// so after the batch the Siege has no protector and the entry that flags it is CR 704.5x: the
+// post-batch request names CR 704.5x, not the pre-batch CR 704.5y.
+#[test]
+fn sba_704_5x_retained_request_names_the_post_batch_rule() {
+    let mut w = World::three([1, 2, 3], 1);
+    let s = w.new_battle(1, 1, true, 0, Some(2));
+    w.env.illegal_protectors.insert((s, p(2)));
+    w.skip_sba_move(1, s);
+    w.set_life(2, 0);
+    assert_eq!(w.found(obj(s)), ["704.5v", "704.5y"]);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(asked[0].reason.source, Some(s));
+    assert_eq!(player_candidates(&asked[0]), [p(3)]);
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(2)]);
+    assert_eq!(out.protectors_chosen, [(s, p(3))]);
+    assert_eq!(run.state.env.battle_protectors.get(&s), Some(&p(3)));
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 704.5y, CR 614.6 (gate 02-state-objects R3c, thread
+// 4698236617): controls. A retained Siege that is CR 704.5y before and after the batch keeps
+// CR 704.5y (also when the post-batch view changes why its protector is illegal); one that is
+// CR 704.5x both times keeps CR 704.5x; one that is CR 704.5x before the batch and, in the
+// caller's post-batch view, has a protector that can't protect it (its own controller) is
+// asked with CR 704.5y.
+#[test]
+fn sba_704_5x_y_retained_request_rule_controls() {
+    // 704.5y both times (the pass's own environment).
+    let mut w = World::three([1, 2, 3], 1);
+    let y = w.new_battle(1, 1, true, 0, Some(2));
+    w.env.illegal_protectors.insert((y, p(2)));
+    w.skip_sba_move(1, y);
+    assert_eq!(w.found(obj(y)), ["704.5v", "704.5y"]);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(y, p(3))]);
+
+    // 704.5y both times, the eligibility changed by the view: the protector is now the Siege's
+    // own controller (illegal by battle type) and player 2 is eligible again.
+    let own = move |pre: &StoredSbaEnvironment, _: &EventContext<'_>| {
+        let mut view = pre.clone();
+        view.illegal_protectors.remove(&(y, p(2)));
+        view.battle_protectors.insert(y, p(1));
+        view
+    };
+    let (run, asked) = drive_post_batch(&w, &[submit_player(2)], &own);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(y, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&y), Some(&p(2)));
+
+    // 704.5x both times.
+    let mut w = World::three([1, 2, 3], 1);
+    let x = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, x);
+    assert_eq!(w.found(obj(x)), ["704.5v", "704.5x"]);
+    let (_, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+
+    // 704.5x before the batch, 704.5y in the post-batch view.
+    let protected_by_self = move |pre: &StoredSbaEnvironment, _: &EventContext<'_>| {
+        let mut view = pre.clone();
+        view.battle_protectors.insert(x, p(1));
+        view
+    };
+    let (run, asked) = drive_post_batch(&w, &[submit_player(3)], &protected_by_self);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(x, p(3))]);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects R3c,
+// thread 4698236625): an unattacked Siege at defense 0 with no protector whose graveyard move a
+// replacement skips, and whose controller loses the game in the same pass: no request names the
+// lost controller (none is made, no request id consumed, nothing pending), the pass succeeds
+// with the loss, the Siege gets no protector and the next pass finds it again without a
+// request. Control: the same Siege whose controller stays in the game is asked.
+#[test]
+fn sba_704_5x_retained_battle_of_a_lost_controller_asks_nothing() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+
+    // Control: the controller stays in the game and is asked.
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(2)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(s, p(2))]);
+
+    w.set_life(1, 0);
+    let (run, asked) = drive_answers(&w, &[]);
+    // No request at all: nothing pending, no request id consumed.
+    assert!(asked.is_empty());
+    assert_eq!(run.asked, 0);
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(1)]);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.performed);
+    let mut w = run.state;
+    assert!(w.lost(1));
+    assert!(!w.env.battle_protectors.contains_key(&s));
+    assert_eq!(w.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+    // The next pass finds it again and still asks nothing.
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(
+        out.findings
+            .iter()
+            .any(|f| f.subject == obj(s) && f.entry_id == "704.5x")
+    );
+
+    // The same through `perform_all_post_batch`.
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    w.set_life(1, 0);
+    let same = |pre: &StoredSbaEnvironment, _: &EventContext<'_>| pre.clone();
+    let (run, asked) = drive_post_batch(&w, &[], &same);
+    assert!(asked.is_empty());
+    assert!(run.out.unwrap().protectors_chosen.is_empty());
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 800.4a, CR 614.6, CR 704.3 (gate 02-state-objects R3d,
+// thread 4699044484): the ORDINARY (pre-batch) protector request makes the same live-controller
+// check as the post-batch one. Three players. Pass 1: an unattacked Siege of player 2 at
+// defense 0 with no protector, whose graveyard move a replacement turns into one defense
+// counter, while player 2 loses the game: player 2 is not asked (the post-batch check). Pass 2:
+// the Siege is at defense 1, a CR 704.5x subject on the ordinary path, and its controller has
+// lost the game (CR 800.4a: it has left the game and can't answer): no request, no request id
+// consumed, nothing pending, and the Siege neither gets a protector nor moves. Control: the same
+// Siege whose controller stays in the game is asked in pass 1 with no ordinary request in pass 2.
+#[test]
+fn sba_704_5x_ordinary_request_skips_a_lost_controller() {
+    fn world(lose: bool) -> (World, ObjectId) {
+        let mut w = World::three([1, 2, 3], 1);
+        let s = w.new_battle(2, 2, true, 0, None);
+        w.registry
+            .add(ReplacementEffect::new(
+                e(10),
+                sba_move_of(s),
+                Action::Instead(vec![GameEvent::AddCounters {
+                    target: CounterTarget::Object(s),
+                    kind: "defense".to_owned(),
+                    amount: 1,
+                }]),
+            ))
+            .unwrap();
+        if lose {
+            w.set_life(2, 0);
+        }
+        (w, s)
+    }
+
+    // Control: player 2 stays in the game and is asked after the batch of pass 1.
+    let (w, s) = world(false);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(1), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(s, p(3))]);
+    let mut w = run.state;
+    assert_eq!(w.counter(s, "defense"), 1);
+    assert!(pass(&mut w).protectors_chosen.is_empty());
+
+    // Pass 1: player 2 loses; the retained Siege gets a defense counter and no request.
+    let (w, s) = world(true);
+    let (run, asked) = drive_answers(&w, &[]);
+    assert!(asked.is_empty());
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(2)]);
+    assert!(out.protectors_chosen.is_empty());
+    let mut w = run.state;
+    assert!(w.lost(2));
+    assert_eq!(w.counter(s, "defense"), 1);
+    assert_eq!(w.found_by("704.5x"), [s]);
+    assert!(w.found_by("704.5v").is_empty());
+
+    // Pass 2: the ordinary path asks nothing (`pass` asserts that no request was made) and the
+    // Siege stays on the battlefield without a protector.
+    let (run, asked) = drive_answers(&w, &[]);
+    assert!(asked.is_empty());
+    assert_eq!(run.asked, 0);
+    let out = run.out.unwrap();
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.executed.is_empty());
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(
+        out.findings
+            .iter()
+            .any(|f| f.subject == obj(s) && f.entry_id == "704.5x")
+    );
+    assert_eq!(w.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+    assert!(!w.env.battle_protectors.contains_key(&s));
+}
+
+// REQ-SBA-001, CR 704.5x, CR 800.4a, CR 101.4 (gate 02-state-objects R3d, thread 4699044484):
+// on the ordinary path a battle whose controller has lost the game (here the active player 1,
+// first in APNAP order) or whose controller is not a player of the game gets no request and
+// consumes no request id: the battle of the live player 3 is the only request, with the SAME
+// request id, chooser, reason and candidates as in a world without the other battles, and the
+// skipped battles stay on the battlefield without a protector. A typeless battle of a lost
+// controller has no candidate and still goes to its owner's graveyard without a request.
+#[test]
+fn sba_704_5x_ordinary_request_ids_unchanged_by_a_lost_controller() {
+    // Control: only the live player's Siege (player 1 has lost the game here too, so the
+    // candidates are the same).
+    let mut control = World::three([1, 2, 3], 1);
+    let live = control.new_battle(3, 3, true, 3, None);
+    control.lose(1);
+    let (run, asked) = drive_answers(&control, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    let expected = asked[0].clone();
+    assert_eq!(expected.chooser, p(3));
+    assert_eq!(player_candidates(&expected), [p(2)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(live, p(2))]);
+
+    let mut w = World::three([1, 2, 3], 1);
+    let siege = w.new_battle(1, 1, true, 3, None);
+    let typeless = w.new_battle(1, 1, false, 3, None);
+    // `gone` is controlled (layer 2, CR 613.1b) by a player who is not in the game.
+    let gone = w.new_battle(1, 1, true, 3, None);
+    w.give_control(20, gone, 9);
+    let live = w.new_battle(3, 3, true, 3, None);
+    w.lose(1);
+    assert_eq!(w.found_by("704.5x"), [siege, typeless, gone, live]);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].request_id, expected.request_id);
+    assert_eq!(asked[0].chooser, expected.chooser);
+    assert_eq!(asked[0].reason.cr, expected.reason.cr);
+    assert_eq!(asked[0].payload, expected.payload);
+    assert_eq!(asked[0].reason.source, Some(live));
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(live, p(2))]);
+    // The typeless battle has no candidate (its only appropriate player, its controller, left
+    // the game): it goes to its owner's graveyard without a request, as before.
+    assert_eq!(
+        batch_shape(&out).0,
+        [(typeless, ZoneChangeCause::StateBasedAction)]
+    );
+    let w = run.state;
+    for b in [siege, gone] {
+        assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+        assert!(!w.env.battle_protectors.contains_key(&b));
+    }
 }
 
 // REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older
@@ -5203,8 +6184,8 @@ fn simultaneity_board(reverse: bool) -> (World, [ObjectId; 9]) {
 
 // REQ-SBA-001, REQ-TEST-001, CR 704.3, CR 704.5a, CR 704.5f, CR 704.5j, CR 704.5v-704.5aa: all
 // found on one snapshot and performed in ONE pass with ONE batch, in both object-id orders; the
-// legend request comes first, then the protector requests (APNAP, then ascending battle id);
-// nothing remains for the next pass.
+// legend request comes first, then the protector requests (CR 101.4: every request is player
+// 1's, so within that player legend groups first, then ascending battle id); nothing remains for the next pass.
 #[test]
 fn sba_704_5v_to_aa_simultaneous_with_old_entries() {
     for reverse in [false, true] {

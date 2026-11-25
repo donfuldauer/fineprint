@@ -5,10 +5,11 @@
 //! Splitting a top-level JSON array into its element slices (R12).
 //!
 //! A bulk file is one large JSON array. Parsing it whole into a `serde_json::Value` would hold
-//! the entire tree in memory; instead [`split_array`] finds the byte range of each top-level
-//! element with a small scanner (strings, escapes and bracket depth only) and each element is
-//! then parsed on its own by `serde_json`, which does the full JSON validation (with its default
-//! recursion limit). The scanner never panics on any input.
+//! the entire tree in memory; instead [`ArrayElements`] finds the byte range of each top-level
+//! element with a small scanner (strings, escapes and bracket depth only), yielding one element
+//! at a time, and each element is then parsed on its own by `serde_json`, which does the full
+//! JSON validation (with its default recursion limit). The scanner never panics on any input.
+//! [`split_array`] collects the same slices into a `Vec` for callers that need them all at once.
 
 /// Why a byte string is not a JSON array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,67 +37,167 @@ fn is_ws(b: u8) -> bool {
 }
 
 /// The byte slices of the top-level elements of the JSON array in `bytes`, whitespace trimmed,
-/// in source order. Each slice still has to be parsed (and so validated) by `serde_json`; an
-/// empty slice (as in `[1,,2]` or `[1,]`) is returned as is and fails that parse.
+/// in source order: [`ArrayElements`] collected. Each slice still has to be parsed (and so
+/// validated) by `serde_json`; an empty slice (as in `[1,,2]` or `[1,]`) is returned as is and
+/// fails that parse. This keeps one slice per element in memory; bulk paths iterate
+/// [`ArrayElements`] instead.
 ///
 /// # Errors
 /// [`ArrayError`] when `bytes` is not UTF-8, does not start with `[` (after whitespace), or the
 /// bracket structure is broken (including trailing non-whitespace after the closing `]`).
 pub fn split_array(bytes: &[u8]) -> Result<Vec<&[u8]>, ArrayError> {
-    if std::str::from_utf8(bytes).is_err() {
-        return Err(ArrayError::NotUtf8);
+    ArrayElements::new(bytes).collect()
+}
+
+/// How many open brackets per element are matched against their closing delimiter; deeper levels
+/// are counted only, so the scan's memory stays bounded whatever the input.
+const MAX_NEST_CHECKED: usize = 128;
+
+/// Where an [`ArrayElements`] scan stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Nothing checked yet.
+    Start,
+    /// Inside the array; the next element starts at `pos`.
+    Scan,
+    /// The closing `]` was seen; only whitespace may follow from this offset.
+    Trailing(usize),
+    /// Finished (or failed): yields nothing more.
+    Done,
+}
+
+/// The top-level elements of a JSON array, one whitespace-trimmed byte slice at a time, in
+/// source order (R12): the streaming form of [`split_array`], with the same elements and the
+/// same [`ArrayError`] values, but holding no index of the elements (memory stays constant
+/// whatever the element count).
+///
+/// The first `next` checks UTF-8 (one pass over the input, no allocation) and the opening `[`.
+/// A structural error is yielded as `Some(Err(_))` once, after the elements that precede it,
+/// and the iterator is fused afterwards; a caller that needs all-or-nothing semantics discards
+/// what it built from the earlier elements when it sees an error.
+#[derive(Clone, Debug)]
+pub struct ArrayElements<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    phase: Phase,
+}
+
+impl<'a> ArrayElements<'a> {
+    /// A scanner over the JSON array in `bytes` (nothing is checked until the first `next`).
+    #[must_use]
+    pub const fn new(bytes: &'a [u8]) -> Self {
+        ArrayElements {
+            bytes,
+            pos: 0,
+            phase: Phase::Start,
+        }
     }
-    let mut i = 0usize;
-    while bytes.get(i).copied().is_some_and(is_ws) {
-        i += 1;
+
+    fn fail(&mut self, e: ArrayError) -> Option<Result<&'a [u8], ArrayError>> {
+        self.phase = Phase::Done;
+        Some(Err(e))
     }
-    if bytes.get(i) != Some(&b'[') {
-        return Err(ArrayError::NotArray);
-    }
-    i += 1;
-    let mut out = Vec::new();
-    // Empty array: `[` ws `]`.
-    let mut j = i;
-    while bytes.get(j).copied().is_some_and(is_ws) {
-        j += 1;
-    }
-    if bytes.get(j) == Some(&b']') {
-        return trailing_ok(bytes, j + 1).map(|()| out);
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut start = i;
-    while let Some(&b) = bytes.get(i) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-        } else {
-            match b {
-                b'"' => in_string = true,
-                b'[' | b'{' => depth += 1,
-                b']' | b'}' if depth > 0 => depth -= 1,
-                b',' if depth == 0 => {
-                    out.push(trim(bytes.get(start..i).unwrap_or_default()));
-                    start = i + 1;
-                }
-                b']' => {
-                    out.push(trim(bytes.get(start..i).unwrap_or_default()));
-                    return trailing_ok(bytes, i + 1).map(|()| out);
-                }
-                b'}' => return Err(ArrayError::Malformed),
-                _ => {}
-            }
+
+    fn begin(&mut self) -> Option<Result<&'a [u8], ArrayError>> {
+        let bytes = self.bytes;
+        if std::str::from_utf8(bytes).is_err() {
+            return self.fail(ArrayError::NotUtf8);
+        }
+        let mut i = 0usize;
+        while bytes.get(i).copied().is_some_and(is_ws) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'[') {
+            return self.fail(ArrayError::NotArray);
         }
         i += 1;
+        // Empty array: `[` ws `]`.
+        let mut j = i;
+        while bytes.get(j).copied().is_some_and(is_ws) {
+            j += 1;
+        }
+        if bytes.get(j) == Some(&b']') {
+            self.phase = Phase::Done;
+            return trailing_ok(bytes, j + 1).err().map(Err);
+        }
+        self.pos = i;
+        self.phase = Phase::Scan;
+        self.scan()
     }
-    Err(ArrayError::Malformed)
+
+    /// Scans one element from `pos` (each element starts outside any string at depth 0). Open
+    /// brackets are tracked as a stack of the closing delimiter each expects, at most
+    /// `MAX_NEST_CHECKED` deep; deeper levels are only counted. A closing delimiter that is not
+    /// the expected one is `Malformed` for the whole array (R12: bounded memory, O(n)).
+    fn scan(&mut self) -> Option<Result<&'a [u8], ArrayError>> {
+        let bytes = self.bytes;
+        let start = self.pos;
+        let mut i = start;
+        let mut stack = [0u8; MAX_NEST_CHECKED];
+        // Open levels, including those past the stack bound.
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        while let Some(&b) = bytes.get(i) {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+            } else {
+                match b {
+                    b'"' => in_string = true,
+                    b'[' | b'{' => {
+                        if let Some(slot) = stack.get_mut(depth) {
+                            *slot = if b == b'[' { b']' } else { b'}' };
+                        }
+                        depth += 1;
+                    }
+                    b']' | b'}' if depth > 0 => {
+                        depth -= 1;
+                        // Levels past the bound are not type-checked.
+                        if stack.get(depth).is_some_and(|&want| want != b) {
+                            return self.fail(ArrayError::Malformed);
+                        }
+                    }
+                    b',' if depth == 0 => {
+                        self.pos = i + 1;
+                        return Some(Ok(trim(bytes.get(start..i).unwrap_or_default())));
+                    }
+                    b']' => {
+                        self.phase = Phase::Trailing(i + 1);
+                        return Some(Ok(trim(bytes.get(start..i).unwrap_or_default())));
+                    }
+                    b'}' => return self.fail(ArrayError::Malformed),
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        self.fail(ArrayError::Malformed)
+    }
 }
+
+impl<'a> Iterator for ArrayElements<'a> {
+    type Item = Result<&'a [u8], ArrayError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.phase {
+            Phase::Done => None,
+            Phase::Start => self.begin(),
+            Phase::Scan => self.scan(),
+            Phase::Trailing(from) => {
+                self.phase = Phase::Done;
+                trailing_ok(self.bytes, from).err().map(Err)
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for ArrayElements<'_> {}
 
 fn trailing_ok(bytes: &[u8], from: usize) -> Result<(), ArrayError> {
     if bytes
@@ -129,17 +230,19 @@ pub fn parse_elements(bytes: &[u8]) -> Result<Vec<Result<serde_json::Value, ()>>
         .collect())
 }
 
-/// Validates that `bytes` is a well-formed JSON array whose every element parses, dropping each
-/// element after parsing it (memory stays bounded by the largest element).
+/// Validates that `bytes` is a well-formed JSON array whose every element parses, streaming
+/// through [`ArrayElements`] and dropping each element after parsing it: no per-element index
+/// is built, so memory stays bounded by the largest element (R12). Returns the element count.
 ///
 /// # Errors
 /// [`ArrayError`]; an element that does not parse is [`ArrayError::Malformed`].
 pub fn validate_array(bytes: &[u8]) -> Result<usize, ArrayError> {
-    let parts = split_array(bytes)?;
-    for p in &parts {
-        if serde_json::from_slice::<serde_json::Value>(p).is_err() {
+    let mut count = 0usize;
+    for p in ArrayElements::new(bytes) {
+        if serde_json::from_slice::<serde_json::Value>(p?).is_err() {
             return Err(ArrayError::Malformed);
         }
+        count += 1;
     }
-    Ok(parts.len())
+    Ok(count)
 }

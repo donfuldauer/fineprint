@@ -121,6 +121,10 @@ pub enum ManaSymbol {
     Phyrexian(Color),
     /// Hybrid Phyrexian `{a/b/P}` with `a != b`.
     HybridPhyrexian(Color, Color),
+    /// Colorless hybrid `{C/c}` (CR 107.4): a monocolored hybrid symbol payable with one
+    /// colorless mana or one mana of color `c`. Canonical text has `C` first: `{C/W}`, `{C/U}`,
+    /// `{C/B}`, `{C/R}`, `{C/G}`. Appended last so existing variant order is unchanged.
+    ColorlessHybrid(Color),
 }
 
 impl ManaSymbol {
@@ -144,8 +148,8 @@ impl ManaSymbol {
 
     /// Whether this symbol is one the parser accepts: `Generic(n)` with `n <= MAX_GENERIC`,
     /// `GenericHybrid(n, _)` with `1 <= n <= MAX_GENERIC`, `Hybrid` and `HybridPhyrexian` with
-    /// two different colors; every other symbol is always valid. The parser and
-    /// [`ManaCostDSL::new`] both use this rule, so they cannot disagree.
+    /// two different colors; every other symbol (including `ColorlessHybrid`) is always valid.
+    /// The parser and [`ManaCostDSL::new`] both use this rule, so they cannot disagree.
     #[must_use]
     pub fn is_valid(self) -> bool {
         match self {
@@ -156,7 +160,8 @@ impl ManaSymbol {
             | ManaSymbol::Colorless
             | ManaSymbol::Snow
             | ManaSymbol::Variable(_)
-            | ManaSymbol::Phyrexian(_) => true,
+            | ManaSymbol::Phyrexian(_)
+            | ManaSymbol::ColorlessHybrid(_) => true,
         }
     }
 }
@@ -175,6 +180,7 @@ impl fmt::Display for ManaSymbol {
             ManaSymbol::HybridPhyrexian(a, b) => {
                 write!(f, "{{{}/{}/P}}", a.letter(), b.letter())
             }
+            ManaSymbol::ColorlessHybrid(c) => write!(f, "{{C/{}}}", c.letter()),
         }
     }
 }
@@ -370,6 +376,8 @@ fn symbol_from_inner(inner: &str) -> Option<ManaSymbol> {
         (Some(one), None, None, None) => single(one),
         (Some(a), Some("P"), None, None) => color(a).map(ManaSymbol::Phyrexian),
         (Some(a), Some(b), None, None) => match (generic(a), color(a), color(b)) {
+            // CR 107.4: `{C/c}` is a monocolored hybrid symbol; only `C` first is canonical.
+            (_, _, Some(c)) if a == "C" => Some(ManaSymbol::ColorlessHybrid(c)),
             (Some(n), _, Some(c)) => Some(ManaSymbol::GenericHybrid(n, c)),
             (_, Some(x), Some(y)) => Some(ManaSymbol::Hybrid(x, y)),
             _ => None,

@@ -26,8 +26,11 @@
 //!
 //! The module is pure: no I/O, clock or environment, ordered containers only, and the output is
 //! a function of the text, the face name and subtypes, the vocabulary and the configuration
-//! (R3). It never panics on any `&str` input, and work is bounded by [`MAX_TEXT_BYTES`] (R12).
-//! It builds no AST.
+//! (R3). It never panics on any `&str` input (R12). Only the raw Oracle text is capped by
+//! [`MAX_TEXT_BYTES`]. The configuration has its own limits ([`MAX_CONFIG_BYTES`],
+//! [`MAX_CONFIG_STRING_BYTES`] and [`MAX_CONFIG_LIST_LEN`], enforced when it is loaded), and the
+//! face name and subtypes come from import records that were already size-capped. It builds no
+//! AST.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

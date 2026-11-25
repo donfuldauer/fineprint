@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 
 use fineprint_base::ids::{ObjectId, PlayerId};
 use fineprint_dsl::expr::{
-    Cmp, DistinctAttr, HistoryQuery as HistoryAST, MathOp, ObjectAttr, PlayerAttr,
-    PlayerSelectorAST, PredicateAST, ReferenceAST, ValueExpressionAST, WordRef, Zone,
+    Cmp, DistinctAttr, HistoryQuery as HistoryAST, MathOp, ObjectAttr, ObjectSelectorAST,
+    PlayerAttr, PlayerSelectorAST, PredicateAST, ReferenceAST, ValueExpressionAST, WordRef, Zone,
 };
 
 use super::resolve::{resolve_players, resolve_reference, select_objects, view_of};
@@ -134,17 +134,17 @@ fn eval_pred(
         PredicateAST::IsToken => obj(&|s| s.is_token),
         PredicateAST::IsColorless => obj(&|s| s.characteristics.colors.bits() == 0),
         PredicateAST::IsMulticolored => obj(&|s| s.characteristics.colors.bits().count_ones() >= 2),
-        // The environment supplies the status flags. FaceUp and Untapped are simply "not face
-        // down" and "not tapped": they are true for any object without that flag, including
-        // objects outside the battlefield.
+        // The environment supplies the status flags. FaceUp is simply "not face down": it is true
+        // for any object without that flag. Tapped and Untapped hold only on the battlefield:
+        // cards in any other zone are neither tapped nor untapped (CR 110.5d).
         // CR 110.5, 110.5b
         PredicateAST::FaceUp => obj(&|s| !s.face_down),
         // CR 110.5, 110.5b
         PredicateAST::FaceDown => obj(&|s| s.face_down),
-        // CR 110.5, 701.26a, 701.26b
-        PredicateAST::Tapped => obj(&|s| s.tapped),
-        // CR 110.5, 701.26a, 701.26b
-        PredicateAST::Untapped => obj(&|s| !s.tapped),
+        // CR 110.5, 110.5d, 701.26a, 701.26b
+        PredicateAST::Tapped => obj(&|s| s.zone == Zone::Battlefield && s.tapped),
+        // CR 110.5, 110.5d, 701.26a, 701.26b
+        PredicateAST::Untapped => obj(&|s| s.zone == Zone::Battlefield && !s.tapped),
         // CR 508.1k, 506.4
         PredicateAST::Attacking => obj(&|s| s.attacking),
         // CR 509.1g, 506.4
@@ -286,16 +286,12 @@ pub fn eval_value(
             // CR 608.2h, CR 113.7a, CR 608.2b: SOURCE_LKI reads the source's captured last
             // known information first; every other reference reads current information first.
             let source_lki = *reference == ReferenceAST::SourceLki;
-            Ok(sat_sum(items.into_iter().map(|item| match item {
-                Referent::Object(id) => {
-                    let view = if source_lki && ctx.source == Some(id) {
-                        lki_first_view(env, id)
-                    } else {
-                        view_of(env, id)
-                    };
-                    view.map_or(0, |view| object_attr(&view, attr))
+            Ok(sat_sum(items.into_iter().map(|item| {
+                match item {
+                    Referent::Object(id) => reference_view(env, ctx, source_lki, id)
+                        .map_or(0, |view| object_attr(&view, attr)),
+                    Referent::Player(_) => 0,
                 }
-                Referent::Player(_) => 0,
             })))
         }
         ValueExpressionAST::PlayerAttr { reference, attr } => {
@@ -334,10 +330,13 @@ pub fn eval_value(
             math(*op, l, r)
         }
         ValueExpressionAST::Distinct { attr, selector } => {
+            // The same lookup policy as ATTR: a SOURCE_LKI selector reads the captured view of
+            // the source (CR 608.2h, CR 113.7a, CR 608.2b).
+            let source_lki = matches!(&**selector, ObjectSelectorAST::Ref(ReferenceAST::SourceLki));
             let views: Vec<ObjectView> = select_objects(env, ctx, selector)?
                 .items
                 .into_iter()
-                .filter_map(|id| view_of(env, id))
+                .filter_map(|id| reference_view(env, ctx, source_lki, id))
                 .collect();
             Ok(distinct(*attr, &views))
         }
@@ -358,6 +357,22 @@ pub fn eval_value(
 /// none was captured (REQ-DSL-003, CR 608.2h, CR 113.7a, CR 608.2b): the view `SOURCE_LKI` reads.
 fn lki_first_view(env: &dyn InterpEnv, id: ObjectId) -> Option<ObjectView> {
     env.lki(id).or_else(|| env.object(id))
+}
+
+/// The view of `id` for a reference: the source's captured last known information when the
+/// reference is `SOURCE_LKI` and `id` is the source, otherwise the current view first
+/// (REQ-DSL-003, CR 608.2h, CR 113.7a, CR 608.2b). One function for `ATTR` and `DISTINCT`.
+fn reference_view(
+    env: &dyn InterpEnv,
+    ctx: &EvalContext,
+    source_lki: bool,
+    id: ObjectId,
+) -> Option<ObjectView> {
+    if source_lki && ctx.source == Some(id) {
+        lki_first_view(env, id)
+    } else {
+        view_of(env, id)
+    }
 }
 
 /// One characteristic of an object as an integer (a missing power or toughness counts as 0,

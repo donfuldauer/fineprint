@@ -9,22 +9,41 @@
 //!   needed file is stale; it then downloads each stale entry's `download_uri` (a file host).
 //!   It never requests a per-card endpoint and never loops over cards.
 //! - `download_uri` is untrusted ([`validate_download_uri`]): `https://` only, host
-//!   `scryfall.com` or a subdomain of `scryfall.com` / `scryfall.io`, no credentials, no port.
-//!   The cache file names are fixed constants.
+//!   `scryfall.com` or a subdomain of `scryfall.com` / `scryfall.io` except the API host
+//!   `api.scryfall.com`, no credentials, no port, no curl glob characters. The cache file names
+//!   are fixed constants.
 //! - 24-hour cache: a file whose metadata says it was fetched less than [`CACHE_SECONDS`] ago
 //!   (and not in the future) is skipped unless forced. The time is a parameter (`now`): only the
 //!   CLI wrapper reads the system clock (R7).
-//! - Every download goes to a `.part` file, is validated ([`validate_scryfall_bulk`],
-//!   [`validate_atomic_cards`]) and only then renamed into place; the group's `source.json` is
-//!   written atomically after. A failed or invalid download leaves the cache untouched.
+//! - Concurrent runs: each group directory is created first and an exclusive lock on its
+//!   [`LOCK_FILE`] is held from reading `source.json` to the end of the commit, so two runs on
+//!   one cache serialize (the second sees the first's fresh metadata). The lock file is left in
+//!   place. Each run stages into its own part files `{file}.{pid}.part`, created exclusively,
+//!   and removes them on every failure path.
+//! - Every download goes to a part file and is validated ([`validate_scryfall_bulk`],
+//!   [`validate_atomic_cards`]); a failed or invalid download leaves the cache untouched. The
+//!   commit then (1) atomically rewrites `source.json` without the entries of the files about
+//!   to be replaced, (2) renames the staged files into place, (3) atomically writes the full new
+//!   `source.json`. A crash or failure at any step leaves every cached file either absent from
+//!   the metadata (so it is stale and refetched, never trusted) or consistent with it.
 //! - HTTP goes through the [`Http`] trait; the production [`Curl`] runs the system `curl` (the
-//!   standard library has no TLS; the same choice as `cargo xtask cr fetch`). Tests inject a
-//!   fake and never touch the network.
+//!   standard library has no TLS; the same choice as `cargo xtask cr fetch`) with `--disable`
+//!   (no `~/.curlrc`), `--globoff`, HTTPS only and no redirect following. Every response is
+//!   streamed through this process and capped while it is read: the metadata in memory at
+//!   [`MAX_METADATA_BYTES`], each bulk file into its part file at the request's byte cap
+//!   ([`run_capped_to_file`]; curl writes to stdout, never `--output`). Past the cap curl is
+//!   killed, so the cap does not depend on the curl or libcurl version. `--max-filesize` stays
+//!   as a second line of defence; a curl older than [`MIN_CURL_VERSION`] or an unparseable
+//!   version only prints one warning per process. Tests inject a fake and never touch the
+//!   network.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{ChildStdout, Command, Stdio};
+use std::sync::OnceLock;
 
 use fineprint_base::hash::sha256;
 use serde_json::{Map, Value, json};
@@ -104,45 +123,138 @@ pub trait Http {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Curl;
 
-/// The `curl` arguments for `req`, writing to `dest` (or stdout when `None`): `--fail
-/// --location --silent --show-error`, HTTPS only (also on redirects), a size and time limit,
-/// the headers; never `--insecure`. curl applies the proxy and CA settings of the environment.
+/// The oldest curl whose `--max-filesize` also stops a transfer whose size is unknown when it
+/// starts. Advisory only: an older or unparseable `curl --version` prints one warning per
+/// process; the bulk-download size cap is enforced in-process whatever the version (R12).
+pub const MIN_CURL_VERSION: (u32, u32, u32) = (8, 4, 0);
+/// The lock file inside each cache group directory (left in place after a run).
+pub const LOCK_FILE: &str = ".lock";
+/// The longest curl stderr excerpt quoted in an error, in bytes.
+const MAX_STDERR_EXCERPT: usize = 200;
+
+/// The `curl` arguments for `req`, writing to `dest` (or stdout when `None`): `--disable` first
+/// (no `~/.curlrc`), then `--fail --silent --show-error --globoff`, HTTPS only, no redirect
+/// following, a size and time limit, the headers; never `--insecure`. curl applies the proxy and
+/// CA settings of the environment. `dest` is passed byte-exact (no lossy conversion).
 #[must_use]
-pub fn curl_args(req: &Request, dest: Option<&Path>) -> Vec<String> {
-    let mut a: Vec<String> = [
+pub fn curl_args(req: &Request, dest: Option<&Path>) -> Vec<OsString> {
+    let mut a: Vec<OsString> = [
+        "--disable",
         "--fail",
-        "--location",
         "--silent",
         "--show-error",
+        "--globoff",
         "--proto",
-        "=https",
-        "--proto-redir",
         "=https",
     ]
     .iter()
-    .map(|s| (*s).to_owned())
+    .map(OsString::from)
     .collect();
     a.extend([
-        "--max-filesize".to_owned(),
-        req.max_bytes.to_string(),
-        "--max-time".to_owned(),
-        req.max_time_secs.to_string(),
+        OsString::from("--max-filesize"),
+        OsString::from(req.max_bytes.to_string()),
+        OsString::from("--max-time"),
+        OsString::from(req.max_time_secs.to_string()),
     ]);
     for (k, v) in &req.headers {
-        a.push("--header".to_owned());
-        a.push(format!("{k}: {v}"));
+        a.push(OsString::from("--header"));
+        a.push(OsString::from(format!("{k}: {v}")));
     }
     if let Some(d) = dest {
-        a.push("--output".to_owned());
-        a.push(d.display().to_string());
+        a.push(OsString::from("--output"));
+        a.push(d.as_os_str().to_owned());
     }
-    a.push("--url".to_owned());
-    a.push(req.url.clone());
+    a.push(OsString::from("--url"));
+    a.push(OsString::from(&req.url));
     a
 }
 
-fn run_curl(args: Vec<String>, url: &str) -> Result<Vec<u8>, String> {
-    let out = Command::new("curl").args(args).output().map_err(|e| {
+/// The error text for a failed curl run: the role and exit status, plus the first line of
+/// curl's stderr cut to 200 bytes on a character boundary with control characters replaced by
+/// `?` (R12: never the URL, never unbounded network text).
+#[must_use]
+pub fn curl_failure_message(role: &str, exit: Option<i32>, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut excerpt = String::new();
+    for c in first.chars() {
+        let c = if c.is_control() { '?' } else { c };
+        if excerpt.len() + c.len_utf8() > MAX_STDERR_EXCERPT {
+            break;
+        }
+        excerpt.push(c);
+    }
+    let status = exit.map_or_else(|| "no exit code".to_owned(), |n| format!("exit {n}"));
+    if excerpt.is_empty() {
+        format!("curl failed for {role} ({status})")
+    } else {
+        format!("curl failed for {role} ({status}): {excerpt}")
+    }
+}
+
+/// Reads at most `cap` bytes from `r`.
+///
+/// # Errors
+/// The read error, or a message naming the cap when `r` holds more than `cap` bytes (at most
+/// `cap + 1` bytes are read).
+pub fn read_stream_capped<R: Read>(r: R, cap: u64) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    r.take(cap.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("cannot read the response: {e}"))?;
+    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > cap {
+        return Err(format!("the response is larger than the {cap}-byte cap"));
+    }
+    Ok(buf)
+}
+
+/// The buffer size of [`copy_stream_capped`].
+const COPY_BUFFER: usize = 64 * 1024;
+
+/// Copies `r` into `w` through a fixed 64 KiB buffer, reading at most `cap + 1` bytes and
+/// writing at most `cap` bytes (R12: the cap holds while the bytes stream, whatever produces
+/// them). Returns the number of bytes written. `w` is not flushed.
+///
+/// # Errors
+/// A read or write error, or a message naming the cap when `r` holds more than `cap` bytes
+/// (the bytes past the cap are never written).
+pub fn copy_stream_capped<R: Read, W: Write>(r: R, w: &mut W, cap: u64) -> Result<u64, String> {
+    let mut r = r.take(cap.saturating_add(1));
+    let mut buf = vec![0u8; COPY_BUFFER];
+    let mut written: u64 = 0;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return Ok(written),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("cannot read the response: {e}")),
+        };
+        let room = usize::try_from(cap.saturating_sub(written)).unwrap_or(usize::MAX);
+        if n > room {
+            return Err(format!("the response is larger than the {cap}-byte cap"));
+        }
+        w.write_all(&buf[..n])
+            .map_err(|e| format!("cannot write the download: {e}"))?;
+        written = written.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+}
+
+/// Runs `cmd` with stdin closed and stdout and stderr piped, hands stdout to `consume` while the
+/// child runs, and kills (and waits) the child as soon as `consume` fails (R12). stderr is
+/// drained on its own thread (first 4 KiB kept) so neither pipe can block the child.
+fn run_streaming<T>(
+    mut cmd: Command,
+    role: &str,
+    consume: impl FnOnce(ChildStdout) -> Result<T, String>,
+) -> Result<T, String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "curl not found: install curl (fineprint-ingest fetch uses it for HTTPS downloads)"
                 .to_owned()
@@ -150,29 +262,171 @@ fn run_curl(args: Vec<String>, url: &str) -> Result<Vec<u8>, String> {
             format!("cannot run curl: {e}")
         }
     })?;
-    if out.status.success() {
-        Ok(out.stdout)
+    let stderr = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let _ = (&mut e).take(4096).read_to_end(&mut kept);
+            let _ = std::io::copy(&mut e, &mut std::io::sink());
+            kept
+        })
+    });
+    let out = match child.stdout.take() {
+        Some(o) => consume(o),
+        None => Err("cannot read the response: no stdout".to_owned()),
+    };
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            // The stderr thread is not joined: it ends when the pipe closes.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{e} for {role}; the transfer was stopped"));
+        }
+    };
+    let status = child.wait().map_err(|e| format!("cannot run curl: {e}"))?;
+    let err = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+    if status.success() {
+        Ok(out)
     } else {
-        Err(format!(
-            "curl failed for {url}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        Err(curl_failure_message(role, status.code(), &err))
     }
+}
+
+/// Runs `cmd` with piped stdout and stderr, reading at most `cap` bytes of stdout while it
+/// runs; past the cap the child is killed (R12). `role` names the transfer in errors.
+///
+/// # Errors
+/// A spawn failure, the cap, or [`curl_failure_message`] for a non-zero exit.
+pub fn run_capped(cmd: Command, cap: u64, role: &str) -> Result<Vec<u8>, String> {
+    run_streaming(cmd, role, |o| read_stream_capped(o, cap))
+}
+
+/// Runs `cmd` and streams its stdout into the existing file `dest` (opened for writing and
+/// truncated, never created), writing at most `cap` bytes through [`copy_stream_capped`]; as
+/// soon as the child produces more than `cap` bytes it is killed and waited (R12). The cap is
+/// enforced by this process, whatever the child is. The file is flushed at the end. On any
+/// error `dest` may hold a partial body (at most `cap` bytes) and must not be trusted: the
+/// caller removes it. `role` names the transfer in errors.
+///
+/// # Errors
+/// A spawn, open, read or write failure, the cap, or [`curl_failure_message`] for a non-zero
+/// exit.
+pub fn run_capped_to_file(cmd: Command, cap: u64, role: &str, dest: &Path) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(dest)
+        .map_err(|e| format!("cannot open the part file for {role}: {e}"))?;
+    run_streaming(cmd, role, |o| {
+        copy_stream_capped(o, &mut file, cap)?;
+        file.flush()
+            .map_err(|e| format!("cannot write the download: {e}"))
+    })
+}
+
+fn run_curl(args: Vec<OsString>, cap: u64, role: &str) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new("curl");
+    cmd.args(args);
+    run_capped(cmd, cap, role)
+}
+
+/// Parses the version of `curl --version` output (`curl 8.4.0 (...) ...`; a suffix such as
+/// `-DEV` is ignored). `None` when the first line has another shape.
+#[must_use]
+pub fn parse_curl_version(output: &str) -> Option<(u32, u32, u32)> {
+    let mut words = output.lines().next()?.split_whitespace();
+    if words.next()? != "curl" {
+        return None;
+    }
+    let mut parts = words.next()?.split('.');
+    let mut num = |required: bool| -> Option<u32> {
+        match parts.next() {
+            None if !required => Some(0),
+            None => None,
+            Some(p) => {
+                let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            }
+        }
+    };
+    Some((num(true)?, num(true)?, num(false)?))
+}
+
+/// The advisory verdict on `curl --version` output: `Ok(None)` for [`MIN_CURL_VERSION`] or
+/// later, `Ok(Some(warning))` for an older or unparseable version. The warning names 8.4.0 and
+/// says the in-process cap still applies: the download size cap never depends on this verdict
+/// (R12; the frontend version need not be the linked libcurl's).
+///
+/// # Errors
+/// Never for a version (the `Result` is kept for API stability).
+pub fn check_curl_version(output: &str) -> Result<Option<String>, String> {
+    match parse_curl_version(output) {
+        None => Ok(Some(
+            "warning: cannot parse the curl version; curl 8.4.0 or later is recommended as a \
+             second line of defence (--max-filesize), and the in-process download size cap \
+             still applies"
+                .to_owned(),
+        )),
+        Some(v) if v < MIN_CURL_VERSION => Ok(Some(format!(
+            "warning: curl {}.{}.{} is older than 8.4.0, so --max-filesize may not stop a \
+             response of unknown size; the in-process download size cap still applies",
+            v.0, v.1, v.2
+        ))),
+        Some(_) => Ok(None),
+    }
+}
+
+/// Checks the system curl version once per process and prints at most one warning on stderr
+/// (see [`check_curl_version`]). Advisory only: it never fails and never decides the cap.
+fn curl_version_advisory() {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| {
+        let mut cmd = Command::new("curl");
+        cmd.args(["--disable", "--version"]);
+        let warning = match run_capped(cmd, 64 * 1024, "curl --version") {
+            Ok(out) => check_curl_version(&String::from_utf8_lossy(&out)).unwrap_or_else(Some),
+            Err(_) => Some(
+                "warning: cannot read the curl version; the in-process download size cap still \
+                 applies"
+                    .to_owned(),
+            ),
+        };
+        if let Some(w) = warning {
+            eprintln!("{w}");
+        }
+    });
+}
+
+/// The role label of a download into `dest` (`{file}.{pid}.part`): the cache file name.
+fn download_role(dest: &Path) -> &'static str {
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned());
+    let name = name.as_deref().unwrap_or("");
+    [ORACLE_CARDS_FILE, RULINGS_FILE, ATOMIC_CARDS_FILE]
+        .into_iter()
+        .find(|f| name.starts_with(f))
+        .unwrap_or("download")
 }
 
 impl Http for Curl {
     fn get_json(&self, req: &Request) -> Result<Vec<u8>, String> {
-        run_curl(curl_args(req, None), &req.url)
+        run_curl(curl_args(req, None), req.max_bytes, "bulk-data metadata")
     }
 
     fn download_to_file(&self, req: &Request, dest: &Path) -> Result<(), String> {
-        run_curl(curl_args(req, Some(dest)), &req.url).map(|_| ())
+        // R12: curl writes to stdout (no `--output`); this process streams the body into the
+        // part file and kills curl past `req.max_bytes`. `--max-filesize` stays in the arguments
+        // as a second line of defence only; the version check is advisory.
+        curl_version_advisory();
+        let mut cmd = Command::new("curl");
+        cmd.args(curl_args(req, None));
+        run_capped_to_file(cmd, req.max_bytes, download_role(dest), dest)
     }
 }
 
 /// Whether `uri` is an acceptable `download_uri` (R12): `https://`, no credentials, no port, no
-/// whitespace, control characters or backslashes, and a host that is `scryfall.com` or ends in
-/// `.scryfall.com` or `.scryfall.io` with non-empty labels of `a-z 0-9 -`.
+/// whitespace, control characters, backslashes or curl glob characters (`[ ] { }`), and a host
+/// that is `scryfall.com` or ends in `.scryfall.com` or `.scryfall.io` with non-empty labels of
+/// `a-z 0-9 -`, except the API host `api.scryfall.com` (downloads never hit the API).
 ///
 /// # Errors
 /// A fixed reason (the URI itself is not repeated).
@@ -186,6 +440,9 @@ pub fn validate_download_uri(uri: &str) -> Result<(), &'static str> {
     {
         return Err("the download URI contains whitespace, control characters or backslashes");
     }
+    if uri.contains(['[', ']', '{', '}']) {
+        return Err("the download URI contains curl glob characters");
+    }
     let Some(rest) = uri.strip_prefix("https://") else {
         return Err("the download URI is not https");
     };
@@ -198,6 +455,9 @@ pub fn validate_download_uri(uri: &str) -> Result<(), &'static str> {
         return Err("the download URI names a port");
     }
     let host = authority;
+    if host == "api.scryfall.com" {
+        return Err("the download URI names the Scryfall API host");
+    }
     let labels_ok = !host.is_empty()
         && host.split('.').all(|l| {
             !l.is_empty()
@@ -420,12 +680,52 @@ struct Staged {
     meta: CachedFile,
 }
 
-fn part_path(dir: &Path, file: &str) -> PathBuf {
-    dir.join(format!("{file}.part"))
+/// This run's part file for `file` in `dir`: `{file}.{pid}.part`.
+#[must_use]
+pub fn part_path(dir: &Path, file: &str) -> PathBuf {
+    dir.join(format!("{file}.{}.part", std::process::id()))
 }
 
-/// Downloads `req` to the `.part` file of `file`, validates it with `check`, and returns the
-/// staged result (the `.part` file is removed on any failure).
+/// Creates the part file exclusively. The group lock is held, so an existing file of this
+/// name is a leftover of a crashed run with the same pid: it is removed and creation retried.
+fn create_part(part: &Path) -> Result<(), String> {
+    let open = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part)
+    };
+    let created = match open() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(part);
+            open()
+        }
+        other => other,
+    };
+    created
+        .map(drop)
+        .map_err(|e| format!("cannot create {}: {e}", part.display()))
+}
+
+/// Creates `dir` and takes the exclusive lock on its [`LOCK_FILE`], held until the returned
+/// file is dropped.
+fn lock_group(dir: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let path = dir.join(LOCK_FILE);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
+    Ok(file)
+}
+
+/// Downloads `req` to this run's part file of `file`, validates it with `check`, and returns
+/// the staged result (the part file is removed on any failure).
 fn stage(
     http: &dyn Http,
     dir: &Path,
@@ -436,6 +736,7 @@ fn stage(
     check: &Validator,
 ) -> Result<Staged, String> {
     let part = part_path(dir, file);
+    create_part(&part)?;
     let result = (|| {
         http.download_to_file(req, &part)?;
         let bytes = super::read_capped(&part, MAX_INPUT_BYTES)
@@ -464,8 +765,27 @@ fn discard(staged: &[Staged]) {
     }
 }
 
-/// Renames the staged files into place and writes the group's `source.json` atomically.
+/// Commits the staged files (the group lock is held): (1) atomically writes `source.json`
+/// without the entries of the files about to be replaced, (2) renames the staged files into
+/// place, (3) atomically writes the full new `source.json`. After a failure at any step every
+/// file is either absent from the metadata (stale, refetched next run) or consistent with it,
+/// and this run's remaining part files are removed.
 fn commit(dir: &Path, mut meta: SourceMeta, staged: Vec<Staged>) -> Result<(), String> {
+    let source = dir.join(SOURCE_FILE);
+    let write = |m: &SourceMeta| {
+        crate::vocab::cli::write_atomic(&source, &render_source_meta(m))
+            .map_err(|e| format!("cannot write {}: {e}", source.display()))
+    };
+    let before = meta.len();
+    for s in &staged {
+        meta.remove(s.file);
+    }
+    if meta.len() != before
+        && let Err(e) = write(&meta)
+    {
+        discard(&staged);
+        return Err(e);
+    }
     for (i, s) in staged.iter().enumerate() {
         if let Err(e) = fs::rename(&s.part, dir.join(s.file)) {
             discard(staged.get(i..).unwrap_or_default());
@@ -475,8 +795,7 @@ fn commit(dir: &Path, mut meta: SourceMeta, staged: Vec<Staged>) -> Result<(), S
     for s in staged {
         meta.insert(s.file.to_owned(), s.meta);
     }
-    crate::vocab::cli::write_atomic(&dir.join(SOURCE_FILE), &render_source_meta(&meta))
-        .map_err(|e| format!("cannot write {}: {e}", dir.join(SOURCE_FILE).display()))
+    write(&meta)
 }
 
 fn scryfall_bulk_check(bytes: &[u8]) -> Result<Option<String>, String> {
@@ -484,14 +803,17 @@ fn scryfall_bulk_check(bytes: &[u8]) -> Result<Option<String>, String> {
 }
 
 /// Runs a fetch at time `now` (seconds since the Unix epoch). `Ok` is the summary line; `Err`
-/// is an input or network error (exit 2), after which the cache is as it was before the failing
-/// group (a group's files are committed together).
+/// is an input or network error (exit 2). A failure before a group's commit leaves that group
+/// unchanged; a failure during the commit leaves every file either absent from the group's
+/// metadata (refetched next run) or consistent with it. Each group is locked while it is read,
+/// staged and committed, so concurrent runs on one cache serialize.
 ///
 /// # Errors
 /// A human-readable reason that never quotes downloaded content.
 pub fn fetch(http: &dyn Http, opts: &FetchOptions, now: u64) -> Result<String, String> {
     let mut done = Vec::new();
     let sdir = opts.cache.join(SCRYFALL_DIR);
+    let slock = lock_group(&sdir)?;
     let smeta = read_source_meta(&sdir);
     let wanted: Vec<&'static str> = [ORACLE_CARDS_FILE, RULINGS_FILE]
         .into_iter()
@@ -520,7 +842,6 @@ pub fn fetch(http: &dyn Http, opts: &FetchOptions, now: u64) -> Result<String, S
             validate_download_uri(&entry(f).download_uri)
                 .map_err(|e| format!("{e} ({f}); the cache is unchanged"))?;
         }
-        fs::create_dir_all(&sdir).map_err(|e| format!("cannot create {}: {e}", sdir.display()))?;
         let mut staged = Vec::new();
         for f in &wanted {
             let e = entry(f);
@@ -548,14 +869,14 @@ pub fn fetch(http: &dyn Http, opts: &FetchOptions, now: u64) -> Result<String, S
         commit(&sdir, smeta, staged)?;
         done.push(format!("scryfall downloaded {}", summary.join(", ")));
     }
+    drop(slock);
     if opts.mtgjson {
         let mdir = opts.cache.join(MTGJSON_DIR);
+        let _mlock = lock_group(&mdir)?;
         let mmeta = read_source_meta(&mdir);
         if !opts.force && is_fresh(&mmeta, &mdir, ATOMIC_CARDS_FILE, now) {
             done.push("mtgjson fresh".to_owned());
         } else {
-            fs::create_dir_all(&mdir)
-                .map_err(|e| format!("cannot create {}: {e}", mdir.display()))?;
             let req = Request::new(MTGJSON_ATOMIC_URL, MAX_INPUT_BYTES, DOWNLOAD_MAX_TIME);
             let s = stage(
                 http,

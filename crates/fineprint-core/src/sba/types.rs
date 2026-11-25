@@ -330,6 +330,13 @@ pub trait SbaEnvironment {
     /// any. A battle whose protector is `None`, or a player who has left the game or lost it,
     /// has no player in the game designated as its protector (CR 704.5x). Default: `None`.
     ///
+    /// Required, together with [`SbaEnvironment::set_battle_protector`], by every environment
+    /// whose game can have a battle: an environment that answers here MUST remember what
+    /// `set_battle_protector` stored. [`perform_all`](super::perform_all) writes the chosen
+    /// protectors only after the whole pass succeeded. An environment that implements neither
+    /// (both defaults) never remembers a choice, so every check finds the battle without a
+    /// protector again and asks again (CR 704.5x); [`StoredSbaEnvironment`] implements both.
+    ///
     /// ```
     /// use std::collections::BTreeSet;
     /// use fineprint_base::ids::{ObjectId, PlayerId};
@@ -423,8 +430,13 @@ pub trait SbaEnvironment {
     /// Records `protector` as the protector of battle `battle` (CR 704.5x, CR 704.5y,
     /// CR 310.9f: the previous protector stops being its protector).
     /// [`perform_all`](super::perform_all) calls it once per chosen protector, ascending by
-    /// battle, only after the pass succeeded (never on `BusInterrupt::Pending` or an error).
-    /// Default: does nothing.
+    /// battle, only after the whole pass succeeded (never on `BusInterrupt::Pending` or an
+    /// error). Default: does nothing.
+    ///
+    /// Required, together with [`SbaEnvironment::battle_protector`], by every environment whose
+    /// game can have a battle: what is stored here MUST be what `battle_protector` answers
+    /// afterwards. An environment that implements neither re-asks the protector at every check
+    /// (CR 704.5x); [`StoredSbaEnvironment`] implements both.
     ///
     /// ```
     /// use std::collections::BTreeSet;
@@ -669,6 +681,11 @@ pub struct SbaOutcome {
     /// The protectors chosen in this pass (CR 704.5x, CR 704.5y): (battle, protector),
     /// ascending by battle. Each was recorded through
     /// [`SbaEnvironment::set_battle_protector`].
+    ///
+    /// Changing the protector of a battle that is being attacked (CR 704.5y applies to it)
+    /// removes that battle from combat (CR 506.4, CR 506.4c: it stops being attacked; its
+    /// attackers stay attacking creatures that attack nothing). The combat code must apply
+    /// that from this report; the pass does not touch combat state.
     pub protectors_chosen: Vec<(ObjectId, PlayerId)>,
     /// The players whose speed became 1 in this pass (CR 704.5aa, CR 702.179a), ascending:
     /// recorded as the [`SPEED`] designation `Int(1)`. Not an event: nothing in `executed`.

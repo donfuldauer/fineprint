@@ -597,22 +597,45 @@ fn req_sba_001_704_5y_legal_protector_nothing() {
     }
 }
 
-// REQ-SBA-001, CR 704.5y, 310.11: a battle being attacked yields nothing, even with an illegal
-// protector.
+// REQ-SBA-001, CR 704.5y, 704.5x, 506.4 (gate 02-state-objects F4): CR 704.5y has no "being
+// attacked" exemption. A battle being attacked whose protector can't be its protector IS asked
+// (reason CR 704.5y) and its protector is replaced; a battle being attacked with NO protector
+// is still not asked (CR 704.5x keeps its attack condition). The pass reports the change only
+// through `protectors_chosen`: the attack itself is untouched (combat applies CR 506.4).
 #[test]
-fn req_sba_001_704_5y_attacked_battle_exempt() {
-    let mut s = Sim::new();
-    let siege = s.siege(P1, P1, 3, Some(P2));
-    s.env.illegal_protectors.insert((siege, P2));
-    let plain = s.battle(P1, P1, 3, Some(P2));
-    let a = s.creature(P2, "test.vanilla_2_2", 2, 2);
-    let b = s.creature(P2, "test.vanilla_2_2", 2, 2);
-    s.attack_battle(a, siege);
-    s.attack_battle(b, plain);
-    assert!(s.check().is_empty());
-    let r = run_sba(s);
-    assert!(!r.outcome().performed);
-    assert_no_protector_change(&r);
+fn req_sba_001_704_5y_attacked_battle_with_illegal_protector_is_asked() {
+    for attacker_owner in [P1, P2] {
+        let mut s = Sim::new();
+        let siege = s.siege(P1, P1, 3, Some(P2));
+        s.env.illegal_protectors.insert((siege, P2));
+        let plain = s.battle(P1, P1, 3, Some(P2));
+        let unprotected = s.siege(P1, P1, 3, None);
+        let a = s.creature(attacker_owner, "test.vanilla_2_2", 2, 2);
+        let b = s.creature(attacker_owner, "test.vanilla_2_2", 2, 2);
+        let c = s.creature(attacker_owner, "test.vanilla_2_2", 2, 2);
+        s.attack_battle(a, siege);
+        s.attack_battle(b, plain);
+        s.attack_battle(c, unprotected);
+        // The Siege has no candidate left (P2 forbidden, P1 its controller): no request, it
+        // goes to its owner's graveyard; the typeless battle is asked, offering only P1.
+        assert_eq!(
+            s.check(),
+            vec![finding("704.5y", obj(siege)), finding("704.5y", obj(plain))],
+            "attacker of {attacker_owner:?}"
+        );
+        let r = drive_answers(s, &[submit_player(P1)]);
+        assert_protector_request(&r.requests[0], P1, "CR 704.5y", &[P1]);
+        assert_eq!(r.requests[0].reason.source, Some(plain));
+        let o = r.outcome();
+        assert!(o.performed);
+        assert_eq!(o.protectors_chosen, vec![(plain, P1)]);
+        assert_eq!(r.after.env.battle_protectors.get(&plain), Some(&P1));
+        assert_to_owners_graveyard(&r, siege, SBA);
+        assert_still_on_battlefield(&r, plain);
+        assert_still_on_battlefield(&r, unprotected);
+        assert!(!o.protectors_chosen.iter().any(|(x, _)| *x == unprotected));
+        assert_eq!(r.after.env.battle_protectors.get(&unprotected), None);
+    }
 }
 
 // REQ-SBA-001, CR 704.5y, 310.11: when no player can be chosen, no request is made and the
@@ -1090,13 +1113,11 @@ fn random_layout(seed: u64) -> Layout {
                     p == controller
                 }
         };
-        let rule = if attacked {
-            None
-        } else {
-            match protector {
-                Some(p) if in_game(p) => (!legal(p)).then_some("704.5y"),
-                _ => Some("704.5x"),
-            }
+        // CR 704.5y applies whether or not the battle is being attacked; only CR 704.5x has
+        // the attack condition (gate 02-state-objects F4).
+        let rule = match protector {
+            Some(p) if in_game(p) => (!legal(p)).then_some("704.5y"),
+            _ => (!attacked).then_some("704.5x"),
         };
         if v || w {
             moving.insert(id);

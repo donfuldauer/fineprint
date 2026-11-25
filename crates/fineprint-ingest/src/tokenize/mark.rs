@@ -74,6 +74,24 @@ impl Lexicon {
                 insert(&mut map, &format!("this {}", t.trim()), Entry::SelfRef);
             }
         }
+        // The importer stores a multi-word subtype as separate words (`["Time", "Lord"]`), so
+        // recover the boundaries from the vocabulary: a multi-word subtype phrase whose words
+        // appear consecutively in the face's own subtypes is one self-reference noun.
+        let own: Vec<String> = own_subtypes.iter().map(|s| s.to_lowercase()).collect();
+        for phrase in vocab
+            .subtype_groups
+            .iter()
+            .flat_map(|g| g.subtypes.iter().map(String::as_str))
+        {
+            let words: Vec<String> = phrase.split_whitespace().map(str::to_lowercase).collect();
+            if words.len() > 1 && own.windows(words.len()).any(|w| w == words.as_slice()) {
+                insert(
+                    &mut map,
+                    &format!("this {}", words.join(" ")),
+                    Entry::SelfRef,
+                );
+            }
+        }
         let max_chars = map.keys().map(|k| k.chars().count()).max().unwrap_or(0);
         Lexicon { map, max_chars }
     }

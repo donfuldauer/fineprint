@@ -500,6 +500,85 @@ fn self_reference_config_aliases() {
     assert_eq!(self_count(&alias.abilities[0].body), 1);
     let none = tok_full("test.none", "test.full", &[], text, &cfg);
     assert_eq!(self_count(&none.abilities[0].body), 0);
+    // F27: another card's `otherNames` never apply to a card without an entry.
+    let other_count = none.abilities[0]
+        .body
+        .tokens
+        .tokens()
+        .iter()
+        .filter(|t| {
+            matches!(
+                t,
+                TextToken::NameRef {
+                    kind: NameRefKind::Other,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(other_count, 0);
+}
+
+/// REQ-ING-004(b): a multi-word subtype stored as separate words (`["Time", "Lord"]`) is one
+/// SELF token covering the whole phrase; a single-word subtype is unchanged; adjacent words that
+/// do not form a vocabulary phrase are not joined.
+#[test]
+fn self_reference_multi_word_subtype() {
+    let f = tok_full(
+        "test.key",
+        "test.face",
+        &["Time", "Lord"],
+        "This Time Lord does a test thing.",
+        &TokenizerConfig::default(),
+    );
+    let body = &f.abilities[0].body;
+    assert_eq!(self_count(body), 1);
+    let toks = body.tokens.tokens();
+    assert!(matches!(
+        &toks[0],
+        TextToken::NameRef {
+            kind: NameRefKind::SelfRef,
+            ..
+        }
+    ));
+    assert!(matches!(&toks[1], TextToken::Literal { text, .. } if text == " does a test thing."));
+    assert!(words(body).is_empty());
+
+    let single = tok_full(
+        "test.key",
+        "test.face",
+        &["Goblin"],
+        "This Goblin does a test thing.",
+        &TokenizerConfig::default(),
+    );
+    let toks = single.abilities[0].body.tokens.tokens();
+    assert!(matches!(&toks[1], TextToken::Literal { text, .. } if text == " does a test thing."));
+
+    // "Goblin Elf" is not a vocabulary phrase: only the second word completes "this elf".
+    let adjacent = tok_full(
+        "test.key",
+        "test.face",
+        &["Goblin", "Elf"],
+        "This Goblin Elf does a test thing.",
+        &TokenizerConfig::default(),
+    );
+    let body = &adjacent.abilities[0].body;
+    assert_eq!(self_count(body), 1);
+    // "Elf" stays a separate creature-type word after the self-reference "This Goblin".
+    assert_eq!(words(body), [(Cat::CreatureType, "Elf".to_string())]);
+}
+
+/// REQ-ING-004(a): a kept span survives byte for byte, including runs of spaces, while the text
+/// around a removed span is still normalized; the result is deterministic.
+#[test]
+fn reminder_kept_span_whitespace_preserved() {
+    let keep: BTreeSet<String> = ["(keep  this \t span\n)".to_string()].into();
+    let line = "Do  (keep  this \t span\n)  (drop) ,  more  .";
+    let a = strip_reminder_text(line, &keep);
+    assert_eq!(a, "Do (keep  this \t span\n), more.");
+    assert_eq!(a, strip_reminder_text(line, &keep));
+    let none_removed = strip_reminder_text("Do (keep  this \t span\n)  x", &keep);
+    assert_eq!(none_removed, "Do (keep  this \t span\n)  x");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -19,8 +19,9 @@
 //!
 //! Cache layout (all under the cache directory, which is git-ignored and never committed):
 //! `scryfall/oracle-cards.json`, `scryfall/rulings.json`, `scryfall/source.json`,
-//! `mtgjson/AtomicCards.json`, `mtgjson/source.json`, `normalized/cards.json`. The file names are
-//! fixed constants, never taken from a server response.
+//! `mtgjson/AtomicCards.json`, `mtgjson/source.json`, `normalized/cards.json`, and a `.lock`
+//! file per fetched group (`fetch` holds it exclusively while it updates the group; it is left
+//! in place). The file names are fixed constants, never taken from a server response.
 
 pub mod cli;
 pub mod fetch;

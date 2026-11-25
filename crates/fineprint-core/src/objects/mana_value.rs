@@ -103,6 +103,8 @@ pub fn symbol_mana_value(symbol: ManaSymbol, ctx: ManaValueContext) -> i64 {
         ManaSymbol::GenericHybrid(n, _) => i64::from(n),
         // CR 202.3g: each Phyrexian symbol contributes 1 (hybrid Phyrexian too, CR 202.3f).
         ManaSymbol::Phyrexian(_) | ManaSymbol::HybridPhyrexian(_, _) => 1,
+        // CR 202.3f, 107.4: the largest component of {C/c} is 1 ({C} and {c} are both 1).
+        ManaSymbol::ColorlessHybrid(_) => 1,
         // CR 202.3e, 107.3g: X is 0 off the stack; CR 107.3a: the announced value on it;
         // CR 107.3p: Y follows the rules of X (Z likewise, DECISIONS.md #21).
         ManaSymbol::Variable(v) => match ctx {
@@ -152,5 +154,45 @@ pub fn mana_value(subject: &ManaValueSubject<'_>, ctx: ManaValueContext) -> i64 
             SplitState::OnStackHalf(SplitHalf::Left) => cost_mana_value(left, ctx),
             SplitState::OnStackHalf(SplitHalf::Right) => cost_mana_value(right, ctx),
         },
+    }
+}
+
+#[cfg(test)]
+mod colorless_hybrid_tests {
+    //! REQ-OBJ-001, REQ-DSL-002: mana value of colorless-hybrid symbols (CR 202.3f, 107.4).
+
+    use fineprint_dsl::mana::{Color, ManaCostDSL, ManaSymbol};
+
+    use super::{ManaValueContext, ManaValueSubject, mana_value, symbol_mana_value};
+
+    fn mv(text: &str) -> i64 {
+        let cost = ManaCostDSL::parse(text).expect("cost");
+        mana_value(
+            &ManaValueSubject::Plain {
+                mana_cost: Some(&cost),
+            },
+            ManaValueContext::OffStack,
+        )
+    }
+
+    /// REQ-OBJ-001 (CR 202.3f, 107.4): each `{C/c}` has mana value 1.
+    #[test]
+    fn req_obj_001_cr_202_3f_colorless_hybrid_symbol_is_one() {
+        for c in Color::ALL {
+            assert_eq!(
+                symbol_mana_value(ManaSymbol::ColorlessHybrid(c), ManaValueContext::OffStack),
+                1
+            );
+        }
+        assert_eq!(mv("{C/W}"), 1);
+    }
+
+    /// REQ-OBJ-001, REQ-DSL-002 (CR 202.3, 202.3f): costs with `{C/c}` sum each symbol as 1.
+    #[test]
+    fn req_obj_001_cr_202_3f_colorless_hybrid_costs() {
+        assert_eq!(mv("{C/W}{1}"), 2);
+        assert_eq!(mv("{C/W}{C/U}"), 2);
+        assert_eq!(mv("{C/W}{C/W}{1}{U}{C/G}"), 5);
+        assert_eq!(mv("{2/B}{C/B}"), 3);
     }
 }

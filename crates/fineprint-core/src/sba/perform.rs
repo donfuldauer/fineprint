@@ -129,21 +129,50 @@ impl Saved {
 /// What the performance of a pass needs from the check snapshot besides the findings
 /// (CR 704.3: everything is read from the one snapshot before anything changes).
 struct Plan {
-    /// CR 704.5j: the legend-rule groups that are findings, in asking order (CR 101.4: the
-    /// controller's APNAP rank, then the lowest id).
+    /// CR 704.5j: the legend-rule groups that are findings (CR 101.4: the controller's APNAP
+    /// rank, then the lowest id; asked in the order of `requests`).
     legend_groups: Vec<LegendGroup>,
     /// CR 704.5q, CR 704.5r: the counters to remove per object and kind. When both entries
     /// remove counters of one kind from one object, the larger amount is removed (decision
     /// #42 FP-041).
     counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>>,
-    /// CR 704.5x, CR 704.5y: the protector choices, in asking order (CR 101.4: the
-    /// controller's APNAP rank, then ascending battle id). A battle that is also a CR 704.5v or
-    /// CR 704.5w finding goes to the graveyard anyway and has none (decision #43 FP-042).
+    /// CR 704.5x, CR 704.5y: the protector choices (CR 101.4: the controller's APNAP rank, then
+    /// ascending battle id; asked in the order of `requests`). A battle that is also a CR 704.5v or
+    /// CR 704.5w finding normally goes to the graveyard and has none before the batch; it is
+    /// remembered in `retained_battles` instead.
     protector_asks: Vec<ProtectorAsk>,
+    /// CR 704.5x, CR 704.5y, CR 704.5v, CR 704.5w, CR 614.6: the battles at defense 0 whose
+    /// protector choice was suppressed before the batch, each with the CR reference of its
+    /// CR 704.5x or CR 704.5y finding. If a replacement effect replaced the graveyard move and
+    /// the battle is still on the battlefield as the same object without a protector after the
+    /// batch, its controller is asked then (decision "Gate 02-state-objects R3 — Protector request
+    /// after the batch for a retained zero-defense battle").
+    retained_battles: BTreeMap<ObjectId, &'static str>,
+    /// CR 101.4: every request of the pass, in asking order: the chooser's APNAP rank, then
+    /// the legend-rule groups before the protector choices of that player, then the group's
+    /// lowest id or the ascending battle id. A protector choice without a chooser or without
+    /// candidates is no request (its battle goes to the graveyard); one whose controller has
+    /// lost the game or is not a player of the game (CR 800.4a) is no request either, and its
+    /// battle stays ([`can_choose_protector`]).
+    requests: Vec<PlannedRequest>,
+}
+
+/// One choice of a pass, an index into [`Plan::legend_groups`] or [`Plan::protector_asks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlannedRequest {
+    /// CR 704.5j: the legend-rule group at this index.
+    Legend(usize),
+    /// CR 704.5x, CR 704.5y: the protector choice at this index.
+    Protector(usize),
 }
 
 impl Plan {
-    fn new(registry: &SbaRegistry, view: &SbaView<'_>, findings: &[SbaFinding]) -> Plan {
+    fn new(
+        registry: &SbaRegistry,
+        view: &SbaView<'_>,
+        game: &GameState,
+        findings: &[SbaFinding],
+    ) -> Plan {
         let mut legend_subjects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>> = BTreeMap::new();
         let mut protector_battles: BTreeMap<ObjectId, &'static str> = BTreeMap::new();
@@ -184,16 +213,53 @@ impl Plan {
                 .filter(|g| g.members.iter().all(|id| legend_subjects.contains(id)))
                 .collect()
         };
-        protector_battles.retain(|b, _| !zero_defense.contains(b));
+        // CR 704.5v, CR 704.5w, CR 704.8: no request before the batch for a battle that leaves
+        // with it (asking would add a meaningless decision); remembered in case its move is
+        // replaced (CR 614.6) and it stays.
+        let (retained_battles, protector_battles): (BTreeMap<_, _>, BTreeMap<_, _>) =
+            protector_battles
+                .into_iter()
+                .partition(|(b, _)| zero_defense.contains(b));
         let protector_asks = if protector_battles.is_empty() {
             Vec::new()
         } else {
             protector_asks(view, &protector_battles)
         };
+        // CR 101.4: one APNAP-ordered sequence per pass for both kinds of choice (decision
+        // "Gate 02-state-objects F2 — One APNAP request sequence per SBA pass"): the chooser's APNAP rank, then (one player's own
+        // choices, in a fixed order) the legend-rule groups before the protector choices, then
+        // the lowest group id or the battle id.
+        let order = view.apnap_order();
+        let rank = |p: PlayerId| order.iter().position(|&q| q == p).unwrap_or(order.len());
+        let mut keyed: Vec<((usize, u8, ObjectId), PlannedRequest)> = Vec::new();
+        for (i, g) in legend_groups.iter().enumerate() {
+            keyed.push((
+                (rank(g.controller), 0, g.members[0]),
+                PlannedRequest::Legend(i),
+            ));
+        }
+        // CR 704.5x, CR 704.5y, CR 800.4a: only a controller still in the game is asked
+        // ([`can_choose_protector`]); a battle whose controller lost the game gets no request and
+        // no request id, and does not move (decision "Gate 02-state-objects R3d — No protector
+        // request to a controller who lost the game, on every path").
+        for (i, a) in protector_asks.iter().enumerate() {
+            if let Some(controller) = a.controller
+                && !a.candidates.is_empty()
+                && can_choose_protector(game, controller)
+            {
+                keyed.push((
+                    (rank(controller), 1, a.battle),
+                    PlannedRequest::Protector(i),
+                ));
+            }
+        }
+        keyed.sort_unstable();
         Plan {
             legend_groups,
             counter_removals,
             protector_asks,
+            retained_battles,
+            requests: keyed.into_iter().map(|(_, r)| r).collect(),
         }
     }
 }
@@ -203,12 +269,17 @@ impl Plan {
 /// changes, then all are performed simultaneously as one event. The heartbeat repeats the
 /// pass while it performs something (CR 704.3); this is one pass.
 ///
+/// - **Request order** (CR 101.4): the legend-rule and protector choices below are ONE
+///   sequence for the pass, asked before anything changes: by the chooser's APNAP rank (the
+///   active player first, then the turn order), then, for one player, every legend-rule group
+///   before every protector choice, then ascending lowest group id or ascending battle id.
+///   Request ids are assigned in this order. The only requests after the batch are the
+///   protector choices of retained zero-defense battles (see "Battle protectors" below).
 /// - **The legend rule** (CR 704.5j, CR 201.2a): the legendary permanents of each (evaluated,
 ///   CR 613.1b) controller form a conflict graph (an edge between two that have at least one
 ///   name in common); each connected component with an edge is a group. Before anything
 ///   changes, the controller of each group is asked ONE `SELECT_OBJECTS_FROM_ZONE` choice
-///   (CR 101.4: groups in APNAP order of their controllers, then ascending lowest id; candidates
-///   the group ascending; min 1; max 1 if every pair of members has the same name, otherwise
+///   (in the request order of the pass below; candidates the group ascending; min 1; max 1 if every pair of members has the same name, otherwise
 ///   the group size minus 1). The answer is the set of survivors and must be a maximal set of
 ///   members no two of which have the same name; on timeout the greedy such set by ascending
 ///   id. Every other member is moved with the batch below.
@@ -242,19 +313,47 @@ impl Plan {
 ///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
-/// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): after the
-///   legend-rule choices and before anything changes, the (evaluated) controller of each battle
-///   that has no player in the game as its protector, or whose protector can't be its
-///   protector, and that is not being attacked, is asked ONE `CHOOSE_PLAYER` choice (CR 101.4:
-///   in APNAP order of the controllers, then ascending battle id; reason `CR 704.5x` or
-///   `CR 704.5y`; candidates the appropriate players ascending: for a Siege the opponents of its
-///   controller, for a battle with no battle type its controller, each allowed by
-///   [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
+/// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): before
+///   anything changes, the (evaluated) controller of each battle that has no player in the game
+///   as its protector and is not being attacked (CR 704.5x), or whose protector can't be its
+///   protector, whether or not it is being attacked (CR 704.5y), is asked ONE `CHOOSE_PLAYER`
+///   choice (in the request order of the pass above; reason `CR 704.5x` or `CR 704.5y`;
+///   `reason.source` the battle; candidates the appropriate players ascending: for a Siege the
+///   opponents of its controller, for a battle with no battle type its controller, each allowed
+///   by [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
 ///   answer that is not a candidate is [`ChoiceError::Invalid`]. A battle with no candidate is
-///   moved to its owner's graveyard with the batch below, without a request; a battle that is
-///   also a CR 704.5v or CR 704.5w finding gets no request. After the pass succeeded each chosen
+///   moved to its owner's graveyard with the batch below, without a request. A battle whose
+///   controller has lost the game (the [`LOST_THE_GAME`] designation from an earlier pass) or is
+///   not a player of the game gets no request and consumes no request id, and stays where it is
+///   (CR 800.4a: the battle leaves the game when its controller does, performed by the caller;
+///   CR 800.4h: a choice that survives the departure goes to the next player in turn order, not
+///   modelled here, #125;
+///   decision "Gate 02-state-objects R3d — No protector request to a controller who lost the
+///   game, on every path"). A battle that is
+///   also a CR 704.5v or CR 704.5w finding gets no request before the batch: when it leaves with
+///   the batch, asking would change nothing (CR 704.8). If a replacement effect replaced its
+///   graveyard move (CR 614.6, CR 704.7) and it is still on the battlefield as the same object
+///   and still a CR 704.5x or CR 704.5y subject after the batch, its controller is asked the same
+///   choice AFTER the batch, in the same pass (the subject test, the controller and the
+///   candidates from a view of the state after the batch, built from the post-batch layer
+///   inputs: those [`perform_all_relayered`] or [`perform_all_post_batch`] receives from its
+///   provider, or `effects` and `layer_env` again for `perform_all`; the protector facts
+///   ([`SbaEnvironment::battle_protector`], [`SbaEnvironment::can_be_protector`]) from the
+///   read-only view the [`perform_all_post_batch`] provider supplies, or from `env` otherwise;
+///   the reason the CR reference of the entry that flags it after the batch; ordered by the
+///   controller's APNAP rank, then ascending battle id; these requests come after every request
+///   of the pass and every request of the batch); with no candidate, or with a controller who
+///   has lost the game (the [`LOST_THE_GAME`] designation), it gets no request and the next
+///   pass finds it again (decisions "Gate 02-state-objects R3 — Protector request after the
+///   batch for a retained zero-defense battle", "Gate 02-state-objects R3b — Post-batch layer
+///   inputs for the retained-battle request" and "Gate 02-state-objects R3c — Post-batch
+///   eligibility, CR reference and lost controller for the retained-battle request"). After the
+///   pass succeeded each chosen
 ///   protector is recorded through [`SbaEnvironment::set_battle_protector`] and reported in
-///   [`SbaOutcome::protectors_chosen`].
+///   [`SbaOutcome::protectors_chosen`]. Changing the protector of a battle that is being
+///   attacked removes it from combat (CR 506.4, CR 506.4c: it stops being attacked; its
+///   attackers stay attacking creatures that attack nothing); the combat code applies that
+///   from [`SbaOutcome::protectors_chosen`], the pass does not touch combat state.
 /// - **Speed** (CR 704.5aa, CR 702.179a): each player found gets the [`SPEED`] designation
 ///   `Int(1)` once, reported in [`SbaOutcome::speed_set`]; not an event.
 /// - **Removing a dungeon from the game** (CR 704.5t, CR 309.7): like ceasing to exist below
@@ -298,6 +397,16 @@ impl Plan {
 /// which have the same name, or a protector answer that is not a candidate ([`ChoiceError::Invalid`] with the request's id, which a
 /// [`ChoiceSession`](crate::choice::ChoiceSession) rejects without recording, the request
 /// staying pending). In both cases every component of `ctx`, the replacement registry and the flags of `env` are exactly as before the call.
+///
+/// # Layer inputs after the batch
+/// `perform_all` reads `effects` and `layer_env` for every view of the pass, including the
+/// post-batch view of the retained zero-defense battles (see "Battle protectors"): that step
+/// then evaluates the state after the batch with the caller's PRE-batch layer inputs. A caller
+/// whose layer inputs depend on state the batch can change (an attachment the batch unattaches,
+/// counters it removes, an object it moves) calls [`perform_all_relayered`] instead and
+/// supplies the layer inputs of the state after the batch; a caller whose protector facts
+/// ([`SbaEnvironment::battle_protector`], [`SbaEnvironment::can_be_protector`]) also depend on
+/// such state calls [`perform_all_post_batch`] and supplies a read-only view of them too.
 pub fn perform_all(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
@@ -306,6 +415,154 @@ pub fn perform_all(
     layer_env: &dyn LayerEnvironment,
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
+) -> Result<SbaOutcome, BusInterrupt> {
+    perform_all_relayered(
+        registry,
+        ctx,
+        replacements,
+        effects,
+        layer_env,
+        env,
+        choices,
+        &mut |_, view| view(effects, layer_env),
+    )
+}
+
+/// The provider of the layer inputs of the state after the batch of a pass, for
+/// [`perform_all_relayered`] (REQ-SBA-001, REQ-LAYER-001; CR 613.1, CR 613.4: characteristics
+/// after every layer).
+///
+/// The engine calls it with the [`EventContext`] as it is after the batch (no mutable borrow is
+/// held then); it must call the second argument exactly once with the continuous effects and
+/// the layer environment that describe that state. The inputs never leave the call, so they may
+/// borrow from the provider's own snapshot of the context.
+pub type PostBatchLayers<'a> =
+    &'a mut dyn FnMut(&EventContext<'_>, &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment));
+
+/// [`perform_all`] with the layer inputs of the state after the batch supplied by `post_batch`
+/// (REQ-SBA-001, CR 704.3, CR 704.5x, CR 614.6).
+///
+/// Everything [`perform_all`] documents holds unchanged: the check, the plan, the pre-batch
+/// requests (request ids included) and the batch read `effects` and `layer_env`. Only the
+/// post-batch protector step of the retained zero-defense battles ("Battle protectors" in
+/// [`perform_all`]) reads the inputs `post_batch` supplies, for both the test that the battle
+/// is still a CR 704.5x or CR 704.5y subject and its request (the chooser, its controller, and
+/// the candidates).
+///
+/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
+/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
+/// environment read), so that re-running the pass from the same state (a
+/// [`ChoiceSession`](crate::choice::ChoiceSession) replay) gives the same requests.
+///
+/// # Errors
+/// As [`perform_all`]; a pending or failed post-batch request leaves every component of `ctx`,
+/// the replacement registry and the flags of `env` exactly as before the call.
+#[allow(clippy::too_many_arguments)]
+pub fn perform_all_relayered(
+    registry: &SbaRegistry,
+    ctx: &mut EventContext<'_>,
+    replacements: &mut ReplacementRegistry,
+    effects: &ContinuousEffects,
+    layer_env: &dyn LayerEnvironment,
+    env: &mut dyn SbaEnvironment,
+    choices: &mut ChoiceContext<'_>,
+    post_batch: PostBatchLayers<'_>,
+) -> Result<SbaOutcome, BusInterrupt> {
+    // The pass's own `env` stays the protector view: the provider supplies layer inputs only.
+    perform_pass(
+        registry,
+        ctx,
+        replacements,
+        effects,
+        layer_env,
+        env,
+        choices,
+        &mut |after, view| post_batch(after, &mut |e, l| view(e, l, None)),
+    )
+}
+
+/// The provider of the state after the batch of a pass, for [`perform_all_post_batch`]: its
+/// layer inputs and a read-only view of its protector facts (REQ-SBA-001, REQ-LAYER-001;
+/// CR 613.1, CR 613.4: characteristics after every layer; CR 704.5x, CR 704.5y).
+///
+/// The engine calls it with the [`EventContext`] as it is after the batch (no mutable borrow is
+/// held then); it must call the second argument exactly once with the continuous effects, the
+/// layer environment and an [`SbaEnvironment`] that describe that state. The engine reads only
+/// [`SbaEnvironment::battle_protector`] and [`SbaEnvironment::can_be_protector`] from that
+/// environment, never writes through it, and never keeps it past the call, so it may borrow
+/// from the provider's own snapshot of the caller state. Which entries are active (the game
+/// variant, [`SbaEnvironment::variant`]) is read from the pass's original `env`, never from this
+/// view.
+pub type PostBatchState<'a> = &'a mut dyn FnMut(
+    &EventContext<'_>,
+    &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment, &dyn SbaEnvironment),
+);
+
+/// [`perform_all_relayered`] whose provider also supplies a read-only view of the protector
+/// facts of the state after the batch (REQ-SBA-001, REQ-LAYER-001; CR 704.3, CR 704.5x,
+/// CR 704.5y, CR 614.6).
+///
+/// Everything [`perform_all_relayered`] documents holds unchanged; in addition, the post-batch
+/// protector step of the retained zero-defense battles ("Battle protectors" in [`perform_all`])
+/// reads each battle's protector ([`SbaEnvironment::battle_protector`]) and who can be its
+/// protector ([`SbaEnvironment::can_be_protector`]) from the [`SbaEnvironment`] the provider
+/// supplies, both for the test that the battle is still a CR 704.5x or CR 704.5y subject and for
+/// its candidates. A caller whose protector facts depend on state the batch can change (an
+/// attachment the batch unattaches) uses this entry point.
+///
+/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
+/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
+/// environment read). The view it supplies is read-only: every write (the chosen protectors
+/// through [`SbaEnvironment::set_battle_protector`], the deathtouch flag) goes to `env`, and
+/// only after the pass succeeded.
+///
+/// # Errors
+/// As [`perform_all`]; a pending or failed post-batch request leaves every component of `ctx`,
+/// the replacement registry and the flags of `env` exactly as before the call.
+#[allow(clippy::too_many_arguments)]
+pub fn perform_all_post_batch(
+    registry: &SbaRegistry,
+    ctx: &mut EventContext<'_>,
+    replacements: &mut ReplacementRegistry,
+    effects: &ContinuousEffects,
+    layer_env: &dyn LayerEnvironment,
+    env: &mut dyn SbaEnvironment,
+    choices: &mut ChoiceContext<'_>,
+    post_batch: PostBatchState<'_>,
+) -> Result<SbaOutcome, BusInterrupt> {
+    perform_pass(
+        registry,
+        ctx,
+        replacements,
+        effects,
+        layer_env,
+        env,
+        choices,
+        &mut |after, view| post_batch(after, &mut |e, l, s| view(e, l, Some(s))),
+    )
+}
+
+/// The engine's post-batch provider: the layer inputs of the state after the batch and, when
+/// the caller supplies one, a read-only protector view of it (`None`: the pass's own `env`).
+type PostBatchInputs<'a> = &'a mut dyn FnMut(
+    &EventContext<'_>,
+    &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment, Option<&dyn SbaEnvironment>),
+);
+
+/// The one pass behind [`perform_all`], [`perform_all_relayered`] and
+/// [`perform_all_post_batch`] (CR 704.3).
+#[allow(clippy::too_many_arguments)]
+fn perform_pass(
+    registry: &SbaRegistry,
+    ctx: &mut EventContext<'_>,
+    replacements: &mut ReplacementRegistry,
+    effects: &ContinuousEffects,
+    layer_env: &dyn LayerEnvironment,
+    env: &mut dyn SbaEnvironment,
+    choices: &mut ChoiceContext<'_>,
+    post_batch: PostBatchInputs<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
     // CR 704.3: every predicate is evaluated against one snapshot before anything changes.
     let (findings, plan) = {
@@ -319,12 +576,21 @@ pub fn perform_all(
             &*env,
         );
         let findings = check_view(registry, &view, &*env);
-        let plan = Plan::new(registry, &view, &findings);
+        let plan = Plan::new(registry, &view, ctx.game, &findings);
         (findings, plan)
     };
     let saved = Saved::take(ctx);
     let replacements_before = replacements.clone();
-    match perform_findings(registry, ctx, replacements, findings, &plan, &*env, choices) {
+    match perform_findings(
+        registry,
+        ctx,
+        replacements,
+        findings,
+        &plan,
+        post_batch,
+        &*env,
+        choices,
+    ) {
         Ok(mut outcome) => {
             // CR 704.3: "If any state-based actions are performed as a result of a check, the
             // check is repeated": performed means the pass changed the state.
@@ -347,48 +613,64 @@ pub fn perform_all(
 }
 
 /// Performs `findings` simultaneously; on error the caller restores everything.
+///
+/// The requests of `plan` are asked before any state changes; then the one batch runs; then
+/// (CR 704.5x, CR 704.5y, CR 614.6) each battle of [`Plan::retained_battles`] that is still on
+/// the battlefield as the same object and still a CR 704.5x or CR 704.5y subject in a fresh view
+/// of the state after the batch (built from the post-batch layer inputs and, when supplied, the
+/// read-only protector view that `post_batch` supplies; `env` otherwise; see
+/// [`ask_retained_protectors`]) is asked its protector choice, with the CR reference of the
+/// entry that flags it after the batch, in the order of the pre-batch requests (the
+/// controller's APNAP rank, then ascending battle id); a battle whose controller has lost the
+/// game gets none. A pending or failed request leaves the rollback to the caller like every
+/// other.
+#[allow(clippy::too_many_arguments)]
 fn perform_findings(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
     replacements: &mut ReplacementRegistry,
     findings: Vec<SbaFinding>,
     plan: &Plan,
+    post_batch: PostBatchInputs<'_>,
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
-    // CR 704.5j: every legend-rule choice is asked before any state changes, so a pending
-    // choice leaves the state as it was.
-    // CR 101.4: the groups are in APNAP order of their controllers; all moves happen together
-    // after every answer.
+    // CR 704.5j, CR 704.5x, CR 704.5y, CR 310.11: every legend-rule and protector choice is
+    // asked before any state changes, so a pending choice leaves the state as it was.
+    // CR 101.4: one sequence for the pass, in APNAP order of the choosing players (decision
+    // "Gate 02-state-objects F2 — One APNAP request sequence per SBA pass"); all moves happen together after every answer.
     let mut legend_losers: BTreeSet<ObjectId> = BTreeSet::new();
-    for group in &plan.legend_groups {
-        let kept = ask_legend_choice(choices, group)?;
-        legend_losers.extend(
-            group
-                .members
-                .iter()
-                .copied()
-                .filter(|id| !kept.contains(id)),
-        );
-    }
-
-    // CR 704.5x, CR 704.5y, CR 310.11: every protector choice is asked before any state change
-    // too, after the legend-rule choices (decision #43 FP-042). A battle no player can protect is
-    // put into its owner's graveyard with the batch, without a request.
     let mut protectors_chosen: Vec<(ObjectId, PlayerId)> = Vec::new();
-    let mut unprotectable: BTreeSet<ObjectId> = BTreeSet::new();
-    for ask in &plan.protector_asks {
-        match ask.controller {
-            Some(controller) if !ask.candidates.is_empty() => {
-                let chosen = ask_protector_choice(choices, ask, controller)?;
-                protectors_chosen.push((ask.battle, chosen));
+    for &request in &plan.requests {
+        match request {
+            PlannedRequest::Legend(i) => {
+                let group = &plan.legend_groups[i];
+                let kept = ask_legend_choice(choices, group)?;
+                legend_losers.extend(
+                    group
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|id| !kept.contains(id)),
+                );
             }
-            _ => {
-                unprotectable.insert(ask.battle);
+            PlannedRequest::Protector(i) => {
+                let ask = &plan.protector_asks[i];
+                if let Some(controller) = ask.controller {
+                    let chosen = ask_protector_choice(choices, ask, controller)?;
+                    protectors_chosen.push((ask.battle, chosen));
+                }
             }
         }
     }
-    protectors_chosen.sort_unstable();
+    // CR 704.5x, CR 704.5y: a battle no player can protect is put into its owner's graveyard
+    // with the batch, without a request.
+    let unprotectable: BTreeSet<ObjectId> = plan
+        .protector_asks
+        .iter()
+        .filter(|a| a.controller.is_none() || a.candidates.is_empty())
+        .map(|a| a.battle)
+        .collect();
 
     // CR 704.5b, CR 121.4: the check consumes the flag. Taken before the batch so that an
     // empty-library draw made by a replacement during the batch counts for the next check.
@@ -663,6 +945,13 @@ fn perform_findings(
         }
     }
 
+    // CR 704.5x, CR 704.5y, CR 614.6: a battle at defense 0 whose graveyard move was replaced
+    // and that stays without a protector gets its protector choice now, after the batch.
+    protectors_chosen.extend(ask_retained_protectors(
+        registry, ctx, plan, post_batch, env, choices,
+    )?);
+    protectors_chosen.sort_unstable();
+
     // CR 704.3: performed means the state changed (perform_all adds a registry change).
     let performed = !executed.is_empty()
         || !ceased.is_empty()
@@ -685,6 +974,115 @@ fn perform_findings(
     })
 }
 
+/// CR 704.5x, CR 704.5y, CR 704.5v, CR 704.5w, CR 614.6: the protector choices of the battles of
+/// [`Plan::retained_battles`] after the batch. A battle that left the battlefield (another id or
+/// zone) gets none (CR 704.8: what it was is last known information from before the pass); a
+/// battle that is still on the battlefield as the same object and is still a subject of a
+/// CR 704.5x or CR 704.5y entry in a view of the state after the batch is asked like a pre-batch
+/// choice ([`ask_protector_choice`]; controller and candidates from that view; the reason the
+/// CR reference of the CR 704.5x or CR 704.5y entry that flags it in that view, the pre-batch
+/// plan only selecting which battles were deferred), ordered by the controller's APNAP rank,
+/// then ascending battle id ([`protector_asks`]). A battle without a controller, whose
+/// controller has lost the game (the [`LOST_THE_GAME`] designation after the batch: it can't
+/// answer), or without a candidate gets no request and consumes no request id: the next pass
+/// finds it again (CR 704.5x). The pre-batch requests make the same controller check on the
+/// state before the batch ([`can_choose_protector`]).
+///
+/// The view is built from the post-batch layer inputs (CR 613.1, CR 613.4: characteristics after
+/// every layer) that `post_batch` supplies for `ctx` as it is after the batch, so a controller
+/// or counters that the batch changed through a layer input are read as they are now; the
+/// protectors and who can be one are read from the read-only [`SbaEnvironment`] view it
+/// supplies ([`perform_all_post_batch`]), or from `env` when it supplies none
+/// ([`perform_all`], [`perform_all_relayered`]). Nothing is written through either. Called at
+/// most once, and only when a retained battle is still on the battlefield.
+///
+/// # Errors
+/// [`BusInterrupt::Pending`] until every request is answered; [`BusInterrupt::Error`] if an
+/// answer is not a candidate. The caller restores the state.
+fn ask_retained_protectors(
+    registry: &SbaRegistry,
+    ctx: &EventContext<'_>,
+    plan: &Plan,
+    post_batch: PostBatchInputs<'_>,
+    env: &dyn SbaEnvironment,
+    choices: &mut ChoiceContext<'_>,
+) -> Result<Vec<(ObjectId, PlayerId)>, BusInterrupt> {
+    // CR 704.8: a retained battle that left the battlefield gets nothing; with none left the
+    // provider is not called.
+    let on_battlefield = plan.retained_battles.keys().any(|&b| {
+        ctx.zones
+            .object(b)
+            .is_some_and(|r| r.zone == ZoneId::Battlefield)
+    });
+    if !on_battlefield {
+        return Ok(Vec::new());
+    }
+    let mut asks: Vec<ProtectorAsk> = Vec::new();
+    post_batch(ctx, &mut |effects, layer_env, protector_view| {
+        // CR 704.5x, CR 704.5y: a fresh view of the state after the batch, through its own
+        // layer inputs and, when the caller supplies one, its read-only protector view (never
+        // written through), used only for the retained battles.
+        let facts: &dyn SbaEnvironment = protector_view.unwrap_or(env);
+        let view = SbaView::new(
+            ctx.game,
+            ctx.zones,
+            ctx.events,
+            ctx.permanents,
+            effects,
+            layer_env,
+            facts,
+        );
+        let variant = env.variant();
+        // CR 704.5x, CR 704.5y: each battle with the CR reference of the post-batch entry that
+        // flags it (the two never flag the same battle; if they did, the first entry in
+        // registry order would win).
+        let mut unprotected: BTreeMap<ObjectId, &'static str> = BTreeMap::new();
+        for entry in registry
+            .entries()
+            .iter()
+            .filter(|entry| entry.action == SbaAction::ChooseProtector && entry.active_in(variant))
+        {
+            for subject in entry.subjects(&view) {
+                if let SbaSubject::Object(o) = subject {
+                    unprotected.entry(o).or_insert(entry.cr_ref);
+                }
+            }
+        }
+        // The pre-batch plan only selects which battles were deferred.
+        let still: BTreeMap<ObjectId, &'static str> = plan
+            .retained_battles
+            .keys()
+            .filter_map(|b| unprotected.get(b).map(|&cr| (*b, cr)))
+            .collect();
+        asks = protector_asks(&view, &still);
+    });
+    let mut chosen = Vec::new();
+    for ask in &asks {
+        // A controller who has lost the game (the LOST_THE_GAME designation) can't answer: like
+        // a battle without a controller, no request; the next pass finds the battle again.
+        if let Some(controller) = ask.controller
+            && !ask.candidates.is_empty()
+            && can_choose_protector(ctx.game, controller)
+        {
+            chosen.push((ask.battle, ask_protector_choice(choices, ask, controller)?));
+        }
+    }
+    Ok(chosen)
+}
+
+/// CR 704.5x, CR 704.5y, CR 800.4a: whether `controller`, the controller of a battle, can be
+/// asked its protector choice: it is a player of `game` without the [`LOST_THE_GAME`]
+/// designation. CR 704.5x and CR 704.5y name "that battle's controller" as the chooser; CR 800.4a
+/// removes the battle when that player leaves (performed by the caller), and CR 800.4h sends a
+/// choice that survives the departure to the next player in turn order (not modelled, #125). One test for the pre-batch requests ([`Plan`]) and the post-batch requests
+/// ([`ask_retained_protectors`]) (decisions "Gate 02-state-objects R3c — Post-batch eligibility,
+/// CR reference and lost controller for the retained-battle request" and "Gate 02-state-objects
+/// R3d — No protector request to a controller who lost the game, on every path").
+fn can_choose_protector(game: &GameState, controller: PlayerId) -> bool {
+    game.player(controller)
+        .is_some_and(|p| p.designation(LOST_THE_GAME).is_none())
+}
+
 /// CR 704.5x, CR 704.5y, CR 310.11: asks `controller`, the controller of the battle of `ask`,
 /// to choose its protector as ONE `CHOOSE_PLAYER` choice: candidates the appropriate players
 /// ascending, min 1, max 1, default the lowest candidate.
@@ -705,7 +1103,9 @@ fn ask_protector_choice(
         choice_type: ChoiceType::ChoosePlayer,
         reason: ChoiceReason {
             cr: ask.cr.to_owned(),
-            source: None,
+            // The battle whose protector is chosen: two requests with the same candidates are
+            // told apart by it.
+            source: Some(ask.battle),
         },
         min: 1,
         max: 1,

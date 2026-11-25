@@ -945,7 +945,7 @@ fn object_flag_predicates_table() {
         (PredicateAST::FaceUp, false, true),
         (PredicateAST::FaceDown, true, false),
         (PredicateAST::Tapped, true, false),
-        (PredicateAST::Untapped, false, true),
+        (PredicateAST::Untapped, false, false),
         (PredicateAST::Attacking, true, false),
         (PredicateAST::Blocking, true, false),
         (PredicateAST::EnteredThisTurn, true, false),
@@ -1027,6 +1027,28 @@ fn object_flag_predicates_table() {
     }
     assert!(!pred_obj(&env, &c, &PredicateAST::IsMulticolored, &red));
     assert!(!pred_obj(&env, &c, &PredicateAST::IsColorless, &red));
+}
+
+/// REQ-DSL-003, CR 110.5d: TAPPED and UNTAPPED hold only on the battlefield; an object in any
+/// other zone is neither.
+#[test]
+fn tap_status_only_on_the_battlefield() {
+    let env = TestEnv::with_players(2);
+    let c = ctx(1);
+    let mut on_bf = creature(1, 1, 1, 1);
+    assert!(pred_obj(&env, &c, &PredicateAST::Untapped, &on_bf));
+    assert!(!pred_obj(&env, &c, &PredicateAST::Tapped, &on_bf));
+    on_bf.tapped = true;
+    assert!(pred_obj(&env, &c, &PredicateAST::Tapped, &on_bf));
+    assert!(!pred_obj(&env, &c, &PredicateAST::Untapped, &on_bf));
+    for zone in [Zone::Graveyard, Zone::Exile, Zone::Hand] {
+        for tapped in [false, true] {
+            let mut v = card(2, zone, 1, &["Creature"]);
+            v.tapped = tapped;
+            assert!(!pred_obj(&env, &c, &PredicateAST::Tapped, &v), "{zone:?}");
+            assert!(!pred_obj(&env, &c, &PredicateAST::Untapped, &v), "{zone:?}");
+        }
+    }
 }
 
 /// REQ-DSL-003: IS_PLAYER and IS_CARD_OR_TOKEN.
@@ -1892,7 +1914,6 @@ fn property_sweep_determinism_and_no_panics() {
         let c = ctx(1);
         env.shuffle = 0;
         let base = select_objects(&env, &c, &s);
-        assert_eq!(base, select_objects(&env, &c, &s));
         for seed in 1..4 {
             env.shuffle = round * 31 + seed;
             assert_eq!(select_objects(&env, &c, &s), base, "round {round}");
@@ -1901,7 +1922,15 @@ fn property_sweep_determinism_and_no_panics() {
             attr: DistinctAttr::Power,
             selector: Box::new(s),
         };
-        assert_eq!(eval_value(&env, &c, &dv), eval_value(&env, &c, &dv));
+        // The base result (shuffle 0) must succeed; every other enumeration order must give
+        // exactly that result.
+        env.shuffle = 0;
+        let dbase = eval_value(&env, &c, &dv);
+        assert!(dbase.is_ok(), "round {round}: {dbase:?}");
+        for seed in 1..4 {
+            env.shuffle = round * 31 + seed;
+            assert_eq!(eval_value(&env, &c, &dv), dbase, "round {round}");
+        }
 
         let pick = |r: &mut Lcg| {
             if r.below(2) == 0 {
@@ -2137,6 +2166,35 @@ fn attr_source_lki_reads_captured_view_first() {
         .insert("$s".into(), vec![Referent::Object(o(10))]);
     let bound = at(ReferenceAST::Bound { var: "$s".into() });
     assert_eq!(val(&env, &cb, &bound), 7);
+}
+
+/// REQ-DSL-003, CR 608.2h, CR 113.7a, CR 608.2b: DISTINCT over SOURCE_LKI reads the same captured
+/// view as ATTR(SOURCE_LKI) (one view function), so a source that left the battlefield agrees.
+#[test]
+fn distinct_source_lki_agrees_with_attr_source_lki() {
+    let mut env = TestEnv::with_players(2);
+    // Current information has a different power from the captured information.
+    env.add(creature(10, 1, 7, 7));
+    env.lki.insert(o(10), creature(10, 1, 3, 3));
+    let c = ctx_src(1, 10);
+    let attr = ValueExpressionAST::Attr {
+        reference: ReferenceAST::SourceLki,
+        attr: ObjectAttr::Power,
+    };
+    let distinct_of = |a: DistinctAttr| ValueExpressionAST::Distinct {
+        attr: a,
+        selector: Box::new(ObjectSelectorAST::Ref(ReferenceAST::SourceLki)),
+    };
+    assert_eq!(val(&env, &c, &attr), 3);
+    // One source: exactly one distinct power, either way.
+    assert_eq!(val(&env, &c, &distinct_of(DistinctAttr::Power)), 1);
+    // A distinct count over a captured view that lacks the attribute (no name) counts 0 even
+    // though the current view has one: the captured view is read, not the current one.
+    assert_eq!(val(&env, &c, &distinct_of(DistinctAttr::Name)), 1);
+    let mut captured = creature(10, 1, 3, 3);
+    captured.characteristics.names.clear();
+    env.lki.insert(o(10), captured);
+    assert_eq!(val(&env, &c, &distinct_of(DistinctAttr::Name)), 0);
 }
 
 // ---------------------------------------------------------------------------------------------
