@@ -177,7 +177,8 @@ Handle the PR state in this order:
    - Everything else (complex, cross-module, contract, rules-outcome, security/redaction) →
      `work-classifier` → `task-executor`.
    - Failed pre-merge checks (such as PR description checks) → update the PR body with
-     `gh pr edit <P> --body ...`.
+     `gh pr edit <R> --body ...` (the PR the warning was read from; on a routine PR `<R>` is
+     `<P>`, on a gate the check belongs to the review PR `<R>`), then post `@coderabbitai review` on `<R>`.
 3. Batch all fix commits locally, update `docs/RUN_LOG.md`, then commit the fix together with that
    update. Re-run `work-verifier` on that exact commit, whether or not the run will merge, so the
    verified commit is the PR head (`docs/PROCESS.md` P6 routine step 1); if `work-verifier`

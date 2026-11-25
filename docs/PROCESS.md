@@ -325,7 +325,7 @@ the previous gate review:
 
 1. **Base.** Find the newest `reviewed/*` tag reachable from `main`
    (`git describe --tags --match 'reviewed/*' --abbrev=0 origin/main`). If none exists, create
-   `reviewed/baseline` at `60024a4` (the last commit of the former per-PR review rhythm). Push a
+   `reviewed/baseline` at `16ca856` (the PR #220 merge commit on `main`, tree-identical to the last commit of the former per-PR review rhythm). Push a
    branch `review-base/<gate>` at that tag.
 2. **Open.** Once the gate issue's own PR passes its verifier, open a second PR with the gate
    issue's branch as head and `review-base/<gate>` as base, titled

@@ -7,7 +7,7 @@
 # commit-msg hook should credit as co-author on agent-made commits. Idempotent and quiet.
 #
 # core.hooksPath is set to .githooks only when it is unset (or already .githooks) AND the clone's
-# hooks directory (`git rev-parse --git-path hooks`) holds no non-.sample hook. Otherwise it is
+# hooks directory (`git rev-parse --git-path hooks`) holds no non-.sample hook (a regular file or symbolic link). Otherwise it is
 # left alone and a warning with the manual command is printed to stderr (this script runs at
 # session start and never fails because of it). FINEPRINT_FORCE_HOOKS=1 forces the replacement.
 # The co-author below is always resolved and recorded.
@@ -37,7 +37,7 @@ if [[ "${current_hooks_path}" != ".githooks" ]]; then
   else
     git_hooks_dir="$(git rev-parse --git-path hooks)"
     if [[ -d "${git_hooks_dir}" ]]; then
-      found="$(find "${git_hooks_dir}" -maxdepth 1 -type f ! -name '*.sample' -print | LC_ALL=C sort | tr '\n' ' ')"
+      found="$(find "${git_hooks_dir}" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' -print | LC_ALL=C sort | tr '\n' ' ')"
       if [[ -n "${found}" ]]; then
         existing="existing hooks in ${git_hooks_dir}: ${found}"
       fi
@@ -49,7 +49,8 @@ if [[ "${current_hooks_path}" != ".githooks" ]]; then
   else
     echo "git hooks: NOT enabling .githooks (${existing})." \
          "To enable them, run: git config core.hooksPath .githooks" \
-         "(and call your existing hooks from .githooks to keep them), or re-run with FINEPRINT_FORCE_HOOKS=1." >&2
+         "(and call your existing hooks from .githooks to keep them), or re-run with FINEPRINT_FORCE_HOOKS=1." \
+         "Until .githooks/commit-msg is integrated, agent commits will lack the Co-authored-by: trailer." >&2
   fi
 fi
 

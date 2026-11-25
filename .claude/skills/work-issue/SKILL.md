@@ -246,7 +246,7 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 - **Gate issues:** run the gate review of PROCESS.md P6 before merging:
   1. Base: the newest `reviewed/*` tag reachable from `origin/main`
      (`git describe --tags --match 'reviewed/*' --abbrev=0 origin/main`; if none, create and push
-     `reviewed/baseline` at `60024a4`). Push `review-base/<gate>` at it
+     `reviewed/baseline` at `16ca856`). Push `review-base/<gate>` at it
      (`git push origin <tag>^{commit}:refs/heads/review-base/<gate>`), where `<gate>` is the phase
      label without `phase:` (for example `04-layers`) or the milestone (`M1`).
   2. Open the review-only PR: head `<branch>` (this issue's branch), base `review-base/<gate>`,

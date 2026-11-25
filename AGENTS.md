@@ -72,7 +72,12 @@ documents `.pzl` scenario conventions.
   agent identity (`noreply@anthropic.com`, `[bot]` accounts). The installer sets `core.hooksPath=.githooks` only when no other hook setup
   exists (it never replaces a `core.hooksPath` pointing elsewhere or non-sample hooks in
   `.git/hooks`; it prints the manual command instead, and `FINEPRINT_FORCE_HOOKS=1` forces it);
-  `fineprint.coauthor` is always recorded. Keep the agent as author; never
+  `fineprint.coauthor` is always recorded. When the installer prints "NOT enabling .githooks", make
+  `.githooks/commit-msg` effective before making any commit: call `.githooks/commit-msg "$1"` from
+  the existing `commit-msg` hook (or the configured hooks directory), preserving every existing
+  hook, or, only when no existing hook has to be kept, re-run with `FINEPRINT_FORCE_HOOKS=1`.
+  Printing the manual command alone is not sufficient, and no agent commit may be made while the
+  trailer hook is not effective. Keep the agent as author; never
   rewrite authorship to hide it, and never bypass the hook with `--no-verify`.
 - **Non-negotiables:** determinism (R3), no card-specific branches (R4), no card data anywhere in
   the repo, synthetic test cards only (R5), `VERIFIED` only through passing tests (R11), untrusted

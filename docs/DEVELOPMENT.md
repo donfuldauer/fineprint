@@ -33,8 +33,12 @@ itself is the set of GitHub issues labelled `work-unit` (milestones M1-M3). Proc
   for the root workspace and `spikes/bindings`.
 - Commit attribution: `scripts/install-git-hooks.sh` sets `core.hooksPath=.githooks` only when
   no other hook setup exists: it does not replace a `core.hooksPath` that points elsewhere or
-  non-sample hooks already in `.git/hooks`, but prints the manual command instead;
-  `fineprint.coauthor` is always recorded; `FINEPRINT_FORCE_HOOKS=1` forces the replacement.
+  non-sample hooks (regular files or symbolic links) already in `.git/hooks`, but prints the manual
+  command instead; `fineprint.coauthor` is always recorded; `FINEPRINT_FORCE_HOOKS=1` forces the
+  replacement. When it prints "NOT enabling .githooks", an agent must make `.githooks/commit-msg`
+  effective before any commit (call `.githooks/commit-msg "$1"` from the existing `commit-msg`
+  hook, preserving every existing hook, or, only when none has to be kept, re-run with
+  `FINEPRINT_FORCE_HOOKS=1`); no agent commit may be made while the trailer hook is not effective.
   `.githooks/commit-msg` then adds `Co-authored-by:` for the human contributor
   to agent-authored commits (`AGENTS.md` "Commit attribution"). Claude Code runs the script at
   `SessionStart`; `.agents/setup-env.sh` runs it on Antigravity VMs.
@@ -227,10 +231,11 @@ place). Downloads go to a per-run part file `{file}.{pid}.part` that is validate
 invalid download leaves the cache unchanged. The commit then writes `source.json` without the
 entries of the files being replaced, renames the part files into place, and writes the full new
 `source.json` (each write atomic), so after any failure a file is either absent from the metadata
-(refetched next run) or consistent with it. It needs `curl` on the `PATH`, version 8.4.0 or later
-for the download size cap (`--max-filesize` stops a response of unknown size only from 8.4.0; an
-older curl is an error, an unparsable version a warning); the metadata response is capped at 1 MiB
-while it is read. curl runs with `--disable` (no `~/.curlrc`) and `--globoff`, HTTPS only, and
+(refetched next run) or consistent with it. It needs `curl` on the `PATH`; every response (the
+1 MiB metadata and each bulk file, at most the per-file cap) is streamed through the program and
+cut off, the curl process killed, as soon as the cap is exceeded, so the cap does not depend on the
+curl or libcurl version (`--max-filesize` stays as a second line of defence; a curl older than
+8.4.0 or an unparseable version only prints a warning). curl runs with `--disable` (no `~/.curlrc`) and `--globoff`, HTTPS only, and
 follows no redirect (proxy and CA settings come from the environment, as for `cargo xtask cr
 fetch`). Exit codes: 0 success, 2 usage, input or network error.
 
@@ -240,7 +245,10 @@ fetch`). Exit codes: 0 success, 2 usage, input or network error.
 warnings, to `<cache>/normalized/cards.json` (or `--out`; `-` is stdout, the summary line then goes
 to stderr). Mana value, colors and color identity are recomputed with integers; the float `cmc` only
 flags a mismatch. `--mtgjson-report` writes the MTGJSON cross-validation report (needs
-`fetch --mtgjson`). `--out` and `--mtgjson-report` must not name the same file (exit 2). A missing Oracle Cards file is exit 2 (run `fetch`); rejected records and
+`fetch --mtgjson`). `--out` and `--mtgjson-report` must not name the same file (exit 2, nothing written); a
+report destination that only aliases the records file on the file system (for example a name that
+differs in case on a case-insensitive volume) is also rejected, after the records are written: exit
+2, no report written, the records file intact. A missing Oracle Cards file is exit 2 (run `fetch`); rejected records and
 diagnostics are reported and exit 0, or 1 with `--strict`. Output is byte-identical for the same
 cache. Card data stays in the git-ignored cache or the explicit `--out`/`--mtgjson-report` path.
 
