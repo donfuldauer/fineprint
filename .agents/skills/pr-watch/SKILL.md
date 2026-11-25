@@ -130,8 +130,8 @@ When all applicable conditions hold:
   P6 merge condition holds on `headRefOid` — including a passing `work-verifier` result for
   `headRefOid` (test or conformance suites alone are not a substitute), dispositions for every
   CodeRabbit review-body finding without an inline thread (if reviewed), and the branch up to date
-  with `main` — and run `gh pr merge <P> --merge --match-head-commit <headRefOid>` (verifying the
-  branch was deleted afterward).
+  with `main` — and run `gh pr merge <P> --merge --match-head-commit <headRefOid>` (do not delete
+  the branch; the repository deletes merged branches automatically).
 - Otherwise (standalone without an explicit merge request), stop scheduling check-ins and report
   the PR URL, head SHA, routine or gate, approval state (gates only), resolved threads, and CI
   results to the user.
