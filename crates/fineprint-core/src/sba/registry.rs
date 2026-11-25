@@ -3,7 +3,8 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! The data-driven state-based action registry (REQ-SBA-001, SRS 9): one entry per rule, each
-//! with its id, CR reference, predicate, action and variant gate.
+//! with its id, CR reference, predicate, action and variant gate. It holds CR 704.5a-704.5t and
+//! CR 704.5v-704.5aa; CR 704.5u is not modelled here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -13,7 +14,7 @@ use fineprint_base::ids::{ObjectId, PlayerId};
 use super::types::{GameVariant, LOST_THE_GAME, SbaEnvironment, SbaSubject};
 use crate::events::EventState;
 use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, literal_of};
-use crate::permanent::{AttachTarget, Permanents};
+use crate::permanent::{AttachTarget, AttackState, AttackTarget, Permanents};
 use crate::state::{GameState, PlayerState};
 use crate::zones::{ZoneId, Zones};
 
@@ -46,6 +47,13 @@ pub enum SbaAction {
     /// The dungeon card's owner removes it from the game (CR 704.5t, CR 309.7): it leaves the
     /// command zone without a zone change.
     RemoveFromGame,
+    /// The battle's controller chooses an appropriate player to be its protector (CR 704.5x,
+    /// CR 704.5y, CR 310.11); if no player can be chosen, the battle is put into its owner's
+    /// graveyard.
+    ChooseProtector,
+    /// The player's speed becomes 1 (CR 704.5aa, CR 702.179a): recorded as the
+    /// [`SPEED`](super::SPEED) designation.
+    SetSpeed,
 }
 
 /// In which game variants an entry is active (REQ-SBA-001).
@@ -76,6 +84,12 @@ pub(super) struct PermanentFacts {
     equipment: bool,
     fortification: bool,
     saga: bool,
+    /// CR 310.12, CR 205.3q: a battle with the subtype Siege (the only battle type).
+    siege: bool,
+    /// CR 303.7: an Aura with the subtype Role.
+    role: bool,
+    /// CR 702.179a: it has start your engines! (evaluated abilities).
+    engine: bool,
     /// The counters on it (CR 122.1), as the layer environment reports them.
     counters: BTreeMap<String, i64>,
     /// Its controller (CR 704.5j, CR 613.1b, CR 110.2): the controller after layer 2 of the
@@ -96,6 +110,9 @@ pub(super) struct SbaView<'a> {
     phasing: &'a Permanents,
     permanents: BTreeMap<ObjectId, PermanentFacts>,
 }
+
+/// The vocabulary id of the start your engines! keyword ability (CR 702.179).
+const START_YOUR_ENGINES: &str = "START_YOUR_ENGINES";
 
 /// Whether `abilities` hold the keyword ability `keyword` (an ability of kind `KEYWORD`).
 fn has_keyword(abilities: &[fineprint_dsl::card::AbilityAST], keyword: &str) -> bool {
@@ -159,6 +176,10 @@ impl<'a> SbaView<'a> {
                     equipment: c.subtypes.contains("Equipment"),
                     fortification: c.subtypes.contains("Fortification"),
                     saga: c.subtypes.contains("Saga"),
+                    siege: c.subtypes.contains("Siege"),
+                    role: c.subtypes.contains("Role"),
+                    // CR 702.179a: the vocabulary id of the keyword (decision #43 FP-042).
+                    engine: has_keyword(&c.abilities, START_YOUR_ENGINES),
                     counters,
                     // CR 613.1b: control-changing effects apply in layer 2; the stored
                     // controller is only the fallback for an evaluation that names none.
@@ -293,8 +314,8 @@ pub struct SbaRegistry {
 }
 
 impl SbaRegistry {
-    /// The state-based actions of CR 704.5a-704.5t, in that order (the CR has no 704.5l and no
-    /// 704.5o).
+    /// The state-based actions of CR 704.5a-704.5t, then CR 704.5v-704.5aa, in that order (the
+    /// CR has no 704.5l and no 704.5o; CR 704.5u is not modelled here).
     #[must_use]
     pub fn standard() -> SbaRegistry {
         SbaRegistry {
@@ -470,6 +491,63 @@ impl SbaRegistry {
                     action: SbaAction::RemoveFromGame,
                     gate: VariantGate::All,
                     predicate: dungeon_complete,
+                },
+                // CR 704.5v, CR 310.7, CR 310.4c: a Siege battle with defense 0 that isn't the
+                // source of an ability that has triggered but not yet left the stack is put into
+                // its owner's graveyard.
+                SbaEntry {
+                    id: "704.5v",
+                    cr_ref: "CR 704.5v",
+                    action: SbaAction::PutIntoGraveyard,
+                    gate: VariantGate::All,
+                    predicate: siege_zero_defense,
+                },
+                // CR 704.5w, CR 310.8: a non-Siege battle with defense 0 is put into its owner's
+                // graveyard.
+                SbaEntry {
+                    id: "704.5w",
+                    cr_ref: "CR 704.5w",
+                    action: SbaAction::PutIntoGraveyard,
+                    gate: VariantGate::All,
+                    predicate: non_siege_zero_defense,
+                },
+                // CR 704.5x, CR 310.11, CR 310.9a, CR 310.12a: a battle with no player in the
+                // game as its protector and no creature attacking it: its controller chooses an
+                // appropriate protector, or it is put into its owner's graveyard.
+                SbaEntry {
+                    id: "704.5x",
+                    cr_ref: "CR 704.5x",
+                    action: SbaAction::ChooseProtector,
+                    gate: VariantGate::All,
+                    predicate: battle_without_protector,
+                },
+                // CR 704.5y, CR 310.11: a battle whose protector can't be its protector: its
+                // controller chooses an appropriate protector, or it is put into its owner's
+                // graveyard.
+                SbaEntry {
+                    id: "704.5y",
+                    cr_ref: "CR 704.5y",
+                    action: SbaAction::ChooseProtector,
+                    gate: VariantGate::All,
+                    predicate: battle_with_illegal_protector,
+                },
+                // CR 704.5z, CR 303.7a: of the Roles one player controls attached to one
+                // permanent, all but the most recent are put into their owners' graveyards.
+                SbaEntry {
+                    id: "704.5z",
+                    cr_ref: "CR 704.5z",
+                    action: SbaAction::PutIntoGraveyard,
+                    gate: VariantGate::All,
+                    predicate: role_rule,
+                },
+                // CR 704.5aa, CR 702.179a: a player who controls a permanent with start your
+                // engines! and has no speed gets speed 1.
+                SbaEntry {
+                    id: "704.5aa",
+                    cr_ref: "CR 704.5aa",
+                    action: SbaAction::SetSpeed,
+                    gate: VariantGate::All,
+                    predicate: engines_without_speed,
                 },
             ],
         }
@@ -983,5 +1061,195 @@ fn dungeon_complete(view: &SbaView<'_>) -> Vec<SbaSubject> {
                 && !view.env.room_ability_pending(id)
         })
         .map(SbaSubject::Object)
+        .collect()
+}
+
+/// CR 310.4c: the defense of a battle on the battlefield is the number of defense counters on
+/// it (none, or a negative count, is 0 or less).
+fn defense(f: &PermanentFacts) -> i64 {
+    f.counters.get("defense").copied().unwrap_or(0)
+}
+
+// CR 704.5v, CR 310.7, CR 310.4c
+fn siege_zero_defense(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    view.permanents
+        .iter()
+        .filter(|&(&id, f)| {
+            f.battle && f.siege && defense(f) <= 0 && !view.env.battle_ability_pending(id)
+        })
+        .map(|(&id, _)| SbaSubject::Object(id))
+        .collect()
+}
+
+// CR 704.5w, CR 310.8
+fn non_siege_zero_defense(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    view.permanents
+        .iter()
+        .filter(|(_, f)| f.battle && !f.siege && defense(f) <= 0)
+        .map(|(&id, _)| SbaSubject::Object(id))
+        .collect()
+}
+
+impl SbaView<'_> {
+    /// CR 310.11, CR 506.4c: whether a creature is attacking battle `battle` (an attacker whose
+    /// battle was removed from combat attacks nothing).
+    fn battle_attacked(&self, battle: ObjectId) -> bool {
+        let attacked = AttackState::Attacking(Some(AttackTarget::Permanent(battle)));
+        self.phasing.ids().into_iter().any(|id| {
+            self.phasing
+                .get(id)
+                .is_some_and(|p| p.combat().attack == attacked)
+        })
+    }
+
+    /// CR 310.9a, CR 310.12a, CR 704.5y: whether `player` is an appropriate protector of
+    /// battle `battle` with facts `f`: in the game, allowed by effects, and for a Siege an
+    /// opponent of its controller, for a battle with no battle type its controller (CR 205.3q:
+    /// Siege is the only battle type).
+    fn appropriate_protector(
+        &self,
+        battle: ObjectId,
+        f: &PermanentFacts,
+        player: PlayerId,
+    ) -> bool {
+        let Some(controller) = f.controller else {
+            return false;
+        };
+        let by_type = if f.siege {
+            player != controller
+        } else {
+            player == controller
+        };
+        by_type && self.remaining(player) && self.env.can_be_protector(battle, player)
+    }
+
+    /// The phased-in battles that are not being attacked (CR 310.11), with their protector
+    /// if it is a player in the game (CR 704.5x).
+    fn unattacked_battles(
+        &self,
+    ) -> impl Iterator<Item = (ObjectId, &PermanentFacts, Option<PlayerId>)> + '_ {
+        self.permanents
+            .iter()
+            .filter(|&(&id, f)| f.battle && !self.battle_attacked(id))
+            .map(|(&id, f)| {
+                let protector = self.env.battle_protector(id).filter(|&p| self.remaining(p));
+                (id, f, protector)
+            })
+    }
+}
+
+/// One protector choice of a pass (CR 704.5x, CR 704.5y).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProtectorAsk {
+    /// The battle.
+    pub(super) battle: ObjectId,
+    /// Its (evaluated) controller, who chooses; `None` only when there are no candidates.
+    pub(super) controller: Option<PlayerId>,
+    /// The appropriate players, ascending (CR 310.9a, CR 310.12a).
+    pub(super) candidates: Vec<PlayerId>,
+    /// The CR reference of the entry, `"CR 704.5x"` or `"CR 704.5y"`.
+    pub(super) cr: &'static str,
+}
+
+/// CR 704.5x, CR 704.5y, CR 310.11: the protector choices for `battles` (battle to the CR
+/// reference of its finding): for each, its controller and the appropriate candidates,
+/// ascending by player id. Ordered by the controller's APNAP rank (CR 101.4), then ascending
+/// battle id (decision #43 FP-042); a battle without a controller (no candidates) last. Battles
+/// not in the snapshot are skipped.
+pub(super) fn protector_asks(
+    view: &SbaView<'_>,
+    battles: &BTreeMap<ObjectId, &'static str>,
+) -> Vec<ProtectorAsk> {
+    let order = apnap_order(view.game);
+    let rank = |p: Option<PlayerId>| {
+        p.and_then(|p| order.iter().position(|&q| q == p))
+            .unwrap_or(order.len())
+    };
+    let mut asks: Vec<ProtectorAsk> = battles
+        .iter()
+        .filter_map(|(&battle, &cr)| {
+            let f = view.permanents.get(&battle)?;
+            let candidates = view
+                .remaining_players()
+                .map(PlayerState::id)
+                .filter(|&p| view.appropriate_protector(battle, f, p))
+                .collect();
+            Some(ProtectorAsk {
+                battle,
+                controller: f.controller,
+                candidates,
+                cr,
+            })
+        })
+        .collect();
+    asks.sort_by_key(|a| (rank(a.controller), a.battle));
+    asks
+}
+
+// CR 704.5x, CR 310.11: no player in the game is its protector and it is not being attacked.
+fn battle_without_protector(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    view.unattacked_battles()
+        .filter(|(_, _, protector)| protector.is_none())
+        .map(|(id, _, _)| SbaSubject::Object(id))
+        .collect()
+}
+
+// CR 704.5y, CR 310.11: its protector, a player in the game, can't be its protector (decision
+// #43 FP-042: not appropriate for its battle type, or not allowed by effects). A battle being
+// attacked is exempt (CR 310.11).
+fn battle_with_illegal_protector(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    view.unattacked_battles()
+        .filter(|&(id, f, protector)| {
+            protector.is_some_and(|p| !view.appropriate_protector(id, f, p))
+        })
+        .map(|(id, _, _)| SbaSubject::Object(id))
+        .collect()
+}
+
+// CR 704.5z, CR 303.7a, CR 613.7e, CR 613.7m: the Roles attached to one permanent or player,
+// grouped by the Role's (evaluated) controller; in each group of two or more every Role but
+// the most recent goes. A tie of the latest timestamp keeps the higher ObjectId (decision
+// #43 FP-042).
+fn role_rule(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    let mut groups: BTreeMap<(AttachTarget, PlayerId), Vec<(u64, ObjectId)>> = BTreeMap::new();
+    for (id, f, target) in view.attachments() {
+        let Some(controller) = f.controller else {
+            continue;
+        };
+        if f.aura && f.role {
+            groups
+                .entry((target, controller))
+                .or_default()
+                .push((view.env.attachment_timestamp(id), id));
+        }
+    }
+    let mut out = Vec::new();
+    for members in groups.into_values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let newest = members.iter().max().copied();
+        out.extend(
+            members
+                .into_iter()
+                .filter(|m| Some(*m) != newest)
+                .map(|(_, id)| SbaSubject::Object(id)),
+        );
+    }
+    out
+}
+
+// CR 704.5aa, CR 702.179a, CR 702.179b: a player in the game who controls a phased-in permanent
+// with start your engines! and has no speed.
+fn engines_without_speed(view: &SbaView<'_>) -> Vec<SbaSubject> {
+    let engines: BTreeSet<PlayerId> = view
+        .permanents
+        .values()
+        .filter(|f| f.engine)
+        .filter_map(|f| f.controller)
+        .collect();
+    view.remaining_players()
+        .filter(|p| engines.contains(&p.id()) && p.designation(super::types::SPEED).is_none())
+        .map(|p| SbaSubject::Player(p.id()))
         .collect()
 }
