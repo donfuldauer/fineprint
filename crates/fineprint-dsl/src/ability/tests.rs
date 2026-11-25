@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::choice::{ChoiceKind, ChoiceSpec};
+use crate::effect::Instruction;
 use crate::expr::tests::{accept, check_wire_enum, reject};
 use crate::expr::{
     ObjectSelectorAST, PlayerGroup, PlayerSelectorAST, PredicateAST, ReferenceAST,
@@ -86,11 +87,11 @@ where
 // SRS examples (§14.4.1–§14.4.4)
 
 /// SRS §14.4.1 example 1.
-const EX1: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"DAMAGE_DEALT","subject":{"ref":"SELF"},"filters":{"combat":true,"recipient":{"pred":"IS_PLAYER"}},"bind":{"recipient":"$P"}}},"effect":[{"op":"DISCARD","player":"$P","count":{"LITERAL":1},"chooser":"$P"}]}"#;
+const EX1: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"DAMAGE_DEALT","subject":{"ref":"SELF"},"filters":{"combat":true,"recipient":{"pred":"IS_PLAYER"}},"bind":{"recipient":"$P"}}},"effect":[{"op":"DISCARD","player":{"ref":"BOUND","var":"$P"},"count":{"LITERAL":1}}]}"#;
 /// SRS §14.4.1 example 2.
 const EX2: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"ATTACKS","subject":{"ref":"SELF"}}},"effect":[{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}]}"#;
 /// SRS §14.4.2 example (adapted).
-const EX3: &str = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"name":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","mode":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
+const EX3: &str = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"name":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","action":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
 /// SRS §14.4.3 attack cost.
 const EX4: &str = r#"{"abilityId":"s1","kind":"STATIC","functionsIn":["BATTLEFIELD"],"effects":[{"type":"RULE","kind":"ATTACK_COST","attackers":{"pred":"IS_CREATURE"},"attackTarget":{"player":{"ref":"CONTROLLER"}},"cost":[{"cost":"PAY_MANA","mana":"{2}"}],"per":"EACH_ATTACKER"}]}"#;
 /// SRS §14.4.3 block restriction.
@@ -129,7 +130,7 @@ fn req_dsl_006_srs_example_1_damage_trigger() {
     );
     assert_eq!(m.bind.as_ref().expect("bind")["recipient"], "$P");
     assert_eq!(t.effect.len(), 1);
-    assert_eq!(t.effect[0].op, "DISCARD");
+    assert_eq!(t.effect[0].name(), "DISCARD");
     assert_eq!(t.base.functions_in, Some(vec![Zone::Battlefield]));
 }
 
@@ -713,8 +714,9 @@ fn req_dsl_006_no_lookback_member_anywhere() {
         reject::<ReplacementMatch>(&format!(
             r#"{{"event":"DIES","affected":{{"ref":"SELF"}},{member}}}"#
         ));
+        // A real instruction has no free-form member: it is an unknown member (REQ-DSL-010).
+        reject::<Instruction>(&format!(r#"{{"op":"POPULATE",{member}}}"#));
         // Opaque placeholders keep the member as data (round-trip unchanged).
-        accept::<EffectInstructionAST>(&format!(r#"{{"op":"DRAW",{member}}}"#));
         accept::<StaticEffect>(&format!(r#"{{"type":"RULE","kind":"SKIP",{member}}}"#));
         accept::<AbilityAST>(&with(MIN_KEYWORD, &format!(r#""params":{{{member}}}"#)));
     }
@@ -1038,7 +1040,7 @@ fn req_dsl_005_target_slots() {
 #[test]
 fn req_dsl_005_mode_sets() {
     let ms: ModeSetAST = accept(
-        r#"{"min":1,"max":2,"modes":[{"id":"m1","effect":[]},{"id":"m2","targets":[{"slot":0,"selector":{"ref":"SELF"},"min":1,"max":1}],"effect":[{"op":"DRAW"}]}]}"#,
+        r#"{"min":1,"max":2,"modes":[{"id":"m1","effect":[]},{"id":"m2","targets":[{"slot":0,"selector":{"ref":"SELF"},"min":1,"max":1}],"effect":[{"op":"POPULATE"}]}]}"#,
     );
     assert_eq!(ms.modes.len(), 2);
     let mode: ModeAST = accept(r#"{"id":"m","effect":[]}"#);
@@ -1066,32 +1068,188 @@ fn req_dsl_005_mode_sets() {
     reject::<AbilityAST>(&with(MIN_TRIGGERED, r#""modes":null"#));
 }
 
-/// REQ-DSL-010 (placeholder), REQ-DSL-005: effect instructions keep opaque members unchanged
-/// and reject a bad `op`, empty member names and any `null`.
+// ---------------------------------------------------------------------------------------------
+// Real effect instructions (REQ-DSL-010)
+
+/// A valid DRAW instruction (full form).
+const I_DRAW: &str = r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}"#;
+/// A valid IF instruction with a nested `then` list.
+const I_IF: &str = r#"{"op":"IF","cond":{"pred":"IS_CREATURE"},"then":[{"op":"POPULATE"}]}"#;
+
+/// The five instruction positions: each template holds `@` where the instruction list goes.
+const POSITIONS: [&str; 5] = [
+    r#"{"abilityId":"a","kind":"SPELL","effect":@}"#,
+    r#"{"abilityId":"a","kind":"ACTIVATED","cost":[{"cost":"TAP_SOURCE"}],"effect":@}"#,
+    r#"{"abilityId":"a","kind":"TRIGGERED","trigger":{"mode":"STATE","state":{"pred":"IS_CREATURE"}},"effect":@}"#,
+    r#"{"abilityId":"a","kind":"SPELL","modes":{"min":1,"max":1,"modes":[{"id":"m1","effect":@}]},"effect":[]}"#,
+    r#"{"abilityId":"a","kind":"REPLACEMENT","match":{"event":"DIES","affected":{"ref":"SELF"}},"replaceWith":[{"op":"INSTEAD","instructions":@}]}"#,
+];
+
+/// The instruction list `list` placed in position `i`.
+fn at(i: usize, list: &str) -> String {
+    POSITIONS[i].replace('@', list)
+}
+
+/// REQ-DSL-010, REQ-NFR-006: anything that is not a valid real instruction is rejected in every
+/// position (spell, activated, triggered, mode, INSTEAD).
 #[test]
-fn req_dsl_005_effect_instruction_placeholder() {
-    let e: EffectInstructionAST =
-        accept(r#"{"op":"TEST_OP_2","a":[1,{"b":true,"":"x"}],"c":"","d":{"LITERAL":1}}"#);
-    assert_eq!(e.op, "TEST_OP_2");
-    assert_eq!(e.params["a"], json!([1, {"b": true, "": "x"}]));
-    assert_eq!(EffectInstructionAST::new("DRAW").params, BTreeMap::new());
-    for doc in [
+fn req_dsl_010_invalid_instructions_rejected_everywhere() {
+    let bad = [
+        r#"{"op":"NOT_AN_OP"}"#,
+        r#"{"op":"draw","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}"#,
+        r#"{"op":"DRAW"}"#,
+        r#"{"op":"DRAW","player":{"ref":"CONTROLLER"}}"#,
+        r#"{"op":"POPULATE","extra":1}"#,
+        r#"{"op":"POPULATE","x":null}"#,
+        r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1.5}}"#,
+        r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":9007199254740992}}"#,
         r#"{}"#,
-        r#"{"op":""}"#,
-        r#"{"op":"draw"}"#,
-        r#"{"op":"1DRAW"}"#,
-        r#"{"op":"DR-AW"}"#,
-        r#"{"op":1}"#,
         r#"{"op":null}"#,
-        r#"{"op":"DRAW","":1}"#,
-        r#"{"op":"DRAW","x":null}"#,
-        r#"{"op":"DRAW","x":[1,null]}"#,
-        r#"{"op":"DRAW","x":{"y":null}}"#,
-        r#"{"op":"DRAW","x":1.5}"#,
+        r#"{"op":1}"#,
+        r#"1"#,
+        r#""POPULATE""#,
         r#"[]"#,
-    ] {
-        reject::<EffectInstructionAST>(doc);
+        r#"null"#,
+    ];
+    for i in 0..POSITIONS.len() {
+        accept::<AbilityAST>(&at(i, r#"[{"op":"POPULATE"}]"#));
+        for b in bad {
+            reject::<AbilityAST>(&at(i, &format!("[{b}]")));
+            reject::<AbilityAST>(&at(i, &format!(r#"[{{"op":"POPULATE"}},{b}]"#)));
+        }
     }
+    for b in bad {
+        reject::<Instruction>(b);
+    }
+}
+
+/// REQ-DSL-010, REQ-NFR-006: valid instructions in every position round-trip, in both orders,
+/// and the canonical bytes are stable (encode, decode, encode).
+#[test]
+fn req_dsl_010_valid_instructions_round_trip_everywhere() {
+    let lists = [
+        format!("[{I_DRAW}]"),
+        r#"[{"op":"POPULATE"}]"#.to_owned(),
+        format!("[{I_IF}]"),
+        r#"[{"op":"POPULATE"},{"op":"VENTURE"}]"#.to_owned(),
+        r#"[{"op":"VENTURE"},{"op":"POPULATE"}]"#.to_owned(),
+    ];
+    for i in 0..POSITIONS.len() {
+        for l in &lists {
+            let a: AbilityAST = accept(&at(i, l));
+            let once = crate::canonical::to_canonical_vec(&a).expect("canonical");
+            let back: AbilityAST = serde_json::from_slice(&once).expect("reload");
+            assert_eq!(back, a);
+            assert_eq!(
+                crate::canonical::to_canonical_vec(&back).expect("canonical"),
+                once
+            );
+        }
+    }
+    // Order is kept.
+    let a: SpellAbilityAST = accept(&at(0, r#"[{"op":"POPULATE"},{"op":"VENTURE"}]"#));
+    assert_eq!(a.effect, vec![Instruction::Populate, Instruction::Venture]);
+    let b: SpellAbilityAST = accept(&at(0, r#"[{"op":"VENTURE"},{"op":"POPULATE"}]"#));
+    assert_eq!(b.effect, vec![Instruction::Venture, Instruction::Populate]);
+}
+
+/// REQ-DSL-010: emptiness is unchanged: spell, activated, triggered and mode effect lists may be
+/// empty; `INSTEAD.instructions` may not.
+#[test]
+fn req_dsl_010_emptiness_rules() {
+    for i in 0..4 {
+        accept::<AbilityAST>(&at(i, "[]"));
+    }
+    reject::<AbilityAST>(&at(4, "[]"));
+    accept::<AbilityAST>(&at(4, r#"[{"op":"POPULATE"}]"#));
+}
+
+/// REQ-DSL-010, REQ-NFR-006: a hand-built instruction that breaks an invariant fails to
+/// serialize inside an ability (Serialize re-checks), and a valid one is written.
+#[test]
+fn req_dsl_010_serialize_rechecks_instructions() {
+    let spell = |effect: Vec<Instruction>| {
+        AbilityAST::Spell(SpellAbilityAST {
+            base: base(),
+            targets: None,
+            modes: None,
+            effect,
+        })
+    };
+    assert!(serde_json::to_vec(&spell(vec![Instruction::Populate])).is_ok());
+    let empty_then = Instruction::If {
+        cond: PredicateAST::IsCreature,
+        then: Vec::new(),
+        otherwise: None,
+    };
+    no_encode(&spell(vec![empty_then.clone()]));
+    no_encode(&AbilityAST::Replacement(ReplacementAbilityAST {
+        base: base(),
+        matcher: ReplacementMatch {
+            event: EventKind::Dies,
+            affected: EventSubject::Object(ObjectSelectorAST::Ref(ReferenceAST::SelfRef)),
+            filters: None,
+        },
+        replace_with: vec![ReplacementOp::Instead {
+            instructions: vec![empty_then],
+        }],
+        is_self_replacement: None,
+        tier_hint: None,
+        optional: None,
+        overrides_614_5: None,
+        shield: None,
+    }));
+}
+
+/// REQ-DSL-010, REQ-DSL-006 (rule E5 re-check against the real instruction type): a real
+/// instruction has no free-form member, so a look-back spelling directly on it is an unknown
+/// member.
+#[test]
+fn req_dsl_010_e5_no_flat_free_form_member_on_instruction() {
+    for member in ["lookBack", "look_back", "LOOK-BACK", "lookback"] {
+        reject::<Instruction>(&format!(r#"{{"op":"POPULATE","{member}":true}}"#));
+        reject::<Instruction>(&format!(
+            r#"{{"op":"IF","cond":{{"pred":"IS_CREATURE"}},"then":[{{"op":"POPULATE"}}],"{member}":1}}"#
+        ));
+        reject::<AbilityAST>(&at(0, &format!(r#"[{{"op":"POPULATE","{member}":true}}]"#)));
+    }
+}
+
+/// REQ-DSL-010, REQ-DSL-006: a delayed trigger's event matcher still refuses look-back
+/// `filters` and `bind` keys (rule E5 holds through the nested `Trigger`).
+#[test]
+fn req_dsl_010_e5_through_delayed_trigger() {
+    let doc = |matcher_extra: &str| {
+        format!(
+            r#"{{"op":"CREATE_DELAYED_TRIGGER","trigger":{{"mode":"EVENT","event":{{"kind":"ATTACKS","subject":{{"ref":"SELF"}}{matcher_extra}}}}},"effect":[{{"op":"POPULATE"}}],"oneShot":true}}"#
+        )
+    };
+    accept::<Instruction>(&doc(""));
+    accept::<Instruction>(&doc(
+        r#","filters":{"combat":true},"bind":{"recipient":"$P"}"#,
+    ));
+    for key in ["lookBack", "look_back", "LOOK-BACK", "lookbackFlag"] {
+        reject::<Instruction>(&doc(&format!(r#","filters":{{"{key}":true}}"#)));
+        reject::<Instruction>(&doc(&format!(r#","bind":{{"{key}":"$P"}}"#)));
+        reject::<AbilityAST>(&at(
+            0,
+            &format!("[{}]", doc(&format!(r#","filters":{{"{key}":true}}"#))),
+        ));
+    }
+}
+
+/// REQ-DSL-010, REQ-DSL-015: `NATIVE_EFFECT` `params` are opaque by contract: a look-back-like
+/// key is data and round-trips unchanged.
+#[test]
+fn req_dsl_010_e5_native_effect_params_are_opaque() {
+    let doc = r#"{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{"lookBack":true,"look_back":[1]}}"#;
+    let i: Instruction = accept(doc);
+    let Instruction::NativeEffect(n) = &i else {
+        panic!("native effect expected")
+    };
+    assert_eq!(n.params["lookBack"], json!(true));
+    assert_eq!(n.params["look_back"], json!([1]));
+    accept::<AbilityAST>(&at(0, &format!("[{doc}]")));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1330,7 +1488,7 @@ fn req_dsl_009_replacement_members() {
         r#"{"op":"SKIP"}"#,
         r#"{"op":"PREVENT"}"#,
         r#"{"op":"PREVENT","amount":{"LITERAL":2}}"#,
-        r#"{"op":"INSTEAD","instructions":[{"op":"DRAW","n":1}]}"#,
+        r#"{"op":"INSTEAD","instructions":[{"op":"POPULATE"}]}"#,
         r#"{"op":"MODIFY_EVENT","set":{"amount":2,"tapped":true,"to":"HAND","who":{"pred":"IS_PLAYER"},"label":"w"}}"#,
         r#"{"op":"CHOOSE","choice":{"chooser":{"ref":"CONTROLLER"},"kind":"COLOR"},"store":"c"}"#,
     ] {
@@ -1383,7 +1541,7 @@ fn req_dsl_009_replacement_members() {
         (ReplacementOp::Prevent { amount: None }, "PREVENT"),
         (
             ReplacementOp::Instead {
-                instructions: vec![EffectInstructionAST::new("DRAW")],
+                instructions: vec![Instruction::Populate],
             },
             "INSTEAD",
         ),
@@ -1442,15 +1600,29 @@ fn req_nfr_006_strict_decoding() {
         "1.5",
     ] {
         reject::<AbilityAST>(&with(MIN_SPELL, &format!(r#""textSpan":[{n},{n}]"#)));
-        reject::<AbilityAST>(&MIN_SPELL.replace("[]", &format!(r#"[{{"op":"DRAW","n":{n}}}]"#)));
+        reject::<AbilityAST>(&MIN_SPELL.replace(
+            "[]",
+            &format!(
+                r#"[{{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{{"n":{n}}}}}]"#
+            ),
+        ));
         reject::<AbilityAST>(&with(MIN_KEYWORD, &format!(r#""params":{{"n":{n}}}"#)));
         reject::<AbilityAST>(&EX4.replace(r#""EACH_ATTACKER""#, n));
     }
     accept::<AbilityAST>(&with(MIN_SPELL, r#""textSpan":[0,4294967295]"#));
-    accept::<AbilityAST>(&MIN_SPELL.replace("[]", r#"[{"op":"DRAW","n":-9007199254740991}]"#));
+    accept::<AbilityAST>(&MIN_SPELL.replace(
+        "[]",
+        r#"[{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{"n":-9007199254740991}}]"#,
+    ));
     reject::<AbilityAST>(&MIN_SPELL.replace(r#""a""#, r#""a﷐""#));
-    reject::<AbilityAST>(&MIN_SPELL.replace("[]", r#"[{"op":"DRAW","￿":1}]"#));
-    reject::<AbilityAST>(&MIN_SPELL.replace("[]", r#"[{"op":"DRAW","x":"﷯"}]"#));
+    reject::<AbilityAST>(&MIN_SPELL.replace(
+        "[]",
+        r#"[{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{"￿":1}}]"#,
+    ));
+    reject::<AbilityAST>(&MIN_SPELL.replace(
+        "[]",
+        r#"[{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{"x":"﷯"}}]"#,
+    ));
     // Nesting through NOT: the ability is depth 1, `condition` depth 2, each NOT one more.
     let nots = |k: usize| {
         let mut p = r#"{"pred":"IS_CREATURE"}"#.to_owned();
@@ -1474,19 +1646,19 @@ fn req_nfr_006_strict_decoding() {
     reject::<AbilityAST>(&chain(63));
     reject::<AbilityAST>(&chain(5000));
     reject::<CostAST>(&r#"{"cost":"COMPOSITE","costs":["#.repeat(100_000));
-    // Opaque values count too: instruction object depth 3, then one per array.
+    // Opaque values count too: instruction object depth 3, params object 4, then one per array.
     let deep_opaque = |k: usize| {
         MIN_SPELL.replace(
             "[]",
             &format!(
-                r#"[{{"op":"DRAW","x":{}1{}}}]"#,
+                r#"[{{"op":"NATIVE_EFFECT","id":"native.t","version":1,"params":{{"x":{}1{}}}}}]"#,
                 "[".repeat(k),
                 "]".repeat(k)
             ),
         )
     };
-    accept::<AbilityAST>(&deep_opaque(124));
-    reject::<AbilityAST>(&deep_opaque(125));
+    accept::<AbilityAST>(&deep_opaque(123));
+    reject::<AbilityAST>(&deep_opaque(124));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1664,29 +1836,6 @@ fn req_nfr_006_serialize_rechecks_parts() {
     ] {
         no_encode(&c);
     }
-
-    let mut e = EffectInstructionAST::new("draw");
-    no_encode(&e);
-    e.op = "DRAW".into();
-    for (k, v) in [
-        ("op", json!("X")),
-        ("", json!(1)),
-        ("x", Value::Null),
-        ("x", json!([1, null])),
-        ("x", serde_json::from_str::<Value>("1.5").expect("float")),
-        ("x", json!(9_007_199_254_740_992_u64)),
-        ("x", json!("a\u{fdd0}")),
-        ("x", json!({"\u{fffe}": 1})),
-    ] {
-        e.params = BTreeMap::from([(k.to_owned(), v)]);
-        no_encode(&e);
-    }
-    let mut deep = json!(1);
-    for _ in 0..200 {
-        deep = json!([deep]);
-    }
-    e.params = BTreeMap::from([("x".to_owned(), deep)]);
-    no_encode(&e);
 
     let mut m = Modification::new("SET_BASE_PT");
     no_encode(&m);

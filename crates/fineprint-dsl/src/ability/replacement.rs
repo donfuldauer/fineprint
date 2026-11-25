@@ -11,9 +11,10 @@ use serde::Serialize;
 use serde::ser::{self, SerializeMap, Serializer};
 use serde_json::Value;
 
-use super::common::{EffectInstructionAST, check_non_empty, put_opt, vec_of};
+use super::common::{check_non_empty, put_opt, vec_of};
 use super::event::{EventKind, EventSubject, FilterValue, check_filters, filters_from};
 use crate::choice::ChoiceSpec;
+use crate::effect::Instruction;
 use crate::expr::ValueExpressionAST;
 use crate::expr::json::{
     AsMap, FromJson, JResult, Members, Obj, check_free_str, deserialize_via_from_json, free_str,
@@ -97,7 +98,7 @@ pub enum ReplacementOp {
     /// `INSTEAD{instructions}` (non-empty).
     Instead {
         /// What happens instead.
-        instructions: Vec<EffectInstructionAST>,
+        instructions: Vec<Instruction>,
     },
     /// `SKIP`: the event does not happen.
     Skip,

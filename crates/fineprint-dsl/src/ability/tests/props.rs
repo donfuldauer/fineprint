@@ -16,6 +16,7 @@ use serde_json::{Map, Value, json};
 
 use super::super::*;
 use crate::choice::{ChoiceKind, ChoiceSpec};
+use crate::effect::Instruction;
 use crate::expr::tests::{
     assert_wire_props, decode_never_panics, gen_player, gen_pred, gen_selector, gen_str, gen_value,
     mutate, pick, random_doc,
@@ -86,16 +87,21 @@ fn gen_upper(rng: &mut Pcg64Dxsm) -> String {
     ["DRAW", "DEAL_DAMAGE", "TEST_OP_9", "X", "A1_"][pick(rng, 5)].to_owned()
 }
 
-/// A placeholder instruction.
-fn gen_instr(rng: &mut Pcg64Dxsm) -> EffectInstructionAST {
-    EffectInstructionAST {
-        op: gen_upper(rng),
-        params: gen_params(rng),
-    }
+/// A valid real instruction (REQ-DSL-010), from a small fixed list.
+fn gen_instr(rng: &mut Pcg64Dxsm) -> Instruction {
+    const DOCS: [&str; 6] = [
+        r#"{"op":"POPULATE"}"#,
+        r#"{"op":"VENTURE"}"#,
+        r#"{"op":"SHUFFLE","player":{"ref":"CONTROLLER"}}"#,
+        r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}"#,
+        r#"{"op":"GAIN_LIFE","player":{"ref":"CONTROLLER"},"amount":{"LITERAL":2}}"#,
+        r#"{"op":"IF","cond":{"pred":"IS_CREATURE"},"then":[{"op":"POPULATE"}]}"#,
+    ];
+    serde_json::from_str(DOCS[pick(rng, DOCS.len())]).expect("valid instruction")
 }
 
 /// Zero to two instructions.
-fn gen_instrs(rng: &mut Pcg64Dxsm) -> Vec<EffectInstructionAST> {
+fn gen_instrs(rng: &mut Pcg64Dxsm) -> Vec<Instruction> {
     (0..pick(rng, 3)).map(|_| gen_instr(rng)).collect()
 }
 
@@ -687,7 +693,7 @@ fn decode_all(doc: &[u8]) {
     decode_never_panics::<ReplacementOp>(doc);
     decode_never_panics::<Trigger>(doc);
     decode_never_panics::<FilterValue>(doc);
-    decode_never_panics::<EffectInstructionAST>(doc);
+    decode_never_panics::<Instruction>(doc);
     decode_never_panics::<Modification>(doc);
     decode_never_panics::<Shield>(doc);
     decode_never_panics::<AbilityBase>(doc);

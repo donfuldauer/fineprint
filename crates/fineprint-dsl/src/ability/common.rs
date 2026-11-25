@@ -2,8 +2,8 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Shared pieces of the ability schema (REQ-DSL-005, REQ-DSL-010 placeholder): opaque JSON
-//! values, flat parameter maps, the placeholder [`EffectInstructionAST`], target slots and mode
+//! Shared pieces of the ability schema (REQ-DSL-005, REQ-DSL-010): opaque JSON
+//! values, flat parameter maps, target slots and mode
 //! sets, plus the small validity helpers the other submodules reuse.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,10 +13,11 @@ use serde::ser::{SerializeMap, Serializer};
 use serde_json::{Map, Value};
 
 use crate::canonical::MAX_DEPTH;
+use crate::effect::Instruction;
 use crate::expr::ObjectSelectorAST;
 use crate::expr::json::{
     AsMap, FromJson, JResult, Members, Obj, array_of, check_free_str, check_int,
-    deserialize_via_from_json, free_str, is_noncharacter, ser_check, str_of, u32_of,
+    deserialize_via_from_json, free_str, is_noncharacter, ser_check, u32_of,
 };
 
 /// Validity of an opaque JSON value (the brief's OPAQUE rule): no `null` anywhere, integers only
@@ -216,70 +217,6 @@ pub(crate) fn put_opt<M: SerializeMap, T: Serialize + ?Sized>(
 }
 
 // ---------------------------------------------------------------------------------------------
-// EffectInstructionAST (placeholder)
-
-/// One effect instruction (REQ-DSL-010 placeholder; docs/DECISIONS.md "#13 FP-012 —
-/// EffectInstructionAST is a placeholder"): an object with a required `op` matching
-/// `[A-Z][A-Z0-9_]*` and any other members, each an opaque JSON value (no `null` anywhere),
-/// stored and written back unchanged. FP-013 replaces it with the real instruction type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EffectInstructionAST {
-    /// The instruction name.
-    pub op: String,
-    /// Every other member, by name (non-empty, not `op`).
-    pub params: BTreeMap<String, Value>,
-}
-
-impl EffectInstructionAST {
-    /// An instruction with no parameters (REQ-DSL-010 placeholder).
-    #[must_use]
-    pub fn new(op: impl Into<String>) -> EffectInstructionAST {
-        EffectInstructionAST {
-            op: op.into(),
-            params: BTreeMap::new(),
-        }
-    }
-
-    /// Checks the placeholder rules.
-    fn check(&self) -> JResult<()> {
-        check_upper_name(&self.op, "effect op")?;
-        check_params(&self.params, &["op"], "effect instruction")
-    }
-}
-
-impl FromJson for EffectInstructionAST {
-    fn from_json(v: &Value) -> JResult<Self> {
-        let map = object_of(v, "effect instruction")?;
-        let op = str_of(
-            map.get("op")
-                .ok_or("effect instruction is missing member \"op\"")?,
-            "op",
-        )?
-        .to_owned();
-        let out = EffectInstructionAST {
-            op,
-            params: rest_params(map, &["op"], "effect instruction")?,
-        };
-        out.check()?;
-        Ok(out)
-    }
-}
-
-impl Members for EffectInstructionAST {
-    fn members<M: SerializeMap>(&self, m: &mut M) -> Result<(), M::Error> {
-        ser_check(self.check())?;
-        m.serialize_entry("op", &self.op)?;
-        write_params(&self.params, m)
-    }
-}
-
-impl Serialize for EffectInstructionAST {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        AsMap(self).serialize(s)
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
 // TargetSlotAST, ModeSetAST, ModeAST
 
 /// One target slot of a spell or ability (REQ-DSL-005): `{"slot","selector","min","max"}`, all
@@ -385,7 +322,7 @@ pub struct ModeAST {
     /// The mode's own target slots (non-empty when present, slots distinct).
     pub targets: Option<Vec<TargetSlotAST>>,
     /// The mode's instructions (may be empty).
-    pub effect: Vec<EffectInstructionAST>,
+    pub effect: Vec<Instruction>,
 }
 
 impl FromJson for ModeAST {
@@ -485,4 +422,4 @@ impl Serialize for ModeSetAST {
     }
 }
 
-deserialize_via_from_json!(EffectInstructionAST, TargetSlotAST, ModeAST, ModeSetAST);
+deserialize_via_from_json!(TargetSlotAST, ModeAST, ModeSetAST);
