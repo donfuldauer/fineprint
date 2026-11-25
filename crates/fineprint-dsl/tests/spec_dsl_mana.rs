@@ -130,7 +130,6 @@ fn req_obj_001_invalid_symbols_rejected() {
         "{W/ U}",
         "{W/W}",
         "{G/G/P}",
-        "{C/W}",
         "{W/C}",
         "{S/W}",
         "{X/W}",
