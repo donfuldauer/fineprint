@@ -516,3 +516,7 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 13-toolchain | #88 | work-classifier | inherit | 1 | routed | - | Implementer T1 Sonnet 5.5; FABLE_ALLOWANCE unknown (no Fable); lib.rs one-line wiring granted |
 | 13-toolchain | #88 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all ok; ingest 96.71 %, layout 99.43 % | layout mapping, 9 tests; 5 DECISIONS entries |
 | 13-toolchain | #88 | Fixer | Haiku 5.5 | 1 | done | cr check ok (862 cited, 2 excluded); fmt clean; layout tests pass | CI `cr`: "CR 901-905" comment read as citing CR 901 (not in index); CR numbers dropped from that comment (triage fast path, T0) |
+| 13-toolchain | #89 | work-classifier | inherit | 1 | needs-rules | - | 10 CR questions; FABLE_ALLOWANCE unknown (no Fable) |
+| 13-toolchain | #89 | rules-researcher | inherit | 1 | done | - | CR 105.1, 305.6, 612.2, 201.5c, 722.2, 711.2, 715.2, 717.2a, 700.2, 207.2a, 113.2c quoted; no SRS discrepancy |
+| 13-toolchain | #89 | work-classifier | inherit | 2 | routed | - | Implementer T2 Opus 5.5; lib.rs one-line wiring granted |
+| 13-toolchain | #89 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace 4373 pass; guard all ok; ingest 97.91 %; cr check ok after cr index | tokenize/ (normalize, reminder strip, sections, marking), 30 tests; 8 DECISIONS entries |

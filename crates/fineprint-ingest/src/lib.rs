@@ -18,3 +18,7 @@ pub mod import;
 
 /// Layout and face mapping from Scryfall `layout` to `LayoutBehavior` (REQ-ING-003).
 pub mod layout;
+
+/// Oracle text tokenization: reminder text, self-references, rewritable words and ability
+/// structure (REQ-ING-004).
+pub mod tokenize;

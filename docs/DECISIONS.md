@@ -8050,3 +8050,134 @@ exists yet). `Verified` is never produced (R11).
 file. No `Cargo.toml`/`Cargo.lock` change, no re-exports; `import/**` is untouched.
 **Rationale.** Same pattern as "#87 FP-085 — Wiring edit and path grant".
 **Alternatives.** None.
+
+## #89 FP-087 — Wiring edit and path grant
+
+**Decision.** The only edit outside `crates/fineprint-ingest/src/tokenize/` is the single
+`pub mod tokenize;` line with its doc comment in `crates/fineprint-ingest/src/lib.rs`, plus
+these appended entries. No `Cargo.toml`/`Cargo.lock` change, no re-exports from `lib.rs`; the
+module re-exports only its own config limits (`MAX_CONFIG_BYTES` and friends) from its private
+`config` submodule.
+**Rationale.** Same pattern as "#87 FP-085 — Wiring edit and path grant" and "#88 FP-086 —
+Wiring edit and path grant".
+**Alternatives.** None.
+
+## #89 FP-087 — API shape
+
+**Decision.** `tokenize_face(&TokenizeInput, &RulesVocabulary, &TokenizerConfig) ->
+TokenizedFace` and `tokenize_record(&NormalizedCardRecord, &RulesVocabulary, &TokenizerConfig)
+-> Vec<TokenizedFace>` (one per face, config key `card_def_id`). The vocabulary is an explicit
+argument so the output is a pure function of (text, face name and subtypes, vocabulary,
+config). `TokenizeInput { card_key, face_name, subtypes, text }` (`TokenizeInput::from_face`).
+`TokenizedFace { display, truncated, abilities, sections }`; `TokenizedAbility { original, kind,
+anchor, section, body }`; `TokenizedText { original, text, tokens, spans }` (spans are byte
+ranges of `text`, parallel to `tokens`, contiguous and covering `text`). `AbilityKind` is
+`Plain`, `Anchored` (anchor text in `anchor`), `Modal { modes: Vec<TokenizedText> }` (header in
+`body`; `anchor` may also be set) or `Chapter { chapters: Vec<u32> }`. Station symbols, level
+bands and class levels are `Section`s (`SectionKind::Station { threshold }`,
+`LevelBand { min, max }`, `ClassLevel { level, cost }`, plus `header` and the striation's raw
+`pt` line); each ability's `section: Option<usize>` indexes `TokenizedFace::sections`. Helpers:
+`normalize_text`, `strip_reminder_text`, `render_tokens(&TextTokenStream, placeholder)` with
+`SELF_REF_PLACEHOLDER = "~"`. All types derive `Debug`, `Clone`, `PartialEq`, `Eq`.
+**Rationale.** Sections make group membership explicit for the later parser without nesting
+abilities; a header line with nothing after it (`N+ |`, `LEVEL a-b`, `{c}: Level N —`) opens a
+section and yields no ability. Spans let the invariant "tokens reproduce the stripped text" be
+checked even though `NameRef{SELF}` carries no text.
+**Alternatives.** A nested `Vec` per section; a structural kind per ability (StationLine etc.)
+with the following lines left Plain (membership would be implicit).
+
+## #89 FP-087 — Self-reference phrase set
+
+**Decision.** `NameRef{SELF}` (name `None`) for: the normalized face name (case-sensitive,
+whole-word), configured `shortNames` (case-sensitive, whole-word; CR 201.5c), every `~`, and
+"this <noun>" with "this" and the noun matched case-insensitively, where the noun is any card
+type of `RulesVocabulary::card_types`, any of the face's own subtypes (for example "this
+Equipment"), or one of `spell`, `permanent`, `card`, `token`. Name patterns are matched first
+(leftmost, longest, self before other); "this" phrases and words are matched only in the gaps.
+"this ability" is not a self-reference (it names an ability, not the object).
+**Rationale.** SRS §14.5 and REQ-ING-004(b) list the name, "this creature", "this spell" and
+"similar phrases"; these are Oracle conventions, not CR text (decision "#37 FP-036").
+**Alternatives.** Only card types (would miss "this spell", "this permanent"); all subtypes of
+the vocabulary (would turn "this Goblin" on an unrelated card into a self-reference).
+
+## #89 FP-087 — Word value casing
+
+**Decision.** A `Word` token's `value` is the matched source text verbatim (after
+normalization), in its source casing ("Red", "red", "RED"); the category says which list it
+matched. Matching is case-insensitive and whole-word: a word character is a letter, digit or
+`_`, so "Goblins", "Redness" and "red_x" are not marked, while "non-Goblin" and "Goblin's"
+mark "Goblin". Plural forms are not marked by this unit. Multi-word creature types ("Time
+Lord") match only whole, with a single space. Vocabulary spellings are normalized like the
+text (curly apostrophes become `'`). On a collision the priority is self-reference, color
+word, basic land type, creature type.
+**Rationale.** Keeping the source text makes `render_tokens` reproduce the ability text
+exactly (display, round trip); the canonical form is a case-insensitive lookup away.
+**Alternatives.** The canonical vocabulary spelling as value (loses the display form);
+plural handling (needs an inflection table with no CR basis).
+
+## #89 FP-087 — NUMBER and CARD_NAME not emitted
+
+**Decision.** The tokenizer never emits `NUMBER` or `CARD_NAME` words; numbers and names stay
+literal text or `NameRef`s.
+**Rationale.** Decision "#37 FP-036 — SRS §14.5 versus the CR": CR 612.2 protects card names
+from text-changing effects and no CR rule makes numbers rewritable.
+**Alternatives.** Emitting them per SRS §14.5 (contradicts the CR).
+
+## #89 FP-087 — Reminder-text config key and shape
+
+**Decision.** The meaningful-parenthesis exceptions, shortened names and other names are client
+configuration: `{"formatVersion":1,"cards":{"<oracle_id>":{"keepParentheses":["(...)"],
+"shortNames":[...],"otherNames":[...]}}}`, loaded by `TokenizerConfig::from_json` into
+`BTreeMap`/`BTreeSet`s. The key is the record's `oracle_id` (`card_def_id`), which is stable
+across printings and unique, unlike a face name. A kept span is the exact top-level
+parenthesized text (parentheses included, normalized); inner parentheses of a kept span are not
+stripped. The loader refuses documents above 4 MiB, malformed JSON (including `serde_json`'s
+recursion limit), unknown members, wrong types, `formatVersion` other than 1, empty, multi-line
+or over-512-byte strings, lists over 256 entries, and `keepParentheses` entries not starting with
+`(` and ending with `)`. Duplicate JSON keys keep the last value. The repository holds no card
+list; tests use invented keys.
+**Rationale.** REQ-ING-004(a) asks for a detector that knows the exceptions; CR 207.2a does not
+make parentheses rules text, so the exceptions are data a client supplies (R5, R12).
+**Alternatives.** Keying by face name (collides across cards, changes with translations);
+a regex per card (harder to validate).
+
+## #89 FP-087 — Line-structure lexical conventions
+
+**Decision.** On each reminder-stripped, trimmed line, in this order: station `N+ | text`,
+`N+|text`, `N+ |` (1–6 digits); level band `LEVEL a-b` / `LEVEL a+` (keyword
+case-insensitive, 1–6 digits, `a <= b`, the en dash already normalized to `-`); class level
+`<cost>: Level N — <text>` (non-empty cost without an em dash, keyword case-insensitive,
+1–6 digits, N >= 1, em dash required). Within a station or level-band section the first bare
+P/T line (`[0-9X*+-]{1,8}/[0-9X*+-]{1,8}`) becomes `Section::pt`; elsewhere it is a plain line.
+When the first section header of a face is a class level, an implicit `ClassLevel { level: 1,
+cost: None }` section holds the lines above it (CR 717.3); stations and bands have no implicit
+section (CR 722.4, 711.4). For the body of a line: chapter `<numerals> — <effect>` (canonical
+upper-case Roman numerals 1–99, comma-separated, strictly increasing, non-empty effect);
+otherwise an anchor `<Prefix> — <text>` (em dash with a space on each side; prefix starts
+upper-case, only letters, spaces, `'` and `-`, at most 6 words and 64 bytes, and not made only
+of Roman numeral letters); then a modal header: the (post-anchor) text contains the word
+"choose" in any case and is followed by option lines. Bullet lines (`•`) are options only when
+the header ends with an em dash; pawprint-led lines (`{P}`) are options after any "choose"
+header, and keep their pawprints in the mode text (they are the mode's cost, CR 700.2i). A
+bullet's mode text is the text after the bullet, cost included (CR 700.2h). Everything else is
+Plain. The brief named headers that begin with "Choose"; headers such as "When ... enters,
+choose one —" are accepted too.
+**Rationale.** SRS §16 and the issue give these shapes; they are data-format conventions of
+the bulk text. Triggered modal headers are common and splitting their bullets into separate
+abilities would lose the mode grouping (CR 700.2).
+**Alternatives.** Only headers beginning "Choose" (strict reading of the brief); anchors
+without spaces around the dash (would capture keyword costs such as "Ward—").
+
+## #89 FP-087 — Limits and noncharacter handling
+
+**Decision.** Normalization replaces Unicode noncharacters with U+FFFD, so
+`TextTokenStream::new` cannot fail on tokenizer output (a failure would still yield an empty
+stream, never a panic). Raw text above `MAX_TEXT_BYTES` (65,536) is cut at the last char
+boundary within the limit and `TokenizedFace::truncated` is set. Parenthesis matching is a
+single stack pass (linear on `((((…`), lexicon lookup at each word start is bounded by the
+longest phrase length, and every numeric field is capped at 6 digits or the chapter bound.
+Normalization also maps tab, U+2028 and U+2029 to a space, U+2010 and U+2011 to `-`, and strips
+any run of leading BOMs (so it is idempotent).
+**Rationale.** R12 and REQ-ING-004 ask for total, bounded parsing; real Oracle text is far
+below the cap.
+**Alternatives.** Rejecting such input with an error (the toolchain would lose the whole card).
