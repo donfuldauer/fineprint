@@ -235,8 +235,27 @@ fn ordered_faces(entries: &[Value]) -> Vec<&Value> {
     faces
 }
 
+/// The index of the normalized face an MTGJSON entry describes by its `side`, when EVERY entry
+/// has a single-letter lowercase `side` in `a..=z` (`a` is face 0); `None` otherwise, when the
+/// entries pair with the faces by position.
+fn side_indices(entries: &[&Value]) -> Option<Vec<usize>> {
+    entries
+        .iter()
+        .map(|e| {
+            let side = e.get("side")?.as_str()?;
+            let mut chars = side.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c @ 'a'..='z'), None) => Some(usize::from(c as u8 - b'a')),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Every disagreement of record `r` with its MTGJSON entries `faces` (non-empty, in face
-/// order): card-wide fields, then `faces` when the counts differ, then each common face.
+/// order): card-wide fields, then `faces` when the counts differ, then each common face. Entries
+/// that all carry a letter `side` pair with the face that letter names (a lone back face is
+/// compared with the back face); otherwise they pair by position.
 fn compare(r: &NormalizedCardRecord, faces: &[&Value]) -> Vec<Value> {
     let Some(first) = faces.first() else {
         return Vec::new();
@@ -249,8 +268,19 @@ fn compare(r: &NormalizedCardRecord, faces: &[&Value]) -> Vec<Value> {
             "mtgjson": faces.len(),
         }));
     }
-    for (i, (face, m)) in r.faces.iter().zip(faces).enumerate() {
-        compare_face(i, face, m, &mut out);
+    match side_indices(faces) {
+        Some(indices) => {
+            for (index, m) in indices.into_iter().zip(faces) {
+                if let Some(face) = r.faces.get(index) {
+                    compare_face(index, face, m, &mut out);
+                }
+            }
+        }
+        None => {
+            for (i, (face, m)) in r.faces.iter().zip(faces).enumerate() {
+                compare_face(i, face, m, &mut out);
+            }
+        }
     }
     out
 }

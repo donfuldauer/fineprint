@@ -49,6 +49,10 @@ pub fn split_array(bytes: &[u8]) -> Result<Vec<&[u8]>, ArrayError> {
     ArrayElements::new(bytes).collect()
 }
 
+/// How many open brackets per element are matched against their closing delimiter; deeper levels
+/// are counted only, so the scan's memory stays bounded whatever the input.
+const MAX_NEST_CHECKED: usize = 128;
+
 /// Where an [`ArrayElements`] scan stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -121,11 +125,16 @@ impl<'a> ArrayElements<'a> {
         self.scan()
     }
 
-    /// Scans one element from `pos` (each element starts outside any string at depth 0).
+    /// Scans one element from `pos` (each element starts outside any string at depth 0). Open
+    /// brackets are tracked as a stack of the closing delimiter each expects, at most
+    /// `MAX_NEST_CHECKED` deep; deeper levels are only counted. A closing delimiter that is not
+    /// the expected one is `Malformed` for the whole array (R12: bounded memory, O(n)).
     fn scan(&mut self) -> Option<Result<&'a [u8], ArrayError>> {
         let bytes = self.bytes;
         let start = self.pos;
         let mut i = start;
+        let mut stack = [0u8; MAX_NEST_CHECKED];
+        // Open levels, including those past the stack bound.
         let mut depth = 0usize;
         let mut in_string = false;
         let mut escaped = false;
@@ -141,8 +150,19 @@ impl<'a> ArrayElements<'a> {
             } else {
                 match b {
                     b'"' => in_string = true,
-                    b'[' | b'{' => depth += 1,
-                    b']' | b'}' if depth > 0 => depth -= 1,
+                    b'[' | b'{' => {
+                        if let Some(slot) = stack.get_mut(depth) {
+                            *slot = if b == b'[' { b']' } else { b'}' };
+                        }
+                        depth += 1;
+                    }
+                    b']' | b'}' if depth > 0 => {
+                        depth -= 1;
+                        // Levels past the bound are not type-checked.
+                        if stack.get(depth).is_some_and(|&want| want != b) {
+                            return self.fail(ArrayError::Malformed);
+                        }
+                    }
                     b',' if depth == 0 => {
                         self.pos = i + 1;
                         return Some(Ok(trim(bytes.get(start..i).unwrap_or_default())));

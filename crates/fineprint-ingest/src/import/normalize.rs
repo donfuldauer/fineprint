@@ -556,7 +556,9 @@ pub fn normalize_card(v: &Value) -> Result<NormalizedCardRecord, RejectReason> {
     // line (never the whole combined line, whose words would land in the wrong face).
     if multi && raw.iter().any(|f| f.type_line.is_none()) {
         let line = top_type_line.as_deref().unwrap_or_default();
-        let parts: Vec<&str> = line.split(" // ").collect();
+        // At most `raw.len() + 1` parts are inspected: enough to tell an exact count, a single
+        // part and an excess apart, without a temporary vector as long as the line (R9).
+        let parts: Vec<&str> = line.splitn(raw.len() + 1, " // ").collect();
         if parts.len() == raw.len() {
             for (f, p) in raw.iter_mut().zip(parts) {
                 if f.type_line.is_none() {

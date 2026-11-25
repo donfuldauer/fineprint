@@ -1973,3 +1973,180 @@ fn million_element_array_streams() {
     assert_eq!(out.rejected[N - 1].index, N - 1);
     assert_eq!(out.rejected[N - 1].reason, RejectReason::NotObject);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Gate 02-state-objects review round 2 (R4, R7, R8, R9)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-ING-001, REQ-NFR-004 (review R4): two output names that alias on the file system. The
+/// scratch directory is probed for case sensitivity: when it is case-insensitive,
+/// `--out cards.json --mtgjson-report Cards.json` exits 2 after the records are written, writes
+/// no report and leaves the records valid; when it is case-sensitive the same command exits 0
+/// and writes both files (case-distinct names stay valid).
+#[test]
+fn import_rejects_destinations_aliasing_by_case() {
+    let cache = scratch("import-case");
+    write_cache(&cache, &json!([card(1, json!({}))]), None, true);
+    write_atomic(&cache, json!({"test.card_1": [atomic_entry(1, json!({}))]}));
+    let c = p(&cache);
+    let dir = scratch("import-case-out");
+    std::fs::write(dir.join("probe"), b"x").unwrap();
+    let insensitive = dir.join("PROBE").exists();
+    let (records, report) = (dir.join("cards.json"), dir.join("Cards.json"));
+    let (code, err) = run_import_lib(&[
+        "--cache",
+        c,
+        "--out",
+        p(&records),
+        "--mtgjson-report",
+        p(&report),
+    ]);
+    if insensitive {
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("same file") && err.contains("--mtgjson-report"),
+            "{err}"
+        );
+        let v = read_json(&records);
+        assert_eq!(v["formatVersion"], 1, "the records stay intact");
+        assert!(v["records"].is_array(), "{v}");
+        assert!(v.get("disagreements").is_none(), "no report written");
+    } else {
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(read_json(&records)["formatVersion"], 1);
+        assert_eq!(read_json(&report)["matched"], 1);
+    }
+}
+
+/// REQ-ING-001, R12, R7 (review R7): a closing delimiter that does not match the open one is
+/// a structural error for the whole array, while invalid values between matched brackets keep
+/// their per-element recovery; nesting beyond the checked depth still ends elements at the
+/// right comma; unbounded openers fail without a deep stack or a large allocation.
+#[test]
+fn mismatched_brackets_are_structural() {
+    for bad in [&b"[[}, {}]"[..], b"[{]}]", b"[[1}]", b"[{\"a\":[}]}]"] {
+        assert_eq!(split_array(bad), Err(ArrayError::Malformed), "{bad:?}");
+        assert_eq!(validate_array(bad), Err(ArrayError::Malformed), "{bad:?}");
+    }
+    assert_eq!(
+        import_oracle_cards(b"[[}, {}]").err(),
+        Some(ArrayError::Malformed)
+    );
+    // Per-element recovery for invalid values with matched brackets is unchanged.
+    assert_eq!(split_array(b"[1,,2]").unwrap(), vec![&b"1"[..], b"", b"2"]);
+    assert_eq!(
+        split_array(b"[{\"a\":1}, nope, {}]").unwrap(),
+        vec![&b"{\"a\":1}"[..], b"nope", b"{}"]
+    );
+    // Brackets inside strings never count.
+    assert_eq!(
+        split_array(b"[\"]}\", [\"{\"]]").unwrap(),
+        vec![&b"\"]}\""[..], b"[\"{\"]"]
+    );
+    // 200 levels (past the checked depth): one element, then the next after the right comma.
+    let mut deep = Vec::new();
+    deep.push(b'[');
+    deep.extend(std::iter::repeat_n(b'[', 200));
+    deep.extend(std::iter::repeat_n(b']', 200));
+    deep.extend_from_slice(b",1]");
+    let parts = split_array(&deep).unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].len(), 400);
+    assert_eq!(parts[1], b"1");
+    // 100 000 openers without closers: Malformed, no overflow.
+    let mut open = vec![b'['; 100_001];
+    assert_eq!(split_array(&open), Err(ArrayError::Malformed));
+    open.extend(std::iter::repeat_n(b'{', 10));
+    assert_eq!(validate_array(&open), Err(ArrayError::Malformed));
+}
+
+/// REQ-ING-002, REQ-ING-003 (review R8): MTGJSON entries that all carry a letter `side` pair
+/// with the normalized face that letter names: a lone `b` entry of a two-face card yields the
+/// `faces` count disagreement and no field disagreement (it is not compared with the front
+/// face), likewise a lone `a`; swapped source order still pairs correctly; entries without
+/// `side` keep the source-order pairing.
+#[test]
+fn mtgjson_lone_labeled_face_pairs_by_side() {
+    let records = BTreeMap::from([(oid(10), norm(&two_face()))]);
+    let id = json!({"scryfallOracleId": oid(10)});
+    let back = json!({"side": "b", "manaValue": 3.0, "colors": ["W"], "colorIdentity": ["G", "W"], "types": ["Planeswalker"], "supertypes": ["Legendary"], "subtypes": ["Testwalker"], "loyalty": "X", "identifiers": id});
+    let front = json!({"side": "a", "manaValue": 3.0, "colors": ["G"], "colorIdentity": ["G", "W"], "types": ["Creature"], "supertypes": [], "subtypes": ["Folk", "Test"], "power": "*", "toughness": "1+*", "identifiers": id});
+    let check = |entries: Vec<Value>| {
+        let atomic = parse_atomic(&bytes_of(&json!({"data": {"test.front": entries}}))).unwrap();
+        cross_check(&records, &atomic, &Value::Null)
+    };
+    let faces_only = json!([{"oracleId": oid(10), "fields": [
+        {"field": "faces", "scryfall": 2, "mtgjson": 1},
+    ]}]);
+    assert_eq!(
+        check(vec![back.clone()])["disagreements"],
+        faces_only,
+        "lone back face"
+    );
+    assert_eq!(
+        check(vec![front.clone()])["disagreements"],
+        faces_only,
+        "lone front face"
+    );
+    // Both sides, in either source order.
+    for entries in [
+        vec![front.clone(), back.clone()],
+        vec![back.clone(), front.clone()],
+    ] {
+        assert_eq!(check(entries)["disagreements"], json!([]));
+    }
+    // Without `side`: source-order pairing (the first entry is face 0).
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        v.as_object_mut().unwrap().remove("side");
+        v
+    };
+    assert_eq!(
+        check(vec![strip(&front), strip(&back)])["disagreements"],
+        json!([])
+    );
+    let swapped = check(vec![strip(&back), strip(&front)]);
+    assert!(
+        swapped["disagreements"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["face"] == 0),
+        "{swapped}"
+    );
+    // A side letter out of range for the record's faces is skipped.
+    let mut third = back.clone();
+    third["side"] = json!("c");
+    assert_eq!(
+        check(vec![third])["disagreements"],
+        faces_only,
+        "no face 2 to compare"
+    );
+}
+
+/// REQ-ING-002, R12 (review R9): a two-face card where one face lacks a type line and the
+/// top-level line holds thousands of ` // ` separators is a `typeLineFaceMismatch` and no
+/// per-face line comes from the fallback; the exact-count and single-part cases still work.
+#[test]
+fn type_line_with_many_separators_is_a_mismatch() {
+    let many = vec!["Instant"; 5000].join(" // ");
+    let r = norm(&mixed_lines(&many));
+    assert!(
+        diags(&r).contains(&"typeLineFaceMismatch"),
+        "{:?}",
+        r.diagnostics
+    );
+    assert!(r.faces[1].card_types.is_empty());
+    assert_eq!(r.faces[0].card_types, vec!["Creature"]);
+    // One part more than the faces is the smallest excess, and a line whose last remainder
+    // holds a further separator is no valid split.
+    let r = norm(&mixed_lines("Instant // Sorcery // Instant"));
+    assert!(diags(&r).contains(&"typeLineFaceMismatch"));
+    assert!(r.faces[1].card_types.is_empty());
+    // Exact count and single part are unchanged.
+    let r = norm(&mixed_lines("Creature // Sorcery"));
+    assert_eq!(r.faces[1].card_types, vec!["Sorcery"]);
+    assert!(!diags(&r).contains(&"typeLineFaceMismatch"));
+    let r = norm(&mixed_lines("Artifact"));
+    assert_eq!(r.faces[1].card_types, vec!["Artifact"]);
+}
