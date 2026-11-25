@@ -8181,3 +8181,125 @@ any run of leading BOMs (so it is idempotent).
 **Rationale.** R12 and REQ-ING-004 ask for total, bounded parsing; real Oracle text is far
 below the cap.
 **Alternatives.** Rejecting such input with an error (the toolchain would lose the whole card).
+
+## #159 FP-140 — Card wrappers validated against the real AST types
+
+**Decision.** `card::ValueExpressionAST(Value)`, `card::TextTokenStream(Vec<Value>)`,
+`card::AbilityAST(Value)` and `card::PartnerAbilityDSL(Value)` keep their tuple shape, `pub`
+field, derives and `#[serde(transparent)]` plain serde (permissive, unchecked building blocks).
+The issue deliverable "become (or re-export) the real types" is met by validated typed views at
+the two checked boundaries: each wrapper gets `to_real(&self) -> Result<real type, String>`
+(into `expr::ValueExpressionAST`, `text::TextTokenStream`, `ability::AbilityAST`), and
+`CardDefinitionDSL::validate_asts` checks every position (`faces[i].power`,
+`faces[i].toughness`, `faces[i].text`, `faces[i].abilities[j]`,
+`commanderEligibility.partnerAbilities[j]`) with a located message. `seal` runs the check on
+the normalised, depth-checked value before hashing (failure: `CanonicalError::Serialize`);
+`from_json` runs it after the lossless-decode step and before the hash comparison (failure:
+`CardDefinitionError::Schema`). A position passes only if the strict decoder of the real type
+accepts it, read from a borrowed `&Value`, and the decoded value re-encodes (through
+`canonical::to_checked_value`) to exactly the original JSON, so each valid AST has one spelling
+and the check never changes canonical JSON or `definitionHash`. `to_canonical_json`,
+`compute_hash`, `verify_hash` and plain serde do not validate. The error type of `to_real` is
+`String` (the decoder's message), so no new public error type or `CardDefinitionError` variant
+is added. This supersedes the open parts of "#11 FP-010 — Placeholder AST types" and "#12
+FP-011 — FP-010 placeholders stay in card/". Follow-up (the Orchestrator files it): migrate
+fineprint-core (about 45 files in src, tests and benches that build or decode the wrappers with
+deliberately fake content, for example `layers/text.rs` and `layouts/facedown.rs`) to the real
+types, then swap the field types.
+**Rationale.** Swapping the Rust field types now would break fineprint-core and
+fineprint-ingest, which construct these wrappers directly; validating at `seal` and `from_json`
+gives the acceptance criteria (invalid content rejected on load and seal, round trip and
+canonical form with the real types) with an additive public API only.
+**Alternatives.** Replace the field types with the real types in this unit (rejected: breaks
+the core crate, out of the owned paths); validate inside the wrappers' `Deserialize` (rejected:
+changes plain serde, which core relies on for placeholder content).
+
+## #159 FP-140 — PartnerAbilityDSL is a KEYWORD ability
+
+**Decision.** A `commanderEligibility.partnerAbilities` entry must decode as an
+`ability::AbilityAST` whose `kind()` is `"KEYWORD"`; `PartnerAbilityDSL::to_real` and
+`validate_asts` reject any other kind with a message naming the kind found.
+**Rationale.** SRS §14.2 leaves `PartnerAbilityDSL` undefined; the SRS commander section lists
+the partner variants (partner, partner—[text], partner with [name], choose a Background,
+Doctor's companion) as keyword abilities, so the keyword instance form (`keyword` plus opaque
+`params`) carries them.
+**Alternatives.** Any ability kind (rejected: a partner entry that is a spell or trigger has no
+meaning); a dedicated partner schema (rejected: not in the SRS; can be added later as an
+additive contract change).
+
+## #159 FP-140 — Effect lists and textSpan not additionally checked
+
+**Decision.** Abilities are validated only through `ability::AbilityAST`'s own decoder. Its
+effect lists still hold the strict placeholder `ability::EffectInstructionAST` (required `op`
+matching `[A-Z][A-Z0-9_]*`, other members opaque); card/ adds no effect-specific check, so the
+card check tightens automatically when #161 (FP-141) swaps in `effect::Instruction`. Fixtures
+with a non-empty effect list use a real instruction wire form (`{"op":"POPULATE"}`) so FP-141
+does not change their hash; the REPLACEMENT fixture uses the replacement op `{"op":"SKIP"}`. An
+ability's `textSpan` is not checked against the length of the face `text`: not enforced.
+**Rationale.** #161 owns `src/ability/` and the effect swap; a span-range check is not required
+by the contracts of this unit.
+**Alternatives.** Decode effect lists as `effect::Instruction` from card/ now (rejected:
+duplicates #161's work and would diverge from the ability decoder); enforce `textSpan` ranges
+(rejected: no contract requires it yet).
+
+## #159 FP-140 — Null power/toughness and regenerated fixtures
+
+**Decision.** `Some(ValueExpressionAST(Value::Null))` for `power` or `toughness` is no longer
+sealable or loadable (a present `null` is not a value expression); plain serde still decodes
+`null` as `Some(...)`, unchanged. The fixtures of `crates/fineprint-dsl/src/card/tests.rs` that
+held placeholder content were migrated to valid synthetic ASTs (`{"const":2}` →
+`{"LITERAL":2}`, `{"kw":"Flying"}` → a LITERAL token, `{"keyword":"FLYING"}` → a KEYWORD
+ability, partner placeholders → KEYWORD abilities, random power `null`/`[n,"*"]` → `"X"`/
+`{"LITERAL":n}`, random toughness → a `MATH` expression). Tests that reached the canonicaliser's
+depth, noncharacter and number-normalisation limits through placeholder JSON now reach them
+through valid content (nested `MATH` chains, a noncharacter in a LITERAL token's text,
+`{"LITERAL": -0.0 | 1.0 | 1e0}` and KEYWORD `params`); `{"LITERAL": 2.5}` is now asserted to be
+refused by `seal` (non-integral, REQ-CORE-006). `card/tests.rs` pins no golden hash literal, so
+no literal was regenerated; for the record, the base fixture `sealed()` changed from
+`fddf030ec9d6bea9c2f508c8de7b37a2e944c55952d5e3032bd93983d8b4eb44` (placeholder content) to
+`ce23dc12dae8b49033785a3832ebece12870f940ce895ab3d01f370b8feee216` (valid real ASTs), because
+its AST content changed; the hashing procedure itself is unchanged.
+**Rationale.** R10: test intent kept, content made valid; REQ-NFR-006: hashes stay well-defined.
+**Alternatives.** Keep `null` power loadable as "no value" (rejected: a second spelling of an
+absent member, and not a real value expression).
+
+## #159 FP-140 — Test-path ownership
+
+**Decision.** The Independent spec tests of this unit live in
+`crates/fineprint-dsl/tests/spec_dsl_card*.rs` (including the migration of `spec_dsl_card.rs`)
+and `crates/fineprint-dsl/tests/spec_dsl_review1.rs`, and belong to the Tester role, a grant the
+Orchestrator adds to the path check. The Implementer's unit tests are
+`crates/fineprint-dsl/src/card/tests.rs`.
+**Rationale.** Same split as "#13 FP-012 — Test-path ownership" (P5 role separation).
+**Alternatives.** Implementer-owned integration tests (rejected: no independence).
+
+## #159 FP-140 — Spec test migration and golden hash
+
+**Decision.** The Independent Tester migrated `crates/fineprint-dsl/tests/spec_dsl_card.rs` and
+`crates/fineprint-dsl/tests/spec_dsl_review1.rs` from free-form placeholder content to valid
+synthetic real ASTs (`{"LITERAL":n}`, `"X"`, `MATH` chains; LITERAL/WORD/NAME_REF tokens with
+unique ids; STATIC, ACTIVATED (empty `effect`) and KEYWORD abilities, exotic payloads moved to
+KEYWORD `params`; KEYWORD `PARTNER` partner abilities). Regenerated golden hash in
+`spec_dsl_card.rs` (`PINNED_HASH` and its copy in `PINNED_SEALED`):
+`36337ac7f9d175df1da81a397b1b788a4f2c88ee12dcc1b937584e5ca34f3aa3` →
+`e930e89d0aec056f27c5a0bac081553c5435af9dbebf4b13f42d65b294d2b770`, because the pinned minimal
+definition's power and toughness changed from the placeholder `1` to `{"LITERAL":1}`; the new
+value was computed with `printf %s '<canonical>' | sha256sum` and matches `compute_hash`.
+`spec_dsl_review1.rs` pins no hash. Limits formerly reached through placeholder JSON are reached
+through valid content (a `MATH` chain of exactly k containers in `power` for the seal/load depth
+agreement; a noncharacter in a LITERAL `text` or WORD `value`; `{"LITERAL":-0.0|1.0}` for number
+normalisation) or through raw document text (over-deep arrays in `power`/`abilities`, unsafe
+integers), since document-level checks run before the AST check; `compute_hash`/
+`to_canonical_json` depth tests stay on placeholder content because those do not validate ASTs.
+Two brief-table entries are asserted at the canonical level: `{"LITERAL":9007199254740992}` is
+`Canonical(UnsafeInteger)` from `from_json` (canonical checks precede the AST check), and `seal`
+may report it as `UnsafeInteger` or `Serialize` (both reject; the canonical-level error is the
+same check `from_json` applies first). `seal` of `{"LITERAL":1.0}` / `-0.0` is asserted to
+normalise to the integer and succeed, matching the loader. The independent tests live in
+`crates/fineprint-dsl/tests/spec_dsl_card*.rs` (new: `spec_dsl_card_ast.rs`) and
+`spec_dsl_review1.rs` (a path-check grant the Orchestrator adds).
+**Rationale.** R10 (intent kept, nothing weakened), REQ-NFR-006 (hash well-defined over single-
+spelling real ASTs), FP-010 loader order (canonical → version → schema → AST → hash).
+**Alternatives.** Require `Schema`/`Serialize` for the unsafe LITERAL (rejected: contradicts the
+documented canonical-first order); keep placeholder content in the migrated files (rejected:
+`seal`/`from_json` now refuse it).
