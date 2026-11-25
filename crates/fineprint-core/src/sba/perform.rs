@@ -325,7 +325,9 @@ impl Plan {
 ///   moved to its owner's graveyard with the batch below, without a request. A battle whose
 ///   controller has lost the game (the [`LOST_THE_GAME`] designation from an earlier pass) or is
 ///   not a player of the game gets no request and consumes no request id, and stays where it is
-///   (CR 800.4a: that player has left the game and can't answer; no rule transfers the choice;
+///   (CR 800.4a: the battle leaves the game when its controller does, performed by the caller;
+///   CR 800.4h: a choice that survives the departure goes to the next player in turn order, not
+///   modelled here, #125;
 ///   decision "Gate 02-state-objects R3d — No protector request to a controller who lost the
 ///   game, on every path"). A battle that is
 ///   also a CR 704.5v or CR 704.5w finding gets no request before the batch: when it leaves with
@@ -1070,9 +1072,9 @@ fn ask_retained_protectors(
 
 /// CR 704.5x, CR 704.5y, CR 800.4a: whether `controller`, the controller of a battle, can be
 /// asked its protector choice: it is a player of `game` without the [`LOST_THE_GAME`]
-/// designation. CR 704.5x and CR 704.5y name only "that battle's controller" as the chooser and
-/// no rule transfers the choice; a player who lost the game has left it (CR 800.4a), so it can't
-/// answer. One test for the pre-batch requests ([`Plan`]) and the post-batch requests
+/// designation. CR 704.5x and CR 704.5y name "that battle's controller" as the chooser; CR 800.4a
+/// removes the battle when that player leaves (performed by the caller), and CR 800.4h sends a
+/// choice that survives the departure to the next player in turn order (not modelled, #125). One test for the pre-batch requests ([`Plan`]) and the post-batch requests
 /// ([`ask_retained_protectors`]) (decisions "Gate 02-state-objects R3c — Post-batch eligibility,
 /// CR reference and lost controller for the retained-battle request" and "Gate 02-state-objects
 /// R3d — No protector request to a controller who lost the game, on every path").

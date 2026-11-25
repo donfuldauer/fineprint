@@ -8933,6 +8933,7 @@ check in the shared `protector_asks` (rejected: it would change the pre-batch re
 Keep the pre-batch CR reference (rejected: names a rule that no longer flags the battle).
 Open rules question for the rules-researcher: whether such a battle should instead leave with the
 player who lost, or another player choose; a follow-up decision amends this one if needed.
+Answered in R3d: CR 800.4a, CR 800.4h.
 
 ## Gate 02-state-objects R3d — No protector request to a controller who lost the game, on every path
 
@@ -8948,9 +8949,12 @@ without a request, as before; for example, a typeless battle whose controller lo
 no candidate because its only appropriate player has left. Requests to live controllers, their
 order (CR 101.4) and their request ids are unchanged.
 
-**Rationale.** CR 704.5x and CR 704.5y name only "that battle's controller" as the chooser, and
-no rule transfers the choice. A player who lost the game has left it (CR 800.4a), so asking that
-player would suspend the pass on a choice nobody can answer. This can happen on the ordinary path
+**Rationale.** CR 704.5x and CR 704.5y name "that battle's controller" as the chooser. CR 800.4a
+removes (exiles) the battle when that player leaves the game, so normally no choice remains. CR
+800.4h says: "If a rule requires a player who has left the game to make a choice, the next player
+in turn order makes that choice." That is reachable only if such a choice survives the departure.
+The engine marks a player who lost with the [`LOST_THE_GAME`] designation but does not yet perform
+the departure (#125), so asking that player would suspend the pass on a choice nobody can answer. This can happen on the ordinary path
 (CodeRabbit thread 4699044484). In pass 1, a Siege at defense 0 has its graveyard move replaced
 by a defense counter while its controller loses the game. In pass 2, the Siege is at defense 1,
 is a CR 704.5x subject, and is planned as an ordinary request. CR 800.4a makes the leaving
@@ -8963,5 +8967,9 @@ procedure deal with it. One helper keeps the two checks from drifting apart.
 the battle goes to the graveyard with the batch. Rejected: no rule supports a graveyard move for
 this reason, the move would pre-empt CR 800.4a exile and the triggers that look at it, and it
 would differ from the deferred path. (2) Hand the choice to another player, such as the next
-player in APNAP order. Rejected: no rule transfers the choice (rules-researcher, CR 2026-11-06).
+player in APNAP order. Rejected: CR 800.4a applies first and removes the battle when the player
+leaves (performed by the player-leaves-game procedure, #125), and CR 800.4h applies only to a
+player who has left the game and only to a choice that survives departure. Routing such a
+surviving choice to the next player in turn order (CR 800.4h, not APNAP) belongs with #125
+(rules-researcher, CR 2026-11-06).
 (3) Keep the check on the deferred path only. Rejected: that is the reported suspension defect.
