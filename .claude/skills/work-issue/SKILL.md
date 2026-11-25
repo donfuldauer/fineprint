@@ -284,7 +284,7 @@ replied to and resolved, and the P5 phase gate holds):
 1. Merge with a merge commit:
    `gh pr merge <P> --merge --match-head-commit <head>` or REST
    (`gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`).
-2. The repository deletes merged branches automatically; check it did.
+2. Do not delete the branch or check that it was deleted: the repository deletes merged branches automatically.
 3. **Unblock dependents (the sweep).** List every open `work-unit` issue labelled `blocked`
    (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
    paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1),
