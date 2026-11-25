@@ -5,18 +5,19 @@
 //! Spec tests for `fineprint_dsl::ability` (FP-012 wire contract), part 1: the SRS §14.4.1–14.4.4
 //! examples (REQ-DSL-004..009, REQ-NFR-006), the closed wire sets, the ability envelope
 //! (REQ-DSL-005), triggers and event matchers with the look-back ban (REQ-DSL-006), and SPELL /
-//! KEYWORD abilities, targets, modes and effect instructions (REQ-DSL-005, REQ-DSL-010
-//! placeholder). Black-box: written from the work-item brief only; everything is driven through
+//! KEYWORD abilities, targets, modes and effect instructions (REQ-DSL-005, REQ-DSL-010:
+//! the real `effect::Instruction`). Black-box: written from the work-item brief only; everything is driven through
 //! serde_json and `fineprint_dsl::canonical`. Synthetic data only (R5).
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use fineprint_dsl::ability::{
-    AbilityAST, ActivationTiming, EffectInstructionAST, EventBatch, EventKind, EventMatcher, Layer,
-    ModeSetAST, RuleKind, StepId, TargetSlotAST, TierHint,
+    AbilityAST, ActivationTiming, EventBatch, EventKind, EventMatcher, Layer, ModeSetAST, RuleKind,
+    StepId, TargetSlotAST, TierHint,
 };
 use fineprint_dsl::canonical::{canonicalize, to_canonical_vec};
+use fineprint_dsl::effect::Instruction;
 use fineprint_dsl::mana::ManaCostDSL;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -174,9 +175,9 @@ const KINDS: [&str; 6] = [
 
 // ---------------------------------------------------------------- SRS examples (verbatim)
 
-const EX1: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"DAMAGE_DEALT","subject":{"ref":"SELF"},"filters":{"combat":true,"recipient":{"pred":"IS_PLAYER"}},"bind":{"recipient":"$P"}}},"effect":[{"op":"DISCARD","player":"$P","count":{"LITERAL":1},"chooser":"$P"}]}"#;
+const EX1: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"DAMAGE_DEALT","subject":{"ref":"SELF"},"filters":{"combat":true,"recipient":{"pred":"IS_PLAYER"}},"bind":{"recipient":"$P"}}},"effect":[{"op":"DISCARD","player":{"ref":"BOUND","var":"$P"},"count":{"LITERAL":1}}]}"#;
 const EX2: &str = r#"{"abilityId":"a1","kind":"TRIGGERED","functionsIn":["BATTLEFIELD"],"trigger":{"mode":"EVENT","event":{"kind":"ATTACKS","subject":{"ref":"SELF"}}},"effect":[{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}}]}"#;
-const EX3: &str = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"name":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","mode":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
+const EX3: &str = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"name":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","action":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
 const EX4: &str = r#"{"abilityId":"s1","kind":"STATIC","functionsIn":["BATTLEFIELD"],"effects":[{"type":"RULE","kind":"ATTACK_COST","attackers":{"pred":"IS_CREATURE"},"attackTarget":{"player":{"ref":"CONTROLLER"}},"cost":[{"cost":"PAY_MANA","mana":"{2}"}],"per":"EACH_ATTACKER"}]}"#;
 const EX5: &str = r#"{"abilityId":"s1","kind":"STATIC","functionsIn":["BATTLEFIELD"],"effects":[{"type":"RULE","kind":"BLOCK_RESTRICTION","blockers":{"op":"AND","conditions":[{"pred":"IS_CREATURE"},{"pred":"CONTROLLED_BY","player":"OPPONENT_OF_CONTROLLER"}]},"rule":"CANT_BLOCK"}]}"#;
 const EX6: &str = r#"{"abilityId":"s1","kind":"STATIC","effects":[{"type":"RULE","kind":"BLOCK_CAPACITY","blockers":{"ref":"SELF"},"max":"UNBOUNDED"}]}"#;
@@ -410,7 +411,7 @@ fn req_dsl_005_examples_distinct() {
 /// are accepted (decision "#13 FP-012").
 #[test]
 fn req_dsl_005_srs_shorthand_examples_rejected() {
-    let a = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"textToken":"CREATURE_TYPE","value":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","mode":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
+    let a = r#"{"abilityId":"a2","kind":"ACTIVATED","functionsIn":["BATTLEFIELD"],"cost":[{"cost":"PAY_MANA","mana":"{2}"},{"cost":"TAP_SOURCE"}],"timing":"SORCERY","limits":[{"perTurn":1}],"activateOnlyIf":{"pred":"CONTROLS","selector":{"pred":"HAS_SUBTYPE","value":{"textToken":"CREATURE_TYPE","value":"TestType"}}},"isLoyalty":false,"isManaAbility":false,"targets":[{"slot":0,"selector":{"zones":["BATTLEFIELD"],"pred":"IS_CREATURE"},"min":1,"max":1}],"effect":[{"op":"TAP_OR_UNTAP","action":"TAP","objects":{"ref":"TARGET","slot":0}}]}"#;
     let b = r#"{"abilityId":"s2","kind":"STATIC","condition":{"pred":"PLAYER_HAS_MAX_SPEED","player":"CONTROLLER"},"effects":[{"type":"CHAR","layer":"7c","affected":{"selector":"OTHER_CREATURES_YOU_CONTROL"},"modification":{"op":"MODIFY_PT","power":2,"toughness":1}}]}"#;
     let b_player_only = EX8.replace(
         r#""player":{"ref":"CONTROLLER"}},"effects""#,
@@ -659,14 +660,16 @@ fn req_dsl_006_look_back_member_rejected_on_matcher_trigger_ability() {
     }
 }
 
-/// REQ-DSL-006: an effect instruction is opaque, so a look-back-named member there is allowed and
-/// round-trips unchanged.
+/// REQ-DSL-006, REQ-DSL-010, REQ-NFR-006 (rule E5): the real `effect::Instruction` has no
+/// look-back member, so a look-back-named member on an instruction is an unknown member and is
+/// rejected, standalone and inside an ability's effect list.
 #[test]
-fn req_dsl_006_look_back_name_inside_effect_instruction_is_opaque() {
+fn req_dsl_006_look_back_name_inside_effect_instruction_is_unknown_member() {
+    accept_v::<Instruction>(&json!({"op":"POPULATE"}));
     for name in LOOK_BACK_NAMES {
-        let instr = json!({"op":"TEST_OP", name: true});
-        accept_v::<EffectInstructionAST>(&instr);
-        accept_v::<AbilityAST>(&with(
+        let instr = json!({"op":"POPULATE", name: true});
+        reject_v::<Instruction>(&instr);
+        reject_v::<AbilityAST>(&with(
             &event_trig(json!({"kind":"DIES"})),
             "effect",
             json!([instr]),
@@ -1307,7 +1310,7 @@ fn req_dsl_005_targets() {
 }
 
 fn mode(id: &str) -> Value {
-    json!({"id":id,"effect":[{"op":"TEST_OP"}]})
+    json!({"id":id,"effect":[{"op":"POPULATE"}]})
 }
 
 /// REQ-DSL-005: ModeSetAST rules, standalone and on SPELL, ACTIVATED and TRIGGERED.
@@ -1319,7 +1322,7 @@ fn req_dsl_005_modes() {
         json!({"min":1,"max":2,"modes":[mode("m1"),mode("m2")]}),
         json!({"min":1,"max":3,"modes":[mode("m1"),mode("m2"),mode("m3")]}),
         json!({"min":2,"max":2,"modes":[{"id":"m1","effect":[]},
-            {"id":"m2","targets":[slot(0,1,1)],"effect":[{"op":"TEST_OP","n":1}]}]}),
+            {"id":"m2","targets":[slot(0,1,1)],"effect":[draw1()]}]}),
     ];
     let bad = [
         json!({"min":1,"max":2,"modes":[mode("m1")]}),
@@ -1365,20 +1368,29 @@ fn req_dsl_005_modes() {
     }
 }
 
-/// REQ-DSL-005, REQ-DSL-010 (placeholder): EffectInstructionAST needs an `op` matching
-/// [A-Z][A-Z0-9_]*; other members are opaque non-null values and round-trip unchanged.
+/// A valid real DRAW instruction (wire form of `effect::Instruction`).
+fn draw1() -> Value {
+    json!({"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}})
+}
+
+/// REQ-DSL-005, REQ-DSL-010, REQ-NFR-006: the instruction type is the real `effect::Instruction`:
+/// it accepts exactly the real wire forms, round-trips canonically in an ability's effect list,
+/// and keeps instruction order. (Reworked from the FP-012 placeholder test that accepted any
+/// `[A-Z][A-Z0-9_]*` op with free-form members.)
 #[test]
-fn req_dsl_010_effect_instruction_placeholder() {
+fn req_dsl_010_effect_instruction_real_type() {
     let good = [
-        json!({"op":"DRAW"}),
-        json!({"op":"A"}),
-        json!({"op":"A1_B2_"}),
-        json!({"op":"TEST_OP","n":3,"s":"text","b":false,"o":{"a":[1,"b",true,{"c":[]}]}}),
-        json!({"op":"TEST_OP","neg":-9007199254740991i64,"empty":{},"list":[]}),
-        json!({"op":"TEST_OP","player":"$P","count":{"LITERAL":1}}),
+        json!({"op":"POPULATE"}),
+        json!({"op":"VENTURE"}),
+        draw1(),
+        json!({"op":"SHUFFLE","player":{"ref":"CONTROLLER"}}),
+        json!({"op":"GAIN_LIFE","player":{"ref":"CONTROLLER"},"amount":{"LITERAL":2}}),
+        json!({"op":"IF","cond":{"pred":"IS_CREATURE"},"then":[{"op":"POPULATE"}]}),
+        json!({"op":"MAY","player":{"ref":"CONTROLLER"},"body":[{"op":"POPULATE"}]}),
+        json!({"op":"DRAW","player":{"ref":"BOUND","var":"$P"},"count":{"LITERAL":-9007199254740991i64}}),
     ];
     for g in &good {
-        accept_v::<EffectInstructionAST>(g);
+        accept_v::<Instruction>(g);
         let a = with(&minimal("SPELL"), "effect", json!([g]));
         accept_v::<AbilityAST>(&a);
     }
@@ -1397,6 +1409,8 @@ fn req_dsl_010_effect_instruction_placeholder() {
     let bad = [
         json!({"op":"draw"}),
         json!({"op":"Draw"}),
+        json!({"op":"NOT_AN_OP"}),
+        json!({"op":"A"}),
         json!({"op":"1X"}),
         json!({"op":"_X"}),
         json!({"op":"A-B"}),
@@ -1406,21 +1420,23 @@ fn req_dsl_010_effect_instruction_placeholder() {
         json!({"op":null}),
         json!({}),
         json!({"n":1}),
-        json!({"op":"TEST_OP","n":null}),
-        json!({"op":"TEST_OP","n":[1,null]}),
-        json!({"op":"TEST_OP","n":{"a":{"b":null}}}),
-        json!({"op":"TEST_OP","":1}),
-        json!({"op":"TEST_OP","n":9007199254740992u64}),
+        json!({"op":"DRAW"}),
+        json!({"op":"DRAW","player":{"ref":"CONTROLLER"}}),
+        json!({"op":"POPULATE","n":3}),
+        json!({"op":"POPULATE","n":null}),
+        json!({"op":"POPULATE","":1}),
+        json!({"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":9007199254740992u64}}),
+        json!("POPULATE"),
         json!("DRAW"),
         json!([]),
         json!(null),
     ];
     for b in &bad {
-        reject_v::<EffectInstructionAST>(b);
+        reject_v::<Instruction>(b);
         reject_v::<AbilityAST>(&with(&minimal("SPELL"), "effect", json!([b])));
     }
-    reject::<EffectInstructionAST>(r#"{"op":"TEST_OP","n":1.5}"#);
-    reject::<EffectInstructionAST>(r#"{"op":"TEST_OP","n":1e2}"#);
+    reject::<Instruction>(r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1.5}}"#);
+    reject::<Instruction>(r#"{"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1e2}}"#);
 }
 
 /// REQ-DSL-005: `effect` is required on SPELL, ACTIVATED and TRIGGERED; `[]` is allowed.
@@ -1429,13 +1445,13 @@ fn req_dsl_005_effect_required() {
     for kind in ["SPELL", "ACTIVATED", "TRIGGERED"] {
         let base = minimal(kind);
         let empty: AbilityAST = accept_v(&base);
-        let one: AbilityAST = accept_v(&with(&base, "effect", json!([{"op":"TEST_OP"}])));
+        let one: AbilityAST = accept_v(&with(&base, "effect", json!([{"op":"POPULATE"}])));
         assert_ne!(empty, one);
         reject_v::<AbilityAST>(&without(&base, "effect"));
         for v in [
             json!(null),
             json!({}),
-            json!({"op":"TEST_OP"}),
+            json!({"op":"POPULATE"}),
             json!([null]),
         ] {
             reject_v::<AbilityAST>(&with(&base, "effect", v));
@@ -1450,7 +1466,7 @@ fn req_dsl_005_spell_ability() {
         "linkIds":["l1"],"abilityWord":"testword","condition":{"pred":"TAPPED"},
         "isManaAbility":false,"targets":[slot(0,1,1)],
         "modes":{"min":1,"max":1,"modes":[mode("m1"),mode("m2")]},
-        "effect":[{"op":"TEST_OP","target":{"ref":"TARGET","slot":0}}]});
+        "effect":[{"op":"TAP_OR_UNTAP","action":"UNTAP","objects":{"ref":"TARGET","slot":0}}]});
     accept_v::<AbilityAST>(&full);
 }
 
