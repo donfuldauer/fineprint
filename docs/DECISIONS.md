@@ -7606,3 +7606,132 @@ run stays unattended.
 
 **Alternatives:**
 - Pause a unit until the owner tests it by hand: rejected by the owner's direction.
+## #57 FP-055 tester — order of `Resolution::ignored` and of resolved devotion words
+
+**Decision.** The interpreter spec tests (`crates/fineprint-core/tests/spec_interp_*.rs`) assert
+that `Resolution::ignored` lists the impossible parts in the order of the input they come from
+(e.g. a `BOUND` list `[O2, unknown player, O1 gone, P2, O77 gone]` gives items `[O2, P2]` and
+ignored `[Gone(unknown), Gone(O1), Gone(O77)]`), and that `DEVOTION` passes the resolved colour
+words to `InterpEnv::devotion` in the order they are written in the attribute.
+
+**Rationale.** The brief fixes the order of `items` ("items in this order") and of
+`partition_possible` (input order, CR 101.3) but not the order of `ignored` or of the word list;
+input order is the only order that needs no extra key, matches how `items` and
+`partition_possible` behave, and keeps the report of ignored parts deterministic (R3).
+
+**Alternatives.** Sorting ignored entries (rejected: `Ignored` has no ordering in the pinned
+API); not asserting the order (rejected: an unpinned order would let a hash-ordered or
+environment-ordered result through, against R3).
+
+## #57 FP-055 — Interpreter API and InterpEnv boundary
+
+**Decision.** `fineprint_core::interp` exposes exactly the API pinned by the brief:
+`Referent`, `ChosenValue`, `ObjectView` (+ `ObjectView::new`), `PlayerStat`, the `InterpEnv`
+trait, `EvalContext` (+ `EvalContext::new`), `Ignored`, `Resolution<T>` (with `Default` for any
+`T`), `Partition<T>`, `#[non_exhaustive] InterpError`, and the functions `resolve_reference`,
+`resolve_players`, `select_objects`, `eval_predicate_object`, `eval_predicate_player`,
+`eval_value`, `compare` and `partition_possible`. Additions: `Display` and `std::error::Error`
+for `InterpError`. Submodules (`types`, `resolve`, `expr`) are private and re-exported from
+`interp/mod.rs`. The game is read only through `InterpEnv`; every object is read as an
+already-layer-evaluated `ObjectView`. `InterpEnv::attached_to(object)` returns
+`Option<Referent>` (the object or player `object` is attached to), not `Option<ObjectId>`,
+because the engine can attach an Aura or similar to a player (`AttachTarget::Player`); this is
+the one change to the pinned API, made in PR review round 1. `crates/fineprint-core/src/lib.rs`
+received one wiring edit (a doc line plus `pub mod interp;`) outside the Implementer's owned
+paths, authorised by the classifier's brief for #57. `InterpEnv::defending_player(attacker)` is
+the defending player an attacker's abilities refer to (CR 508.5): the player it is attacking
+or the controller of the planeswalker / protector of the battle it is attacking and, once it is
+no longer attacking (removed from combat, CR 506.4), the player it was attacking just before;
+`None` only for an object that never attacked this combat. Retaining the last-attacked player
+when a creature is removed from combat is the integration unit's duty, tracked by the follow-up
+issue #221 FP-162; the interpreter does not check whether the source is currently attacking.
+Likewise `InterpEnv::objects_in` and `object` must exclude phased-out permanents (a phased-out
+permanent is treated as though it does not exist, CR 702.26b, while its zone is unchanged,
+CR 702.26d); `lki` is unaffected. The integration unit's `InterpEnv` must do that filtering: the
+interpreter relies on it and has no phased-out concept of its own (a phased-out target thus
+resolves as `Gone`, derived from CR 702.26b with CR 608.2b).
+
+**Rationale.** `GameState` has no zones, permanents, stack or wired history ledger yet (#18
+FP-017), and #31 FP-030 puts real-state environments in the integration unit; an injected trait
+(like `TriggerEnv` and `LayerEnvironment`) lets the expression layer be complete and tested now
+and keeps it a pure function of the environment and the context (REQ-CORE-006). Evaluated
+numeric `power`/`toughness`/`mana_value` are carried by the view because `Characteristics`
+holds placeholder JSON wrappers for P/T (#32 FP-031).
+
+**Alternatives.** Reading `GameState` directly (rejected: the data is not there and the
+integration belongs to a later unit); passing raw `Characteristics` and evaluating layers inside
+the interpreter (rejected: layers are the layer system's job, and the CDA path is #186 FP-146).
+
+## #57 FP-055 — Interpretations where the brief was silent
+
+**Decision.** The brief's marked decisions, as implemented: `TEAMMATES` is the empty list (no
+team formats yet); the filter-selector default zone is the battlefield; `ENCHANTED`, `EQUIPPED`
+and `ATTACHED_TO` are the same lookup (`InterpEnv::attached_to(source)`) and may name an object
+or a player host (a player host is checked against `env.players()`, an object host with
+`env.object`, either becomes `Ignored::Gone` when absent); `REMEMBERED(key)`
+resolves only a remembered `ChoiceValue::Player`; `CONTROLS` is "some player in the set controls
+some selected object"; `PLAYER_HAS_MAX_SPEED` is true iff the resolved set is non-empty and all
+have max speed, independent of the subject; division by zero is `InterpError::DivisionByZero`
+(malformed, not an impossible instruction); `MEMORY(key)` is the `Number` or the `Mode` index,
+otherwise 0. Further interpretations made here:
+1. Every player referent (CONTROLLER, OWNER, ACTIVE_PLAYER, DEFENDING_PLAYER, TARGET, CHOSEN,
+   BOUND, LINKED, REMEMBERED, THAT_PLAYER) is checked against `env.players()` and becomes
+   `Ignored::Gone(Player)` if absent; every object referent except SELF/SOURCE_LKI, including
+   each member of a `BOUND` or `LINKED` list, is checked with `env.object(id)`.
+2. For a player subject, object-only predicates (`HAS_CARD_TYPE`, `HAS_COLOR`, `HAS_COUNTER`
+   with a comparison, `MANA_VALUE`, `POWER`, `TOUGHNESS`, `CONTROLLED_BY`, `OWNED_BY`) return
+   false without evaluating their words, values or player selectors (so they cannot error).
+3. For an object subject, `POWER`/`TOUGHNESS` evaluate the right-hand value before looking at the
+   subject's P/T, so a malformed value errors the same way whether or not the subject has P/T;
+   a subject without P/T is then false.
+4. `CONTROLS` reads each selected object's controller from `env.object(id)` (current
+   information; an object without a controller controls nothing).
+5. `resolve_players` / `select_objects` reference form: the ignored entries follow the input
+   order of the underlying reference's referents: each gone referent's `Gone` entry and each
+   wrong-kind referent's `Unresolved(ref)` entry appear where that referent stands in the list
+   (`items` also in input order).
+6. Selector `count`: 0 or less keeps none; a positive count larger than `usize::MAX` (32-bit or
+   wasm32 targets) keeps all; ids `objects_in` reports that `env.object`
+   does not know are skipped silently (no `Ignored` entry: they are not part of the instruction).
+7. `SPELLS_CAST_THIS_TURN` with a condition and no player counts every entry of
+   `env.spells_cast_this_turn()` whose view passes the condition, with no filter on the caster
+   (so a caster no longer in the game still counts), consistent with the unconditioned ledger
+   total. With a player selector the caster must be in the resolved player set.
+8. `ATTR` and `DISTINCT` read objects with `view_of` (current information, then LKI), except
+   `ATTR(SOURCE_LKI, attr)`, which reads the source's captured last known information first
+   and falls back to its current information (CR 608.2h, CR 113.7a, CR 608.2b);
+   `DISTINCT ... COLOR` counts only the five colour bits.
+9. `MANA_SPENT_TO_CAST` resolves its reference with `resolve_reference`; both `SELF` and
+   `SOURCE_LKI` can resolve an object no longer present (`SELF` through current-then-last-known
+   information, `SOURCE_LKI` through its captured view, CR 608.2h); every other reference
+   requires the object to be present. It sums `env.mana_spent_to_cast` over the Object items.
+10. `DEFENDING_PLAYER`: a source that never attacked gives `None` (the reference is
+   `Unresolved`; the CR is silent, a modelling choice); a retained defending player who has left
+   the game gives `Ignored::Gone(Player)`. Recommendation (not a CR claim): an attacker whose
+   planeswalker or battle was removed from combat while it was still attacking (permanent module
+   `Attacking(None)`, CR 506.4c) should also keep its last defending player.
+11. A player selector used by a HISTORY query is a set of distinct players: each matching player
+   (and each cast) is counted once, however often the selector names the player.
+
+**Rationale.** Each choice follows the brief's tables literally where they speak, keeps
+evaluation integer-only, side-effect-free and independent of iteration order (R3), and keeps the
+CR 101.3 split (impossible instruction = ignored part; malformed expression = error).
+
+**Alternatives.** Evaluating object-only predicates' operands for player subjects (rejected: the
+brief says "false", and an error there would make a player-subject test depend on unrelated
+data); treating an unknown referent player as resolved (rejected: CR 101.3 says the impossible
+part is ignored); counting only casters in `env.players()` for conditioned spell queries with no
+player (rejected in review round 1: it disagreed with the unconditioned ledger total, which
+counts every caster).
+
+## #57 FP-055 — Deferred
+
+**Decision.** Not built in this unit: the `InterpEnv` implementation on the real game state
+(integration unit); engine retention of the last-attacked player in the permanent combat state
+and the `InterpEnv` implementation on the real state, both owned by #221 FP-162;
+spec-generated YES_NO text (#28); non-literal CDA evaluation through the layer environment
+(#186 FP-146).
+
+**Rationale.** Outside issue #57's deliverables.
+
+**Alternatives.** None considered.
