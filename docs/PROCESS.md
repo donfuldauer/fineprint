@@ -286,7 +286,7 @@ explicitly on a gate review PR.)
    - the issue is not a gate issue, or its gate review is approved (below).
 
    Then merge with a merge commit (`gh pr merge <P> --merge --match-head-commit <sha>`
-   or REST; the repository deletes the branch), unsubscribe if subscribed, and unblock dependents:
+   or REST; the repository deletes the branch, so never delete it), unsubscribe if subscribed, and unblock dependents:
    every issue whose blockers are now all satisfied swaps its `blocked` label for `ready`. A
    blocker is satisfied only if it is closed as completed by a merged PR (the issue timeline shows
    a `closed` event from a merged PR, or a PR merged into `main` whose body contains a whole-number
