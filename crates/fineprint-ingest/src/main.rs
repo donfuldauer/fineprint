@@ -4,8 +4,9 @@
 
 //! The `fineprint-ingest` command line (offline card toolchain).
 //!
-//! Subcommands: `vocab` (see `fineprint_ingest::vocab::cli`). Exit codes: 0 success,
-//! 1 violations, 2 usage or input error.
+//! Subcommands: `vocab` (see `fineprint_ingest::vocab::cli`), `fetch` and `import` (see
+//! `fineprint_ingest::import::cli`). Exit codes: 0 success, 1 violations, 2 usage or input
+//! error.
 
 #![forbid(unsafe_code)]
 
@@ -13,7 +14,9 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fineprint-ingest <command> [options]\n\
-                     commands:\n  vocab --cr <rules.txt> [--out <file>|-] [--check]";
+                     commands:\n  vocab --cr <rules.txt> [--out <file>|-] [--check]\n  \
+                     fetch [--cache <dir>] [--force] [--mtgjson]\n  \
+                     import [--cache <dir>] [--out <file>|-] [--mtgjson-report <file>|-] [--strict]";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -21,6 +24,12 @@ fn main() -> ExitCode {
     let mut stderr = std::io::stderr().lock();
     let code = match args.first().and_then(|a| a.to_str()) {
         Some("vocab") => fineprint_ingest::vocab::cli::run(&args[1..], &mut stdout, &mut stderr),
+        Some("fetch") => {
+            fineprint_ingest::import::cli::run_fetch(&args[1..], &mut stdout, &mut stderr)
+        }
+        Some("import") => {
+            fineprint_ingest::import::cli::run_import(&args[1..], &mut stdout, &mut stderr)
+        }
         _ => {
             use std::io::Write;
             let _ = writeln!(stderr, "{USAGE}");

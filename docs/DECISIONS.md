@@ -7873,3 +7873,138 @@ the end of `spec_sba_battle.rs`.
 **Rationale.** Independent Tester paths must be disjoint from the Implementer's (P5).
 
 **Alternatives.** A separate `spec_sba_fp042_property.rs` (rejected: no benefit).
+
+## #87 FP-085 — Wiring edit and path grant
+
+**Decision.** Besides the owned `crates/fineprint-ingest/src/import/`, the unit edits only what
+the brief grants: one `pub mod import;` line with its doc comment in
+`crates/fineprint-ingest/src/lib.rs`; the `fetch` and `import` dispatch arms and the extended
+usage text in `crates/fineprint-ingest/src/main.rs`; the new spec test
+`crates/fineprint-ingest/tests/spec_ingest_import.rs`; `docs/DEVELOPMENT.md`; this file. No
+`Cargo.toml` or `Cargo.lock` change: `serde_json`, `fineprint-base` and `fineprint-dsl` suffice.
+The atomic writer `vocab::cli::write_atomic` is reused (called, not modified).
+**Rationale.** As in "#15 FP-014 — Wiring edit and path grant".
+**Alternatives.** A separate binary (rejected: one toolchain CLI).
+
+## #87 FP-085 — Recomputation duplicated rather than a core dependency
+
+**Decision.** `import/recompute.rs` holds its own small, pure versions of the per-symbol colors,
+per-symbol mana value, cost colors, record mana value and color identity, instead of calling
+`fineprint-core` (`colors_of_mana_cost`, `symbol_mana_value`, `color_identity`).
+**Rationale.** `fineprint-ingest` depends on `fineprint-base` and `fineprint-dsl` only
+(REQ-NFR-005). The functions are a few lines each, follow the same per-symbol table, and are
+tested on every symbol kind.
+**Alternatives.** Depend on core (forbidden); move the functions to dsl (a contract change in a
+crate this unit does not own).
+
+## #87 FP-085 — Raw layout, no CR 205 validation, station P/T deferred
+
+**Decision.** The record keeps the Scryfall `layout` string raw (an unrecognized layout is not an
+error); the `LayoutBehavior` mapping is REQ-ING-003, a later unit. The type line is split
+lexically on the first em dash (U+2014; a hyphen is not a separator) with the fixed supertype
+words `Basic Legendary Ongoing Snow World Elite Host`; it is not validated against the CR 205
+vocabulary and the vocabulary JSON is not read (`typeLineEmpty` flags a missing or empty line).
+`power`, `toughness`, `loyalty` and `defense` stay the source strings; the station-card P/T
+attachment is left to the later layout unit. `all_parts` is kept raw (`id`, `component`, `name`)
+for `relatedTokens`/`meldPartner`; `oracle_tags` and token records are not imported.
+**Rationale.** The brief scopes those steps to later units; keeping the raw hooks lets them work
+without re-importing.
+**Alternatives.** Validate types now (needs the vocabulary and a policy for unknown words; later
+unit).
+
+## #87 FP-085 — curl as the HTTP client, behind an Http trait
+
+**Decision.** `fetch` uses the system `curl` through `std::process::Command` (`--fail --location
+--silent --show-error --proto =https --proto-redir =https --max-filesize --max-time`, the
+`User-Agent` and `Accept` headers), behind the `Http` trait (`get_json`, `download_to_file`);
+tests inject a fake. A missing curl is exit 2 with a message.
+**Rationale.** Same choice as "#6 FP-005" for `cargo xtask cr fetch`: no TLS in the standard
+library, no new dependency (the brief forbids `Cargo.toml` changes), and curl applies the proxy
+and CA settings of the environment. Time limits: 60 s for the metadata, 3600 s for a bulk file;
+the metadata response is capped at 1 MiB.
+**Alternatives.** An HTTP crate (a dependency change).
+
+## #87 FP-085 — 24-hour cache, clock injection and cache metadata
+
+**Decision.** Each group directory (`scryfall/`, `mtgjson/`) has a `source.json`
+`{"formatVersion":1,"files":{<file>:{sourceUrl, updatedAt, sha256, byteCount,
+fetchedAtEpochSeconds}}}`. A file is fresh when its entry exists, the file exists, and
+`fetchedAt <= now < fetchedAt + 86400`; a future `fetchedAt` is stale. If every needed Scryfall
+file is fresh, no request is made (not even the bulk-data metadata request); otherwise one
+metadata request is made and only the stale files are downloaded. `fetch` takes `now` as a
+parameter; only `cli::run_fetch` reads the system clock. All stale files of a group are
+downloaded to `.part` files and validated before any is renamed, so a failure leaves the group
+unchanged. The MTGJSON `updatedAt` is the file's `meta.date` (there is no bulk-data entry).
+`download_uri` must be `https://` on `scryfall.com`, `*.scryfall.com` or `*.scryfall.io` with
+lowercase labels, no credentials, no port, no whitespace or backslash.
+**Rationale.** REQ-ING-001 (cache at least 24 hours, no crawling), R7 (no wall clock in tests),
+R12 (the URI is server data).
+**Alternatives.** One `source.json` for the whole cache (rejected: the groups are fetched
+independently).
+
+## #87 FP-085 — Record-level mana value per layout and the cmc check
+
+**Decision.** One face: that face's cost. `split`: the sum of all faces (CR 202.3d, 709.4b).
+`adventure`: the main face (CR 716.4); `flip`: the normal face (CR 710.2). Every other layout
+with several faces (`transform`, `modal_dfc` front face per CR 712.6a, `meld`, `reversible_card`,
+unknown layouts): the front face (CR 202.3b; melded permanents,
+CR 202.3c, are not computed at import). `cmc` matches when it is a finite JSON number, `cmc * 2`
+is exactly a whole number, and it equals `manaValue * 2`; a value such as 2.9 is a mismatch, not
+rounded (the brief asks for "no tolerance beyond exact representation"). A missing, non-numeric
+or non-finite `cmc` is `cmcMissing`. `cmc` is never stored.
+**Rationale.** The brief's per-layout rule; exactness follows the "no tolerance" clause, which a
+plain `round()` would violate.
+**Alternatives.** `round(cmc * 2)` alone (accepts 2.9 as 3).
+
+## #87 FP-085 — Color indicator and cost colors
+
+**Decision.** A face's `computedColors` is the union of the colors of its mana cost and of its
+color indicator (CR 105.2, 202.2e, 204.2); where both are present this is an inference (no CR
+example covers both), matching `fineprint-core`'s `base_colors`. This supersedes the brief's
+"indicator replaces cost" wording on the rules-researcher's ruling. Card-level colors for the
+cross-check: `split` = union of the halves (CR 709.4, 709.4b); `adventure` = main face (CR 716.4);
+`flip` = normal face (CR 710.2); `transform`, `modal_dfc` and others = front face (CR 712.6a).
+`colorsMismatch` is raised when (a) a face's own `colors` differs from that face's computed
+colors, or (b) a present top-level `colors` differs from the card-level colors of its layout. An
+absent top-level `colors` never raises it (transform and modal_dfc sources carry none). Source
+values never alter computed values. `colorIdentity` is the union over every face, an Adventure's
+face and a double-faced card's back included (CR 903.4, 903.4d), of the computed colors and the
+mana symbols of the rules text outside reminder text.
+**Rationale.** The rules-researcher's rulings on CR 105.2, 202.2e, 204.2, 709.4b, 716.4, 710.2,
+712.6a and 903.4d.
+**Alternatives.** Indicator replaces cost (the earlier behaviour, rejected: contradicts the CR
+and `base_colors`); checking only the front face (rejected: spurious mismatches for split cards).
+
+## #87 FP-085 — digitalOnly, empty costs and field types
+
+**Decision.** `digitalOnly` is true when `digital` is true, or `games` is a non-empty array
+without `"paper"`. `emptyManaCostUnexpected` is raised for a face with no mana cost (an empty or
+absent `mana_cost`) when the layout is `normal` and the face's card types do not contain `Land`;
+the record is not rejected. A JSON `null` in an optional field counts as absent; every other
+wrong type rejects the record with `fieldType:<field>` (`card_faces.<field>` for a face), an
+unknown color letter with `unknownColor:<field>`, a missing `name` or `layout` with
+`missingField:<field>`, an unparseable cost with `manaCostParse`, a missing `oracle_id` with
+`notGameplayObject`, a non-UUID-shaped one with `oracleIdShape`.
+**Rationale.** REQ-ING-002 and R12: reasons name fields only, never input text.
+**Alternatives.** Rejecting nulls (Scryfall does not emit them; accepting them is harmless).
+
+## #87 FP-085 — Output shapes, default paths and --strict
+
+**Decision.** `<cache>/normalized/cards.json` (default `--out`) has the members `formatVersion`
+(1), `sources` (`oracleCards`, `rulings`: `{updatedAt, sha256, byteCount}` or null), `records`
+(one `NormalizedCardRecord` per line, sorted by `oracle_id`), `rulings` (by `oracle_id`, source
+order), `rejected` (`{index, oracleId, reason}`) and `warnings` (fixed strings such as
+`sourceHashMismatch:oracleCards`, `sourceMetadataMissing`, `rulingsUnknownOracleId:<n>`,
+`rulingsInvalid:<n>`), in that order. Inside a record the members are sorted by name
+(`serde_json`'s map without `preserve_order`), a fixed order. The sha256 recorded is the one of
+the bytes read; a difference from `source.json` is a warning. The MTGJSON report (only at an
+explicit `--mtgjson-report` path or stdout) lists per `oracle_id` the disagreeing fields with
+numbers and color letters printed and only the kind (`string`, `list(n)`, `absent`, ...) of other
+values, plus `onlyInScryfall`/`onlyInMtgjson` ids, `matched`, `agreed` and `invalidEntries`.
+`import` exits 0 despite rejections and diagnostics; `--strict` exits 1 when at least one record
+was rejected or has a diagnostic (warnings do not count). Bulk arrays are split into elements by
+a small scanner and each element parsed on its own, so memory is bounded by the largest element;
+inputs above 4 GiB are refused before reading.
+**Rationale.** REQ-ING-001 (provenance), R3 (byte-identical output), R12, REQ-NFR-004 (card data
+only in the git-ignored cache or an explicit path).
+**Alternatives.** One `serde_json::Value` for the whole file (memory grows with the file).

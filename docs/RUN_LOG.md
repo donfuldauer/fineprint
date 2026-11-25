@@ -508,3 +508,8 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 05-sba | #43 | work-classifier | Sonnet 5.5 | 2 | routed | - | final briefs; Implementer and Tester in parallel |
 | 05-sba | #43 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace both configs pass; guard, cr check ok; core 98.89 % | 6 entries, 5 seams; FABLE_ALLOWANCE unknown (no Fable) |
 | 05-sba | #43 | Independent Tester | Opus 5.5 | 1 | done | spec_sba_* 59 passed; workspace both configs pass | spec_sba_attach.rs 704.5p fixture updated (DECISIONS) |
+| 13-toolchain | #87 | work-classifier | inherit | 1 | routed | - | Implementer T2 Opus 5.5; FABLE_ALLOWANCE unknown (no Fable) |
+| 13-toolchain | #87 | Implementer | Opus 5.5 | 1 | done | fmt, clippy clean; workspace 4323 pass; guard all ok; ingest 97.15 % | fetch/import/MTGJSON report; 9 DECISIONS entries; 3 rules questions |
+| 13-toolchain | #87 | rules-researcher | inherit | 1 | done | - | colors: cost and indicator union (105.2); split union (709.4b); adventure/flip/DFC first face (716.4, 710.2, 712.6a); MV as implemented |
+| 13-toolchain | #87 | work-classifier | inherit | 2 | routed | - | Fixer T1 Sonnet 5.5 |
+| 13-toolchain | #87 | Fixer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all, cr check ok | union colors, per-layout colorsMismatch; cr-citations.json regenerated |

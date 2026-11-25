@@ -153,6 +153,12 @@ cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt
                                      # regenerate crates/fineprint-dsl/data/vocab.json (RulesVocabulary, #15 FP-014)
 cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
                                      # compare the committed vocab.json with regeneration (writes nothing)
+cargo run --locked -p fineprint-ingest -- fetch [--cache <dir>] [--force] [--mtgjson]
+                                     # download the Scryfall Oracle Cards and Rulings bulk files (and,
+                                     # with --mtgjson, MTGJSON AtomicCards) into git-ignored ingest-cache/,
+                                     # at most once per 24 hours (uses curl; #87 FP-085)
+cargo run --locked -p fineprint-ingest -- import [--cache <dir>] [--out <file>|-] [--mtgjson-report <file>|-] [--strict]
+                                     # normalize the cached bulk files into ingest-cache/normalized/cards.json
 FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec_ingest_vocab
                                      # the real-CR vocabulary test; with the variable set a missing
                                      # cr-cache/rules.txt fails it (without it, the test is skipped)
@@ -202,6 +208,30 @@ mismatch, missing committed file, keyword id collision), 2 usage or input error 
 unparseable CR text, a missing required rule). Output is byte-identical for the same CR bytes
 whatever the line endings or BOM.
 
+`fineprint-ingest fetch [--cache <dir>] [--force] [--mtgjson]` (#87 FP-085; details in
+`crates/fineprint-ingest/src/import/mod.rs`): makes at most one request to the Scryfall
+`bulk-data` metadata endpoint per run (none when every needed file is fresh) and downloads the
+`oracle_cards` and `rulings` entries' `download_uri` (accepted only as `https://` on
+`scryfall.com`, `*.scryfall.com` or `*.scryfall.io`); it never requests a per-card endpoint.
+`--mtgjson` also downloads MTGJSON `AtomicCards.json`; without it MTGJSON is never contacted. A file
+fetched less than 24 hours ago is skipped unless `--force`. The cache (default `ingest-cache/`
+relative to the current directory, git-ignored) holds `scryfall/oracle-cards.json`,
+`scryfall/rulings.json`, `mtgjson/AtomicCards.json` and a `source.json` per group
+(`sourceUrl`, `updatedAt`, `sha256`, `byteCount`, `fetchedAtEpochSeconds` per file). Downloads go
+to a `.part` file that is validated, then renamed; a failure leaves the cache unchanged. It needs
+`curl` on the `PATH` (proxy and CA settings come from the environment, as for `cargo xtask cr
+fetch`). Exit codes: 0 success, 2 usage, input or network error.
+
+`fineprint-ingest import [--cache <dir>] [--out <file>|-] [--mtgjson-report <file>|-] [--strict]`
+(#87 FP-085): reads the cached bulk files and writes the normalized records, keyed and sorted by
+`oracle_id`, with the sources' `updatedAt` and sha256, the rulings, the rejected objects and the
+warnings, to `<cache>/normalized/cards.json` (or `--out`; `-` is stdout, the summary line then goes
+to stderr). Mana value, colors and color identity are recomputed with integers; the float `cmc` only
+flags a mismatch. `--mtgjson-report` writes the MTGJSON cross-validation report (needs
+`fetch --mtgjson`). A missing Oracle Cards file is exit 2 (run `fetch`); rejected records and
+diagnostics are reported and exit 0, or 1 with `--strict`. Output is byte-identical for the same
+cache. Card data stays in the git-ignored cache or the explicit `--out`/`--mtgjson-report` path.
+
 CI format, lint and test on Linux, Windows and macOS is available now; see "CI" below.
 
 Lands later:
@@ -212,8 +242,9 @@ Lands later:
   set by #51 FP-049).
 - Replay and golden-hash verification: lands with #83 FP-081 and #106 FP-104.
 - Benchmarks beyond the layer recompute benchmark (#36 FP-035): land with #120 FP-118. Fuzzer: lands with #119 FP-117.
-- Toolchain CLI `fineprint-ingest`: the binary and its `vocab` subcommand land with #15 FP-014;
-  the card-database commands land with #100 FP-098.
+- Toolchain CLI `fineprint-ingest`: the binary and its `vocab` subcommand landed with #15 FP-014
+  and `fetch`/`import` (the Scryfall bulk import) with #87 FP-085; the card-database commands
+  land with #100 FP-098.
 - C ABI header check (cbindgen): lands with #102 FP-100.
 - `dotnet test` for FinePrint.Core: lands with #103 FP-101.
 - `wasm-pack test` / wasm-bindgen + npm: lands with #104 FP-102.
