@@ -11,9 +11,12 @@
 //! `before` to `after` (life and counters additively, a count clamped at 0; a changed
 //! designation takes `after`'s value or absence). The PRNG and the generators are carried as
 //! values (the PRNG set to `after`'s; generators advanced, never rewound). It never carries the
-//! turn position, priority, active player, turn order, effect registry or history ledger, so the
-//! priority player stays the checkpoint's (CR 734.2). Components added to `GameState` by later
-//! units must be added here by those units.
+//! turn position, priority, active player, turn order, continuous effects, timestamp ledger,
+//! generating-ability links or history ledger, so the priority player stays the checkpoint's
+//! (CR 734.2) and a rollback restores the checkpoint's effects, timestamps and links; the effect
+//! and timestamp generators are advanced, so no effect id or timestamp issued by the durable
+//! sub-transaction is issued again. Components added to `GameState` by later units must be
+//! added here by those units.
 
 use std::collections::BTreeSet;
 

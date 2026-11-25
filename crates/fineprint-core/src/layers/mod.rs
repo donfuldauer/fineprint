@@ -129,11 +129,12 @@
 //! every entry. The cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI
 //! compares both modes through [`evaluated_digest`].
 //!
-//! **Scope.** This module is standalone: it is not wired into the game state, its Merkle layout
-//! or the state hash (the placeholder `state::EffectRegistry` stays), and the cache keeps its
-//! own [`StateVersion`] counter. **Out of scope** (later units): wiring into the game state, the
-//! state hash and calling [`LayerCache::invalidate`] from the real mutation points
-//! (#183 FP-144); switching the call sites in events, triggers, replacement and zones;
+//! **Scope.** The game state (`crate::state::GameState`) stores the [`ContinuousEffects`] and the
+//! [`TimestampLedger`], hashes them (their canonical encodings, CR-005) and evaluates them
+//! through `crate::state::GameEnvironment`; the cache keeps its own [`StateVersion`] counter and
+//! is not part of the state. **Out of scope** (later units): calling [`LayerCache::invalidate`]
+//! from the zone, control, counter, attachment and status mutation points; switching the call
+//! sites in events, triggers, replacement and zones;
 //! layer-major evaluation across objects (#186 FP-146; dependency is judged on the object under
 //! evaluation only); effect expiry and durations (the caller removes ended effects; a "for as
 //! long as" window is judged by the caller); typed player properties derived from pass A and the
@@ -144,6 +145,7 @@
 
 mod cache;
 mod copy;
+mod encode;
 mod error;
 mod facedown;
 mod lockin;
@@ -159,6 +161,8 @@ mod timestamps;
 mod cache_tests;
 #[cfg(test)]
 mod copy_tests;
+#[cfg(test)]
+mod encode_tests;
 #[cfg(test)]
 mod facedown_tests;
 #[cfg(test)]
@@ -177,6 +181,7 @@ pub use copy::{
     CopiableValues, CopiedCharacteristic, CopyException, ValueSource, copiable_characteristics,
     copiable_effect, copiable_values, merge_effect, modification_effect,
 };
+pub(crate) use encode::{effect_links, provenance_from_parts, provenance_parts, put_json};
 pub use error::LayerError;
 pub use facedown::{
     FaceDownRefusal, FaceDownTarget, FaceUpRefusal, face_down_effect, turn_face_down, turn_face_up,

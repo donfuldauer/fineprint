@@ -35,9 +35,19 @@ impl GameState {
     ///   (amounts `1..=i64::MAX`, so the bytes equal the former `u64` encoding);
     ///   `/players/<id>/designations`: `BTreeMap<String, DesignationValue>`, where `<id>` is
     ///   `Label::index(id.get())`;
-    /// - `/effects`: the `EffectRegistry`; `/history`: the `HistoryLedger`.
+    /// - `/effects`: the `layers::ContinuousEffects` (count, then per effect in ascending
+    ///   `EffectId` order the id, every field of the effect and its `SameAsLayer` anchor link;
+    ///   the layout is in the `crate::layers` encoding documentation, CR-005);
+    /// - `/timestamps`: the `layers::TimestampLedger` (count, then the object, counter and
+    ///   sticker entries, each tagged, in ascending key order; CR 613.7);
+    /// - `/effect_generators`: the generating-ability links,
+    ///   `BTreeMap<EffectId, GeneratingAbility>` (each value the source `ObjectId` and the
+    ///   ability as RFC 8785 canonical JSON, CR 613.8a);
+    /// - `/history`: the `HistoryLedger`.
     ///
-    /// The tree depends only on values, never on sharing or on how the state was built.
+    /// Each empty collection (`/effects`, `/timestamps`, `/effect_generators`, `/history`) is
+    /// `put_len(0)`, 4 zero bytes. The tree depends only on values, never on sharing or on how
+    /// the state was built.
     #[must_use]
     pub fn merkle_tree(&self) -> MerkleTree {
         let mut tree = MerkleTree::new();
@@ -104,7 +114,9 @@ impl GameState {
             );
         }
 
-        put(&mut tree, &named(&["effects"]), &self.effects);
+        put(&mut tree, &named(&["effects"]), &*self.effects);
+        put(&mut tree, &named(&["timestamps"]), &*self.timestamps);
+        put(&mut tree, &named(&["effect_generators"]), &*self.generators);
         put(&mut tree, &named(&["history"]), &self.history);
         tree
     }
