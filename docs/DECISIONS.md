@@ -8890,3 +8890,46 @@ Amends "Gate 02-state-objects R8" (the face pairing by `side`).
 **Rationale.** Silently skipping the entry made a card whose only face was never compared look agreed. The shape follows the per-face shape (`face`, `field`, `scryfall`, `mtgjson`) and carries kind words only, so untrusted MTGJSON text never enters the report.
 
 **Alternatives.** A top-level `unmatchedSides` list (rejected: changes the report layout and the `fields` consumers). Reusing `field: "faces"` with counts (rejected: counts can be equal, so it would not identify the entry). Rejecting the entry in `parse_atomic` (rejected: the card's other entries are still comparable, and a rejected record would hide the card from the report).
+
+## Gate 02-state-objects R3c — Post-batch eligibility, CR reference and lost controller for the retained-battle request
+
+Amends "Gate 02-state-objects R3b — Post-batch layer inputs for the retained-battle request" and
+"Gate 02-state-objects R3 — Protector request after the batch for a retained zero-defense battle"
+(review threads 4698236604, 4698236617, 4698236625).
+
+**Decision.**
+1. Additive eligibility-view entry point: `pub type PostBatchState<'a>` (a provider that calls its
+   callback once with the post-batch `&ContinuousEffects`, `&dyn LayerEnvironment` and a READ-ONLY
+   `&dyn SbaEnvironment`) and `pub fn perform_all_post_batch(...)` (same arguments as
+   `perform_all_relayered`, `post_batch: PostBatchState<'_>`), re-exported from `sba`. The
+   post-batch `SbaView` of the retained battles reads `battle_protector` and `can_be_protector`
+   from that view (both the CR 704.5x/704.5y subject test and the candidates). Internally all three
+   entry points share one private pass whose provider callback takes
+   `Option<&dyn SbaEnvironment>`; `perform_all_relayered` passes `None` (the pass's own `env`), so
+   its behaviour is byte-for-byte unchanged and `PostBatchLayers` is unchanged. Writes
+   (`set_battle_protector`, the deathtouch flag) stay on the original `&mut dyn SbaEnvironment`
+   after the pass succeeds. The game variant is still read from the pass's own `env`.
+2. CR reference from the post-batch entry: `plan.retained_battles` only selects the deferred battle
+   ids; each battle's `ProtectorAsk.cr` (and so the request's `reason.cr`) is the `cr_ref` of the
+   post-batch ChooseProtector entry that flags it (if two entries ever flagged one battle, the
+   first in registry order wins).
+3. Lost controller: in the deferred stage only, a retained battle whose controller has the
+   `LOST_THE_GAME` designation after the batch (or is not a player of the game) takes the same
+   no-request path as a battle without a controller: no request, no request id consumed, nothing
+   pending, not in `protectors_chosen`; the next pass finds it again. The shared `protector_asks`
+   and the pre-batch request sequence are unchanged.
+
+**Rationale.** `SbaEnvironment` is caller-supplied state, like `LayerEnvironment`, and the engine
+cannot ask the caller to re-read it while the batch holds `&mut ctx`; only the caller can describe
+the post-batch eligibility, and only read-only, so the writes remain where the rollback contract
+expects them. The engine takes the CR reference from the rule that actually flags the battle after
+the batch (a protector who lost the game in the same pass turns a CR 704.5y subject into a
+CR 704.5x one). A player who has lost the game cannot answer; the request would stay Pending until
+its default fires.
+
+**Alternatives.** Change `PostBatchLayers` to add the view (rejected: breaks the R3b public type,
+even if unreleased, and its callers). A second pass (rejected as in R3b). Apply the lost-controller
+check in the shared `protector_asks` (rejected: it would change the pre-batch request sequence).
+Keep the pre-batch CR reference (rejected: names a rule that no longer flags the battle).
+Open rules question for the rules-researcher: whether such a battle should instead leave with the
+player who lost, or another player choose; a follow-up decision amends this one if needed.
