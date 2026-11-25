@@ -5847,6 +5847,133 @@ fn sba_704_5x_retained_battle_of_a_lost_controller_asks_nothing() {
     assert!(run.out.unwrap().protectors_chosen.is_empty());
 }
 
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 800.4a, CR 614.6, CR 704.3 (gate 02-state-objects R3d,
+// thread 4699044484): the ORDINARY (pre-batch) protector request makes the same live-controller
+// check as the post-batch one. Three players. Pass 1: an unattacked Siege of player 2 at
+// defense 0 with no protector, whose graveyard move a replacement turns into one defense
+// counter, while player 2 loses the game: player 2 is not asked (the post-batch check). Pass 2:
+// the Siege is at defense 1, a CR 704.5x subject on the ordinary path, and its controller has
+// lost the game (CR 800.4a: it has left the game and can't answer): no request, no request id
+// consumed, nothing pending, and the Siege neither gets a protector nor moves. Control: the same
+// Siege whose controller stays in the game is asked in pass 1 with no ordinary request in pass 2.
+#[test]
+fn sba_704_5x_ordinary_request_skips_a_lost_controller() {
+    fn world(lose: bool) -> (World, ObjectId) {
+        let mut w = World::three([1, 2, 3], 1);
+        let s = w.new_battle(2, 2, true, 0, None);
+        w.registry
+            .add(ReplacementEffect::new(
+                e(10),
+                sba_move_of(s),
+                Action::Instead(vec![GameEvent::AddCounters {
+                    target: CounterTarget::Object(s),
+                    kind: "defense".to_owned(),
+                    amount: 1,
+                }]),
+            ))
+            .unwrap();
+        if lose {
+            w.set_life(2, 0);
+        }
+        (w, s)
+    }
+
+    // Control: player 2 stays in the game and is asked after the batch of pass 1.
+    let (w, s) = world(false);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(2));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(1), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(s, p(3))]);
+    let mut w = run.state;
+    assert_eq!(w.counter(s, "defense"), 1);
+    assert!(pass(&mut w).protectors_chosen.is_empty());
+
+    // Pass 1: player 2 loses; the retained Siege gets a defense counter and no request.
+    let (w, s) = world(true);
+    let (run, asked) = drive_answers(&w, &[]);
+    assert!(asked.is_empty());
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(2)]);
+    assert!(out.protectors_chosen.is_empty());
+    let mut w = run.state;
+    assert!(w.lost(2));
+    assert_eq!(w.counter(s, "defense"), 1);
+    assert_eq!(w.found_by("704.5x"), [s]);
+    assert!(w.found_by("704.5v").is_empty());
+
+    // Pass 2: the ordinary path asks nothing (`pass` asserts that no request was made) and the
+    // Siege stays on the battlefield without a protector.
+    let (run, asked) = drive_answers(&w, &[]);
+    assert!(asked.is_empty());
+    assert_eq!(run.asked, 0);
+    let out = run.out.unwrap();
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.executed.is_empty());
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(
+        out.findings
+            .iter()
+            .any(|f| f.subject == obj(s) && f.entry_id == "704.5x")
+    );
+    assert_eq!(w.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+    assert!(!w.env.battle_protectors.contains_key(&s));
+}
+
+// REQ-SBA-001, CR 704.5x, CR 800.4a, CR 101.4 (gate 02-state-objects R3d, thread 4699044484):
+// on the ordinary path a battle whose controller has lost the game (here the active player 1,
+// first in APNAP order) or whose controller is not a player of the game gets no request and
+// consumes no request id: the battle of the live player 3 is the only request, with the SAME
+// request id, chooser, reason and candidates as in a world without the other battles, and the
+// skipped battles stay on the battlefield without a protector. A typeless battle of a lost
+// controller has no candidate and still goes to its owner's graveyard without a request.
+#[test]
+fn sba_704_5x_ordinary_request_ids_unchanged_by_a_lost_controller() {
+    // Control: only the live player's Siege (player 1 has lost the game here too, so the
+    // candidates are the same).
+    let mut control = World::three([1, 2, 3], 1);
+    let live = control.new_battle(3, 3, true, 3, None);
+    control.lose(1);
+    let (run, asked) = drive_answers(&control, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    let expected = asked[0].clone();
+    assert_eq!(expected.chooser, p(3));
+    assert_eq!(player_candidates(&expected), [p(2)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(live, p(2))]);
+
+    let mut w = World::three([1, 2, 3], 1);
+    let siege = w.new_battle(1, 1, true, 3, None);
+    let typeless = w.new_battle(1, 1, false, 3, None);
+    // `gone` is controlled (layer 2, CR 613.1b) by a player who is not in the game.
+    let gone = w.new_battle(1, 1, true, 3, None);
+    w.give_control(20, gone, 9);
+    let live = w.new_battle(3, 3, true, 3, None);
+    w.lose(1);
+    assert_eq!(w.found_by("704.5x"), [siege, typeless, gone, live]);
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].request_id, expected.request_id);
+    assert_eq!(asked[0].chooser, expected.chooser);
+    assert_eq!(asked[0].reason.cr, expected.reason.cr);
+    assert_eq!(asked[0].payload, expected.payload);
+    assert_eq!(asked[0].reason.source, Some(live));
+    let out = run.out.unwrap();
+    assert_eq!(out.protectors_chosen, [(live, p(2))]);
+    // The typeless battle has no candidate (its only appropriate player, its controller, left
+    // the game): it goes to its owner's graveyard without a request, as before.
+    assert_eq!(
+        batch_shape(&out).0,
+        [(typeless, ZoneChangeCause::StateBasedAction)]
+    );
+    let w = run.state;
+    for b in [siege, gone] {
+        assert_eq!(w.zones.object(b).unwrap().zone, ZoneId::Battlefield);
+        assert!(!w.env.battle_protectors.contains_key(&b));
+    }
+}
+
 // REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older
 // goes to its OWNER's graveyard; one Role each of players 1 and 2 on the same creature do not
 // interact; a non-Role Aura is unaffected; a Role controlled by player 1 but owned by player 2

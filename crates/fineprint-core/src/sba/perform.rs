@@ -151,7 +151,9 @@ struct Plan {
     /// CR 101.4: every request of the pass, in asking order: the chooser's APNAP rank, then
     /// the legend-rule groups before the protector choices of that player, then the group's
     /// lowest id or the ascending battle id. A protector choice without a chooser or without
-    /// candidates is no request (its battle goes to the graveyard).
+    /// candidates is no request (its battle goes to the graveyard); one whose controller has
+    /// lost the game or is not a player of the game (CR 800.4a) is no request either, and its
+    /// battle stays ([`can_choose_protector`]).
     requests: Vec<PlannedRequest>,
 }
 
@@ -165,7 +167,12 @@ enum PlannedRequest {
 }
 
 impl Plan {
-    fn new(registry: &SbaRegistry, view: &SbaView<'_>, findings: &[SbaFinding]) -> Plan {
+    fn new(
+        registry: &SbaRegistry,
+        view: &SbaView<'_>,
+        game: &GameState,
+        findings: &[SbaFinding],
+    ) -> Plan {
         let mut legend_subjects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut counter_removals: BTreeMap<ObjectId, BTreeMap<String, i64>> = BTreeMap::new();
         let mut protector_battles: BTreeMap<ObjectId, &'static str> = BTreeMap::new();
@@ -231,9 +238,14 @@ impl Plan {
                 PlannedRequest::Legend(i),
             ));
         }
+        // CR 704.5x, CR 704.5y, CR 800.4a: only a controller still in the game is asked
+        // ([`can_choose_protector`]); a battle whose controller lost the game gets no request and
+        // no request id, and does not move (decision "Gate 02-state-objects R3d — No protector
+        // request to a controller who lost the game, on every path").
         for (i, a) in protector_asks.iter().enumerate() {
             if let Some(controller) = a.controller
                 && !a.candidates.is_empty()
+                && can_choose_protector(game, controller)
             {
                 keyed.push((
                     (rank(controller), 1, a.battle),
@@ -310,7 +322,12 @@ impl Plan {
 ///   opponents of its controller, for a battle with no battle type its controller, each allowed
 ///   by [`SbaEnvironment::can_be_protector`]; min 1, max 1, default the lowest candidate). An
 ///   answer that is not a candidate is [`ChoiceError::Invalid`]. A battle with no candidate is
-///   moved to its owner's graveyard with the batch below, without a request. A battle that is
+///   moved to its owner's graveyard with the batch below, without a request. A battle whose
+///   controller has lost the game (the [`LOST_THE_GAME`] designation from an earlier pass) or is
+///   not a player of the game gets no request and consumes no request id, and stays where it is
+///   (CR 800.4a: that player has left the game and can't answer; no rule transfers the choice;
+///   decision "Gate 02-state-objects R3d — No protector request to a controller who lost the
+///   game, on every path"). A battle that is
 ///   also a CR 704.5v or CR 704.5w finding gets no request before the batch: when it leaves with
 ///   the batch, asking would change nothing (CR 704.8). If a replacement effect replaced its
 ///   graveyard move (CR 614.6, CR 704.7) and it is still on the battlefield as the same object
@@ -470,9 +487,11 @@ pub fn perform_all_relayered(
 /// The engine calls it with the [`EventContext`] as it is after the batch (no mutable borrow is
 /// held then); it must call the second argument exactly once with the continuous effects, the
 /// layer environment and an [`SbaEnvironment`] that describe that state. The engine reads only
-/// [`SbaEnvironment::battle_protector`] and [`SbaEnvironment::can_be_protector`] (and the
-/// variant) from that environment, never writes through it, and never keeps it past the call,
-/// so it may borrow from the provider's own snapshot of the caller state.
+/// [`SbaEnvironment::battle_protector`] and [`SbaEnvironment::can_be_protector`] from that
+/// environment, never writes through it, and never keeps it past the call, so it may borrow
+/// from the provider's own snapshot of the caller state. Which entries are active (the game
+/// variant, [`SbaEnvironment::variant`]) is read from the pass's original `env`, never from this
+/// view.
 pub type PostBatchState<'a> = &'a mut dyn FnMut(
     &EventContext<'_>,
     &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment, &dyn SbaEnvironment),
@@ -555,7 +574,7 @@ fn perform_pass(
             &*env,
         );
         let findings = check_view(registry, &view, &*env);
-        let plan = Plan::new(registry, &view, &findings);
+        let plan = Plan::new(registry, &view, ctx.game, &findings);
         (findings, plan)
     };
     let saved = Saved::take(ctx);
@@ -964,7 +983,8 @@ fn perform_findings(
 /// then ascending battle id ([`protector_asks`]). A battle without a controller, whose
 /// controller has lost the game (the [`LOST_THE_GAME`] designation after the batch: it can't
 /// answer), or without a candidate gets no request and consumes no request id: the next pass
-/// finds it again (CR 704.5x). The pre-batch requests are not affected by that check.
+/// finds it again (CR 704.5x). The pre-batch requests make the same controller check on the
+/// state before the batch ([`can_choose_protector`]).
 ///
 /// The view is built from the post-batch layer inputs (CR 613.1, CR 613.4: characteristics after
 /// every layer) that `post_batch` supplies for `ctx` as it is after the batch, so a controller
@@ -1040,15 +1060,25 @@ fn ask_retained_protectors(
         // a battle without a controller, no request; the next pass finds the battle again.
         if let Some(controller) = ask.controller
             && !ask.candidates.is_empty()
-            && ctx
-                .game
-                .player(controller)
-                .is_some_and(|p| p.designation(LOST_THE_GAME).is_none())
+            && can_choose_protector(ctx.game, controller)
         {
             chosen.push((ask.battle, ask_protector_choice(choices, ask, controller)?));
         }
     }
     Ok(chosen)
+}
+
+/// CR 704.5x, CR 704.5y, CR 800.4a: whether `controller`, the controller of a battle, can be
+/// asked its protector choice: it is a player of `game` without the [`LOST_THE_GAME`]
+/// designation. CR 704.5x and CR 704.5y name only "that battle's controller" as the chooser and
+/// no rule transfers the choice; a player who lost the game has left it (CR 800.4a), so it can't
+/// answer. One test for the pre-batch requests ([`Plan`]) and the post-batch requests
+/// ([`ask_retained_protectors`]) (decisions "Gate 02-state-objects R3c — Post-batch eligibility,
+/// CR reference and lost controller for the retained-battle request" and "Gate 02-state-objects
+/// R3d — No protector request to a controller who lost the game, on every path").
+fn can_choose_protector(game: &GameState, controller: PlayerId) -> bool {
+    game.player(controller)
+        .is_some_and(|p| p.designation(LOST_THE_GAME).is_none())
 }
 
 /// CR 704.5x, CR 704.5y, CR 310.11: asks `controller`, the controller of the battle of `ask`,
