@@ -24,14 +24,18 @@ fn face(name: &str, cost: Option<&str>) -> CardFaceDSL {
         supertypes: Vec::new(),
         card_types: vec!["Creature".to_owned()],
         subtypes: vec!["Bird".to_owned()],
-        power: Some(ValueExpressionAST(json!({"const": 2}))),
-        toughness: Some(ValueExpressionAST(json!({"const": 2}))),
+        power: Some(ValueExpressionAST(json!({"LITERAL": 2}))),
+        toughness: Some(ValueExpressionAST(json!({"LITERAL": 2}))),
         loyalty: None,
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![json!({"kw": "Flying"})]),
-        abilities: vec![AbilityAST(json!({"keyword": "FLYING"}))],
+        text: TextTokenStream(vec![
+            json!({"id": "t1", "kind": "LITERAL", "text": "Flying"}),
+        ]),
+        abilities: vec![AbilityAST(
+            json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "FLYING"}),
+        )],
     }
 }
 
@@ -71,6 +75,28 @@ fn sealed() -> CardDefinitionDSL {
 
 fn json_bytes(v: &Value) -> Vec<u8> {
     serde_json::to_vec(v).expect("ser")
+}
+
+/// A valid partner ability: a synthetic KEYWORD ability with id `id` (R5).
+fn partner(id: &str) -> PartnerAbilityDSL {
+    PartnerAbilityDSL(json!({"abilityId": id, "kind": "KEYWORD", "keyword": "PARTNER"}))
+}
+
+/// A valid value expression of `levels` nested `MATH` nodes around `leaf`, built iteratively
+/// by moving (`json!` would serialise the inner value recursively). Each `MATH` node opens two
+/// JSON objects.
+fn math_chain(levels: usize, leaf: Value) -> Value {
+    let mut v = leaf;
+    for _ in 0..levels {
+        let mut body = serde_json::Map::new();
+        body.insert("op".to_owned(), json!("ADD"));
+        body.insert("lhs".to_owned(), v);
+        body.insert("rhs".to_owned(), json!("X"));
+        let mut node = serde_json::Map::new();
+        node.insert("MATH".to_owned(), Value::Object(body));
+        v = Value::Object(node);
+    }
+    v
 }
 
 /// Generic enum check: ALL / as_str / Display agree with serde and every value round-trips.
@@ -328,7 +354,7 @@ fn req_dsl_002_json_member_names() {
     full.meld_partner = Some("test.partner".into());
     full.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
-        partner_abilities: vec![PartnerAbilityDSL(json!({"kind": "test"}))],
+        partner_abilities: vec![partner("p1")],
     });
     full.related_tokens = Some(vec!["test.token_1_1".into()]);
     full.source.override_source = Some("test.client".into());
@@ -703,7 +729,7 @@ fn random_definition(rng: &mut Pcg64Dxsm) -> CardDefinitionDSL {
     def.related_tokens = (pick(2) == 1).then(Vec::new);
     def.commander_eligibility = (pick(2) == 1).then(|| CommanderEligibilityDSL {
         eligible: pick(2) == 1,
-        partner_abilities: vec![PartnerAbilityDSL(json!({"n": pick(5)}))],
+        partner_abilities: vec![partner(&format!("p{}", pick(5)))],
     });
     def.legalities
         .insert(format!("fmt_{}", pick(9)), Legality::ALL[pick(4)]);
@@ -728,10 +754,14 @@ fn random_definition(rng: &mut Pcg64Dxsm) -> CardDefinitionDSL {
             f.life_modifier = (pick(2) == 1).then_some(0);
             f.power = match pick(3) {
                 0 => None,
-                1 => Some(ValueExpressionAST(Value::Null)),
-                _ => Some(ValueExpressionAST(json!([pick(9), "*"]))),
+                1 => Some(ValueExpressionAST(json!("X"))),
+                _ => Some(ValueExpressionAST(json!({"LITERAL": pick(9)}))),
             };
-            f.toughness = (pick(2) == 1).then(|| ValueExpressionAST(json!({"b": 1, "a": [true]})));
+            f.toughness = (pick(2) == 1).then(|| {
+                ValueExpressionAST(
+                    json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1}, "rhs": "X"}}),
+                )
+            });
             f
         })
         .collect();
@@ -854,7 +884,7 @@ fn full_definition() -> CardDefinitionDSL {
     def.meld_partner = Some("test.partner".into());
     def.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
-        partner_abilities: vec![PartnerAbilityDSL(json!({"p": 1}))],
+        partner_abilities: vec![partner("p1")],
     });
     def.related_tokens = Some(vec!["test.token".into()]);
     let f = &mut def.faces[0];
@@ -1093,17 +1123,22 @@ fn req_dsl_001_from_json_lossless() {
     );
 }
 
-/// REQ-DSL-001, REQ-NFR-006: sealing normalises placeholder numbers, so a sealed definition
-/// holding `-0.0` or `1.0` loads back equal, and `1.0` and `1` load the same.
+/// REQ-DSL-001, REQ-NFR-006, REQ-DSL-003: sealing normalises numbers inside the AST wrappers,
+/// so a sealed definition holding `-0.0` or `1.0` loads back equal, and `1.0` and `1` load the
+/// same. A non-integral number is not a valid real AST (REQ-CORE-006) and cannot be sealed.
 #[test]
 fn req_dsl_001_seal_normalises_numbers() {
-    for spelling in ["-0.0", "1.0", "1e0", "2.5"] {
+    for spelling in ["-0.0", "1.0", "1e0"] {
         let mut def = definition();
         def.faces[0].power = Some(ValueExpressionAST(
-            serde_json::from_str::<Value>(spelling).expect("number"),
+            serde_json::from_str::<Value>(&format!("{{\"LITERAL\": {spelling}}}")).expect("lit"),
         ));
         def.faces[0].abilities = vec![AbilityAST(
-            serde_json::from_str(&format!("[{spelling}, {{\"n\": {spelling}}}]")).expect("ab"),
+            serde_json::from_str(&format!(
+                "{{\"abilityId\": \"a1\", \"kind\": \"KEYWORD\", \"keyword\": \"TEST_KEYWORD\", \
+                 \"params\": {{\"n\": {spelling}, \"m\": [{spelling}]}}}}"
+            ))
+            .expect("ab"),
         )];
         let hash_before = def.compute_hash().expect("hash");
         let bytes_before = def.to_canonical_json().expect("json");
@@ -1122,12 +1157,22 @@ fn req_dsl_001_seal_normalises_numbers() {
             "{spelling}"
         );
     }
+    // A fraction survives canonicalisation but is no value expression: seal refuses it.
+    let mut fraction = definition();
+    fraction.faces[0].power = Some(ValueExpressionAST(
+        serde_json::from_str::<Value>(r#"{"LITERAL": 2.5}"#).expect("lit"),
+    ));
+    assert!(fraction.compute_hash().is_ok());
+    match fraction.seal() {
+        Err(CanonicalError::Serialize(msg)) => assert!(msg.contains("faces[0].power"), "{msg}"),
+        r => panic!("unexpected {r:?}"),
+    }
     let mut one = definition();
-    one.faces[0].power = Some(ValueExpressionAST(json!(1)));
+    one.faces[0].power = Some(ValueExpressionAST(json!({"LITERAL": 1})));
     let one = one.seal().expect("seal");
     let text = String::from_utf8(one.to_canonical_json().expect("json")).expect("utf8");
-    assert!(text.contains("\"power\":1,"), "{text}");
-    let spelled = text.replace("\"power\":1,", "\"power\":1.0,");
+    assert!(text.contains("\"power\":{\"LITERAL\":1},"), "{text}");
+    let spelled = text.replace("\"power\":{\"LITERAL\":1},", "\"power\":{\"LITERAL\":1.0},");
     assert_eq!(
         CardDefinitionDSL::from_json(spelled.as_bytes()),
         CardDefinitionDSL::from_json(text.as_bytes())
@@ -1144,29 +1189,50 @@ fn nested(depth: usize) -> Value {
     v
 }
 
-/// REQ-DSL-001, REQ-NFR-006: one depth budget for sealing, export, hashing and loading. The
-/// definition object, `faces`, a face and `abilities` take four levels.
+/// REQ-DSL-001, REQ-NFR-006, REQ-DSL-003: one depth budget for sealing, export, hashing and
+/// loading, reached with valid real content. The definition object, `faces` and a face take
+/// three levels; each `MATH` node of `power` takes two, a `LITERAL` leaf one and an `"X"` leaf
+/// none.
 #[test]
 fn req_dsl_001_definition_depth_budget() {
     use crate::canonical::MAX_DEPTH;
+    assert_eq!(MAX_DEPTH, 127);
+    // 3 + 2 * 62 = 127: exactly the budget.
     let mut deepest = definition();
-    deepest.faces[0].abilities = vec![AbilityAST(nested(MAX_DEPTH - 4))];
+    deepest.faces[0].power = Some(ValueExpressionAST(math_chain(62, json!("X"))));
     let sealed = deepest.seal().expect("deepest allowed seals");
     let exported = sealed.to_canonical_json().expect("export");
     assert_eq!(CardDefinitionDSL::from_json(&exported), Ok(sealed));
 
     let too_deep = CanonicalError::Serialize(format!("nesting depth exceeds {MAX_DEPTH}"));
-    for depth in [MAX_DEPTH - 3, 130] {
+    // 3 + 2 * 62 + 1 = 128 and 3 + 2 * 63 + 1 = 130.
+    for levels in [62, 63] {
         let mut deeper = definition();
-        deeper.faces[0].abilities = vec![AbilityAST(nested(depth))];
+        deeper.faces[0].power = Some(ValueExpressionAST(math_chain(
+            levels,
+            json!({"LITERAL": 1}),
+        )));
         assert_eq!(deeper.clone().seal(), Err(too_deep.clone()));
         assert_eq!(deeper.to_canonical_json(), Err(too_deep.clone()));
         assert_eq!(deeper.compute_hash(), Err(too_deep.clone()));
+        // The loader refuses the same depth as a Canonical error.
+        let mut v = sealed_json();
+        v["faces"][0]["power"] = math_chain(levels, json!({"LITERAL": 1}));
+        assert!(matches!(
+            CardDefinitionDSL::from_json(&json_bytes(&v)),
+            Err(CardDefinitionError::Canonical(CanonicalError::Syntax(_)))
+        ));
     }
 }
 
-/// REQ-DSL-001, REQ-NFR-006: a noncharacter in a definition cannot be sealed or
-/// exported, and a noncharacter in the input is a Canonical error.
+/// The plain JSON of a sealed synthetic definition.
+fn sealed_json() -> Value {
+    serde_json::to_value(sealed()).expect("value")
+}
+
+/// REQ-DSL-001, REQ-NFR-006, REQ-DSL-012: a noncharacter in a definition (also inside a valid
+/// LITERAL text token) cannot be sealed or exported, and a noncharacter in the input is a
+/// Canonical error.
 #[test]
 fn req_nfr_006_definition_noncharacter() {
     let mut def = definition();
@@ -1174,6 +1240,23 @@ fn req_nfr_006_definition_noncharacter() {
     assert!(matches!(
         def.clone().seal(),
         Err(CanonicalError::Serialize(_))
+    ));
+    let mut token = definition();
+    token.faces[0].text = TextTokenStream(vec![
+        json!({"id": "t1", "kind": "LITERAL", "text": "abc\u{FFFE}"}),
+    ]);
+    assert!(matches!(
+        token.clone().seal(),
+        Err(CanonicalError::Serialize(_))
+    ));
+    assert!(token.to_canonical_json().is_err());
+    let token_text = String::from_utf8(sealed().to_canonical_json().expect("json"))
+        .expect("utf8")
+        .replace("\"text\":\"Flying\"", "\"text\":\"Fly\\ufdd0\"");
+    assert!(token_text.contains("\\ufdd0"), "{token_text}");
+    assert!(matches!(
+        CardDefinitionDSL::from_json(token_text.as_bytes()),
+        Err(CardDefinitionError::Canonical(CanonicalError::Syntax(_)))
     ));
     let text = String::from_utf8(sealed().to_canonical_json().expect("json"))
         .expect("utf8")
@@ -1196,7 +1279,7 @@ fn req_dsl_001_random_review_mutations_never_panic() {
         let pick = |rng: &mut Pcg64Dxsm, n: usize| (rng.next_u64() % n as u64) as usize;
         let keys: Vec<String> = v.as_object().expect("obj").keys().cloned().collect();
         let key = keys[pick(&mut rng, keys.len())].clone();
-        match pick(&mut rng, 5) {
+        match pick(&mut rng, 6) {
             0 => v[&key] = Value::Null,
             1 => {
                 if let Value::Object(m) = &v[&key] {
@@ -1205,6 +1288,7 @@ fn req_dsl_001_random_review_mutations_never_panic() {
             }
             2 => v[&key] = json!({ "x": v[&key].clone() }),
             3 => v["faces"][0]["abilities"] = json!([nested(pick(&mut rng, 140))]),
+            4 => v["faces"][0]["power"] = math_chain(pick(&mut rng, 70), json!("X")),
             _ => v[&key] = json!("\u{FDD0}"),
         }
         if pick(&mut rng, 2) == 1 {
@@ -1280,15 +1364,21 @@ fn req_nfr_006_stale_hash_excluded_from_hash_input() {
     }
 }
 
-/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: `compute_hash` hashes the borrowed definition, so a
-/// value built in memory far beyond the depth budget is a `Serialize` error rather than a stack
-/// overflow. The value is forgotten, not dropped, because dropping it would itself recurse.
+/// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006, REQ-DSL-003: `compute_hash` hashes the borrowed
+/// definition, so a value built in memory far beyond the depth budget is a `Serialize` error
+/// rather than a stack overflow; `validate_asts` and the typed views likewise return an error.
+/// The value is forgotten, not dropped, because dropping it would itself recurse.
 #[test]
 fn req_nfr_006_compute_hash_deep_value_is_an_error() {
     let mut def = definition();
+    // 50 000 MATH nodes: 100 000 levels of valid-shaped value expression.
+    def.faces[0].power = Some(ValueExpressionAST(math_chain(50_000, json!("X"))));
     def.faces[0].abilities = vec![AbilityAST(nested(100_000))];
     let hash = def.compute_hash();
     let verified = def.verify_hash();
+    let validated = def.validate_asts();
+    let power_view = def.faces[0].power.as_ref().map(ValueExpressionAST::to_real);
+    let ability_view = def.faces[0].abilities[0].to_real();
     // Forget before asserting: a failed assertion must not unwind into a recursive drop.
     std::mem::forget(def);
     assert!(matches!(hash, Err(CanonicalError::Serialize(_))));
@@ -1296,12 +1386,22 @@ fn req_nfr_006_compute_hash_deep_value_is_an_error() {
         verified,
         Err(CardDefinitionError::Canonical(CanonicalError::Serialize(_)))
     ));
+    match validated {
+        Err(CardDefinitionError::Schema(msg)) => assert!(msg.contains("faces[0].power"), "{msg}"),
+        r => panic!("unexpected {r:?}"),
+    }
+    assert!(matches!(power_view, Some(Err(_))));
+    assert!(ability_view.is_err());
 }
 
 /// REQ-NFR-006, REQ-DSL-002, REQ-CORE-006: `seal` on a definition nested past the budget is a
-/// `Serialize` error (1 000 levels, small enough to drop safely).
+/// `Serialize` error (1 000 levels, small enough to drop safely), in an AST wrapper holding
+/// valid-shaped content and in one holding placeholder content.
 #[test]
 fn req_nfr_006_seal_deep_value_is_an_error() {
+    let mut def = definition();
+    def.faces[0].power = Some(ValueExpressionAST(math_chain(500, json!("X"))));
+    assert!(matches!(def.seal(), Err(CanonicalError::Serialize(_))));
     let mut def = definition();
     def.faces[0].abilities = vec![AbilityAST(nested(1_000))];
     assert!(matches!(def.seal(), Err(CanonicalError::Serialize(_))));
@@ -1312,15 +1412,23 @@ fn req_nfr_006_seal_deep_value_is_an_error() {
 #[test]
 fn req_nfr_006_nested_definition_hash_member_is_hashed() {
     let base = sealed();
+    let with_param = |value: &str| {
+        AbilityAST(json!({
+            "abilityId": "a1",
+            "kind": "KEYWORD",
+            "keyword": "TEST_KEYWORD",
+            "params": {"definitionHash": value}
+        }))
+    };
     let mut nested_member = definition();
-    nested_member.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "x"}))];
+    nested_member.faces[0].abilities = vec![with_param("x")];
     let nested_hash = nested_member.compute_hash().expect("hash");
     assert_ne!(nested_hash, base.compute_hash().expect("hash"));
     let mut other = definition();
-    other.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "y"}))];
+    other.faces[0].abilities = vec![with_param("y")];
     assert_ne!(other.compute_hash().expect("hash"), nested_hash);
     let mut bad = definition();
-    bad.faces[0].abilities = vec![AbilityAST(json!({"definitionHash": "\u{FDD0}"}))];
+    bad.faces[0].abilities = vec![with_param("\u{FDD0}")];
     assert!(matches!(
         bad.compute_hash(),
         Err(CanonicalError::Serialize(_))
@@ -1337,4 +1445,622 @@ fn req_nfr_006_nested_definition_hash_member_is_hashed() {
         sealed_nested.definition_hash,
         fineprint_base::hash::sha256(&bytes).to_hex()
     );
+}
+
+// ---- #159 FP-140: AST positions checked against the real DSL types ----
+
+/// Valid value expressions (REQ-DSL-003, SRS §14.4), each in its canonical spelling.
+fn valid_values() -> Vec<Value> {
+    vec![
+        json!({"LITERAL": 0}),
+        json!({"LITERAL": -3}),
+        json!({"LITERAL": MAX_SAFE_INTEGER}),
+        json!("X"),
+        json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1}, "rhs": "X"}}),
+        json!({"MATH": {
+            "op": "DIV_FLOOR",
+            "lhs": {"MATH": {"op": "MUL", "lhs": "X", "rhs": {"LITERAL": 2}}},
+            "rhs": {"MATH": {"op": "MAX", "lhs": {"LITERAL": 1}, "rhs": "X"}}
+        }}),
+        math_chain(10, json!({"LITERAL": 7})),
+    ]
+}
+
+/// Valid token streams (REQ-DSL-012, SRS §14.5), synthetic text only (R5).
+fn valid_texts() -> Vec<Vec<Value>> {
+    vec![
+        vec![],
+        vec![json!({"id": "t1", "kind": "LITERAL", "text": "abc"})],
+        vec![json!({"id": "t1", "kind": "WORD", "category": "COLOR_WORD", "value": "Hue"})],
+        vec![json!({"id": "t1", "kind": "NAME_REF", "ref": "SELF"})],
+        vec![
+            json!({"id": "t1", "kind": "NAME_REF", "ref": "SELF"}),
+            json!({"id": "t2", "kind": "LITERAL", "text": " gets +1/+1 for each "}),
+            json!({"id": "t3", "kind": "WORD", "category": "CREATURE_TYPE", "value": "TestType"}),
+            json!({"id": "t4", "kind": "WORD", "category": "NUMBER", "value": "2"}),
+            json!({"id": "t5", "kind": "NAME_REF", "ref": "OTHER", "name": "test.other"}),
+        ],
+    ]
+}
+
+/// Valid abilities of all six kinds (REQ-DSL-010, SRS §14.3). Non-empty effect lists use a real
+/// effect instruction (`POPULATE`), never a free-form placeholder op; the replacement uses the
+/// replacement op `SKIP`.
+fn valid_abilities() -> Vec<Value> {
+    vec![
+        json!({"abilityId": "a1", "kind": "SPELL", "effect": []}),
+        json!({"abilityId": "a1", "kind": "SPELL", "effect": [{"op": "POPULATE"}]}),
+        json!({"abilityId": "a1", "kind": "ACTIVATED", "cost": [{"cost": "TAP_SOURCE"}],
+               "effect": [{"op": "POPULATE"}]}),
+        json!({"abilityId": "a1", "kind": "TRIGGERED",
+               "trigger": {"mode": "STATE", "state": {"pred": "IS_CREATURE"}}, "effect": []}),
+        json!({"abilityId": "a1", "kind": "STATIC", "effects": [{"type": "RULE", "kind": "SKIP"}]}),
+        json!({"abilityId": "a1", "kind": "REPLACEMENT",
+               "match": {"event": "DIES", "affected": {"ref": "SELF"}},
+               "replaceWith": [{"op": "SKIP"}]}),
+        json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD"}),
+        json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+               "functionsIn": ["BATTLEFIELD"], "textSpan": [0, 1], "params": {"n": 2}}),
+    ]
+}
+
+/// Valid partner abilities: KEYWORD abilities only.
+fn valid_partners() -> Vec<Value> {
+    vec![
+        json!({"abilityId": "p1", "kind": "KEYWORD", "keyword": "PARTNER"}),
+        json!({"abilityId": "p1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+               "params": {"with": "test.partner"}}),
+    ]
+}
+
+/// A synthetic two-face definition with a commander eligibility, so every AST position exists
+/// (abilities are also checked on the second face).
+fn two_face_definition() -> CardDefinitionDSL {
+    let mut def = definition();
+    let mut back = face("test.back_face", None);
+    back.face_kind = FaceKind::Back;
+    back.text = TextTokenStream(vec![json!({"id": "t1", "kind": "NAME_REF", "ref": "SELF"})]);
+    back.abilities = vec![AbilityAST(
+        json!({"abilityId": "b1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD"}),
+    )];
+    def.layout = LayoutBehavior::DfcNonmodal;
+    def.faces.push(back);
+    def.commander_eligibility = Some(CommanderEligibilityDSL {
+        eligible: true,
+        partner_abilities: vec![partner("p1")],
+    });
+    def
+}
+
+/// One AST position of [`two_face_definition`]: the wrapper setter and the JSON pointer/name.
+#[derive(Clone, Copy, Debug)]
+enum Position {
+    Power,
+    Toughness,
+    Text,
+    BackAbility,
+    Partner,
+}
+
+impl Position {
+    const ALL: [Position; 5] = [
+        Position::Power,
+        Position::Toughness,
+        Position::Text,
+        Position::BackAbility,
+        Position::Partner,
+    ];
+
+    /// The location name `validate_asts` reports.
+    fn location(self) -> &'static str {
+        match self {
+            Position::Power => "faces[0].power",
+            Position::Toughness => "faces[0].toughness",
+            Position::Text => "faces[0].text",
+            Position::BackAbility => "faces[1].abilities[0]",
+            Position::Partner => "commanderEligibility.partnerAbilities[0]",
+        }
+    }
+
+    /// `def` with `content` in this position (a text position takes an array).
+    fn set(self, def: &mut CardDefinitionDSL, content: Value) {
+        match self {
+            Position::Power => def.faces[0].power = Some(ValueExpressionAST(content)),
+            Position::Toughness => def.faces[0].toughness = Some(ValueExpressionAST(content)),
+            Position::Text => {
+                def.faces[0].text = match content {
+                    Value::Array(items) => TextTokenStream(items),
+                    other => TextTokenStream(vec![other]),
+                }
+            }
+            Position::BackAbility => def.faces[1].abilities = vec![AbilityAST(content)],
+            Position::Partner => {
+                if let Some(c) = def.commander_eligibility.as_mut() {
+                    c.partner_abilities = vec![PartnerAbilityDSL(content)];
+                }
+            }
+        }
+    }
+
+    /// The JSON member of this position in a serialised definition.
+    fn get(self, v: &Value) -> &Value {
+        match self {
+            Position::Power => &v["faces"][0]["power"],
+            Position::Toughness => &v["faces"][0]["toughness"],
+            Position::Text => &v["faces"][0]["text"],
+            Position::BackAbility => &v["faces"][1]["abilities"][0],
+            Position::Partner => &v["commanderEligibility"]["partnerAbilities"][0],
+        }
+    }
+
+    /// Replaces the JSON member of this position in a serialised definition.
+    fn replace(self, v: &mut Value, content: Value) {
+        let slot = match self {
+            Position::Power => &mut v["faces"][0]["power"],
+            Position::Toughness => &mut v["faces"][0]["toughness"],
+            Position::Text => &mut v["faces"][0]["text"],
+            Position::BackAbility => &mut v["faces"][1]["abilities"][0],
+            Position::Partner => &mut v["commanderEligibility"]["partnerAbilities"][0],
+        };
+        *slot = content;
+    }
+
+    /// Valid samples for this position (text samples as arrays).
+    fn valid(self) -> Vec<Value> {
+        match self {
+            Position::Power | Position::Toughness => valid_values(),
+            Position::Text => valid_texts().into_iter().map(Value::Array).collect(),
+            Position::BackAbility => valid_abilities(),
+            Position::Partner => valid_partners(),
+        }
+    }
+
+    /// Content that is not a valid real AST for this position.
+    fn invalid(self) -> Vec<Value> {
+        match self {
+            Position::Power | Position::Toughness => vec![
+                Value::Null,
+                json!(2),
+                json!({"const": 2}),
+                json!({"LITERAL": 1, "extra": 1}),
+                json!({"LITERAL": "1"}),
+                json!({"MATH": {"op": "POW", "lhs": "X", "rhs": "X"}}),
+                json!({"MATH": {"op": "ADD", "lhs": "X"}}),
+                json!("Y"),
+                json!([{"LITERAL": 1}]),
+            ],
+            Position::Text => vec![
+                json!([{"kw": "Flying"}]),
+                json!([1]),
+                json!([{"id": "t1", "kind": "LITERAL", "text": "a"},
+                       {"id": "t1", "kind": "LITERAL", "text": "b"}]),
+                json!([{"id": "", "kind": "LITERAL", "text": "a"}]),
+                json!([{"id": "t1", "kind": "LITERAL", "text": ""}]),
+                json!([{"id": "t1", "kind": "BOLD", "text": "a"}]),
+                json!([{"id": "t1", "kind": "WORD", "category": "FLAVOR", "value": "a"}]),
+                json!([{"id": "t1", "kind": "NAME_REF", "ref": "OTHER"}]),
+                json!([{"id": "t1", "kind": "LITERAL", "text": "a", "extra": true}]),
+                json!([null]),
+            ],
+            Position::BackAbility => vec![
+                json!("test.ability"),
+                json!(7),
+                Value::Null,
+                json!({"keyword": "FLYING"}),
+                json!({"abilityId": "a1", "kind": "MAGIC"}),
+                json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "x": 1}),
+                json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "lowercase"}),
+                json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+                       "functionsIn": null}),
+                json!({"abilityId": "a1", "kind": "SPELL", "effect": [{"note": 1}]}),
+                json!({"abilityId": "a1", "kind": "ACTIVATED", "cost": [], "effect": []}),
+                json!({"abilityId": "a1", "kind": "SPELL"}),
+            ],
+            Position::Partner => vec![
+                json!({"kind": "test"}),
+                json!({"p": 1}),
+                json!({"abilityId": "p1", "kind": "STATIC",
+                       "effects": [{"type": "RULE", "kind": "SKIP"}]}),
+                json!({"abilityId": "p1", "kind": "SPELL", "effect": []}),
+                Value::Null,
+            ],
+        }
+    }
+}
+
+/// REQ-DSL-003, REQ-DSL-010, REQ-DSL-012, REQ-NFR-006 (acceptance 2): valid value expressions,
+/// token streams and abilities of all six kinds in every AST position seal; the canonical JSON
+/// loads back equal; the hash is stable and verifies; and the position keeps exactly the given
+/// JSON (single spelling, the check never changes the hash).
+#[test]
+fn req_dsl_003_valid_asts_seal_and_round_trip() {
+    for position in Position::ALL {
+        for sample in position.valid() {
+            let mut def = two_face_definition();
+            position.set(&mut def, sample.clone());
+            assert_eq!(def.validate_asts(), Ok(()), "{position:?} {sample}");
+            let hash_before = def.compute_hash().expect("hash");
+            let sealed = def
+                .seal()
+                .unwrap_or_else(|e| panic!("{position:?} {sample}: {e}"));
+            assert_eq!(sealed.definition_hash, hash_before, "{position:?} {sample}");
+            assert_eq!(sealed.verify_hash(), Ok(()));
+            assert_eq!(sealed.compute_hash(), Ok(hash_before.clone()));
+            let canonical = sealed.to_canonical_json().expect("canonical");
+            let loaded = CardDefinitionDSL::from_json(&canonical).expect("load");
+            assert_eq!(loaded, sealed, "{position:?} {sample}");
+            assert_eq!(loaded.compute_hash(), Ok(hash_before));
+            let v = serde_json::to_value(&loaded).expect("value");
+            assert_eq!(position.get(&v), &sample, "{position:?}");
+        }
+    }
+    // Every ability kind is covered.
+    let kinds: std::collections::BTreeSet<&str> = valid_abilities()
+        .into_iter()
+        .map(|a| AbilityAST(a).to_real().expect("valid").kind())
+        .collect();
+    assert_eq!(kinds.len(), 6);
+}
+
+/// REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (acceptance 1): content that is not a valid real AST
+/// is rejected in each of the five positions, by `from_json` as `Schema` naming the location
+/// (the document carries the correct hash over its checked content, so the failure is the AST
+/// check) and by `seal` as `CanonicalError::Serialize` naming the location.
+#[test]
+fn req_dsl_003_invalid_asts_rejected_on_load_and_seal() {
+    let good = serde_json::to_value(two_face_definition().seal().expect("seal")).expect("value");
+    for position in Position::ALL {
+        let location = position.location();
+        for bad in position.invalid() {
+            // Load path.
+            let mut v = good.clone();
+            position.replace(&mut v, bad.clone());
+            rehash(&mut v);
+            match CardDefinitionDSL::from_json(&json_bytes(&v)) {
+                Err(CardDefinitionError::Schema(msg)) => {
+                    assert!(msg.contains(location), "{location} {bad}: {msg}");
+                }
+                r => panic!("{location} {bad}: unexpected {r:?}"),
+            }
+            // Seal path.
+            let mut def = two_face_definition();
+            position.set(&mut def, bad.clone());
+            assert!(def.compute_hash().is_ok(), "{location} {bad}");
+            match def.clone().seal() {
+                Err(CanonicalError::Serialize(msg)) => {
+                    assert!(msg.contains(location), "{location} {bad}: {msg}");
+                }
+                r => panic!("{location} {bad}: unexpected {r:?}"),
+            }
+            match def.validate_asts() {
+                Err(CardDefinitionError::Schema(msg)) => {
+                    assert!(msg.contains(location), "{location} {bad}: {msg}");
+                }
+                r => panic!("{location} {bad}: unexpected {r:?}"),
+            }
+        }
+    }
+}
+
+/// REQ-DSL-003, REQ-DSL-012, REQ-NFR-006: a present `null` power or toughness still decodes with
+/// plain serde, but is no longer sealable or loadable; and abilities are checked on every face.
+#[test]
+fn req_dsl_003_null_power_and_later_faces_rejected() {
+    for member in ["power", "toughness"] {
+        let mut v = sealed_json();
+        v["faces"][0][member] = Value::Null;
+        let plain: CardDefinitionDSL = serde_json::from_value(v.clone()).expect("plain serde");
+        let slot = if member == "power" {
+            &plain.faces[0].power
+        } else {
+            &plain.faces[0].toughness
+        };
+        assert_eq!(slot, &Some(ValueExpressionAST(Value::Null)));
+        assert!(matches!(
+            plain.clone().seal(),
+            Err(CanonicalError::Serialize(msg)) if msg.contains(&format!("faces[0].{member}"))
+        ));
+        rehash(&mut v);
+        assert!(matches!(
+            CardDefinitionDSL::from_json(&json_bytes(&v)),
+            Err(CardDefinitionError::Schema(msg)) if msg.contains(&format!("faces[0].{member}"))
+        ));
+    }
+    // A third face's second ability is located precisely.
+    let mut def = two_face_definition();
+    let mut third = face("test.third", None);
+    third
+        .abilities
+        .push(AbilityAST(json!({"keyword": "FLYING"})));
+    def.faces.push(third);
+    assert!(matches!(
+        def.validate_asts(),
+        Err(CardDefinitionError::Schema(msg)) if msg.contains("faces[2].abilities[1]")
+    ));
+}
+
+/// REQ-DSL-003, REQ-NFR-006: `from_json` checks ASTs before the hash, so invalid content whose
+/// declared hash is also wrong reports `Schema`, not `HashMismatch`; and the lossless-decode
+/// check still runs before the AST check.
+#[test]
+fn req_dsl_003_ast_check_precedes_hash_check() {
+    let good = serde_json::to_value(two_face_definition().seal().expect("seal")).expect("value");
+    for position in Position::ALL {
+        for bad in position.invalid() {
+            let mut v = good.clone();
+            position.replace(&mut v, bad.clone());
+            // The old hash no longer matches the content.
+            let result = CardDefinitionDSL::from_json(&json_bytes(&v));
+            assert!(
+                matches!(&result, Err(CardDefinitionError::Schema(msg)) if msg.contains(position.location())),
+                "{position:?} {bad}: {result:?}"
+            );
+            let mut wrong = v.clone();
+            wrong["definitionHash"] = json!("f".repeat(64));
+            assert!(matches!(
+                CardDefinitionDSL::from_json(&json_bytes(&wrong)),
+                Err(CardDefinitionError::Schema(_))
+            ));
+        }
+    }
+    // A valid AST with a tampered hash is still a HashMismatch.
+    let mut v = good.clone();
+    v["faces"][0]["power"] = json!({"LITERAL": 9});
+    assert!(matches!(
+        CardDefinitionDSL::from_json(&json_bytes(&v)),
+        Err(CardDefinitionError::HashMismatch { .. })
+    ));
+    // Lossless decode (step c) runs before the AST check: a null loyalty plus an invalid power
+    // reports the lossless message, not an AST location.
+    let mut both = good;
+    both["faces"][0]["loyalty"] = Value::Null;
+    both["faces"][0]["power"] = Value::Null;
+    rehash(&mut both);
+    match CardDefinitionDSL::from_json(&json_bytes(&both)) {
+        Err(CardDefinitionError::Schema(msg)) => assert!(!msg.contains("faces[0].power"), "{msg}"),
+        r => panic!("unexpected {r:?}"),
+    }
+}
+
+/// REQ-DSL-003, REQ-DSL-010, REQ-DSL-012: the typed views decode valid content into the real
+/// types and refuse invalid content; a partner ability must be a KEYWORD ability.
+#[test]
+fn req_dsl_010_typed_views() {
+    for v in valid_values() {
+        let real = ValueExpressionAST(v.clone())
+            .to_real()
+            .expect("valid value");
+        assert_eq!(canonical::to_checked_value(&real), Ok(v));
+    }
+    assert_eq!(
+        ValueExpressionAST(json!({"LITERAL": 4})).to_real(),
+        Ok(crate::expr::ValueExpressionAST::Literal(4))
+    );
+    for t in valid_texts() {
+        let real = TextTokenStream(t.clone()).to_real().expect("valid text");
+        assert_eq!(real.len(), t.len());
+        assert_eq!(canonical::to_checked_value(&real), Ok(Value::Array(t)));
+    }
+    let tokens = TextTokenStream(valid_texts()[4].clone())
+        .to_real()
+        .expect("valid");
+    assert!(
+        tokens
+            .find("t3")
+            .is_some_and(crate::text::TextToken::is_rewritable)
+    );
+    for a in valid_abilities() {
+        let real = AbilityAST(a.clone()).to_real().expect("valid ability");
+        assert_eq!(canonical::to_checked_value(&real), Ok(a.clone()));
+        // Only KEYWORD abilities are partner abilities.
+        let as_partner = PartnerAbilityDSL(a).to_real();
+        if real.kind() == "KEYWORD" {
+            assert_eq!(as_partner, Ok(real));
+        } else {
+            let err = as_partner.expect_err("non-keyword partner");
+            assert!(
+                err.contains("KEYWORD") && err.contains(real.kind()),
+                "{err}"
+            );
+        }
+    }
+    for p in valid_partners() {
+        let real = PartnerAbilityDSL(p.clone())
+            .to_real()
+            .expect("valid partner");
+        assert_eq!(real.kind(), "KEYWORD");
+        assert_eq!(canonical::to_checked_value(&real), Ok(p));
+    }
+    for bad in Position::Power.invalid() {
+        assert!(ValueExpressionAST(bad.clone()).to_real().is_err(), "{bad}");
+    }
+    for bad in Position::Text.invalid() {
+        let Value::Array(items) = bad else {
+            panic!("text samples are arrays")
+        };
+        assert!(TextTokenStream(items).to_real().is_err());
+    }
+    for bad in Position::BackAbility.invalid() {
+        assert!(AbilityAST(bad.clone()).to_real().is_err(), "{bad}");
+        assert!(PartnerAbilityDSL(bad.clone()).to_real().is_err(), "{bad}");
+    }
+    // A non-integral literal is not a value expression (REQ-CORE-006).
+    let fraction: Value = serde_json::from_str(r#"{"LITERAL": 1.5}"#).expect("json");
+    assert!(ValueExpressionAST(fraction).to_real().is_err());
+}
+
+/// REQ-NFR-006: a decoded AST is accepted only in its single canonical spelling; the helper
+/// rejects any re-encoding that differs from the original JSON.
+#[test]
+fn req_nfr_006_single_spelling_check() {
+    assert_eq!(
+        super::validate::single_spelling(&json!({"LITERAL": 1}), &json!({"LITERAL": 1})),
+        Ok(())
+    );
+    let err = super::validate::single_spelling(&json!({"LITERAL": 1}), &json!({"LITERAL": 2}))
+        .expect_err("different spelling");
+    assert!(err.contains("canonical"), "{err}");
+    // A value the checked serializer refuses is reported, not panicked on.
+    assert!(super::validate::single_spelling(&json!("\u{FDD0}"), &json!("")).is_err());
+}
+
+/// REQ-DSL-003, REQ-NFR-006: plain serde of the wrappers stays permissive and unchanged (the
+/// unchecked building block other crates use), and `compute_hash`, `to_canonical_json` and
+/// `verify_hash` still work on unvalidated placeholder content; only `seal` and `from_json`
+/// validate.
+#[test]
+fn req_nfr_006_wrappers_stay_permissive() {
+    assert_eq!(
+        serde_json::from_value::<AbilityAST>(json!("test.ability")).expect("ability"),
+        AbilityAST(json!("test.ability"))
+    );
+    assert_eq!(
+        serde_json::from_value::<ValueExpressionAST>(json!({"const": 2})).expect("value"),
+        ValueExpressionAST(json!({"const": 2}))
+    );
+    assert_eq!(
+        serde_json::from_value::<TextTokenStream>(json!([1, "a", null])).expect("text"),
+        TextTokenStream(vec![json!(1), json!("a"), Value::Null])
+    );
+    assert_eq!(
+        serde_json::from_value::<PartnerAbilityDSL>(json!({"kind": "test"})).expect("partner"),
+        PartnerAbilityDSL(json!({"kind": "test"}))
+    );
+    assert_eq!(
+        serde_json::to_value(AbilityAST(json!([1, 2]))).expect("ser"),
+        json!([1, 2])
+    );
+    let mut placeholder = definition();
+    placeholder.faces[0].abilities = vec![AbilityAST(json!({"keyword": "FLYING"}))];
+    placeholder.faces[0].text = TextTokenStream(vec![json!({"kw": "Flying"})]);
+    placeholder.faces[0].power = Some(ValueExpressionAST(json!({"const": 2})));
+    let hash = placeholder
+        .compute_hash()
+        .expect("hash of placeholder content");
+    assert_eq!(hash.len(), 64);
+    assert!(placeholder.to_canonical_json().is_ok());
+    placeholder.definition_hash = hash;
+    assert_eq!(placeholder.verify_hash(), Ok(()));
+    assert!(matches!(
+        placeholder.validate_asts(),
+        Err(CardDefinitionError::Schema(msg)) if msg.contains("faces[0].power")
+    ));
+    assert!(matches!(
+        placeholder.seal(),
+        Err(CanonicalError::Serialize(_))
+    ));
+}
+
+/// A random valid value expression of at most `depth` MATH levels (synthetic, R5).
+fn random_value(rng: &mut Pcg64Dxsm, depth: u32) -> Value {
+    const OPS: [&str; 7] = ["ADD", "SUB", "MUL", "DIV_FLOOR", "DIV_CEIL", "MIN", "MAX"];
+    match rng.next_u64() % if depth == 0 { 2 } else { 3 } {
+        0 => json!({"LITERAL": (rng.next_u64() % 41) as i64 - 20}),
+        1 => json!("X"),
+        _ => {
+            let op = OPS[(rng.next_u64() % 7) as usize];
+            let lhs = random_value(rng, depth - 1);
+            let rhs = random_value(rng, depth - 1);
+            json!({"MATH": {"op": op, "lhs": lhs, "rhs": rhs}})
+        }
+    }
+}
+
+/// A random valid token stream (synthetic, R5).
+fn random_text(rng: &mut Pcg64Dxsm) -> Vec<Value> {
+    (0..rng.next_u64() % 5)
+        .map(|i| match rng.next_u64() % 4 {
+            0 => json!({"id": format!("t{i}"), "kind": "LITERAL", "text": format!("w{i}")}),
+            1 => json!({"id": format!("t{i}"), "kind": "WORD", "category": "COLOR_WORD",
+                        "value": "Hue"}),
+            2 => json!({"id": format!("t{i}"), "kind": "NAME_REF", "ref": "SELF"}),
+            _ => json!({"id": format!("t{i}"), "kind": "NAME_REF", "ref": "OTHER",
+                        "name": "test.other"}),
+        })
+        .collect()
+}
+
+/// REQ-DSL-003, REQ-DSL-010, REQ-DSL-012, REQ-NFR-006 property: random valid ASTs validate,
+/// have a single spelling (the real value re-encodes to the wrapper's JSON), and survive the
+/// validate → seal → export → load round trip with the hash unchanged.
+#[test]
+fn req_nfr_006_property_valid_asts_single_spelling_round_trip() {
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x0dd1_0159_0001);
+    let abilities = valid_abilities();
+    for _ in 0..200 {
+        let mut def = two_face_definition();
+        let power = random_value(&mut rng, 4);
+        let toughness = random_value(&mut rng, 4);
+        let text = random_text(&mut rng);
+        let ability = abilities[(rng.next_u64() % abilities.len() as u64) as usize].clone();
+        def.faces[0].power = Some(ValueExpressionAST(power.clone()));
+        def.faces[0].toughness = Some(ValueExpressionAST(toughness));
+        def.faces[0].text = TextTokenStream(text.clone());
+        def.faces[1].abilities = vec![AbilityAST(ability.clone())];
+        let real = def.faces[0].power.as_ref().map(ValueExpressionAST::to_real);
+        assert_eq!(
+            real.map(|r| canonical::to_checked_value(&r.expect("valid"))),
+            Some(Ok(power))
+        );
+        let real_text = def.faces[0].text.to_real().expect("valid text");
+        assert_eq!(
+            canonical::to_checked_value(&real_text),
+            Ok(Value::Array(text))
+        );
+        let real_ability = def.faces[1].abilities[0].to_real().expect("valid ability");
+        assert_eq!(canonical::to_checked_value(&real_ability), Ok(ability));
+        assert_eq!(def.validate_asts(), Ok(()));
+        let before = def.compute_hash().expect("hash");
+        let sealed = def.seal().expect("seal");
+        assert_eq!(sealed.definition_hash, before);
+        let loaded =
+            CardDefinitionDSL::from_json(&sealed.to_canonical_json().expect("json")).expect("load");
+        assert_eq!(loaded, sealed);
+        assert_eq!(loaded.compute_hash(), Ok(before));
+    }
+}
+
+/// REQ-DSL-003, R12: the typed views and `validate_asts` are total on arbitrary JSON content:
+/// random byte strings that parse as JSON, and random small JSON trees, never panic.
+#[test]
+fn req_dsl_003_typed_views_never_panic() {
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x0dd1_0159_0002);
+    let alphabet = b"{}[]\":,0123456789-.eEtrufalsnXLITERAMH ";
+    for _ in 0..3000 {
+        let len = (rng.next_u64() % 40) as usize;
+        let raw: Vec<u8> = (0..len)
+            .map(|_| alphabet[(rng.next_u64() % alphabet.len() as u64) as usize])
+            .collect();
+        let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
+            continue;
+        };
+        let _ = ValueExpressionAST(v.clone()).to_real();
+        let _ = AbilityAST(v.clone()).to_real();
+        let _ = PartnerAbilityDSL(v.clone()).to_real();
+        let items = match v.clone() {
+            Value::Array(items) => items,
+            other => vec![other],
+        };
+        let _ = TextTokenStream(items).to_real();
+        let mut def = two_face_definition();
+        def.faces[0].power = Some(ValueExpressionAST(v));
+        assert!(def.validate_asts().is_err() || def.clone().seal().is_ok());
+    }
+    // Random mutations of valid samples.
+    let samples: Vec<Value> = valid_values()
+        .into_iter()
+        .chain(valid_abilities())
+        .chain(valid_partners())
+        .collect();
+    for _ in 0..2000 {
+        let sample = &samples[(rng.next_u64() % samples.len() as u64) as usize];
+        let mut bytes = json_bytes(sample);
+        let at = (rng.next_u64() % bytes.len() as u64) as usize;
+        bytes[at] = alphabet[(rng.next_u64() % alphabet.len() as u64) as usize];
+        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+            let _ = ValueExpressionAST(v.clone()).to_real();
+            let _ = AbilityAST(v.clone()).to_real();
+            let _ = PartnerAbilityDSL(v).to_real();
+        }
+    }
 }
