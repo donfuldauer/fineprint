@@ -287,7 +287,7 @@ pub fn map_layout(record: &NormalizedCardRecord) -> Result<LayoutOutcome, Layout
             1 => m(L::DfcNonmodal, &one),
             _ => m(L::DfcNonmodal, &[Main, Back]),
         },
-        // Variant-gated (SRS §4.2, CR 901-905, 309).
+        // Variant-gated (SRS §4.2 layout table).
         "planar" => gated(record, L::Planar),
         "scheme" => gated(record, L::Scheme),
         "vanguard" => gated(record, L::Vanguard),

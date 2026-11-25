@@ -515,3 +515,4 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 13-toolchain | #87 | Fixer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all, cr check ok | union colors, per-layout colorsMismatch; cr-citations.json regenerated |
 | 13-toolchain | #88 | work-classifier | inherit | 1 | routed | - | Implementer T1 Sonnet 5.5; FABLE_ALLOWANCE unknown (no Fable); lib.rs one-line wiring granted |
 | 13-toolchain | #88 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all ok; ingest 96.71 %, layout 99.43 % | layout mapping, 9 tests; 5 DECISIONS entries |
+| 13-toolchain | #88 | Fixer | Haiku 5.5 | 1 | done | cr check ok (862 cited, 2 excluded); fmt clean; layout tests pass | CI `cr`: "CR 901-905" comment read as citing CR 901 (not in index); CR numbers dropped from that comment (triage fast path, T0) |
