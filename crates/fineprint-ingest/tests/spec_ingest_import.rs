@@ -2114,14 +2114,76 @@ fn mtgjson_lone_labeled_face_pairs_by_side() {
             .any(|f| f["face"] == 0),
         "{swapped}"
     );
-    // A side letter out of range for the record's faces is skipped.
+    // A side letter out of range for the record's faces is reported (R8b), not skipped.
     let mut third = back.clone();
     third["side"] = json!("c");
     assert_eq!(
         check(vec![third])["disagreements"],
-        faces_only,
+        json!([{"oracleId": oid(10), "fields": [
+            {"field": "faces", "scryfall": 2, "mtgjson": 1},
+            {"face": 2, "field": "side", "scryfall": "absent", "mtgjson": "present"},
+        ]}]),
         "no face 2 to compare"
     );
+}
+
+/// REQ-ING-002, REQ-ING-003, R12 (gate round 3, R8b): an entry whose `side` names a face the
+/// record lacks is one `side` disagreement carrying kind words only; the card is not `agreed`.
+#[test]
+fn mtgjson_side_naming_an_absent_face_is_a_disagreement() {
+    let id = json!({"scryfallOracleId": oid(10)});
+    let side = json!({"face": 1, "field": "side", "scryfall": "absent", "mtgjson": "present"});
+    let front = json!({"side": "a", "manaValue": 3.0, "colors": ["G"], "colorIdentity": ["G", "W"], "types": ["Creature"], "supertypes": [], "subtypes": ["Folk", "Test"], "power": "*", "toughness": "1+*", "identifiers": id});
+    let check = |rec: &Value, entries: Vec<Value>| {
+        let records = BTreeMap::from([(oid(10), norm(rec))]);
+        let atomic = parse_atomic(&bytes_of(&json!({"data": {"test.front": entries}}))).unwrap();
+        cross_check(&records, &atomic, &Value::Null)
+    };
+    // T1 and T5: a one-face record, one `b` entry that matches face 0 otherwise.
+    let one = {
+        let mut v = two_face();
+        v["card_faces"].as_array_mut().unwrap().truncate(1);
+        v["layout"] = json!("normal");
+        v
+    };
+    let mut lone = front.clone();
+    lone["side"] = json!("b");
+    lone["colorIdentity"] = json!(["G"]);
+    lone["secretMark"] = json!("SECRETMARK");
+    let one_rec = norm(&one);
+    assert_eq!(one_rec.faces.len(), 1);
+    let report = check(&one, vec![lone.clone()]);
+    assert_eq!(report["agreed"], 0, "{report}");
+    assert_eq!(
+        report["disagreements"][0]["fields"],
+        json!([side.clone()]),
+        "{report}"
+    );
+    assert_eq!(
+        report["disagreements"],
+        json!([{"oracleId": oid(10), "fields": [side]}])
+    );
+    assert!(!report.to_string().contains("SECRETMARK"));
+    // T2: two faces, entries `a` and `c`: face 1 is not compared, `c` is reported.
+    let mut c = front.clone();
+    c["side"] = json!("c");
+    let report = check(&two_face(), vec![front.clone(), c]);
+    assert_eq!(
+        report["disagreements"][0]["fields"],
+        json!([{"face": 2, "field": "side", "scryfall": "absent", "mtgjson": "present"}]),
+        "{report}"
+    );
+    // T4: an unusable `side` falls back to source-order pairing, no `side` disagreement.
+    for bad in [json!("B"), json!("ab"), json!(7)] {
+        let mut e = front.clone();
+        e["side"] = bad;
+        let report = check(&one, vec![e]);
+        assert!(!report.to_string().contains("\"side\""), "{report}");
+    }
+    let mut e = front;
+    e.as_object_mut().unwrap().remove("side");
+    let report = check(&one, vec![e]);
+    assert!(!report.to_string().contains("\"side\""), "{report}");
 }
 
 /// REQ-ING-002, R12 (review R9): a two-face card where one face lacks a type line and the

@@ -255,7 +255,8 @@ fn side_indices(entries: &[&Value]) -> Option<Vec<usize>> {
 /// Every disagreement of record `r` with its MTGJSON entries `faces` (non-empty, in face
 /// order): card-wide fields, then `faces` when the counts differ, then each common face. Entries
 /// that all carry a letter `side` pair with the face that letter names (a lone back face is
-/// compared with the back face); otherwise they pair by position.
+/// compared with the back face); an entry whose letter names a face the record lacks is a
+/// `side` disagreement. Otherwise they pair by position.
 fn compare(r: &NormalizedCardRecord, faces: &[&Value]) -> Vec<Value> {
     let Some(first) = faces.first() else {
         return Vec::new();
@@ -273,6 +274,15 @@ fn compare(r: &NormalizedCardRecord, faces: &[&Value]) -> Vec<Value> {
             for (index, m) in indices.into_iter().zip(faces) {
                 if let Some(face) = r.faces.get(index) {
                     compare_face(index, face, m, &mut out);
+                } else {
+                    // The entry names a face the record lacks: report it (kinds only, never
+                    // the entry's own text) instead of dropping it.
+                    out.push(json!({
+                        "face": index,
+                        "field": "side",
+                        "scryfall": "absent",
+                        "mtgjson": "present",
+                    }));
                 }
             }
         }
