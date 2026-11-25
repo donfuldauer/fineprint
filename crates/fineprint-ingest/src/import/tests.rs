@@ -24,7 +24,8 @@ use super::normalize::{
 };
 use super::recompute::{
     cmc_matches, color_identity, cost_colors, cost_mana_value, face_colors, letters_mask,
-    mask_letters, record_mana_value, symbol_colors, symbol_mana_value, text_symbol_colors,
+    mask_letters, record_colors, record_mana_value, symbol_colors, symbol_mana_value,
+    text_symbol_colors,
 };
 use super::{MAX_INPUT_BYTES, is_uuid_shape, read_capped};
 
@@ -83,8 +84,31 @@ fn symbol_tables() {
     let big = ManaCostDSL::parse("{1000000}{1000000}").unwrap();
     assert_eq!(cost_mana_value(Some(&big)), 2_000_000);
     let c = ManaCostDSL::parse("{R}").unwrap();
-    assert_eq!(face_colors(Some(&c), Some(mask(2))).bits(), 2);
+    // REQ-ING-002 (CR 105.2, 202.2e, 204.2): cost and indicator colors are united.
+    assert_eq!(face_colors(Some(&c), Some(mask(2))).bits(), 10);
     assert_eq!(face_colors(Some(&c), None).bits(), 8);
+    assert_eq!(face_colors(None, Some(mask(4))).bits(), 4);
+    assert_eq!(face_colors(None, None).bits(), 0);
+}
+
+/// REQ-ING-002 (CR 709.4, 709.4b, 716.4, 710.2, 712.6a): card-level colors by layout.
+#[test]
+fn record_colors_rules() {
+    let (r, u, g) = (mask(8), mask(2), mask(16));
+    assert_eq!(record_colors("split", &[r, u]).bits(), 10);
+    assert_eq!(record_colors("split", &[r]).bits(), 8);
+    for layout in [
+        "adventure",
+        "flip",
+        "transform",
+        "modal_dfc",
+        "meld",
+        "test_layout",
+    ] {
+        assert_eq!(record_colors(layout, &[g, u]).bits(), 16, "{layout}");
+    }
+    assert_eq!(record_colors("split", &[]).bits(), 0);
+    assert_eq!(record_colors("transform", &[]).bits(), 0);
 }
 
 /// REQ-ING-002 (CR 202.3b, 202.3d): the record-level rule by layout.

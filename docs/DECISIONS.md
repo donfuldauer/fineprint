@@ -7944,9 +7944,10 @@ independently).
 
 ## #87 FP-085 — Record-level mana value per layout and the cmc check
 
-**Decision.** One face: that face's cost. `split`: the sum of all faces (CR 202.3d). `adventure`
-and `flip`: the first face. Every other layout with several faces (`transform`, `modal_dfc`,
-`meld`, `reversible_card`, unknown layouts): the front face (CR 202.3b; melded permanents,
+**Decision.** One face: that face's cost. `split`: the sum of all faces (CR 202.3d, 709.4b).
+`adventure`: the main face (CR 716.4); `flip`: the normal face (CR 710.2). Every other layout
+with several faces (`transform`, `modal_dfc` front face per CR 712.6a, `meld`, `reversible_card`,
+unknown layouts): the front face (CR 202.3b; melded permanents,
 CR 202.3c, are not computed at import). `cmc` matches when it is a finite JSON number, `cmc * 2`
 is exactly a whole number, and it equals `manaValue * 2`; a value such as 2.9 is a mismatch, not
 rounded (the brief asks for "no tolerance beyond exact representation"). A missing, non-numeric
@@ -7957,15 +7958,22 @@ plain `round()` would violate.
 
 ## #87 FP-085 — Color indicator and cost colors
 
-**Decision.** A face's `computedColors` is the color indicator when present, otherwise the cost
-colors, exactly as the brief states. The `colorsMismatch` cross-check compares the front face's
-computed colors with the front face's own `colors` when present, else the top-level `colors`
-(for a one-face record, the top-level `colors`). `colorIdentity` is the union over every face of
-the computed colors and the mana symbols of the Oracle text outside parentheses.
-**Rationale.** The brief fixes this rule for the import; whether a face with both a cost and an
-indicator has the union of both (as `fineprint-core`'s `base_colors` computes), and whether a
-split card's `colors` should be compared with both halves, are reported to the rules-researcher.
-**Alternatives.** The union (core's in-game rule); waiting for the ruling (R8: do not wait).
+**Decision.** A face's `computedColors` is the union of the colors of its mana cost and of its
+color indicator (CR 105.2, 202.2e, 204.2); where both are present this is an inference (no CR
+example covers both), matching `fineprint-core`'s `base_colors`. This supersedes the brief's
+"indicator replaces cost" wording on the rules-researcher's ruling. Card-level colors for the
+cross-check: `split` = union of the halves (CR 709.4, 709.4b); `adventure` = main face (CR 716.4);
+`flip` = normal face (CR 710.2); `transform`, `modal_dfc` and others = front face (CR 712.6a).
+`colorsMismatch` is raised when (a) a face's own `colors` differs from that face's computed
+colors, or (b) a present top-level `colors` differs from the card-level colors of its layout. An
+absent top-level `colors` never raises it (transform and modal_dfc sources carry none). Source
+values never alter computed values. `colorIdentity` is the union over every face, an Adventure's
+face and a double-faced card's back included (CR 903.4, 903.4d), of the computed colors and the
+mana symbols of the rules text outside reminder text.
+**Rationale.** The rules-researcher's rulings on CR 105.2, 202.2e, 204.2, 709.4b, 716.4, 710.2,
+712.6a and 903.4d.
+**Alternatives.** Indicator replaces cost (the earlier behaviour, rejected: contradicts the CR
+and `base_colors`); checking only the front face (rejected: spurious mismatches for split cards).
 
 ## #87 FP-085 — digitalOnly, empty costs and field types
 

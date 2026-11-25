@@ -62,12 +62,30 @@ pub fn cost_colors(cost: Option<&ManaCostDSL>) -> ColorBitmask {
     })
 }
 
-/// A face's computed colors: the color indicator when present, otherwise the cost colors
-/// (CR 202.2; the brief's rule for this unit, see DECISIONS.md "#87 FP-085 — Color indicator
-/// and cost colors").
+/// A face's computed colors: the union of the colors of the mana cost (CR 105.2) and of the
+/// color indicator (CR 202.2e, 204.2). A card with both is an inference (no CR example covers
+/// both on one face), matching `fineprint-core`'s `base_colors`; see DECISIONS.md "#87 FP-085 —
+/// Color indicator and cost colors". Neither gives colorless.
 #[must_use]
 pub fn face_colors(cost: Option<&ManaCostDSL>, indicator: Option<ColorBitmask>) -> ColorBitmask {
-    indicator.unwrap_or_else(|| cost_colors(cost))
+    union(cost_colors(cost), indicator.unwrap_or(ColorBitmask::NONE))
+}
+
+/// The card-level colors off the stack from the faces' computed colors, by Scryfall `layout`:
+///
+/// - `split` with several faces: the union of every face (CR 709.4, 709.4b);
+/// - every other layout: the first (front, normal or main) face (CR 716.4 adventure, CR 710.2
+///   flip, CR 712.6a transform, modal and other double-faced layouts);
+/// - no faces: colorless.
+#[must_use]
+pub fn record_colors(layout: &str, face_colors: &[ColorBitmask]) -> ColorBitmask {
+    if layout == "split" && face_colors.len() > 1 {
+        face_colors
+            .iter()
+            .fold(ColorBitmask::NONE, |acc, c| union(acc, *c))
+    } else {
+        face_colors.first().copied().unwrap_or(ColorBitmask::NONE)
+    }
 }
 
 /// The mana value one symbol contributes off the stack (CR 202.3).
@@ -99,10 +117,10 @@ pub fn cost_mana_value(cost: Option<&ManaCostDSL>) -> u64 {
 /// The record-level mana value from the faces' costs, by Scryfall `layout` (CR 202.3):
 ///
 /// - one face: that face's cost;
-/// - `split`: the sum of every face (CR 202.3d, off the stack);
-/// - `adventure` and `flip`: the first face;
+/// - `split`: the sum of every face (CR 202.3d, 709.4b, off the stack);
+/// - `adventure` (CR 716.4) and `flip` (CR 710.2): the first face;
 /// - every other layout with several faces (`transform`, `modal_dfc`, `meld`,
-///   `reversible_card`, ...): the front (first) face (CR 202.3b; melded permanents, CR 202.3c,
+///   `reversible_card`, ...): the front (first) face (CR 202.3b, 712.6a; melded permanents, CR 202.3c,
 ///   are not computed at import).
 #[must_use]
 pub fn record_mana_value(layout: &str, face_costs: &[Option<&ManaCostDSL>]) -> u64 {
@@ -152,8 +170,8 @@ pub fn text_symbol_colors(text: &str) -> ColorBitmask {
 }
 
 /// The color identity of a record (CR 903.4): the union over every face (the back face of a
-/// double-faced card included, CR 903.4d) of the face's computed colors (cost colors, or the
-/// color indicator when present) and the colors of the mana symbols in its rules text outside
+/// double-faced card included, CR 903.4d; an Adventure's face too) of the face's computed
+/// colors (the union of its cost colors and color indicator, see [`face_colors`]) and the colors of the mana symbols in its rules text outside
 /// reminder text (CR 903.4c).
 #[must_use]
 pub fn color_identity(faces: &[(ColorBitmask, Option<&str>)]) -> ColorBitmask {

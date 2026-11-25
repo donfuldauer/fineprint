@@ -849,13 +849,24 @@ fn recompute_every_symbol_kind() {
     ] {
         assert_eq!(colors_of(cost), bits, "{cost}");
     }
-    // A color indicator replaces the cost colors of a face.
-    let r = norm(&card(
-        1,
-        json!({"mana_cost": "{R}", "cmc": 1.0, "color_indicator": ["U"], "colors": ["U"], "color_identity": ["U"]}),
-    ));
-    assert_eq!(r.faces[0].computed_colors.bits(), 2);
+}
+
+/// REQ-ING-002 (CR 105.2, 202.2e, 204.2): a face's colors are the union of its cost colors and
+/// its color indicator; the source `colors` is only compared.
+#[test]
+fn color_indicator_unions_with_cost_colors() {
+    let base = |colors: Value| {
+        norm(&card(
+            1,
+            json!({"mana_cost": "{R}", "cmc": 1.0, "color_indicator": ["U"], "colors": colors, "color_identity": ["U", "R"]}),
+        ))
+    };
+    let r = base(json!(["U", "R"]));
+    assert_eq!(r.faces[0].computed_colors.bits(), 10);
     assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    let r = base(json!(["U"]));
+    assert_eq!(r.faces[0].computed_colors.bits(), 10);
+    assert_eq!(diags(&r), vec!["colorsMismatch"]);
 }
 
 fn faced(layout: &str, costs: [&str; 2], cmc: u64) -> NormalizedCardRecord {
@@ -1431,4 +1442,102 @@ fn import_is_deterministic_across_input_order() {
     let ra = std::fs::read(a.join("normalized/cards.json")).unwrap();
     assert_eq!(code(&import(&a, &[])), 0);
     assert_eq!(std::fs::read(a.join("normalized/cards.json")).unwrap(), ra);
+}
+
+fn multi(layout: &str, cost_cmc: (&str, &str, u64), extra: Value) -> NormalizedCardRecord {
+    let mut v = json!({
+        "oracle_id": oid(30),
+        "name": "test.a // test.b",
+        "layout": layout,
+        "cmc": cost_cmc.2,
+        "card_faces": [
+            {"name": "test.a", "mana_cost": cost_cmc.0, "type_line": "Instant"},
+            {"name": "test.b", "mana_cost": cost_cmc.1, "type_line": "Sorcery"},
+        ]
+    });
+    if let (Value::Object(m), Value::Object(e)) = (&mut v, extra) {
+        m.extend(e);
+    }
+    norm(&v)
+}
+
+/// REQ-ING-002 (CR 709.4, 709.4b, 202.3d): a split card's top-level `colors` is compared with
+/// both halves combined.
+#[test]
+fn colors_cross_check_split() {
+    let ok = multi(
+        "split",
+        ("{1}{R}", "{3}{U}{U}", 7),
+        json!({"colors": ["R", "U"]}),
+    );
+    assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+    let bad = multi(
+        "split",
+        ("{1}{R}", "{3}{U}{U}", 7),
+        json!({"colors": ["R"]}),
+    );
+    assert_eq!(diags(&bad), vec!["colorsMismatch"]);
+}
+
+/// REQ-ING-002 (CR 716.4, 903.4): an adventure's colors are the main face's; its identity
+/// includes the adventure face.
+#[test]
+fn colors_cross_check_adventure() {
+    let r = multi(
+        "adventure",
+        ("{G}", "{W}", 1),
+        json!({"colors": ["G"], "color_identity": ["G", "W"]}),
+    );
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    assert_eq!(r.color_identity.bits() & 1, 1);
+    assert_eq!(r.color_identity.bits(), 17);
+    assert_eq!(r.faces[0].computed_colors.bits(), 16);
+}
+
+/// REQ-ING-002 (CR 710.2): a flip card's colors are the first face's.
+#[test]
+fn colors_cross_check_flip() {
+    let r = multi(
+        "flip",
+        ("{G}", "{W}", 1),
+        json!({"colors": ["G"], "color_identity": ["G", "W"]}),
+    );
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    let bad = multi(
+        "flip",
+        ("{G}", "{W}", 1),
+        json!({"colors": ["G", "W"], "color_identity": ["G", "W"]}),
+    );
+    assert_eq!(diags(&bad), vec!["colorsMismatch"]);
+}
+
+/// REQ-ING-002 (CR 712.6a, 204.2): transform and modal_dfc records carry no top-level `colors`;
+/// per-face `colors` are checked against each face's computed colors; a top-level `colors` is
+/// compared with the front face only.
+#[test]
+fn colors_cross_check_double_faced() {
+    for layout in ["transform", "modal_dfc"] {
+        let ident = json!({"color_identity": ["R", "U"]});
+        let r = multi(layout, ("{1}{R}", "{U}", 2), ident.clone());
+        assert!(r.diagnostics.is_empty(), "{layout}: {:?}", r.diagnostics);
+        let mut v = json!({
+            "oracle_id": oid(31), "name": "test.a // test.b", "layout": layout, "cmc": 2.0,
+            "color_identity": ["R", "U"],
+            "card_faces": [
+                {"name": "test.a", "mana_cost": "{1}{R}", "type_line": "Instant", "colors": ["R"]},
+                {"name": "test.b", "mana_cost": "{U}", "type_line": "Sorcery", "colors": ["U"]},
+            ]
+        });
+        let r = norm(&v);
+        assert!(r.diagnostics.is_empty(), "{layout}: {:?}", r.diagnostics);
+        v["card_faces"][1]["colors"] = json!(["R"]);
+        assert_eq!(diags(&norm(&v)), vec!["colorsMismatch"], "{layout}");
+        // Top-level `colors` (REQ-ING-002, CR 712.6a): the front face.
+        v["card_faces"][1]["colors"] = json!(["U"]);
+        v["colors"] = json!(["R"]);
+        let r = norm(&v);
+        assert!(r.diagnostics.is_empty(), "{layout}: {:?}", r.diagnostics);
+        v["colors"] = json!(["U"]);
+        assert_eq!(diags(&norm(&v)), vec!["colorsMismatch"], "{layout}");
+    }
 }

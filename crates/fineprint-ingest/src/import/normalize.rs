@@ -22,7 +22,9 @@ use serde_json::{Map, Value, json};
 
 use super::is_uuid_shape;
 use super::json_array::{ArrayError, split_array};
-use super::recompute::{cmc_matches, color_identity, face_colors, letters_mask, record_mana_value};
+use super::recompute::{
+    cmc_matches, color_identity, face_colors, letters_mask, record_colors, record_mana_value,
+};
 
 /// The version of the normalized output file.
 pub const FORMAT_VERSION: u64 = 1;
@@ -46,7 +48,7 @@ pub enum Diagnostic {
     ManaValueMismatch,
     /// The source `cmc` is missing, not a number or not finite.
     CmcMissing,
-    /// The source `colors` differ from the computed colors (front face).
+    /// A source `colors` (a face's or the record's) differs from the computed colors.
     ColorsMismatch,
     /// The source `color_identity` differs from the recomputed identity.
     ColorIdentityMismatch,
@@ -103,7 +105,8 @@ pub struct NormalizedFace {
     pub colors: Option<ColorBitmask>,
     /// The source `color_indicator`, converted to a mask (`None` when absent).
     pub color_indicator: Option<ColorBitmask>,
-    /// The recomputed colors: the indicator when present, otherwise the cost colors.
+    /// The recomputed colors: the union of the colours of the mana cost and of the color
+    /// indicator (CR 105.2, 202.2e, 204.2; an inference where both are present).
     pub computed_colors: ColorBitmask,
 }
 
@@ -603,7 +606,8 @@ pub fn normalize_card(v: &Value) -> Result<NormalizedCardRecord, RejectReason> {
         }
     }
 
-    // CR 903.4, 903.4c, 903.4d: every face, rules-text symbols outside reminder text.
+    // CR 903.4, 903.4c, 903.4d: every face (an Adventure's and a DFC's back included; each
+    // face's computed colors are the cost/indicator union), rules-text symbols outside reminder text.
     let identity_in: Vec<(ColorBitmask, Option<&str>)> = faces
         .iter()
         .map(|f| (f.computed_colors, f.oracle_text.as_deref()))
@@ -613,16 +617,21 @@ pub fn normalize_card(v: &Value) -> Result<NormalizedCardRecord, RejectReason> {
         diagnostics.insert(Diagnostic::ColorIdentityMismatch);
     }
 
-    // Colors cross-check against the front (or only) face.
-    if let Some(front) = faces.first() {
-        let source = if multi {
-            front.colors.or(top_colors)
-        } else {
-            top_colors
-        };
-        if source.is_some_and(|s| s != front.computed_colors) {
-            diagnostics.insert(Diagnostic::ColorsMismatch);
-        }
+    // Colors cross-check; the source never alters the computed values.
+    // A face's own `colors` is compared with that face's computed colors (CR 105.2, 204.2).
+    if faces
+        .iter()
+        .any(|f| f.colors.is_some_and(|s| s != f.computed_colors))
+    {
+        diagnostics.insert(Diagnostic::ColorsMismatch);
+    }
+    // The top-level `colors` is the card's colors off the stack: split = both halves combined
+    // (CR 709.4, 709.4b), adventure = main face (CR 716.4), flip = normal face (CR 710.2),
+    // transform, modal and others = front face (CR 712.6a). Absent (transform and modal_dfc
+    // sources carry none) raises nothing.
+    let face_masks: Vec<ColorBitmask> = faces.iter().map(|f| f.computed_colors).collect();
+    if top_colors.is_some_and(|s| s != record_colors(&layout, &face_masks)) {
+        diagnostics.insert(Diagnostic::ColorsMismatch);
     }
 
     let texts: Vec<Option<&str>> = faces.iter().map(|f| f.oracle_text.as_deref()).collect();
