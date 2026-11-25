@@ -41,6 +41,8 @@ pub fn symbol_colors(symbol: ManaSymbol) -> ColorBitmask {
         ManaSymbol::Colored(c) | ManaSymbol::GenericHybrid(_, c) | ManaSymbol::Phyrexian(c) => {
             color_mask(c)
         }
+        // CR 107.4e, 202.2d: {C/c} is exactly the color c.
+        ManaSymbol::ColorlessHybrid(c) => color_mask(c),
         // CR 202.2d: every component color of a hybrid symbol.
         ManaSymbol::Hybrid(a, b) | ManaSymbol::HybridPhyrexian(a, b) => {
             union(color_mask(a), color_mask(b))
@@ -99,6 +101,8 @@ pub fn symbol_mana_value(symbol: ManaSymbol) -> u64 {
         ManaSymbol::GenericHybrid(n, _) => u64::from(n),
         // CR 202.3g: each Phyrexian symbol counts 1.
         ManaSymbol::Phyrexian(_) | ManaSymbol::HybridPhyrexian(_, _) => 1,
+        // CR 202.3f, 107.4: the largest component of {C/c} is 1.
+        ManaSymbol::ColorlessHybrid(_) => 1,
         // CR 202.3e: X, Y and Z are 0 off the stack.
         ManaSymbol::Variable(_) => 0,
     }
@@ -230,4 +234,27 @@ pub fn cmc_matches(cmc: f64, mv: u64) -> bool {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let doubled = doubled as u64;
     mv.checked_mul(2) == Some(doubled)
+}
+
+#[cfg(test)]
+mod colorless_hybrid_tests {
+    //! REQ-OBJ-001, REQ-DSL-002: ingest recompute of colorless-hybrid symbols (CR 107.4e,
+    //! 202.2d, 202.3f).
+
+    use fineprint_dsl::mana::{Color, ManaCostDSL, ManaSymbol};
+
+    use super::{color_mask, cost_colors, cost_mana_value, symbol_colors, symbol_mana_value};
+
+    /// REQ-OBJ-001 (CR 202.3f, 107.4e, 202.2d): `{C/c}` is mana value 1 and exactly color c.
+    #[test]
+    fn req_obj_001_cr_202_3f_ingest_colorless_hybrid_arms() {
+        for c in Color::ALL {
+            let s = ManaSymbol::ColorlessHybrid(c);
+            assert_eq!(symbol_mana_value(s), 1);
+            assert_eq!(symbol_colors(s).bits(), color_mask(c).bits());
+        }
+        let cost = ManaCostDSL::parse("{C/W}{C/U}{1}").expect("cost");
+        assert_eq!(cost_mana_value(Some(&cost)), 3);
+        assert_eq!(cost_colors(Some(&cost)).bits(), 0b11);
+    }
 }

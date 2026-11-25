@@ -36,6 +36,11 @@ fn samples() -> Vec<(ManaSymbol, &'static str)> {
         (ManaSymbol::Phyrexian(White), "{W/P}"),
         (ManaSymbol::HybridPhyrexian(Green, Blue), "{G/U/P}"),
         (ManaSymbol::HybridPhyrexian(Blue, Green), "{U/G/P}"),
+        (ManaSymbol::ColorlessHybrid(White), "{C/W}"),
+        (ManaSymbol::ColorlessHybrid(Blue), "{C/U}"),
+        (ManaSymbol::ColorlessHybrid(Black), "{C/B}"),
+        (ManaSymbol::ColorlessHybrid(Red), "{C/R}"),
+        (ManaSymbol::ColorlessHybrid(Green), "{C/G}"),
     ]
 }
 
@@ -93,7 +98,6 @@ fn req_obj_001_unknown_symbols_rejected() {
         "{ W}",
         "{W }",
         "{W/W}",
-        "{C/W}",
         "{W/C}",
         "{P}",
         "{2/P}",
@@ -450,6 +454,7 @@ fn req_obj_001_new_agrees_with_parser() {
     for a in Color::ALL {
         symbols.push(ManaSymbol::Colored(a));
         symbols.push(ManaSymbol::Phyrexian(a));
+        symbols.push(ManaSymbol::ColorlessHybrid(a));
         for b in Color::ALL {
             symbols.push(ManaSymbol::Hybrid(a, b));
             symbols.push(ManaSymbol::HybridPhyrexian(a, b));
@@ -467,4 +472,140 @@ fn req_obj_001_new_agrees_with_parser() {
         }
     }
     assert!(valid > 0);
+}
+
+/// REQ-DSL-002, REQ-OBJ-001 (CR 107.4): each colorless-hybrid symbol `{C/c}` parses to
+/// `ColorlessHybrid(c)`, is valid, and prints back as the same canonical text.
+#[test]
+fn req_dsl_002_cr_107_4_colorless_hybrid_parse_and_display() {
+    for c in Color::ALL {
+        let text = format!("{{C/{}}}", c.letter());
+        let symbol = ManaSymbol::ColorlessHybrid(c);
+        assert!(symbol.is_valid());
+        assert_eq!(ManaSymbol::parse(&text), Ok(symbol), "{text}");
+        assert_eq!(text.parse::<ManaSymbol>(), Ok(symbol), "{text}");
+        assert_eq!(symbol.to_string(), text);
+        let cost = ManaCostDSL::parse(&text).expect("cost");
+        assert_eq!(cost.symbols(), &[symbol]);
+        assert_eq!(cost.to_string(), text);
+    }
+}
+
+/// REQ-DSL-002, REQ-OBJ-001 (CR 107.4): costs mixing and repeating `{C/c}` with other symbols
+/// keep their order and round-trip through the canonical text.
+#[test]
+fn req_dsl_002_cr_107_4_colorless_hybrid_mixed_cost_round_trip() {
+    use Color::*;
+    let text = "{C/W}{C/W}{1}{U}{C/G}";
+    let cost = ManaCostDSL::parse(text).expect("cost");
+    assert_eq!(
+        cost.symbols(),
+        &[
+            ManaSymbol::ColorlessHybrid(White),
+            ManaSymbol::ColorlessHybrid(White),
+            ManaSymbol::Generic(1),
+            ManaSymbol::Colored(Blue),
+            ManaSymbol::ColorlessHybrid(Green),
+        ]
+    );
+    assert_eq!(cost.to_string(), text);
+    assert_eq!(ManaCostDSL::parse(&cost.to_string()), Ok(cost.clone()));
+    for other in [
+        "{C}{C/U}{C/B}{C/R}",
+        "{2/W}{C/W}{W/U}{C/U}{B/P}{G/U/P}{C/G}{X}",
+    ] {
+        let parsed = ManaCostDSL::parse(other).expect(other);
+        assert_eq!(parsed.to_string(), other);
+    }
+    let built = ManaCostDSL::new(vec![
+        ManaSymbol::Generic(3),
+        ManaSymbol::ColorlessHybrid(Red),
+        ManaSymbol::ColorlessHybrid(Red),
+    ])
+    .expect("valid");
+    assert_eq!(built.to_string(), "{3}{C/R}{C/R}");
+    assert_eq!(ManaCostDSL::parse("{3}{C/R}{C/R}"), Ok(built));
+}
+
+/// REQ-DSL-002, REQ-OBJ-001 (CR 107.4): only `C`-first uppercase spellings are symbols; every
+/// near miss is `UnknownSymbol` at its `{` and nothing panics.
+#[test]
+fn req_dsl_002_cr_107_4_colorless_hybrid_non_canonical_rejected() {
+    for text in [
+        "{W/C}", "{U/C}", "{G/C}", "{C/P}", "{C/C}", "{C/S}", "{C/X}", "{c/W}", "{C/w}", "{c/w}",
+        "{C/W/P}", "{C/ W}", "{ C/W}", "{C /W}", "{C/}", "{/W}", "{C/2}", "{2/C}", "{C/W/U}",
+        "{C//W}",
+    ] {
+        assert_eq!(
+            ManaSymbol::parse(text),
+            Err(ManaParseError::UnknownSymbol {
+                offset: 0,
+                symbol: text.to_owned()
+            }),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        ManaCostDSL::parse("{C/W}{1}{W/C}"),
+        Err(ManaParseError::UnknownSymbol {
+            offset: 8,
+            symbol: "{W/C}".to_owned()
+        })
+    );
+}
+
+/// REQ-DSL-002, REQ-OBJ-001 (CR 107.4): strict serde decode accepts the five `{C/c}` spellings
+/// (equal to the parsed cost), serializes canonically, and rejects non-canonical text.
+#[test]
+fn req_dsl_002_cr_107_4_colorless_hybrid_serde_strict() {
+    for c in Color::ALL {
+        let text = format!("{{1}}{{C/{}}}", c.letter());
+        let json = format!("\"{text}\"");
+        let decoded: ManaCostDSL = serde_json::from_str(&json).expect("de");
+        assert_eq!(decoded, ManaCostDSL::parse(&text).expect("parse"));
+        assert_eq!(serde_json::to_string(&decoded).expect("ser"), json);
+    }
+    for bad in [
+        "\"{W/C}\"",
+        "\"{c/W}\"",
+        "\"{C/w}\"",
+        "\"{c/w}\"",
+        "\"{C/P}\"",
+        "\"{C/C}\"",
+    ] {
+        assert!(serde_json::from_str::<ManaCostDSL>(bad).is_err(), "{bad}");
+    }
+}
+
+/// REQ-DSL-002, REQ-OBJ-001 (CR 107.4), R12: bounded random strings built from `{C/`-style
+/// fragments never panic; anything accepted re-prints exactly, and colorless-hybrid symbols are
+/// among the accepted costs.
+#[test]
+fn req_dsl_002_cr_107_4_colorless_hybrid_random_strings_never_panic() {
+    const ALPHABET: &[&str] = &[
+        "{C/W}", "{C/G}", "{1}", "{C/", "{c/", "{W/", "C/", "/", "W", "U", "C", "P", "w", "}", "{",
+        " ",
+    ];
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x000b_1ec7_0169);
+    let mut accepted_colorless_hybrid = 0u32;
+    for _ in 0..4000 {
+        let len = (rng.next_u64() % 8) as usize;
+        let text: String = (0..len)
+            .map(|_| ALPHABET[(rng.next_u64() % ALPHABET.len() as u64) as usize])
+            .collect();
+        if let Ok(cost) = ManaCostDSL::parse(&text) {
+            assert_eq!(cost.to_string(), text);
+            if cost
+                .symbols()
+                .iter()
+                .any(|s| matches!(s, ManaSymbol::ColorlessHybrid(_)))
+            {
+                accepted_colorless_hybrid += 1;
+            }
+        }
+        if let Ok(symbol) = ManaSymbol::parse(&text) {
+            assert_eq!(symbol.to_string(), text);
+        }
+    }
+    assert!(accepted_colorless_hybrid > 0);
 }

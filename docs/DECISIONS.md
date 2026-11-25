@@ -8372,3 +8372,25 @@ an implementation detail for black-box tests.
 **Alternatives.** Keep the SRS shorthand and assert rejection (rejected: loses the round-trip
 coverage of the examples); pin the exact nesting boundary in spec tests (rejected: couples the
 black-box tests to wrapper depth).
+
+## #169 FP-142 — Colorless-hybrid ManaSymbol variant
+
+**Decision.** `{C/W}`, `{C/U}`, `{C/B}`, `{C/R}`, `{C/G}` are represented by a new variant
+`ManaSymbol::ColorlessHybrid(Color)`, appended last (CR-001, additive) so existing variant order
+and the derived `Ord` are unchanged. The parser accepts only the `C`-first uppercase spelling;
+`{W/C}`, `{C/P}`, `{C/C}`, lowercase forms and the like stay `UnknownSymbol`. Mana value is 1
+(CR 202.3f: largest component of {C} and {c}); colors are exactly c (CR 107.4e, 202.2d); color
+identity picks this up unchanged through `symbol_colors` (CR 903.4). The owned paths were
+extended to the two `ManaSymbol` matches in `crates/fineprint-ingest/src/import/recompute.rs`
+(`symbol_colors`, `symbol_mana_value`) plus an inline test module there: both matches are
+exhaustive, so the workspace does not compile without the new arms. This entry supersedes the
+citation in "#21 FP-020 — `{C/W}` is not representable in `ManaSymbol`", which credited "colored
+with mana value 1" to CR 107.4e alone: the correct citation is CR 107.4/107.4e for the symbol and
+its color, and CR 202.3f for its mana value. The follow-up that entry described has now landed.
+**Rationale.** A dedicated variant keeps `GenericHybrid`'s `n >= 1` rule and `{1/W}` semantics
+intact, and appending it is the only additive change allowed by R2.
+**Alternatives.** Encode `{C/c}` as `GenericHybrid(0, c)` or `GenericHybrid(1, c)` (rejected:
+changes the meaning and validity of existing symbols and their canonical text); a generic
+`Hybrid`-with-colorless enum for the left half (rejected: changes an existing variant, breaking);
+add a wildcard arm in ingest instead of explicit arms (rejected: would silently mis-handle future
+symbols).
