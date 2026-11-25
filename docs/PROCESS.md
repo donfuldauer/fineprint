@@ -400,3 +400,11 @@ decisions (R8):
 - anything with legal weight: distribution of card data, licensing, commercial use (SRS §1.3);
 - publishing a release (crates, NuGet, npm packages);
 - repository settings an agent cannot change (for example branch-protection required checks).
+
+**Manual testing.** A session never waits for a person to test anything by hand (running a
+binding host, a UI, a package on a real machine, or any other manual or physical check), and
+never asks for it mid-run. Such checks are reserved for the owner's acceptance pass once the plan
+is complete: the session automates everything it can, records what only a person can check in
+the item's `docs/DECISIONS.md` entry under "Manual check at final acceptance", and carries on. A
+pending manual check never holds a unit, leaves a PR open, fails the work-verifier, fails a gate
+or ends a run.

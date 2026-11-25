@@ -335,4 +335,5 @@ scheduled task exists or it is disabled, nothing starts automatically. See DECIS
 
 Start a session to chain to the next issue; start an issue whose dependencies are open; push to `main`; merge with a failing required check
 or an unresolved thread; skip, ignore or weaken a test; put card data in the repository (R5);
-quote CR rules from memory (R6).
+quote CR rules from memory (R6); wait for, or ask, a person to test anything by hand (record it
+for final acceptance and carry on, PROCESS.md P8 "Manual testing").

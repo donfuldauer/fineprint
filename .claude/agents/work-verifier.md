@@ -30,7 +30,9 @@ real `requirements: <n met / n total>` count over all brief requirements (never 
 
 1. **Requirements traced.** For each REQUIREMENTS item find the implementing code and a test that
    exercises it, and run that test: `met` (test name and result), `not met`, or `untestable here`
-   (the issue must say it needs a person or special hardware). Docs-only requirements are
+   (the issue must say it needs a person or special hardware). An `untestable here` item recorded
+   for final acceptance does not fail the verdict (PROCESS.md P8 "Manual testing"). Docs-only
+   requirements are
    `met` on file:line evidence.
 2. **REQ-ID trace.** Every `REQ-*` ID the brief claims appears in at least one passing test's name,
    doc comment or `.pzl` header. For a whole-milestone check run
