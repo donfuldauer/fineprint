@@ -7592,3 +7592,17 @@ the sole code reviewer (R9); only its timing changes.
 - Review on the gate issue's own PR against `main`: rejected because CodeRabbit would see only that
   issue's diff, not the phase's cumulative changes.
 - Milestone-only gates: rejected for diff size (point 5).
+
+## Process — Manual testing waits for final acceptance
+
+**Decision:** At the owner's direction (2026-11-25), no session waits for a person to test
+anything by hand. Agents automate what they can, record anything only a person can check in the
+item's DECISIONS.md entry under "Manual check at final acceptance", and continue. A pending manual
+check never holds a unit, a PR merge, the work-verifier's verdict, a gate, or a run (PROCESS.md
+P8 "Manual testing"; `work-issue` "Never").
+
+**Rationale:** The owner reserves manual testing for one pass once everything is complete, so the
+run stays unattended.
+
+**Alternatives:**
+- Pause a unit until the owner tests it by hand: rejected by the owner's direction.
