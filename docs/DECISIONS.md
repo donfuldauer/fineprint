@@ -4916,6 +4916,10 @@ infect in the normalizer (no flag in the event).
    unit, #180. Once that lands, `events_from_batch` emits `UNATTACHED` occurrences from the new
    records.
 
+   *Landed in #180 (FP-143):* executed events now carry `ExecutedEvent::unattached` records and
+   `events_from_batch` emits `UNATTACHED` from them; the player-leaves-game case stays deferred
+   (see "#180 FP-143 — Host player leaving the game: deferred").
+
 **Rationale:** CodeRabbit round-2 findings on PR #179, using the cached CR 2026-11-06 text. The
 executor and its outcome encoding are owned by the closed #27 FP-026, so changing them needs the R2
 contract-change protocol.
@@ -8973,3 +8977,103 @@ player who has left the game and only to a choice that survives departure. Routi
 surviving choice to the next player in turn order (CR 800.4h, not APNAP) belongs with #125
 (rules-researcher, CR 2026-11-06).
 (3) Keep the check on the deferred path only. Rejected: that is the reported suspension defect.
+
+## #180 FP-143 — Lost attachment links live on `ExecutedEvent`, not on `Outcome`
+
+**Decision:** The links an executed event removes are reported in a new last field
+`ExecutedEvent::unattached: Vec<UnattachRecord>` (`attachment`, `host`), encoded last as a
+length-prefixed sequence (CR-004). `Outcome` and every existing tag are unchanged.
+
+**Rationale:** `Outcome` is `Copy` and is matched by value across the engine (SBA, replacement
+bus, entering copies); one event can end any number of links (a host with several attachments),
+so the fan-out needs a `Vec`, which would make `Outcome` non-`Copy` and change every variant's
+shape. On `ExecutedEvent` the change is one trailing field: existing consumers keep reading
+`outcome` unchanged, and the encoding change is a single appended sequence.
+
+**Alternatives:** A new `Outcome` variant or a field on `Outcome::Attached` /
+`Outcome::ZoneChange` (rejected: breaks `Copy`, changes every match site, and still could not
+carry several links without a `Vec`). A separate log of unattach records beside the batch
+(rejected: trigger normalization would have to join two logs and the batch order would be lost).
+
+## #180 FP-143 — `GameEvent::UnattachFrom`, and why the SBA switch is a follow-up
+
+**Decision:** Add `GameEvent::UnattachFrom { attachment, host }` (tag 17, appended last). It
+clears the link only if the attachment is attached to exactly `host` and is otherwise a no-op;
+plain `Unattach` keeps clearing whatever the current host is. The replacement bus maps it to the
+same `UNATTACH` kind and the same affected object as `Unattach`. `sba/perform.rs` keeps
+submitting plain `Unattach`; adopting `UnattachFrom` there is a follow-up for the SBA owner.
+
+**Rationale:** CR 701.3d ("becoming unattached from that object or player") names the host. The
+residual SBA case in "#42 FP-041 — Planned unattach and pre-pass host (round 3)" (a replacement
+re-attaches E, which E's own planned `Unattach` then clears from the new host) needs an unattach
+that only ends the planned link. `sba/**` is not owned by this unit (R1), so only the event is
+added here.
+
+**Alternatives:** Change `Unattach` to carry an optional host (rejected: changes an existing tag's
+encoding and every literal). Change the SBA pass here (rejected: outside the owned paths).
+
+## #180 FP-143 — Order of unattach records
+
+**Decision:** Within one executed event the records are: for `Attach` to a different host, one
+record for the previous host; for `Unattach`/`UnattachFrom`, the cleared link; for a permanent
+leaving the battlefield, first its own link (under its old id), then one record per permanent
+attached to it, ascending id (`Permanents::attachments_of` order). Both are read before
+`Permanents::leave` drops them. A same-zone reposition, a first attach and a same-host attach
+(CR 701.3b) record nothing. Records are produced in the same runs as outcomes, so the planning
+run's records are discarded with its state and a failed batch logs nothing.
+
+**Rationale:** The leaving object is the event's subject, so its own link is reported first; the
+ascending order for its attachments is the engine's stable ordering key (R3). An earlier
+`Unattach` in the same batch has already cleared a link, so a later zone change finds none and no
+link is reported twice (this is how the SBA pass, which submits its unattaches before its zone
+changes, stays at one occurrence per link).
+
+**Alternatives:** Attachments first, then the own link (rejected: no rules difference, and the
+subject-first order matches the occurrence order of the event itself). Timestamp order for the
+attachments (rejected: ids are the documented stable key and need no extra lookup).
+
+## #180 FP-143 — Normalizer order: the event's own occurrences, then its records
+
+**Decision:** `events_from_batch` emits, for each executed event, its own occurrences first, then
+one `UNATTACHED` occurrence per record in record order (subject = the attachment's pre-event id
+in both views). `Unattach` and `UnattachFrom` emit their single `UNATTACHED` occurrence from the
+event itself and ignore their records. So a move to a new host is `ATTACHED` then `UNATTACHED`,
+and a host dying is its zone-change occurrence then the `UNATTACHED` occurrences.
+
+**Rationale:** REQ-EVENT-002 fixes batch order for the indices; within one event the event
+itself happened, and the links ended as part of it. Ignoring the records of an explicit unattach
+keeps existing executed-event literals (which have no records) triggering exactly once and makes
+duplication impossible.
+
+**Alternatives:** Records before the event's own occurrences (rejected: an `ATTACHED` trigger
+would then see an index after its own `UNATTACHED`, which reads as unattach-then-attach). Emitting
+records for `Unattach` instead of the event (rejected: literals without records would stop
+triggering).
+
+## #180 FP-143 — Host player leaving the game: deferred
+
+**Decision:** An attachment whose host player leaves the game (CR 701.3d, "or that player leaves
+the game"; CR 800.4a) is not reported here. The engine has no player-leaves-game event yet
+(#125), so there is nothing to attach a record to. `UnattachRecord.host` already supports
+`AttachTarget::Player`, so the player-leaves procedure can report these links with no further
+contract change. Phasing (CR 702.26i, CR 702.26j) is not modelled and touches no link.
+
+**Rationale:** Out of the owned paths and without an executing event; the record type is ready.
+
+**Alternatives:** Synthesize records from a player designation change (rejected: there is no such
+event in the executed log, and inventing one would be a contract change outside this unit).
+
+## #180 FP-143 — Tokens ceasing to exist in the SBA pass log no record
+
+**Decision:** `sba/perform.rs` (around line 891) removes ceasing objects with
+`Permanents::leave` directly, not through a zone-change event, so a link they were part of ends
+without an `UnattachRecord` and without `UNATTACHED`. This unit does not change it (`sba/**` is
+not owned here); it is recorded for the SBA owner as a follow-up.
+
+**Rationale:** The executor can only report links that its own events end. In the normal flow a
+token leaves the battlefield through a zone change (which records its links) and only then ceases
+to exist in another zone, where it has no links, so the path matters only for an object that
+ceases to exist while still on the battlefield.
+
+**Alternatives:** Report from `Permanents::leave` (rejected: the permanent container is not owned
+here and has no log). Change `perform.rs` here (rejected: R1).
