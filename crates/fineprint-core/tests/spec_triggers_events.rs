@@ -237,6 +237,7 @@ fn literal_zone_change(
             to: ZoneId::of(to, P2),
         }),
         lki_captured: from == ZoneKind::Battlefield,
+        unattached: vec![],
     }
 }
 
@@ -465,6 +466,7 @@ fn literal_same_zone(z: ZoneKind, cause: ZoneChangeCause, old: u64, new: u64) ->
             to: ZoneId::of(z, P1),
         }),
         lki_captured: false,
+        unattached: vec![],
     }
 }
 
@@ -1303,6 +1305,7 @@ fn spec_triggers_events_odd_literals_do_not_panic() {
                 )),
                 outcome: Outcome::Applied,
                 lki_captured: false,
+                unattached: vec![],
             },
             ExecutedEvent {
                 instance: EventInstance::new(GameEvent::Tap {
@@ -1310,6 +1313,7 @@ fn spec_triggers_events_odd_literals_do_not_panic() {
                 }),
                 outcome: Outcome::TurnBegan { turn: 9 },
                 lki_captured: false,
+                unattached: vec![],
             },
             ExecutedEvent {
                 instance: EventInstance::new(GameEvent::RemoveCounters {
@@ -1319,6 +1323,7 @@ fn spec_triggers_events_odd_literals_do_not_panic() {
                 }),
                 outcome: Outcome::Applied,
                 lki_captured: false,
+                unattached: vec![],
             },
             ExecutedEvent {
                 instance: EventInstance::new(GameEvent::LifeChange {
@@ -1327,6 +1332,7 @@ fn spec_triggers_events_odd_literals_do_not_panic() {
                 }),
                 outcome: Outcome::Applied,
                 lki_captured: false,
+                unattached: vec![],
             },
         ],
     };
