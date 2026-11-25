@@ -513,3 +513,5 @@ merges get their own rows. Fable uses carry the classifier's evidence in Notes.
 | 13-toolchain | #87 | rules-researcher | inherit | 1 | done | - | colors: cost and indicator union (105.2); split union (709.4b); adventure/flip/DFC first face (716.4, 710.2, 712.6a); MV as implemented |
 | 13-toolchain | #87 | work-classifier | inherit | 2 | routed | - | Fixer T1 Sonnet 5.5 |
 | 13-toolchain | #87 | Fixer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all, cr check ok | union colors, per-layout colorsMismatch; cr-citations.json regenerated |
+| 13-toolchain | #88 | work-classifier | inherit | 1 | routed | - | Implementer T1 Sonnet 5.5; FABLE_ALLOWANCE unknown (no Fable); lib.rs one-line wiring granted |
+| 13-toolchain | #88 | Implementer | Sonnet 5.5 | 1 | done | fmt, clippy clean; workspace pass; guard all ok; ingest 96.71 %, layout 99.43 % | layout mapping, 9 tests; 5 DECISIONS entries |
