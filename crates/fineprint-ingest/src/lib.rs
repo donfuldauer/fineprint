@@ -15,3 +15,6 @@ pub mod vocab;
 /// `fineprint-ingest fetch` and `import`: the Scryfall bulk import into the git-ignored cache
 /// (REQ-ING-001, REQ-ING-002, REQ-NFR-004).
 pub mod import;
+
+/// Layout and face mapping from Scryfall `layout` to `LayoutBehavior` (REQ-ING-003).
+pub mod layout;

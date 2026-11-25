@@ -8008,3 +8008,45 @@ inputs above 4 GiB are refused before reading.
 **Rationale.** REQ-ING-001 (provenance), R3 (byte-identical output), R12, REQ-NFR-004 (card data
 only in the git-ignored cache or an explicit path).
 **Alternatives.** One `serde_json::Value` for the whole file (memory grows with the file).
+
+## #88 FP-086 — Battle layout maps to DFC_NONMODAL (D1)
+
+**Decision.** Scryfall `battle` maps to `LayoutBehavior::DfcNonmodal`; one face gives `[Main]`,
+two faces give `[Main, Back]`.
+**Rationale.** `LayoutBehavior` has no Battle variant and battle cards are double-faced
+(SRS §4.2 row "same-named behavior" has no match; the DFC layout is the nearest).
+**Alternatives.** A new `Battle` variant (a dsl contract change, R2); treating it as unknown.
+
+## #88 FP-086 — Emblem layout maps to TOKEN with token_kind Emblem (D2)
+
+**Decision.** Scryfall `emblem` maps to `LayoutBehavior::Token` with `token_kind = Emblem`;
+`token` and `double_faced_token` give `Token` / `DfcToken` with `token_kind = Token`.
+**Rationale.** There is no Emblem variant, and the SRS row says "Token or emblem records".
+**Alternatives.** A new `Emblem` variant (contract change, R2).
+
+## #88 FP-086 — Meld record shape (D3)
+
+**Decision.** A meld record is one source object with exactly one face `[Main]`; the melded
+result is a separate record. `FaceKind::MeldResult` is not assigned by this unit. Partners are
+`all_parts` entries with component `meld_part` or `meld_result` and a name differing from the
+record's own, sorted and deduplicated; none gives `MeldPartnerMissing`.
+**Rationale.** SRS §4.2: meld cards are not DFCs (CR 713.1).
+**Alternatives.** Two faces including the result face.
+
+## #88 FP-086 — UNSUPPORTED is a support status, not a layout
+
+**Decision.** `UNSUPPORTED` is carried as `SupportStatus::Unsupported` by `LayoutError` and
+`UnsupportedReason`; no layout variant is added and the dsl crate is untouched. Layouts the SRS
+table does not list (for example `attraction`, `conspiracy`) are unknown layouts
+(`UnknownLayout`). `augment` and `host` are always Unsupported (`ext.unset`; no extension flag
+exists yet). `Verified` is never produced (R11).
+**Rationale.** `LayoutBehavior` has no Unsupported variant; contracts change only by R2.
+**Alternatives.** Adding a variant (contract change).
+
+## #88 FP-086 — Wiring edit and path grant
+
+**Decision.** The only edit outside `crates/fineprint-ingest/src/layout/` is the single
+`pub mod layout;` line with its doc comment in `crates/fineprint-ingest/src/lib.rs`, plus this
+file. No `Cargo.toml`/`Cargo.lock` change, no re-exports; `import/**` is untouched.
+**Rationale.** Same pattern as "#87 FP-085 — Wiring edit and path grant".
+**Alternatives.** None.
