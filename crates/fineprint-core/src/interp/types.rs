@@ -191,7 +191,9 @@ pub trait InterpEnv {
     fn spells_cast_this_turn(&self) -> Vec<(PlayerId, ObjectView)>;
     /// Last-known-information views of the creatures that died this turn.
     fn creatures_died_this_turn(&self) -> Vec<ObjectView>;
-    /// Mana spent to cast `spell`, only of that color when `color` is given.
+    /// Mana spent to cast `spell`, only of that color when `color` is given. `spell` may be the
+    /// id of a permanent that the spell became; the result is then the payment carried in that
+    /// permanent's spell history (CR 400.7d).
     fn mana_spent_to_cast(&self, spell: ObjectId, color: Option<&str>) -> i64;
     /// The current value of a rewritable word token of `source` (SRS §14.5).
     fn text_token_value(&self, source: ObjectId, token_id: &str) -> Option<String>;
