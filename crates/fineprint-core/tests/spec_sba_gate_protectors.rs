@@ -26,7 +26,9 @@ use fineprint_core::layers::{ContinuousEffects, LayerEnvironment};
 use fineprint_core::replacement::{
     Action, BusError, BusEventKind, BusInterrupt, EventMatcher, ReplacementEffect,
 };
-use fineprint_core::sba::{SbaRegistry, perform_all_relayered};
+use fineprint_core::sba::{
+    SbaEnvironment, SbaRegistry, perform_all_post_batch, perform_all_relayered,
+};
 use fineprint_core::txn::Transactional;
 use support::*;
 
@@ -397,4 +399,142 @@ fn req_sba_001_704_5x_relayered_entry_point_asks_the_retained_battle() {
     assert_eq!(o.protectors_chosen, vec![(b, P1)]);
     assert!(o.performed);
     assert_eq!(state.env.battle_protectors.get(&b), Some(&P1));
+}
+
+/// One `perform_all_post_batch` pass over `s` through the public API: the provider hands back
+/// the same layer inputs and a read-only protector view that is a copy of `s.env` without the
+/// (battle, player) pairs of `eligible_after` in its illegal protectors (the caller's state
+/// after the batch). A pending request must leave the state unchanged.
+fn call_sba_post_batch(
+    s: &mut Sim,
+    c: &mut ChoiceContext<'_>,
+    eligible_after: &[(ObjectId, PlayerId)],
+) -> Result<SbaOut, Interrupt> {
+    let registry = SbaRegistry::standard();
+    let before = s.snap();
+    let mut view_env = s.env.clone();
+    for pair in eligible_after {
+        view_env.illegal_protectors.remove(pair);
+    }
+    let Sim {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider,
+        layer,
+        effects,
+        env,
+        replacements,
+        ..
+    } = s;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider,
+    };
+    let (effects, layer): (&ContinuousEffects, &dyn LayerEnvironment) = (effects, layer);
+    let mut post_batch = |_: &EventContext<'_>,
+                          view: &mut dyn FnMut(
+        &ContinuousEffects,
+        &dyn LayerEnvironment,
+        &dyn SbaEnvironment,
+    )| { view(effects, layer, &view_env) };
+    let r = perform_all_post_batch(
+        &registry,
+        &mut ctx,
+        replacements,
+        effects,
+        layer,
+        env,
+        c,
+        &mut post_batch,
+    );
+    match r {
+        Ok(o) => Ok(Ok(o)),
+        Err(BusInterrupt::Pending(p)) => {
+            assert_eq!(s.snap(), before, "a pending pass changed the state");
+            Err(Interrupt::Pending(p))
+        }
+        Err(BusInterrupt::Error(BusError::Choice(e @ ChoiceError::Invalid { .. }))) => {
+            Err(Interrupt::Error(e))
+        }
+        Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+    }
+}
+
+/// Starts a `perform_all_post_batch` session over `s` and answers each request with
+/// `answers` in order; returns the requests, the final state and the outcome.
+fn drive_post_batch(
+    s: &Sim,
+    answers: &[PlayerId],
+    eligible_after: &[(ObjectId, PlayerId)],
+) -> (Vec<PendingChoiceRequest>, Sim, SbaOut) {
+    let mut session = ChoiceSession::start(s.clone(), |s: &mut Sim, c: &mut ChoiceContext<'_>| {
+        call_sba_post_batch(s, c, eligible_after)
+    })
+    .unwrap();
+    let mut requests = Vec::new();
+    let mut answers = answers.iter();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                assert!(answers.next().is_none(), "unused answers");
+                return (requests, state.clone(), output.clone());
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        let answer = *answers.next().expect("more requests than answers");
+        session
+            .submit(pending.request_id, submit_player(answer))
+            .unwrap();
+        requests.push(pending);
+    }
+}
+
+/// REQ-SBA-001, REQ-LAYER-001, CR 704.5v, 704.5x, 614.6, 704.3 (gate 02-state-objects
+/// R3c, threads 4698236604 and 4698236625): through the re-exported `perform_all_post_batch`,
+/// the post-batch request of a retained zero-defense Siege takes who can be its protector from
+/// the provider's read-only view (P2, ineligible in the pass's own environment, is a candidate);
+/// the answer is recorded through the pass's own environment, whose eligibility facts are
+/// untouched. A retained Siege whose controller loses the game in the same pass gets no
+/// request.
+#[test]
+fn req_sba_001_704_5x_post_batch_entry_point_reads_the_eligibility_view() {
+    let mut s = Sim::with_players(3);
+    let b = s.siege(P1, P1, 0, None);
+    s.add_replacement(ReplacementEffect::new(eid(1), sba_move_of(b), Action::Skip));
+    s.env.illegal_protectors.insert((b, P2));
+
+    let (requests, after, out) = drive_post_batch(&s, &[P2], &[(b, P2)]);
+    assert_eq!(requests.len(), 1);
+    assert_protector_request(&requests[0], P1, "CR 704.5x", &[P2, P3]);
+    assert_eq!(requests[0].reason.source, Some(b));
+    assert_eq!(
+        out.expect("an SBA outcome").protectors_chosen,
+        vec![(b, P2)]
+    );
+    assert_eq!(after.env.battle_protectors.get(&b), Some(&P2));
+    assert!(after.env.illegal_protectors.contains(&(b, P2)));
+
+    // The pass's own environment (no view change): P3 only.
+    let (requests, _, _) = drive_post_batch(&s, &[P3], &[]);
+    assert_protector_request(&requests[0], P1, "CR 704.5x", &[P3]);
+
+    // The controller loses the game in the same pass: no request.
+    s.set_life(P1, 0);
+    let (requests, after, out) = drive_post_batch(&s, &[], &[(b, P2)]);
+    assert!(requests.is_empty());
+    let o = out.expect("an SBA outcome");
+    assert_eq!(o.lost_players, vec![P1]);
+    assert!(o.protectors_chosen.is_empty());
+    assert!(!after.env.battle_protectors.contains_key(&b));
 }

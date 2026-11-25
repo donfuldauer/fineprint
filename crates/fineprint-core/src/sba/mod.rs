@@ -23,7 +23,9 @@
 //! of CR 704.3 (repeat while something was performed, then put waiting triggers on the stack)
 //! belongs to the heartbeat. [`perform_all_relayered`] is the same pass with the layer inputs
 //! of the state after the batch supplied by the caller, for the protector choice of a
-//! zero-defense battle that stays on the battlefield (CR 704.5x, CR 614.6).
+//! zero-defense battle that stays on the battlefield (CR 704.5x, CR 614.6);
+//! [`perform_all_post_batch`] also takes a read-only view of the protector facts of that
+//! state from the caller.
 //!
 //! **Inputs.** Toughness, abilities and card types are the evaluated characteristics
 //! (CR 613.1, CR 613.4) from the caller's [`ContinuousEffects`](crate::layers::ContinuousEffects)
@@ -63,7 +65,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use perform::{PostBatchLayers, check, perform_all, perform_all_relayered};
+pub use perform::{
+    PostBatchLayers, PostBatchState, check, perform_all, perform_all_post_batch,
+    perform_all_relayered,
+};
 pub use registry::{SbaAction, SbaEntry, SbaRegistry, VariantGate};
 pub use types::{
     GameVariant, LOST_THE_GAME, SPEED, SbaEnvironment, SbaFinding, SbaOutcome, SbaSubject,

@@ -5531,6 +5531,322 @@ fn sba_704_5x_relayered_pending_restores_and_replays() {
     assert_ne!(run.hash, before);
 }
 
+// Gate 02-state-objects R3c: the retained-battle request reads the protector facts of the state
+// after the batch from the caller's read-only view (`perform_all_post_batch`), names the CR
+// rule of the entry that flags the battle after the batch, and is never addressed to a player
+// who has lost the game.
+
+/// How a test caller of [`perform_all_post_batch`] derives its read-only post-batch protector
+/// view from the pre-batch environment and the context after the batch.
+type ViewRule<'a> = &'a dyn Fn(&StoredSbaEnvironment, &EventContext<'_>) -> StoredSbaEnvironment;
+
+/// One `perform_all_post_batch` pass over `w`: fresh layer inputs of the state after the batch,
+/// and the protector view `rule` derives. Pending and error handling as [`run_pass`].
+fn run_pass_post_batch(
+    w: &mut World,
+    ch: &mut ChoiceContext<'_>,
+    rule: ViewRule<'_>,
+) -> Result<Out, Interrupt> {
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    let pre_env = w.env.clone();
+    let registry = SbaRegistry::standard();
+    let World {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        registry: replacements,
+        effects,
+        chars,
+        env,
+        ..
+    } = w;
+    let effects: &ContinuousEffects = effects;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider: &snap,
+    };
+    let mut provider = |after: &EventContext<'_>,
+                        view: &mut dyn FnMut(
+        &ContinuousEffects,
+        &dyn LayerEnvironment,
+        &dyn SbaEnvironment,
+    )| {
+        let fresh = snapshot_of(after.zones, after.events, chars);
+        let facts = rule(&pre_env, after);
+        view(effects, &fresh, &facts);
+    };
+    let result = perform_all_post_batch(
+        &registry,
+        &mut ctx,
+        replacements,
+        effects,
+        &snap,
+        env,
+        ch,
+        &mut provider,
+    );
+    settle(w, before, result)
+}
+
+/// Runs one `perform_all_post_batch` pass on a clone of `w` in a choice session, answering
+/// `answers` in order; returns the run and every request asked.
+fn drive_post_batch(
+    w: &World,
+    answers: &[ChoiceResponse],
+    rule: ViewRule<'_>,
+) -> (Run, Vec<PendingChoiceRequest>) {
+    let mut session =
+        ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+            run_pass_post_batch(w, ch, rule)
+        })
+        .unwrap();
+    let mut asked = Vec::new();
+    let mut answers = answers.iter();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                assert!(answers.next().is_none(), "unused answers");
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        let answer = answers.next().expect("more requests than answers").clone();
+        session.submit(pending.request_id, answer).unwrap();
+        asked.push(pending);
+    }
+}
+
+/// The protector candidates of a `CHOOSE_PLAYER` request.
+fn player_candidates(r: &PendingChoiceRequest) -> Vec<PlayerId> {
+    match &r.payload {
+        ChoicePayload::ChoosePlayer { players } => players.clone(),
+        other => panic!("not a CHOOSE_PLAYER payload: {other:?}"),
+    }
+}
+
+/// Three players (active player 1): a Siege `s` of player 1 at defense 0 with no protector,
+/// unattacked, whose graveyard move a persistent replacement skips, with an Equipment `gear`
+/// attached to it (the batch unattaches it). The caller's environment says player 2
+/// can't be the protector of `s` while `gear` is attached to it. Returns (world, s, gear).
+fn post_batch_eligibility_world() -> (World, ObjectId, ObjectId) {
+    let mut w = World::three([1, 2, 3], 1);
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    let gear = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(gear, AttachTarget::Permanent(s));
+    w.env.illegal_protectors.insert((s, p(2)));
+    (w, s, gear)
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 704.5v, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects
+// R3c, thread 4698236604): the post-batch request of a retained Siege reads who can be its
+// protector from the caller's post-batch view: player 2 becomes eligible when the batch
+// unattaches the Equipment, so the candidates are players 2 and 3; with the pre-batch
+// environment (the view routed back to it, or `perform_all`) they would be player 3 only. The
+// chosen protector is written through the ORIGINAL environment after the pass succeeded (the
+// view is never written back); a pending request leaves the world, its environment flags and
+// recorded protectors included, exactly as before the pass.
+#[test]
+fn sba_704_5x_retained_request_reads_post_batch_eligibility_view() {
+    let (w, s, gear) = post_batch_eligibility_world();
+    assert_eq!(w.clone().found(obj(s)), ["704.5v", "704.5x"]);
+    let unattached = move |pre: &StoredSbaEnvironment, after: &EventContext<'_>| {
+        let mut view = pre.clone();
+        if after.permanents.attached_to(gear) != Some(AttachTarget::Permanent(s)) {
+            view.illegal_protectors.remove(&(s, p(2)));
+        }
+        view
+    };
+    let before = w.state_hash();
+    let session = ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+        run_pass_post_batch(w, ch, &unattached)
+    })
+    .unwrap();
+    let pending = session.pending().expect("no request").clone();
+    assert_eq!(session.state_hash(), before);
+    assert_eq!(session.base().env, w.env);
+    assert_eq!(pending.chooser, p(1));
+    assert_eq!(pending.reason.cr, "CR 704.5x");
+    assert_eq!(pending.reason.source, Some(s));
+    assert_eq!(player_candidates(&pending), [p(2), p(3)]);
+    assert_eq!(pending.default_on_timeout, submit_player(2));
+
+    let (run, asked) = drive_post_batch(&w, &[submit_player(2)], &unattached);
+    assert_eq!(asked, std::slice::from_ref(&pending));
+    let out = run.out.unwrap();
+    assert_eq!(out.unattached, [gear]);
+    assert_eq!(out.protectors_chosen, [(s, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&s), Some(&p(2)));
+    // The view's eligibility never reaches the original environment.
+    assert!(run.state.env.illegal_protectors.contains(&(s, p(2))));
+    assert_eq!(run.state.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+
+    // The view routed back to the pre-batch environment: player 3 only, same request id.
+    let stale = |pre: &StoredSbaEnvironment, _: &EventContext<'_>| pre.clone();
+    let (run_stale, asked_stale) = drive_post_batch(&w, &[submit_player(3)], &stale);
+    assert_eq!(asked_stale.len(), 1);
+    assert_eq!(player_candidates(&asked_stale[0]), [p(3)]);
+    assert_eq!(asked_stale[0].request_id, pending.request_id);
+    // T2: `perform_all` (and so `perform_all_relayered`) reads the pass's own environment.
+    let (run_all, asked_all) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked_all, asked_stale);
+    assert_eq!(run_all.out, run_stale.out);
+    assert_eq!(run_all.hash, run_stale.hash);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 704.5y, CR 614.6 (gate 02-state-objects R3c,
+// thread 4698236617): an unattacked Siege at defense 0 whose protector (player 2) can't be its
+// protector is a CR 704.5y subject before the batch; player 2 loses the game in the same pass,
+// so after the batch the Siege has no protector and the entry that flags it is CR 704.5x: the
+// post-batch request names CR 704.5x, not the pre-batch CR 704.5y.
+#[test]
+fn sba_704_5x_retained_request_names_the_post_batch_rule() {
+    let mut w = World::three([1, 2, 3], 1);
+    let s = w.new_battle(1, 1, true, 0, Some(2));
+    w.env.illegal_protectors.insert((s, p(2)));
+    w.skip_sba_move(1, s);
+    w.set_life(2, 0);
+    assert_eq!(w.found(obj(s)), ["704.5v", "704.5y"]);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(asked[0].reason.source, Some(s));
+    assert_eq!(player_candidates(&asked[0]), [p(3)]);
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(2)]);
+    assert_eq!(out.protectors_chosen, [(s, p(3))]);
+    assert_eq!(run.state.env.battle_protectors.get(&s), Some(&p(3)));
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 704.5y, CR 614.6 (gate 02-state-objects R3c, thread
+// 4698236617): controls. A retained Siege that is CR 704.5y before and after the batch keeps
+// CR 704.5y (also when the post-batch view changes why its protector is illegal); one that is
+// CR 704.5x both times keeps CR 704.5x; one that is CR 704.5x before the batch and, in the
+// caller's post-batch view, has a protector that can't protect it (its own controller) is
+// asked with CR 704.5y.
+#[test]
+fn sba_704_5x_y_retained_request_rule_controls() {
+    // 704.5y both times (the pass's own environment).
+    let mut w = World::three([1, 2, 3], 1);
+    let y = w.new_battle(1, 1, true, 0, Some(2));
+    w.env.illegal_protectors.insert((y, p(2)));
+    w.skip_sba_move(1, y);
+    assert_eq!(w.found(obj(y)), ["704.5v", "704.5y"]);
+    let (run, asked) = drive_answers(&w, &[submit_player(3)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(y, p(3))]);
+
+    // 704.5y both times, the eligibility changed by the view: the protector is now the Siege's
+    // own controller (illegal by battle type) and player 2 is eligible again.
+    let own = move |pre: &StoredSbaEnvironment, _: &EventContext<'_>| {
+        let mut view = pre.clone();
+        view.illegal_protectors.remove(&(y, p(2)));
+        view.battle_protectors.insert(y, p(1));
+        view
+    };
+    let (run, asked) = drive_post_batch(&w, &[submit_player(2)], &own);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(y, p(2))]);
+    assert_eq!(run.state.env.battle_protectors.get(&y), Some(&p(2)));
+
+    // 704.5x both times.
+    let mut w = World::three([1, 2, 3], 1);
+    let x = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, x);
+    assert_eq!(w.found(obj(x)), ["704.5v", "704.5x"]);
+    let (_, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+
+    // 704.5x before the batch, 704.5y in the post-batch view.
+    let protected_by_self = move |pre: &StoredSbaEnvironment, _: &EventContext<'_>| {
+        let mut view = pre.clone();
+        view.battle_protectors.insert(x, p(1));
+        view
+    };
+    let (run, asked) = drive_post_batch(&w, &[submit_player(3)], &protected_by_self);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].reason.cr, "CR 704.5y");
+    assert_eq!(player_candidates(&asked[0]), [p(2), p(3)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(x, p(3))]);
+}
+
+// REQ-SBA-001, CR 704.5v, CR 704.5x, CR 614.6, CR 704.3 (gate 02-state-objects R3c,
+// thread 4698236625): an unattacked Siege at defense 0 with no protector whose graveyard move a
+// replacement skips, and whose controller loses the game in the same pass: no request names the
+// lost controller (none is made, no request id consumed, nothing pending), the pass succeeds
+// with the loss, the Siege gets no protector and the next pass finds it again without a
+// request. Control: the same Siege whose controller stays in the game is asked.
+#[test]
+fn sba_704_5x_retained_battle_of_a_lost_controller_asks_nothing() {
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+
+    // Control: the controller stays in the game and is asked.
+    let (run, asked) = drive_answers(&w, &[submit_player(2)]);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(asked[0].reason.cr, "CR 704.5x");
+    assert_eq!(player_candidates(&asked[0]), [p(2)]);
+    assert_eq!(run.out.unwrap().protectors_chosen, [(s, p(2))]);
+
+    w.set_life(1, 0);
+    let (run, asked) = drive_answers(&w, &[]);
+    // No request at all: nothing pending, no request id consumed.
+    assert!(asked.is_empty());
+    assert_eq!(run.asked, 0);
+    let out = run.out.unwrap();
+    assert_eq!(out.lost_players, [p(1)]);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(out.performed);
+    let mut w = run.state;
+    assert!(w.lost(1));
+    assert!(!w.env.battle_protectors.contains_key(&s));
+    assert_eq!(w.zones.object(s).unwrap().zone, ZoneId::Battlefield);
+    // The next pass finds it again and still asks nothing.
+    let out = pass(&mut w);
+    assert!(out.protectors_chosen.is_empty());
+    assert!(
+        out.findings
+            .iter()
+            .any(|f| f.subject == obj(s) && f.entry_id == "704.5x")
+    );
+
+    // The same through `perform_all_post_batch`.
+    let mut w = World::new();
+    let s = w.new_battle(1, 1, true, 0, None);
+    w.skip_sba_move(1, s);
+    w.set_life(1, 0);
+    let same = |pre: &StoredSbaEnvironment, _: &EventContext<'_>| pre.clone();
+    let (run, asked) = drive_post_batch(&w, &[], &same);
+    assert!(asked.is_empty());
+    assert!(run.out.unwrap().protectors_chosen.is_empty());
+}
+
 // REQ-SBA-001, CR 704.5z, CR 303.7a, CR 613.7e: two Roles of player 1 on one creature: the older
 // goes to its OWNER's graveyard; one Role each of players 1 and 2 on the same creature do not
 // interact; a non-Role Aura is unaffected; a Role controlled by player 1 but owned by player 2
