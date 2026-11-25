@@ -68,5 +68,5 @@ pub use history::{History, HistoryQuery, HistoryScope, HistoryStat};
 pub use state::{EventLog, EventState, ObjectMarkers};
 pub use types::{
     AppliedEffects, CounterTarget, DamageTarget, EventBatch, EventInstance, ExecutedBatch,
-    ExecutedEvent, GameEvent, Outcome, Phase, Step, ZoneChangeCause,
+    ExecutedEvent, GameEvent, Outcome, Phase, Step, UnattachRecord, ZoneChangeCause,
 };
