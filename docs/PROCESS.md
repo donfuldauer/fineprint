@@ -293,6 +293,7 @@ explicitly on a gate review PR.)
    match for `Closes #<n>` — `#<n>` not followed by another digit), or a comment on it names the
    replacement issue(s) that delivered the work and those pass the same test. The run-log row was
    committed in the PR itself, so nothing is pushed to `main` directly.
+   After every routine merge, run the late-gate check (Gate reviews, "Late gate").
 4. **Never**, to get green: skip, ignore, delete or weaken a test; force-push or rewrite history
    on a branch the agent did not create; push an empty commit; close and reopen a PR to restart
    CI; merge with a failing required check.
@@ -305,6 +306,19 @@ open `work-unit` issue carrying its `phase:*` label (a **phase gate**) or in its
 `gh issue list --state open --label work-unit --label <phase-label>` (and `--milestone <M>`), paging
 explicitly (P1). The gate's name is the phase label without its prefix (for example
 `04-layers`) or the milestone (`M1`).
+
+**Late gate.** The check above and the merge are not atomic: two routine PRs of one phase can both
+see the other issue still open and both merge as routine. So after **any** routine merge, re-query
+the open `work-unit` issues of the merged issue's phase label and milestone (paging explicitly,
+P1). If none remain and no `reviewed/<gate>` tag exists, run a late gate immediately, whether or
+not any issue carried `review:gate`: branch `gate/<gate>` from the merge commit on `main` with the
+gate's `docs/RUN_LOG.md` row as its commit, open a PR from it to `main` (body: `Late gate: <gate>`,
+no `Closes`) in the role of the gate issue's PR, open the review PR against `review-base/<gate>`
+(cumulative since the last `reviewed/*` tag) and run steps 3-7 below on it (CodeRabbit full
+review, dispositions, resolved threads, merge of that PR, review PR closed unmerged, tags). A
+`review:gate` label on the planned final issue still takes the normal pre-merge path above; the
+late gate is the backstop for the race and for unlabelled final issues. Gates never run in
+parallel (below), so a late gate waits for any open gate.
 
 **Review PR.** A gate review is one review-only pull request whose diff is everything merged since
 the previous gate review:
@@ -321,8 +335,13 @@ the previous gate review:
    review also lands in the gate issue's PR.
 3. **Too large.** If CodeRabbit reports the diff exceeds what it reviews in one PR, split the
    review by area: for each group of top-level paths, push `review/<gate>-<area>` built from the
-   base plus `git checkout <gate head> -- <paths>`, open it against `review-base/<gate>` the same
-   way, and refresh it after each fix push. Every area PR must be approved.
+   base plus `git checkout --no-overlay <gate head> -- <paths>` (the default overlay mode would
+   keep a base file the gate branch deleted, so deletions would be missing from the review), open it
+   against `review-base/<gate>` the same way, and rebuild it from the current gate head after each
+   fix push. Verify each area branch: `git diff --name-status <base> review/<gate>-<area>` must
+   equal `git diff --name-status <base> <gate head> -- <paths>`. The union of the area paths must
+   cover `git diff --name-only <base> <gate head>`: every changed path, deletions included,
+   appears in some area. Every area PR must be approved (step 6).
 4. **Findings.** Each review round is one batch (P5) and every finding ends in exactly one
    disposition recorded as a reply on its thread:
    - **Fixed:** an executor commit on the gate branch addresses it (gate-review fixes may touch
@@ -361,7 +380,10 @@ the previous gate review:
    `@coderabbitai approve`.
 6. **Gate merge conditions**, on the shared head commit: the routine merge conditions above;
    `coderabbitai` has an effective `APPROVED` review on every review PR of the gate covering that
-   head (not superseded by a later `CHANGES_REQUESTED` or `DISMISSED` review), with no actionable
+   review PR's current head (the shared gate head for a single review PR; for a split gate, each
+   area PR's own head, which is rebuilt from the current gate head after the last push and so is
+   never the shared gate head, with the step 3 verification and path-coverage check passing on that
+   gate head) (not superseded by a later `CHANGES_REQUESTED` or `DISMISSED` review), with no actionable
    comment unanswered and every thread dispositioned and resolved (except types that cannot be
    resolved); and the P5 phase gate (and, for a milestone, its acceptance criteria) holds.
 7. **Close out.** Merge the gate issue's PR into `main`. Close every review PR **without

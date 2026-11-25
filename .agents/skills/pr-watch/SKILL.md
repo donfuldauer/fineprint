@@ -32,9 +32,15 @@ threads:
    ```sh
    gh pr view <P> --json number,url,state,headRefName,headRefOid,labels,reviewDecision,statusCheckRollup,reviews,comments
    ```
+   On a gate, `<P>` supplies only the labels, head commit and CI (`statusCheckRollup` on the shared
+   head commit); read the CodeRabbit reviews and comments from every review PR `<R>`:
+   ```sh
+   gh pr view <R> --json number,url,state,headRefName,headRefOid,reviewDecision,reviews,comments
+   ```
    Determine whether CodeRabbit review is required (`docs/PROCESS.md` P6 "Gate reviews"; retired
    `review:skip` / `review:sanity` / `review:full` labels are ignored):
-   - **Gate:** `<P>` is a gate review PR (its base branch starts with `review-base/`), or `<P>`
+   - **Gate:** the input is a gate review PR (its base branch starts with `review-base/`; resolve
+     the gate issue's own PR from its head branch and call that `<P>`, the PR into `main`), or `<P>`
      closes a gate issue (labelled `review:gate`, or the last open `work-unit` issue of its
      `phase:*` label or milestone). Watch the gate issue's PR **and** every gate review PR on the
      same head branch together: CI is read from the shared head commit, CodeRabbit findings and
@@ -43,10 +49,10 @@ threads:
    - **Routine:** anything else. No CodeRabbit review is required or requested; findings are
      handled only if `coderabbitai` posted a review anyway.
 2. **All review threads and all comments in each thread (paginated via GraphQL so nothing is missed;
-   skip on a routine PR with no CodeRabbit review; on a gate, read the review PR `<R>`):**
+   skip on a routine PR with no CodeRabbit review; on a gate, read every review PR `<R>`, never `<P>`):**
    ```sh
    gh api graphql \
-     -F owner=donfuldauer -F name=fineprint -F pr=<P> -F after=null \
+     -F owner=donfuldauer -F name=fineprint -F pr=<R> -F after=null \
      -f query='
        query($owner: String!, $name: String!, $pr: Int!, $after: String) {
          repository(owner: $owner, name: $name) {
@@ -86,7 +92,8 @@ threads:
    Repeat while `comments.pageInfo.hasNextPage` is `true`, and evaluate thread disposition only
    after all comments in the thread have been collected.
 3. Also inspect `reviews[].body` for additional / nitpick / outside-diff comments that do not have
-   an inline thread, and `comments` for CodeRabbit's summary and pre-merge check warnings.
+   an inline thread, and `comments` for CodeRabbit's summary and pre-merge check warnings (on a
+   gate, from `<R>`'s `gh pr view` output above; `<P>` carries none of them).
 
 ## 2. Check completion
 
@@ -110,9 +117,16 @@ You are **done** when all applicable conditions hold on the current `headRefOid`
        `status == "COMPLETED"` and `conclusion == "SUCCESS"`;
      - for `StatusContext` entries, `state == "SUCCESS"`.
 2. **CodeRabbit approved on the current head (gates only, per §1):** on every gate review PR,
-   `coderabbitai` has an effective `APPROVED` review covering `headRefOid` that has not been superseded by a later
-   `CHANGES_REQUESTED` or `DISMISSED` review (a subsequent `COMMENTED` review does not retract an
-   existing approval). On a routine PR this item is satisfied automatically.
+   `coderabbitai` has an effective `APPROVED` review covering that review PR's current `headRefOid`
+   that has not been superseded by a later `CHANGES_REQUESTED` or `DISMISSED` review (a subsequent
+   `COMMENTED` review does not retract an existing approval). For a single review PR that is the
+   shared gate head. For a split gate, each area PR's head is its own branch `review/<gate>-<area>`
+   (never the shared gate head), rebuilt from the current gate head after the last push; every area
+   PR needs its approval on its own current head, `git diff --name-status <base> review/<gate>-<area>`
+   must equal `git diff --name-status <base> <gate head> -- <paths>`, and the area paths together
+   must cover `git diff --name-only <base> <gate head>` (deletions included; areas are built with
+   `git checkout --no-overlay`, `docs/PROCESS.md` P6 step 3). CI stays on the shared gate head
+   commit (`<P>`). On a routine PR this item is satisfied automatically.
 3. **Every finding accounted for and every thread resolved (when review is required or any review
    comment exists):** every inline review thread has a disposition reply and `isResolved == true`,
    and every CodeRabbit review-body finding without an inline thread (outside-diff, additional, or
@@ -131,7 +145,12 @@ When all applicable conditions hold:
   `headRefOid` (test or conformance suites alone are not a substitute), dispositions for every
   CodeRabbit review-body finding without an inline thread (if reviewed), and the branch up to date
   with `main` — and run `gh pr merge <P> --merge --match-head-commit <headRefOid>` (do not delete
-  the branch; the repository deletes merged branches automatically).
+  the branch; the repository deletes merged branches automatically). `<P>` here is always the
+  issue's own PR (base `main`); if you were given a gate review PR (base `review-base/<gate>`),
+  resolve the gate issue's PR from its head branch and use that, and never merge a review PR. On a
+  gate the merge and the close-out (review PRs closed unmerged, `reviewed/<gate>` tag, and for a
+  phase gate `phase-<NN>-green`) belong to `work-issue` §7 (`docs/PROCESS.md` P6 step 7): hand
+  over to it rather than merging standalone.
 - Otherwise (standalone without an explicit merge request), stop scheduling check-ins and report
   the PR URL, head SHA, routine or gate, approval state (gates only), resolved threads, and CI
   results to the user.
@@ -266,6 +285,8 @@ your current session:
    ```sh
    sleep 150 && gh pr view <P> --json headRefOid,statusCheckRollup,reviews --jq '{head: .headRefOid, pending_or_failed: [.statusCheckRollup[] | select((.__typename == "StatusContext" and .state != "SUCCESS") or (.__typename != "StatusContext" and (.status != "COMPLETED" or (.conclusion != "SUCCESS" and .conclusion != "SKIPPED")))) | {name: (.name // .context), status: (.status // .state), conclusion}], coderabbit_reviews: [.reviews[] | select(.author.login == "coderabbitai") | {state, submittedAt, commit: .commit.oid}]}'
    ```
+   On a gate, run the same snapshot for `<R>` as well and take `coderabbit_reviews` from it (`<P>`
+   has none); `pending_or_failed` is read from `<P>` (shared head commit).
    When the wakeup notification arrives, go back to §1 and act on the updated state. Repeat until
    §2 holds (or stop after a reasonable retry limit on stalled checks/rate limits and report to the
    user).
@@ -281,4 +302,4 @@ your current session:
 Sleep-poll in a foreground loop; resolve a thread without a disposition reply; resolve an unfixed
 security issue (including any redaction or forking leak) or a verified unfixed correctness defect;
 ask a person to resolve a review thread; skip, ignore, or weaken a test to get CI green; push
-directly to `main`; quote CR rules from memory (R6).
+directly to `main`; merge a review PR (the base of a gate review PR is `review-base/<gate>`; only the gate issue's own PR into `main` is ever merged); quote CR rules from memory (R6).

@@ -6,6 +6,12 @@
 # Enables the tracked hooks in .githooks/ for this clone and records which human the
 # commit-msg hook should credit as co-author on agent-made commits. Idempotent and quiet.
 #
+# core.hooksPath is set to .githooks only when it is unset (or already .githooks) AND the clone's
+# hooks directory (`git rev-parse --git-path hooks`) holds no non-.sample hook. Otherwise it is
+# left alone and a warning with the manual command is printed to stderr (this script runs at
+# session start and never fails because of it). FINEPRINT_FORCE_HOOKS=1 forces the replacement.
+# The co-author below is always resolved and recorded.
+#
 # Agent harnesses run this automatically (Claude Code: the SessionStart hook in
 # .claude/settings.json; Antigravity cloud VMs: .agents/setup-env.sh). Contributors can also run
 # it by hand once per clone.
@@ -23,9 +29,28 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-if [[ "$(git config --get core.hooksPath || true)" != ".githooks" ]]; then
-  git config core.hooksPath .githooks
-  echo "git hooks: core.hooksPath set to .githooks"
+current_hooks_path="$(git config --get core.hooksPath || true)"
+if [[ "${current_hooks_path}" != ".githooks" ]]; then
+  existing=""
+  if [[ -n "${current_hooks_path}" ]]; then
+    existing="core.hooksPath is already set to '${current_hooks_path}'"
+  else
+    git_hooks_dir="$(git rev-parse --git-path hooks)"
+    if [[ -d "${git_hooks_dir}" ]]; then
+      found="$(find "${git_hooks_dir}" -maxdepth 1 -type f ! -name '*.sample' -print | LC_ALL=C sort | tr '\n' ' ')"
+      if [[ -n "${found}" ]]; then
+        existing="existing hooks in ${git_hooks_dir}: ${found}"
+      fi
+    fi
+  fi
+  if [[ -z "${existing}" || "${FINEPRINT_FORCE_HOOKS:-}" == "1" ]]; then
+    git config core.hooksPath .githooks
+    echo "git hooks: core.hooksPath set to .githooks"
+  else
+    echo "git hooks: NOT enabling .githooks (${existing})." \
+         "To enable them, run: git config core.hooksPath .githooks" \
+         "(and call your existing hooks from .githooks to keep them), or re-run with FINEPRINT_FORCE_HOOKS=1." >&2
+  fi
 fi
 
 # shellcheck source=../.githooks/lib-agent-identity.sh

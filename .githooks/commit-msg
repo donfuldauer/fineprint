@@ -38,5 +38,11 @@ if grep -qiE "^co-authored-by:.*<${coauthor_email_re}>" "${msg_file}"; then
   exit 0
 fi
 
+# An empty or comments-only message is an aborted commit: leave it empty so git aborts it,
+# instead of turning it into a trailer-only commit.
+if [[ -z "$(git stripspace --strip-comments <"${msg_file}")" ]]; then
+  exit 0
+fi
+
 git interpret-trailers --in-place --if-exists addIfDifferent \
   --trailer "Co-authored-by: ${coauthor}" "${msg_file}"

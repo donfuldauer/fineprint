@@ -217,7 +217,9 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
    (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,<phase-label>&state=open&per_page=100&page=N"`,
    and `milestone=<number>` instead of the phase label). Re-check just before merging: an issue
    that was not a gate when the PR opened becomes one if every other issue of its phase merged
-   meanwhile. Ignore any retired `review:skip` / `review:sanity` / `review:full` label or
+   meanwhile. The re-check and the merge are not atomic (two same-phase PRs can both pass it), so
+   §7 also re-queries after every routine merge and runs a **late gate** if the phase or milestone
+   just ran out of open issues without a gate review (PROCESS.md P6 "Late gate"). Ignore any retired `review:skip` / `review:sanity` / `review:full` label or
    review-mode note on the issue.
 3. Create the PR with `gh pr create --base main --head <branch> --title … --body-file <file>` or
    REST (`gh api repos/donfuldauer/fineprint/pulls -X POST -f title=… -f head=<branch> -f base=main
@@ -251,7 +253,12 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
      title `Gate review: <phase or milestone> (do not merge)`, body linking this issue's PR, the
      issues closed since the base, and the phase or milestone exit criteria. Post
      `@coderabbitai full review` on it. If CodeRabbit says the diff is too large, split it into
-     area review PRs as P6 "Gate reviews" step 3 describes.
+     area review PRs as P6 "Gate reviews" step 3 describes: build each `review/<gate>-<area>` with
+     `git checkout --no-overlay <gate head> -- <paths>` (carries deletions), rebuild it from the
+     current gate head after every push, check that
+     `git diff --name-status <base> review/<gate>-<area>` equals
+     `git diff --name-status <base> <gate head> -- <paths>` and that the area paths together cover
+     `git diff --name-only <base> <gate head>`.
   3. Each CodeRabbit round (or push) is one batch, handled with the `triage` skill's §2 procedure
      and PROCESS.md P6:
      - Read: `gh pr view` / `gh pr checks` / `gh api graphql` (for review threads), or REST
@@ -279,12 +286,25 @@ P7 failure policy. Three failed attempts plus one tier-up attempt → mark the i
 When every P6 merge condition holds on the head commit (required checks green; branch up to date
 with `main`; last work-verifier result `pass` for the head; for a gate issue, `coderabbitai` has an
 effective `APPROVED` review covering the head on every review PR of the gate, with every thread
-replied to and resolved, and the P5 phase gate holds):
+replied to and resolved, and the P5 phase gate holds; on a split gate each area PR's approval
+covers that area branch's current head, rebuilt from the current gate head after the last push,
+and the area paths cover every changed path of `git diff --name-only <base> <gate head>`, deletions
+included):
 
 1. Merge with a merge commit:
    `gh pr merge <P> --merge --match-head-commit <head>` or REST
    (`gh api repos/donfuldauer/fineprint/pulls/<P>/merge -X PUT -f merge_method=merge -f sha=<head>`).
 2. Do not delete the branch or check that it was deleted: the repository deletes merged branches automatically.
+   **Late-gate check (after every routine merge).** Re-query the open `work-unit` issues of the
+   merged issue's phase label and milestone (REST, paging explicitly, as in §5 step 2). If none
+   remain and no `reviewed/<gate>` tag exists, the merge completed the phase or milestone without
+   a gate review (a concurrent PR passed the §5 re-check too, or the issue was unlabelled): run a
+   late gate now (PROCESS.md P6 "Late gate"). Branch `gate/<gate>` from the merge commit on
+   `main`, commit the gate's `docs/RUN_LOG.md` row on it, open its PR to `main` (no `Closes`),
+   run §6 steps 1-4 with that branch as `<branch>` (review PR against `review-base/<gate>`,
+   cumulative since the last `reviewed/*` tag), then merge its PR as above and close out
+   (step 4: review PRs closed unmerged, tags). A `review:gate` issue still takes the normal
+   pre-merge path of §6.
 3. **Unblock dependents (the sweep).** List every open `work-unit` issue labelled `blocked`
    (`gh api "repos/donfuldauer/fineprint/issues?labels=work-unit,blocked&state=open&per_page=100&page=N"`,
    paging N = 1, 2, … until a page returns fewer than 100; not `--paginate`, see `run-plan` §1),
