@@ -56,7 +56,7 @@ pub use self::event::{
 pub use self::replacement::{ReplacementMatch, ReplacementOp, Shield, ShieldUses, TierHint};
 pub use self::statics::{
     Affected, CharacteristicEffect, Layer, Modification, PlayerEffect, PtValue, RuleKind,
-    RuleModification, StaticEffect,
+    RuleModification, StaticEffect, TypePart,
 };
 
 use self::common::{

@@ -882,6 +882,299 @@ fn exception_drops_matching_cda_abilities() {
     assert_eq!(got, odd);
 }
 
+/// A static ability with one `CHAR` effect in `layer`, characteristic-defining when `cda`, whose
+/// modification carries `defines` when given (REQ-OBJ-002; SRS §14.4.3).
+fn char_static_defines(layer: &str, cda: bool, defines: Option<serde_json::Value>) -> AbilityAST {
+    let mut modification = serde_json::json!({"op": "TEST_OP"});
+    if let Some(d) = defines {
+        modification["defines"] = d;
+    }
+    AbilityAST(serde_json::json!({
+        "kind": "STATIC",
+        "effects": [{
+            "type": "CHAR",
+            "layer": layer,
+            "affected": {"ref": "SELF"},
+            "modification": modification,
+            "isCDA": cda,
+        }],
+    }))
+}
+
+/// A layer-4 CDA whose `defines` lists `parts`.
+fn type_cda(parts: &[&str]) -> AbilityAST {
+    char_static_defines("4", true, Some(serde_json::json!(parts)))
+}
+
+/// The six type-line exceptions that set or do not copy one part, with the wire name of the
+/// part each touches (CR 707.9b, 707.9c, 707.9d).
+fn type_line_exceptions() -> Vec<(CopyException, &'static str)> {
+    vec![
+        (
+            CopyException::SetSupertypes(set(&["Legendary"])),
+            "SUPERTYPES",
+        ),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::Supertypes),
+            "SUPERTYPES",
+        ),
+        (
+            CopyException::SetCardTypes(set(&["Artifact"])),
+            "CARD_TYPES",
+        ),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::CardTypes),
+            "CARD_TYPES",
+        ),
+        (CopyException::SetSubtypes(set(&["Golem"])), "SUBTYPES"),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::Subtypes),
+            "SUBTYPES",
+        ),
+    ]
+}
+
+/// The "in addition to its other types" exceptions and an unrelated one (CR 707.9d last
+/// sentence).
+fn keeping_exceptions() -> Vec<CopyException> {
+    vec![
+        CopyException::AddSupertypes(set(&["Legendary"])),
+        CopyException::AddCardTypes(set(&["Artifact"])),
+        CopyException::AddSubtypes(set(&["Golem"])),
+        CopyException::SetNames(set(&["test.n"])),
+        CopyException::GainAbility(ability("gained.other")),
+    ]
+}
+
+/// Whether `cda` is still among the abilities of a copy of a creature carrying it (after
+/// [`ability`]`("plain")`) under `exceptions`; the plain ability always stays.
+fn cda_kept(cda: &AbilityAST, exceptions: &[CopyException]) -> bool {
+    let mut orig = creature("test.orig", 3, 3);
+    orig.abilities = vec![ability("plain"), cda.clone()];
+    let got = CopiableValues::plain(orig)
+        .copy_with(&other("test.own"), exceptions)
+        .characteristics
+        .abilities;
+    assert_eq!(got.first(), Some(&ability("plain")), "{exceptions:?}");
+    got.iter().skip(1).any(|a| a == cda)
+}
+
+// REQ-OBJ-002, REQ-DSL-008; CR 707.9d, 109.3, 205.1b: a single-part layer-4 CDA is not copied
+// exactly when an exception sets or does not copy its own part; a subtype-only CDA survives
+// SetSupertypes, SetCardTypes, NotCopied(Supertypes) and NotCopied(CardTypes); likewise for
+// supertype-only and card-type-only CDAs.
+#[test]
+fn single_part_type_cda_dropped_only_by_its_part() {
+    for part in ["SUPERTYPES", "CARD_TYPES", "SUBTYPES"] {
+        let cda = type_cda(&[part]);
+        for (ex, touched) in type_line_exceptions() {
+            assert_eq!(
+                cda_kept(&cda, std::slice::from_ref(&ex)),
+                touched != part,
+                "{part} CDA under {ex:?}"
+            );
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: the acceptance criterion: a subtype-only layer-4 CDA survives a
+// SetSupertypes exception, and the supertypes are still set.
+#[test]
+fn subtype_only_cda_survives_set_supertypes() {
+    let cda = type_cda(&["SUBTYPES"]);
+    let mut orig = creature("test.orig", 3, 3);
+    orig.abilities = vec![cda.clone()];
+    let c = CopiableValues::plain(orig)
+        .copy_with(
+            &other("test.own"),
+            &[CopyException::SetSupertypes(set(&["Legendary"]))],
+        )
+        .characteristics;
+    assert_eq!(c.abilities, vec![cda]);
+    assert_eq!(c.supertypes, set(&["Legendary"]));
+}
+
+// REQ-OBJ-002; CR 707.9d (judgement call, docs/DECISIONS.md "#198 FP-151 — Per-part CDA targets
+// for copy exceptions"): a multi-part CDA is not copied as a whole as soon as any of its parts
+// is touched, and is copied when none is.
+#[test]
+fn multi_part_type_cda_dropped_whole_when_any_part_touched() {
+    let cda = type_cda(&["CARD_TYPES", "SUBTYPES"]);
+    for (ex, touched) in type_line_exceptions() {
+        assert_eq!(
+            cda_kept(&cda, std::slice::from_ref(&ex)),
+            touched == "SUPERTYPES",
+            "{ex:?}"
+        );
+    }
+    let two = type_cda(&["SUPERTYPES", "SUBTYPES"]);
+    for (ex, touched) in type_line_exceptions() {
+        assert_eq!(
+            cda_kept(&two, std::slice::from_ref(&ex)),
+            touched == "CARD_TYPES",
+            "{ex:?}"
+        );
+    }
+    // Two exceptions, neither touching the CDA's parts: kept.
+    assert!(cda_kept(
+        &type_cda(&["SUBTYPES"]),
+        &[
+            CopyException::SetSupertypes(set(&["Legendary"])),
+            CopyException::NotCopied(CopiedCharacteristic::CardTypes),
+        ]
+    ));
+}
+
+// REQ-OBJ-002; CR 707.9d: a layer-4 CDA without `defines`, or listing all three parts, defines
+// the whole type line and is dropped by any type-line exception (the #38 FP-037 behaviour).
+#[test]
+fn type_cda_without_defines_dropped_by_any_type_exception() {
+    for cda in [
+        char_static("4", true),
+        char_static_defines("4", true, None),
+        type_cda(&["SUBTYPES", "SUPERTYPES", "CARD_TYPES"]),
+    ] {
+        for (ex, _) in type_line_exceptions() {
+            assert!(!cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-NFR-006; CR 707.9d: a malformed `defines` (which the DSL decode refuses)
+// never panics in core and counts as all three parts.
+#[test]
+fn malformed_defines_counts_as_all_parts() {
+    for bad in [
+        serde_json::json!([]),
+        serde_json::json!("SUBTYPES"),
+        serde_json::json!(["subtypes"]),
+        serde_json::json!(["SUBTYPE"]),
+        serde_json::json!([1]),
+        serde_json::json!([null]),
+        serde_json::json!(["SUBTYPES", "SUBTYPES"]),
+        serde_json::json!(["SUBTYPES", "x"]),
+        serde_json::json!({"SUBTYPES": true}),
+        serde_json::json!(null),
+    ] {
+        let cda = char_static_defines("4", true, Some(bad.clone()));
+        for (ex, _) in type_line_exceptions() {
+            assert!(!cda_kept(&cda, std::slice::from_ref(&ex)), "{bad} {ex:?}");
+        }
+        for ex in keeping_exceptions() {
+            assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{bad} {ex:?}");
+        }
+    }
+    // A modification that is not an object: all three parts as well.
+    let odd = AbilityAST(serde_json::json!({
+        "kind": "STATIC",
+        "effects": [{"type": "CHAR", "layer": "4", "modification": 3, "isCDA": true}],
+    }));
+    assert!(!cda_kept(
+        &odd,
+        &[CopyException::SetSupertypes(set(&["Legendary"]))]
+    ));
+}
+
+// REQ-OBJ-002; CR 707.9d last sentence: "in addition to its other types" exceptions (and
+// exceptions that define no CDA characteristic) keep every type CDA, whatever it defines.
+#[test]
+fn add_type_exceptions_keep_every_type_cda() {
+    for cda in [
+        char_static("4", true),
+        type_cda(&["SUPERTYPES"]),
+        type_cda(&["CARD_TYPES"]),
+        type_cda(&["SUBTYPES"]),
+        type_cda(&["CARD_TYPES", "SUBTYPES"]),
+    ] {
+        for ex in keeping_exceptions() {
+            assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+        }
+        assert!(cda_kept(&cda, &keeping_exceptions()), "{cda:?}");
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: color and power/toughness CDAs are unaffected by type-line
+// exceptions (a `defines` param there is opaque and ignored), and still dropped by their own.
+#[test]
+fn color_and_pt_cdas_ignore_type_exceptions_and_defines() {
+    for (layer, own) in [
+        ("5", CopyException::SetColors(ColorBitmask::WHITE)),
+        ("7a", CopyException::SetPower(literal(1))),
+    ] {
+        for cda in [
+            char_static(layer, true),
+            char_static_defines(layer, true, Some(serde_json::json!(["SUBTYPES"]))),
+        ] {
+            for (ex, _) in type_line_exceptions() {
+                assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+            }
+            assert!(!cda_kept(&cda, std::slice::from_ref(&own)), "{cda:?}");
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: a layer-4 CHAR effect that is not a CDA is never dropped, nor is a
+// gained type CDA (CR 707.9a: part of the copy's copiable values), nor does a modification
+// that is not a copy drop anything (CR 613.2a, 707.2).
+#[test]
+fn non_cda_and_gained_type_abilities_never_dropped() {
+    for not_cda in [
+        char_static_defines("4", false, Some(serde_json::json!(["SUBTYPES"]))),
+        char_static_defines("4", false, None),
+    ] {
+        for (ex, _) in type_line_exceptions() {
+            assert!(cda_kept(&not_cda, std::slice::from_ref(&ex)), "{ex:?}");
+        }
+    }
+    let cda = type_cda(&["SUBTYPES"]);
+    for (ex, _) in type_line_exceptions() {
+        let mut orig = creature("test.orig", 3, 3);
+        orig.abilities = vec![ability("plain")];
+        let got = CopiableValues::plain(orig)
+            .copy_with(
+                &other("test.own"),
+                &[ex.clone(), CopyException::GainAbility(cda.clone())],
+            )
+            .characteristics
+            .abilities;
+        assert_eq!(got, vec![ability("plain"), cda.clone()], "{ex:?}");
+        let mut orig = creature("test.orig", 3, 3);
+        orig.abilities = vec![cda.clone()];
+        let got = CopiableValues::plain(orig)
+            .modified(std::slice::from_ref(&ex))
+            .characteristics
+            .abilities;
+        assert_eq!(got, vec![cda.clone()], "modified {ex:?}");
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: an ability with a subtype-defining layer-4 CDA effect and a colors
+// CDA effect is dropped (whole) by an exception touching either, and kept by SetSupertypes.
+#[test]
+fn ability_with_several_cda_effects_uses_their_union() {
+    let both = AbilityAST(serde_json::json!({
+        "kind": "STATIC",
+        "effects": [
+            {"type": "CHAR", "layer": "4", "affected": {"ref": "SELF"},
+             "modification": {"op": "TEST_OP", "defines": ["SUBTYPES"]}, "isCDA": true},
+            {"type": "CHAR", "layer": "5", "affected": {"ref": "SELF"},
+             "modification": {"op": "TEST_OP"}, "isCDA": true},
+        ],
+    }));
+    assert!(cda_kept(
+        &both,
+        &[CopyException::SetSupertypes(set(&["Legendary"]))]
+    ));
+    assert!(!cda_kept(
+        &both,
+        &[CopyException::SetSubtypes(set(&["Golem"]))]
+    ));
+    assert!(!cda_kept(
+        &both,
+        &[CopyException::SetColors(ColorBitmask::WHITE)]
+    ));
+}
+
 // ---------------------------------------------------------------------------------------------
 // As-enters P/T (CR 613.2a, 707.2)
 // ---------------------------------------------------------------------------------------------
