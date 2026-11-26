@@ -36,6 +36,14 @@ pub enum EventError {
     Memory(MemoryError),
     /// The game state rejected the operation.
     State(StateError),
+    /// A graveyard order (CR 404.3) names an owner with no simultaneous graveyard entry in the
+    /// batch, names an owner twice, or is not a permutation of that owner's group of cards
+    /// (see [`EventContext::execute_batch_ordered`](super::EventContext::execute_batch_ordered)
+    /// and [`GraveyardOrderGroup::order_from_response`](super::GraveyardOrderGroup::order_from_response)).
+    InvalidGraveyardOrder {
+        /// The owner the rejected order names.
+        owner: PlayerId,
+    },
 }
 
 impl fmt::Display for EventError {
@@ -56,6 +64,9 @@ impl fmt::Display for EventError {
             EventError::Permanent(e) => write!(f, "permanent error: {e}"),
             EventError::Memory(e) => write!(f, "memory error: {e}"),
             EventError::State(e) => write!(f, "state error: {e}"),
+            EventError::InvalidGraveyardOrder { owner } => {
+                write!(f, "invalid graveyard order for player {}", owner.get())
+            }
         }
     }
 }

@@ -2258,7 +2258,8 @@ values. (f) The SRS REQ-ZONE-001 item 1 clause attributing re-evaluation "includ
 through casting or resolution" to CR 401.5 is not covered by CR 401.5 (casting, activation and
 special actions only) and is out of scope here, with the rest of top-card reveal statics;
 simultaneous-entry ordering choices (CR 401.4, CR 404.3, CR 405.3), merged permanents, ante and
-subgames are later work. (g) Only objects on the stack or the battlefield have a controller
+subgames are later work. Update (#208 FP-154): the CR 404.3 graveyard case is done in `events/`;
+CR 401.4 and CR 405.3 remain later work. (g) Only objects on the stack or the battlefield have a controller
 (CR 109.4). The container keeps an explicit controller only there: a request controller
 elsewhere, or `set_controller` elsewhere, is `ControllerNotApplicable` as a container rule (the
 CR has exceptions, CR 109.4a-g, such as emblems in the command zone, CR 109.4c; emblems and
@@ -6950,6 +6951,8 @@ those cards may arrange them in any order.") is a property of every simultaneous
 graveyard entry (the bus and zone-move layer, `events/` and `replacement/`) and is already
 listed as later work in `#19 FP-018 (f)`; until it lands `perform_all` keeps ascending
 `ObjectId` order with `Position::Top` (the ordering prompt is SRS §2.1 item 4, ORDER_CARDS).
+Update: the `events/` API for this choice landed in #208 FP-154 (see "#208 FP-154 — Owner orders
+simultaneous graveyard entry (CR 404.3)"); wiring it into `perform_all` is a follow-up.
 (2) CR 704.5g/704.5h destruction must be observable as "destroyed" by triggers (CR 701.8b: "The
 only ways a permanent can be destroyed are as a result of an effect that uses the word "destroy"
 or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or
@@ -9995,6 +9998,7 @@ back to all three parts). Core already depended on fineprint-dsl.
 **Alternatives:** Core reading the `defines` JSON itself (rejected: duplicated vocabulary);
 moving `TypePart` to another exported module (rejected: `statics` is where layer-4 CHAR
 modifications are defined).
+
 ## #203 FP-152 tester — Independent Tester judgement calls
 
 **Decision:** (1) The ETB projection returns only the entrant's evaluation, so requirement 8's
@@ -10059,6 +10063,68 @@ sourced static's controller is the source's evaluated controller. The corrected 
 that contract (a stale stored value must not be seen), so it is stronger, not weaker.
 **Alternatives:** Moving the source under P2 and keeping stored P2 (rejected: would no longer
 distinguish stored from evaluated controller); leaving the test (rejected: contradicts the brief).
+
+## #208 FP-154 — Owner orders simultaneous graveyard entry (CR 404.3)
+
+**Decision.** (a) Opt-in additive API in `events/`: `EventContext::graveyard_order_groups(batch)`
+lists the `GraveyardOrderGroup`s of a final (post-replacement, CR 614.6) batch, ascending by owner,
+leaving every component unchanged; `GraveyardOrderGroup::request(id)` builds the owner's
+`ORDER_CARDS` request; `GraveyardOrderGroup::order_from_response` maps the answer to a
+`GraveyardOrder`; `EventContext::execute_batch_ordered(batch, orders)` executes the batch with the
+chosen orders. `execute_batch`, `execute` and `execute_batch_with_entry_copies` are unchanged
+(same graveyard order, ids and log). New error `EventError::InvalidGraveyardOrder { owner }`.
+(b) Group rule, from the planning run: executed `ZoneChange` events (not draws) requested at
+`Position::Top`, that change zones (`old != new`: a graveyard-to-graveyard reposition is not "put
+into"), into a graveyard (CR 400.3: the owner's), of a nontoken card (CR 111.6, CR 108.2b; a token
+takes no part and does not count toward the two, CR 111.7). One group per owner with two or more
+such cards. `Bottom` and `Index` moves keep their requested position and never form or join a
+group. JUDGEMENT CALL beyond the brief: a card that a later event of the same batch moves again
+(out of the graveyard or repositioned, possible only through a predicted id) is not counted,
+since its arrival position no longer exists at the end of the batch. (c) Encoding: one
+`ORDER_CARDS` request per group, chooser the owner, `reason.cr = "CR 404.3"`, the cards ascending,
+`destinations = [Graveyard]`, `min == max == n`, public (`hidden: false`, a graveyard is public),
+options in the shape `generate_request` gives an `ORDER` choice (the cards as enumerated options
+while `n!` is below `ENUMERATION_LIMIT`, a `ValidatorRule::Permutation` contract otherwise; that
+rule's doc says "in top", but validation is driven by the payload, whose only destination is
+`Graveyard`). The answer is `SUBMIT_ORDERING` with empty `top`/`bottom` and the `graveyard` list
+top first (index 0 = topmost). (d) The timeout default is the order `execute_batch` yields,
+"submission order of arrival": each card goes on top in submission order, so the last-submitted
+card ends on top. (e) Placement: the group's cards take the positions ("slots") they occupy in
+the `execute_batch` result, in the chosen order; every other object of the graveyard keeps its
+`execute_batch` position. The group is therefore contiguous on top of the graveyard unless
+another object of the same batch landed between its cards (a token, which ceases to exist at
+the next state-based-action check, CR 111.7, or an `Index` move, which keeps its requested
+position); in that case that object keeps its place. The arrangement is done with same-zone
+repositions (CR 400.7: no new object ids, no events), so `ExecutedBatch` (events, outcomes, ids)
+and LKI are exactly those of `execute_batch`. (f) Multiple owners: one request per owner with a
+group, asked in ascending `PlayerId` order; callers pass any request ids. (g) Invalid orders
+(owner without a group, owner twice, not a permutation of the group's cards) fail with
+`InvalidGraveyardOrder` naming the lowest offending owner (checked in ascending owner order, so
+the result does not depend on entry order) and change nothing. (h) No contract change:
+`ORDER_CARDS` with the `graveyard` destination is already in SRS 15.3; `generate_request`'s
+`ORDER` kind offers only `Top`, and a graveyard-offering `ChoiceKind` would be a later additive R2
+item. (i) Deferred: CR 401.4 (library: a hidden choice with positions and the non-reveal rule)
+and CR 405.3 (stack: APNAP stack code outside `events/`). Wiring the choice into
+`sba/perform.rs` `perform_all` and `replacement/bus.rs` is a follow-up issue; until then they keep
+ascending `ObjectId` order (#41 FP-040 follow-up (1)).
+
+**Rationale.** An additive API keeps every existing caller, test and golden replay identical
+(the default equals today's result) and lets the callers that own SBA and the bus adopt it later.
+Computing groups from the planning run uses exactly the moves the real run makes, after
+replacement (REQ-EVENT-001). The slot placement honours the brief's "Bottom/Index keep their
+requested position" for every other object, makes the default a no-op, and gives contiguity in
+every case where only the group's cards arrive at the top; the CR gives no sequencing between
+owners (CR 404.3 does not cite CR 101.4) and the piles are independent, so ascending `PlayerId` is
+a deterministic choice with no rules effect.
+
+**Alternatives.** Reordering inside `execute_batch` itself (rejected: changes every caller and the
+golden corpus, and needs a choice context in the executor). Permuting the execution order of the
+group's moves (rejected: assigns different object ids than `execute_batch` and still leaves
+interleaved objects between the cards). Forcing a contiguous block that pushes interleaved
+objects below it (rejected: moves `Index` arrivals away from their requested position and makes
+an explicitly submitted default differ from `execute_batch`). APNAP sequencing of owners
+(rejected: not stated by CR 404.3; ascending `PlayerId` is recorded instead). Using
+`Zones::reorder_graveyard` (rejected: gated by the CR 404.2 tournament flag).
 
 ## #211 FP-157 — Retire ceased CardIds in Zones
 
