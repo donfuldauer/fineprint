@@ -9854,3 +9854,80 @@ replay files yet"); replay verification lands with #83 FP-081 and #106 FP-104, s
 deliverable has nothing to check yet. No test pins a new golden value of `state_hash`.
 **Rationale.** Nothing to replay.
 **Alternatives.** Creating a corpus here (rejected: outside owned paths, belongs to those units).
+
+## #195 FP-150 — Typed REPLACE_TEXT_WORD accessor, no new wire rejection
+
+**Decision:** The DSL keeps `REPLACE_TEXT_WORD` as an opaque op on the wire. `Modification` gains
+only `REPLACE_TEXT_WORD` (the op name), `replace_text_word(category, from, to)` (builds the flat
+params `category` as its wire name, `from`, `to`) and `as_replace_text_word()`, a typed view that
+returns `Ok(None)` for other ops, `Ok(Some(..))` for a well-formed one and `Err(message)` for a
+missing, non-string or unknown category, a missing or non-string word, any other member, or typed
+power/toughness. `from_json`, `check` and the canonical bytes are unchanged; `CARD_NAME` and
+empty or noncharacter words are returned as parsed.
+**Rationale:** REQ-DSL-012 needs a typed model, but adding a rejection to the decoder would change
+the set of documents that parse (a breaking contract change, R2). The engine already owns the CR
+612.2 checks (`validate_modification`), so the DSL view stays a pure reader and every refusal
+happens once, in the compile step.
+**Alternatives:** A dedicated `Modification` variant or typed fields (rejected: breaking wire and
+struct change); rejecting malformed or `CARD_NAME` replacements in `from_json` (rejected: new
+wire rejection, and the CR 612.2 rule belongs to the engine).
+
+## #195 FP-150 — Compile step lives in fineprint-core layers
+
+**Decision:** `compile_text_modification` and `compile_text_effect` are in
+`fineprint_core::layers` (`layers/compile.rs`). They map a well-formed `REPLACE_TEXT_WORD` to
+`LayerModification::ReplaceTextWord` and run the same `validate_modification` registration uses,
+so `CARD_NAME` (CR 612.2) and invalid words give exactly the registration error and every `Ok`
+result registers. Malformed members give `Unsupported("REPLACE_TEXT_WORD with malformed
+members")`, any other op `Unsupported("not a text-changing modification")`, and
+`compile_text_effect` additionally refuses a layer other than 3 with
+`Unsupported("REPLACE_TEXT_WORD outside layer 3 (CR 613.1c)")`, checked after the modification's
+own errors. `from == to` compiles (ordinary no-op).
+**Rationale:** The dependency direction is base <- dsl <- core: `LayerModification` lives in core,
+so only core can produce it. Reusing `validate_modification` keeps one source of truth for the
+CR 612.2 rules.
+**Alternatives:** A compile step in fineprint-dsl (rejected: dsl cannot depend on core); a new
+error variant for malformed members (rejected: `LayerError` is shared; `Unsupported` with a
+static message is what the brief and registration already use).
+
+## #195 FP-150 — Gap G4 closed by resolve_value_words
+
+**Decision:** The private `resolve_value` in `layers/text.rs` is made public, unchanged in
+behaviour, as `fineprint_core::layers::resolve_value_words`. Word references reachable only from
+a value expression (outside any predicate or selector) are resolved by calling it against the
+evaluated text table. The interpreter wiring (#57 FP-055) just calls it when it evaluates a value
+expression of an object whose text may have changed; no further engine work is needed for G4.
+**Rationale:** The function already walked value expressions for the predicate and selector
+resolvers; exporting it closes G4 with no new code path and the same error rules.
+**Alternatives:** Placing the whole of G4 in the interpreter (rejected: duplicates the walk);
+a new generic AST visitor (rejected: larger change, outside this unit).
+
+## #195 FP-150 — Category and words chosen on resolution
+
+**Decision:** "With the categories and values chosen on resolution" (SRS 14.5) means the resolving
+interpreter (#57) builds the modification with the chosen literal values through
+`Modification::replace_text_word` and compiles it with `compile_text_modification` /
+`compile_text_effect`. This unit adds no choice wiring and no choice-reference members in the
+modification.
+**Rationale:** The choice framework and `CREATE_CONTINUOUS_EFFECT` resolution belong to the
+interpreter; a literal modification keeps the compile step pure and total.
+**Alternatives:** Choice references (for example `{"choice": ...}`) in `category`/`from`/`to`
+resolved by the compile step (rejected: needs game state and choice results, which the compile
+step must not read, R3).
+
+## #195 FP-150 tester — Independent Tester judgement calls
+
+**Decision:** (1) The DSL spec tests do not assert the accessor's result for an empty or
+noncharacter `from`/`to` (the brief lists those as compile-step rejections only); the core spec
+tests assert `LayerError::Unsupported` for them. (2) "Documents that parsed before still parse"
+is tested by requiring every malformed `REPLACE_TEXT_WORD` member set that the opaque-params
+parser accepted (missing member, wrong JSON type, unknown category, extra param) to still parse
+and re-serialise unchanged, with the accessor returning `Err`. (3) The acceptance scenario follows
+the brief's token list literally (a `COLOR_WORD` word "Swamp" read by a `HAS_SUBTYPE` predicate),
+since no category-compatibility check exists (DECISIONS "#37 FP-036 — Word replacement scope").
+(4) Requirement 11(a) mirrors both #37 assertions for the compiled form: the chain
+(Island->Forest, both words Forest in every order) and the swap loop (Island->Swamp, timestamp
+order).
+**Rationale:** Each choice asserts exactly what the brief and the #37 decisions pin, never less.
+**Alternatives:** Asserting accessor rejection of empty words (rejected: not in the brief's Err
+list); a land-type word for the acceptance scenario (rejected: departs from the brief's token list).

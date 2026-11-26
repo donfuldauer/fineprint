@@ -22,6 +22,7 @@ use crate::expr::json::{
     ser_check, str_of, tagged, wire_enum,
 };
 use crate::expr::{ObjectSelectorAST, PlayerSelectorAST, ValueExpressionAST};
+use crate::text::RewritableCategory;
 
 wire_enum! {
     /// A layer of the layer system (REQ-DSL-008): 1a, 1b, 2–6, 7a–7d.
@@ -231,6 +232,74 @@ impl Modification {
             toughness: None,
             params: BTreeMap::new(),
         }
+    }
+
+    /// The op name of the layer 3 text-changing effect (REQ-DSL-012, SRS §14.5; CR 612.1,
+    /// 613.1c): `{"op":"REPLACE_TEXT_WORD","category","from","to"}`.
+    pub const REPLACE_TEXT_WORD: &'static str = "REPLACE_TEXT_WORD";
+
+    /// A `REPLACE_TEXT_WORD` modification (REQ-DSL-012, SRS §14.5): every rewritable word of
+    /// `category` whose value is `from` reads `to`. The members are the flat params
+    /// `category` (its wire name), `from` and `to`; the wire shape is the one an opaque op
+    /// already has, so a built modification serializes, parses back equal and is byte-stable in
+    /// canonical JSON. The category and words are the literal values chosen on resolution; no
+    /// check is made here (`CARD_NAME` and empty or noncharacter words are refused by the
+    /// engine's compile step, CR 612.2).
+    #[must_use]
+    pub fn replace_text_word(
+        category: RewritableCategory,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Modification {
+        let mut m = Modification::new(Modification::REPLACE_TEXT_WORD);
+        m.params.insert(
+            "category".to_owned(),
+            Value::String(category.as_str().to_owned()),
+        );
+        m.params
+            .insert("from".to_owned(), Value::String(from.into()));
+        m.params.insert("to".to_owned(), Value::String(to.into()));
+        m
+    }
+
+    /// The typed view of a `REPLACE_TEXT_WORD` modification (REQ-DSL-012, SRS §14.5):
+    /// `Ok(None)` for any other op; `Ok(Some((category, from, to)))` for a well-formed one.
+    /// `CARD_NAME` is returned as parsed (its rejection, CR 612.2, belongs to the compile
+    /// step); words are free strings. Never panics, whatever the members hold (R12). This view
+    /// is additive: parsing and serializing a document never consults it.
+    ///
+    /// # Errors
+    /// A message when the op is `REPLACE_TEXT_WORD` and `category` is missing, not a string or
+    /// not a known [`RewritableCategory`] wire name; `from` or `to` is missing or not a
+    /// string; a member other than `category`, `from` and `to` is present; or typed power or
+    /// toughness is set.
+    pub fn as_replace_text_word(
+        &self,
+    ) -> Result<Option<(RewritableCategory, String, String)>, String> {
+        if self.op != Modification::REPLACE_TEXT_WORD {
+            return Ok(None);
+        }
+        if self.power.is_some() || self.toughness.is_some() {
+            return Err("REPLACE_TEXT_WORD takes no power or toughness".to_owned());
+        }
+        if let Some(extra) = self
+            .params
+            .keys()
+            .find(|k| !matches!(k.as_str(), "category" | "from" | "to"))
+        {
+            return Err(format!("REPLACE_TEXT_WORD has unknown member {extra:?}"));
+        }
+        let text = |key: &str| -> Result<String, String> {
+            match self.params.get(key) {
+                None => Err(format!("REPLACE_TEXT_WORD is missing member {key:?}")),
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(_) => Err(format!("REPLACE_TEXT_WORD member {key:?} must be a string")),
+            }
+        };
+        let name = text("category")?;
+        let category = RewritableCategory::from_wire(&name)
+            .ok_or_else(|| format!("unknown REPLACE_TEXT_WORD category {name:?}"))?;
+        Ok(Some((category, text("from")?, text("to")?)))
     }
 
     /// Whether `op` has typed power and toughness.
