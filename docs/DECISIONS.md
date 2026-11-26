@@ -9945,3 +9945,68 @@ order).
 **Rationale:** Each choice asserts exactly what the brief and the #37 decisions pin, never less.
 **Alternatives:** Asserting accessor rejection of empty words (rejected: not in the brief's Err
 list); a land-type word for the acceptance scenario (rejected: departs from the brief's token list).
+
+## #203 FP-152 tester — Independent Tester judgement calls
+
+**Decision:** (1) The ETB projection returns only the entrant's evaluation, so requirement 8's
+"A2 (P2's artifact) affected and A1 not" is observed on the entrant itself: an artifact entering
+under P1 (entry and environment controller P1, as the projection requires) is given to P2 by a
+layer-2 effect already in force; its own or copied static "artifacts you control are creatures"
+must make it a creature, and a second static "artifacts you don't control gain a synthetic type"
+must not apply to it (that second static is what the old controller's perspective would select).
+(2) Beyond the brief's list, the layer tests add a stale stored controller case (stored P1,
+source's base controller P2, no layer-2 effect: "you" is P2, CR 109.5 "current controller"),
+a stolen-and-returned case and a case where both the candidate and the source change control;
+each follows from the brief's `MatchContext::effect_controller` contract.
+**Rationale:** Asserts exactly the brief's contract through the public API, never less.
+**Alternatives:** Evaluating A1/A2 separately with `evaluate_all` inside the ETB file (rejected:
+that tests the layer evaluator, already covered, not the projection's copied statics).
+
+## #203 FP-152 — Controller of a sourced static effect
+
+**Decision:** (1) The controller a selector sees for a static effect with a source is the source's
+controller in the current layer pass: the candidate's own state so far when the source is the
+candidate, otherwise the source's view the board pass already builds for the existence question
+(the source evaluated through the end of the effect's own layer without the effect; one level
+deep, other sources at their start-of-layer state). For layers 3-7d this is the post-layer-2
+controller. For layers 1a, 1b and 2 it is the source's state so far in that layer (no
+fixed point is sought for a control-changing static whose source itself changes control in
+layer 2). (2) The stored `ContinuousEffect::controller` is the fallback when the source is not in
+the universe or its evaluated controller is `None` (CR 108.4a, 109.5 owner semantics remain the
+registering caller's job). (3) The foreign source's state reaches `pipeline::applies_to` through
+a new provided method `LayerEnvironment::static_source_state` (default `None`), answered by the
+board pass's `BoardEnv` (its existing per-effect views) and `NestedEnv` (start-of-layer slots);
+`MatchContext` is unchanged. (4) `replacement::etb::bind_to` keeps storing `entry.controller`,
+now only a fallback: the bound static's source is the entrant, so the evaluator reads the
+entrant's post-layer-2 controller (CR 614.12, 110.2, 613.1b).
+**Rationale:** CR 109.5 and 611.3a (rules-researcher, #203): "you" of a static is the current
+controller of the object it is on and the effect is not locked in; layer 2 precedes layers 3+
+(CR 613.1b), and timestamp/dependency order only within a layer (CR 613.7, 613.8a), so both
+timestamp orders give the same result. Reusing the existence-question view keeps one source
+evaluation per layer and effect, so the cached and full-recompute paths and the dependency trial
+(`step_applies` is shared) agree with no extra cost. Layers 1-2 have no completed layer-2 result
+to read; the state so far is the only value available without iteration.
+**Alternatives:** Passing the source state through `MatchContext` (rejected: the brief freezes
+its field set); a pipeline-side wrapper environment capturing views (rejected: `LayerCache` calls
+`run_board` directly, so cached and uncached results would differ); a fixed-point iteration for
+layer-2 statics whose source changes control in layer 2 (rejected: no rule excerpt asks for it,
+cost and termination risk); overwriting the stored controller at each control change in the
+state (rejected: state mutation outside the evaluator and not layer-aware).
+**Owned paths:** `crates/fineprint-core/src/layers/board.rs` (only the two `static_source_state`
+overrides of `BoardEnv` and `NestedEnv`) was added to the owned paths by the Orchestrator (R1
+extension), because `LayerCache` calls `run_board` directly, so a pipeline-only wrapper would
+desynchronise cached and uncached results.
+
+## #203 FP-152 — Existing spec test corrected to the static-controller contract
+
+**Decision:** `crates/fineprint-core/tests/spec_layers_each_layer.rs`
+`selector_sees_layer_2_result_and_context_fields` (Orchestrator-granted owned-path extension)
+registered a static with stored controller P2 whose source was controlled by P1 and asserted
+`effect_controller == P2`, the stored value. It is corrected (R10) to put the source under P2
+and register the static with a stale stored controller P1, still asserting
+`effect_controller == P2` for every candidate, plus every original assertion.
+**Rationale:** Brief #203 requirement 1 (REQ-LAYER-002 deliverable 1; CR 109.5, 611.3a): a
+sourced static's controller is the source's evaluated controller. The corrected test now asserts
+that contract (a stale stored value must not be seen), so it is stronger, not weaker.
+**Alternatives:** Moving the source under P2 and keeping stored P2 (rejected: would no longer
+distinguish stored from evaluated controller); leaving the test (rejected: contradicts the brief).

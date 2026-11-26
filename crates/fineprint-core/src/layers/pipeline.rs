@@ -220,6 +220,23 @@ pub trait LayerEnvironment {
         let _ = (effect, source, source_view);
         true
     }
+
+    /// The state of `source`, the source of the static `effect`, when `source` is another object
+    /// of the evaluation's universe than the object being evaluated: the view the board pass
+    /// also hands to [`Self::generating_ability_exists`] (that object evaluated through the end
+    /// of the effect's own layer without the effect, every earlier layer complete). `None` when
+    /// no such view exists (the source is not in the universe). Default: `None`.
+    ///
+    /// Answered by the evaluator's own board pass (REQ-LAYER-001); a caller's environment is
+    /// never asked and need not implement it. The evaluator reads the controller of this state
+    /// as the effect's controller for selector matching ([`MatchContext::effect_controller`];
+    /// CR 109.5: "you" of a static ability is the current controller of the object it is on;
+    /// CR 611.3a: a static effect is not locked in; CR 613.1b: after layer 2 that is the
+    /// controller after control-changing effects).
+    fn static_source_state(&self, effect: EffectId, source: ObjectId) -> Option<&Evaluated> {
+        let _ = (effect, source);
+        None
+    }
 }
 
 /// The number of a literal power or toughness: a JSON integer or `{"LITERAL": n}`; `None` for
@@ -364,7 +381,8 @@ pub(super) fn step_applies(
             locks.linked_applies(*eid)
         }
         Step::Effect(eid, effect) => {
-            applies_to(effect, env, id, state) && generator_exists(*eid, effect, env, id, state)
+            applies_to(*eid, effect, env, id, state)
+                && generator_exists(*eid, effect, env, id, state)
         }
         Step::Counter(..) => true,
     }
@@ -502,8 +520,10 @@ pub fn evaluate_all(
 }
 
 /// Whether `effect` applies to `id` now: a locked set (CR 611.2c) or a selector matched against
-/// the object as evaluated so far (CR 611.3a, CR 613.5).
+/// the object as evaluated so far (CR 611.3a, CR 613.5), with the effect's controller from
+/// [`effect_controller`].
 fn applies_to(
+    eid: EffectId,
     effect: &ContinuousEffect,
     env: &dyn LayerEnvironment,
     id: ObjectId,
@@ -515,7 +535,7 @@ fn applies_to(
             selector,
             &MatchContext {
                 source: effect.source,
-                effect_controller: effect.controller,
+                effect_controller: effect_controller(eid, effect, env, id, state),
                 candidate: id,
                 candidate_view: state,
             },
@@ -523,6 +543,43 @@ fn applies_to(
         // Decided by the lock-in record in [`step_applies`] (CR 613.6).
         Affected::SameAsLayer(_) => false,
     }
+}
+
+/// The controller of `effect` as a selector sees it ([`MatchContext::effect_controller`]).
+///
+/// A static effect with a source (CR 611.3): the source's controller as evaluated in this pass
+/// at the point the effect applies, not the one stored at registration (CR 109.5: "you" of a
+/// static ability is the current controller of the object it is on; CR 611.3a: a static effect
+/// is not locked in). When the source is the object `id` being evaluated, its state so far
+/// (`state`); otherwise the source's view from the board pass
+/// ([`LayerEnvironment::static_source_state`]). For an effect of layer 3 or later this is the
+/// controller after layer 2 (CR 613.1b; CR 613.7 and 613.8 order effects only within a layer, so
+/// the timestamp of a control change relative to the static does not matter); for an effect of
+/// layers 1a, 1b or 2 it is the source's state so far in that layer (docs/DECISIONS.md "#203
+/// FP-152 — Controller of a sourced static effect"). The stored controller is kept when the
+/// source has no view (not in the universe) or no evaluated controller (CR 108.4a, 109.5: the
+/// owner, which the registering caller stores).
+///
+/// Any other effect keeps the stored controller: an effect of a resolved spell or ability (its
+/// set and controller are fixed at creation, CR 611.2c), an effect without a source, and a
+/// linked part ([`Affected::SameAsLayer`], decided by its anchor, CR 613.6) never reach a
+/// selector with another controller.
+fn effect_controller(
+    eid: EffectId,
+    effect: &ContinuousEffect,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    state: &Evaluated,
+) -> PlayerId {
+    let (EffectOrigin::Static { .. }, Some(source)) = (&effect.origin, effect.source) else {
+        return effect.controller;
+    };
+    let view = if source == id {
+        Some(state)
+    } else {
+        env.static_source_state(eid, source)
+    };
+    view.and_then(|v| v.controller).unwrap_or(effect.controller)
 }
 
 /// The start of layer 7 (CR 613.4): whether the object in `state` has power and toughness after
@@ -716,5 +773,321 @@ fn apply_counter(state: &mut Evaluated, pt: &mut Option<(i64, i64)>, kind: &str,
             *t = t.saturating_add(dt.saturating_mul(amount));
         }
         update_pt(state, *pt);
+    }
+}
+
+/// Unit tests of the controller a selector sees for a sourced static effect (REQ-LAYER-001,
+/// REQ-LAYER-002; CR 109.5, 611.3a, 613.1b, 613.7). Synthetic ids and characteristics only (R5).
+#[cfg(test)]
+mod static_controller_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
+    use fineprint_dsl::ability::Layer;
+    use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
+    use fineprint_dsl::expr::{ObjectSelectorAST, SelectorFilter};
+
+    use super::{
+        Evaluated, LayerEnvironment, MatchContext, ObjectBase, effect_controller, evaluate,
+        evaluate_all, evaluate_with_order,
+    };
+    use crate::layers::LayerCache;
+    use crate::layers::registry::{
+        Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
+        ManaValueProvenance,
+    };
+    use crate::objects::Characteristics;
+
+    const P1: PlayerId = PlayerId::new(1);
+    const P2: PlayerId = PlayerId::new(2);
+    /// The static's source, `test.artifact_anthem` (an artifact itself).
+    const S: ObjectId = ObjectId::new(1);
+    /// P1's artifact.
+    const A1: ObjectId = ObjectId::new(2);
+    /// P2's artifact.
+    const A2: ObjectId = ObjectId::new(3);
+    /// An object outside the universe.
+    const GONE: ObjectId = ObjectId::new(99);
+    const STATIC: EffectId = EffectId::new(10);
+    const STEAL: EffectId = EffectId::new(20);
+
+    fn artifact(name: &str) -> Characteristics {
+        Characteristics {
+            names: [format!("test.{name}")].into_iter().collect(),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: ["Artifact".to_owned()].into_iter().collect(),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream(Vec::new()),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        }
+    }
+
+    /// S (P1), A1 (P1), A2 (P2) on the battlefield. Every selector reads "artifacts you
+    /// control": an artifact whose controller so far is the effect's controller.
+    struct Board;
+
+    impl LayerEnvironment for Board {
+        fn objects(&self) -> Vec<ObjectId> {
+            vec![S, A1, A2]
+        }
+
+        fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+            let (name, controller) = match id {
+                S => ("artifact_anthem", P1),
+                A1 => ("artifact_one", P1),
+                A2 => ("artifact_two", P2),
+                _ => return None,
+            };
+            Some(ObjectBase {
+                characteristics: artifact(name),
+                controller: Some(controller),
+                on_battlefield: true,
+            })
+        }
+
+        fn matches(&self, _selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+            ctx.candidate_view
+                .characteristics
+                .card_types
+                .contains("Artifact")
+                && ctx.candidate_view.controller == Some(ctx.effect_controller)
+        }
+    }
+
+    fn any_selector() -> Affected {
+        Affected::Selector(ObjectSelectorAST::Filter(SelectorFilter {
+            zones: None,
+            count: None,
+            ordering: None,
+            predicate: None,
+        }))
+    }
+
+    fn make_creature() -> LayerModification {
+        LayerModification::AddTypes {
+            supertypes: BTreeSet::new(),
+            card_types: ["Creature".to_owned()].into_iter().collect(),
+            subtypes: BTreeSet::new(),
+        }
+    }
+
+    /// "Artifacts you control are creatures" (layer 4) generated by `source`, registered
+    /// under P1, at timestamp 5.
+    fn anthem(source: ObjectId, origin: EffectOrigin) -> ContinuousEffect {
+        ContinuousEffect {
+            source: Some(source),
+            controller: P1,
+            timestamp: Timestamp::new(5),
+            layer: Layer::L4,
+            is_cda: false,
+            origin,
+            affected: any_selector(),
+            modification: make_creature(),
+        }
+    }
+
+    fn printed() -> EffectOrigin {
+        EffectOrigin::Static { granted_at: None }
+    }
+
+    /// A resolved layer-2 effect giving P2 control of S at timestamp `t` (CR 613.1b).
+    fn steal_s(t: u64) -> ContinuousEffect {
+        ContinuousEffect {
+            source: None,
+            controller: P2,
+            timestamp: Timestamp::new(t),
+            layer: Layer::L2,
+            is_cda: false,
+            origin: EffectOrigin::Resolved,
+            affected: Affected::Objects([S].into_iter().collect()),
+            modification: LayerModification::SetController(P2),
+        }
+    }
+
+    fn registry(anthem: ContinuousEffect, steal_at: Option<u64>) -> ContinuousEffects {
+        let mut effects = ContinuousEffects::new();
+        effects.register(STATIC, anthem).expect("register static");
+        if let Some(t) = steal_at {
+            effects.register(STEAL, steal_s(t)).expect("register steal");
+        }
+        effects
+    }
+
+    /// Whether each object is a creature, by every evaluator (`evaluate`,
+    /// `evaluate_with_order`, `evaluate_all`, the cache), asserting they agree (REQ-LAYER-001).
+    fn creatures(effects: &ContinuousEffects) -> BTreeMap<ObjectId, bool> {
+        let all = evaluate_all(effects, &Board).expect("evaluate_all");
+        let cached = LayerCache::new()
+            .evaluate_all(effects, &Board)
+            .expect("cache evaluate_all");
+        assert_eq!(all, cached);
+        let mut out = BTreeMap::new();
+        for id in [S, A1, A2] {
+            let one = evaluate(effects, &Board, id).expect("evaluate");
+            let (ordered, _) = evaluate_with_order(effects, &Board, id).expect("with order");
+            assert_eq!(one, all[&id]);
+            assert_eq!(ordered, all[&id]);
+            out.insert(id, one.characteristics.card_types.contains("Creature"));
+        }
+        out
+    }
+
+    // REQ-LAYER-002; CR 109.5, 611.3a, 613.1b, 613.7: with no control change, the static
+    // applies for P1 (unchanged behaviour); when S itself is taken over by P2 in layer 2, S
+    // (an artifact P2 now controls) is affected under its new controller, in both timestamp
+    // orders of the control change relative to the static.
+    #[test]
+    fn req_layer_002_self_source_static_follows_layer_2_controller_both_orders() {
+        let none = creatures(&registry(anthem(S, printed()), None));
+        assert_eq!(none, BTreeMap::from([(S, true), (A1, true), (A2, false)]));
+        for steal_at in [3, 7] {
+            let got = creatures(&registry(anthem(S, printed()), Some(steal_at)));
+            assert!(
+                got[&S],
+                "S under P2 is an artifact its controller controls ({steal_at})"
+            );
+        }
+    }
+
+    // REQ-LAYER-001, REQ-LAYER-002; CR 109.5, 611.3a, 613.1b, 613.7: P1's static source S
+    // ("artifacts you control are creatures", layer 4) taken over by P2 in layer 2, with the
+    // control change EARLIER (3) and LATER (7) than the static (5): P2's artifact A2 is a
+    // creature, P1's artifact A1 is not; with control returned (the layer-2 effect removed),
+    // A1 is a creature and A2 is not. Every evaluator and the cache agree.
+    #[test]
+    fn req_layer_002_foreign_source_static_follows_layer_2_controller_both_orders() {
+        for steal_at in [3, 7] {
+            let mut effects = registry(anthem(S, printed()), Some(steal_at));
+            assert_eq!(
+                creatures(&effects),
+                BTreeMap::from([(S, true), (A1, false), (A2, true)]),
+                "steal at {steal_at}"
+            );
+            // Control returns: the layer-2 effect ends.
+            assert!(effects.remove(STEAL));
+            assert_eq!(
+                creatures(&effects),
+                BTreeMap::from([(S, true), (A1, true), (A2, false)]),
+                "returned after steal at {steal_at}"
+            );
+        }
+    }
+
+    // REQ-LAYER-001; CR 613.1b, 613.7: one cache kept across the control change and its end
+    // agrees with the uncached evaluator at every step.
+    #[test]
+    fn req_layer_001_cache_follows_control_change_of_static_source() {
+        let mut cache = LayerCache::new();
+        let mut effects = registry(anthem(S, printed()), None);
+        assert_eq!(
+            cache.evaluate_all(&effects, &Board).expect("before"),
+            evaluate_all(&effects, &Board).expect("before")
+        );
+        effects.register(STEAL, steal_s(7)).expect("steal");
+        let during = cache.evaluate_all(&effects, &Board).expect("during");
+        assert_eq!(during, evaluate_all(&effects, &Board).expect("during"));
+        assert!(during[&A2].characteristics.card_types.contains("Creature"));
+        assert!(!during[&A1].characteristics.card_types.contains("Creature"));
+        assert!(effects.remove(STEAL));
+        let after = cache.evaluate_all(&effects, &Board).expect("after");
+        assert_eq!(after, evaluate_all(&effects, &Board).expect("after"));
+        assert!(after[&A1].characteristics.card_types.contains("Creature"));
+        assert!(!after[&A2].characteristics.card_types.contains("Creature"));
+    }
+
+    // REQ-LAYER-002; CR 109.5, 611.3a: a static on P2's artifact A2 registered with a stale
+    // controller (P1) applies for A2's evaluated controller (P2) to every candidate, A2 itself
+    // included and S and A1 (P1's) excluded. A second layer-4 static on S (adding a subtype
+    // only) makes the board evaluate S as a foreign source in the same layer, so the nested
+    // source evaluation reads A2's start-of-layer state.
+    #[test]
+    fn req_layer_002_two_foreign_sources_in_one_layer() {
+        let mut on_s = anthem(S, printed());
+        on_s.modification = LayerModification::AddTypes {
+            supertypes: BTreeSet::new(),
+            card_types: BTreeSet::new(),
+            subtypes: ["Construct".to_owned()].into_iter().collect(),
+        };
+        let mut effects = registry(on_s, None);
+        let mut on_a2 = anthem(A2, printed());
+        on_a2.timestamp = Timestamp::new(6);
+        effects.register(EffectId::new(11), on_a2).expect("second");
+        assert_eq!(
+            creatures(&effects),
+            BTreeMap::from([(S, false), (A1, false), (A2, true)])
+        );
+    }
+
+    // REQ-LAYER-002; CR 611.2c: an effect of a resolved spell or ability keeps the controller
+    // stored at creation, even when its source changes control in layer 2.
+    #[test]
+    fn req_layer_002_resolved_effect_keeps_stored_controller() {
+        for steal_at in [3, 7] {
+            let got = creatures(&registry(anthem(S, EffectOrigin::Resolved), Some(steal_at)));
+            assert_eq!(
+                got,
+                BTreeMap::from([(S, false), (A1, true), (A2, false)]),
+                "steal at {steal_at}"
+            );
+        }
+    }
+
+    // REQ-LAYER-002; CR 611.2c: a locked set ignores controllers altogether.
+    #[test]
+    fn req_layer_002_locked_set_is_unaffected_by_control_change() {
+        let mut locked = anthem(S, printed());
+        locked.affected = Affected::Objects([A1].into_iter().collect());
+        let got = creatures(&registry(locked, Some(7)));
+        assert_eq!(got, BTreeMap::from([(S, false), (A1, true), (A2, false)]));
+    }
+
+    // REQ-LAYER-002; CR 108.4a, 109.5: a static whose source is not in the universe (no view)
+    // falls back to the stored controller.
+    #[test]
+    fn req_layer_002_source_outside_universe_falls_back_to_stored_controller() {
+        let got = creatures(&registry(anthem(GONE, printed()), Some(7)));
+        assert_eq!(got, BTreeMap::from([(S, false), (A1, true), (A2, false)]));
+    }
+
+    // REQ-LAYER-002: `effect_controller` directly: a static without a source, and a sourced
+    // static whose source state has no controller, keep the stored controller; a sourced
+    // static on the candidate reads the candidate's controller so far; a caller's
+    // environment has no view of another source (default `static_source_state`).
+    #[test]
+    fn req_layer_002_effect_controller_resolution() {
+        let state = |controller| Evaluated {
+            characteristics: artifact("artifact_one"),
+            controller,
+            mana_value_provenance: ManaValueProvenance::plain(),
+        };
+        let mut sourceless = anthem(S, printed());
+        sourceless.source = None;
+        assert_eq!(
+            effect_controller(STATIC, &sourceless, &Board, S, &state(Some(P2))),
+            P1
+        );
+        let on_s = anthem(S, printed());
+        assert_eq!(
+            effect_controller(STATIC, &on_s, &Board, S, &state(Some(P2))),
+            P2
+        );
+        assert_eq!(
+            effect_controller(STATIC, &on_s, &Board, S, &state(None)),
+            P1
+        );
+        assert!(Board.static_source_state(STATIC, S).is_none());
+        assert_eq!(
+            effect_controller(STATIC, &on_s, &Board, A1, &state(Some(P2))),
+            P1
+        );
     }
 }

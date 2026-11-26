@@ -478,6 +478,13 @@ impl LayerEnvironment for BoardEnv<'_> {
         let view = source_view.or_else(|| self.views.get(&effect));
         self.inner.generating_ability_exists(effect, source, view)
     }
+
+    /// CR 109.5, 611.3a, 613.1b: another source of the universe with its view from
+    /// [`foreign_views`], the same one the existence question uses.
+    fn static_source_state(&self, effect: EffectId, source: ObjectId) -> Option<&Evaluated> {
+        let _ = source;
+        self.views.get(&effect)
+    }
 }
 
 impl LayerEnvironment for NestedEnv<'_, '_> {
@@ -493,6 +500,13 @@ impl LayerEnvironment for NestedEnv<'_, '_> {
     ) -> bool {
         let view = source_view.or_else(|| self.slots.get(&source).map(|s| &s.scratch.state));
         self.inner.generating_ability_exists(effect, source, view)
+    }
+
+    /// CR 109.5, 611.3a, 613.1b: any other source of the universe with its start-of-layer
+    /// state (no further nesting), as for the existence question.
+    fn static_source_state(&self, effect: EffectId, source: ObjectId) -> Option<&Evaluated> {
+        let _ = effect;
+        self.slots.get(&source).map(|s| &s.scratch.state)
     }
 }
 
