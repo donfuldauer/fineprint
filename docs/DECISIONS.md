@@ -10155,3 +10155,29 @@ bounded by the number of tokens and copies that ever ceased in a match.
 silently allow id reuse); a high-water CardId mark only (rejected: CardIds are not issued by
 `Zones` and need not be dense); rejecting only in `create_object` / `enter_from_outside`
 (rejected: `add_outside_card` would be a back door).
+
+## #216 FP-160 — Evaluated controller through the CharacteristicsProvider
+
+**Decision:** The layer-2 controller (CR 613.1b) reaches LKI capture and the CR 616.1 replacement
+chooser through a new provided method `CharacteristicsProvider::controller(id) -> Option<PlayerId>`
+(default `None`), overridden by `LayeredProvider` with `evaluate(..).ok().and_then(|e|
+e.controller)`. `capture_lki_on_move` uses it only for an object leaving the battlefield, falling
+back to the zone record's controller; the stack and every other zone keep
+`ObjectRecord::rules_controller`. `Bus::chooser` uses it only for an affected permanent, falling
+back to `Permanent::controller`; a non-permanent keeps its rules-level controller or owner (CR
+108.4a). The stored `Permanent::controller` and the zone record are not changed, and destinations
+stay owner-based (CR 400.3). Contract entry CR-008 (additive). The wrappers `LkiProvider`
+(events/exec.rs) and `CeasingLki` (sba/perform.rs) must forward the method for the event-driven
+and SBA paths to benefit; that is a follow-up in their owning unit.
+**Rationale:** The injected provider is already, by the caller's contract, the layer-evaluated
+view, so it is the single source of truth every consumer shares, mirroring the SBA registry's
+"evaluated, else stored" rule (PR #214, F4). A defaulted method keeps every implementor
+source-compatible and leaves base-only fakes on the old behaviour. The LKI encoding is unchanged;
+only the recorded value can differ.
+**Alternatives:** Syncing `Permanent::controller` from layer 2 after each evaluation (rejected: no
+state-level caller exists that runs the layers and writes back, and it would need edits in
+permanent/, events/ and the state driver, outside this unit); computing the controller separately
+in each consumer from a `ContinuousEffects` reference (rejected: duplicates the evaluation and
+gives consumers no common fallback rule); consulting the provider for stack objects too (rejected:
+the layer system's controller for a spell is not a control change the brief covers, and CR 109.4
+behaviour is to stay unchanged).

@@ -573,8 +573,10 @@ impl Bus<'_, '_, '_> {
 
     /// The chooser of `event` (CR 616.1): the controller of the affected object (CR 112.2,
     /// CR 109.4: a permanent's or a stack object's controller), its owner if it has no
-    /// controller, else the affected player; for a token creation the controller it would
-    /// enter under; with neither, the active player.
+    /// controller (CR 108.4a), else the affected player; for a token creation the controller it
+    /// would enter under; with neither, the active player. A permanent's controller is the
+    /// layer-evaluated one (CR 613.1b) from the context's provider, falling back to the stored
+    /// controller when the provider names none.
     fn chooser(&self, event: &GameEvent) -> Result<PlayerId, BusError> {
         // CR 616.1
         if let GameEvent::CreateToken {
@@ -585,7 +587,12 @@ impl Bus<'_, '_, '_> {
         }
         if let Some(object) = affected_object(event) {
             if let Some(permanent) = self.ctx.permanents.get(object) {
-                return Ok(permanent.controller());
+                // CR 613.1b, CR 616.1: the controller after layer 2, else the stored one.
+                return Ok(self
+                    .ctx
+                    .provider
+                    .controller(object)
+                    .unwrap_or_else(|| permanent.controller()));
             }
             // CR 109.4, CR 112.2: a spell on the stack has a controller; elsewhere the owner.
             return self
@@ -1442,4 +1449,305 @@ fn modify(event: &mut GameEvent, m: Modification) -> bool {
         _ => {}
     }
     true
+}
+
+#[cfg(test)]
+mod evaluated_chooser_tests {
+    // Unit tests of the replacement chooser with the layer-evaluated controller: REQ-REPL-*
+    // (CR 616.1, CR 108.4a), REQ-LAYER-001 (CR 613.1b), REQ-EVENT-001 (the bus). Synthetic ids
+    // and synthetic characteristics only.
+
+    use std::collections::BTreeSet;
+
+    use fineprint_base::encode::encode_to_vec;
+    use fineprint_base::hash::{Digest, leaf_digest};
+    use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
+    use fineprint_dsl::ability::Layer;
+    use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
+    use fineprint_dsl::expr::ObjectSelectorAST;
+
+    use super::*;
+    use crate::choice::{ChoicePayload, ChoiceResponse, ChoiceSession, Interrupt, Status};
+    use crate::events::{EventBatch, EventContext, EventState, GameEvent, ZoneChangeCause};
+    use crate::layers::{
+        Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerEnvironment,
+        LayerModification, LayeredProvider, MatchContext, ObjectBase,
+    };
+    use crate::memory::{LkiStore, MemoryTable};
+    use crate::objects::Characteristics;
+    use crate::permanent::Permanents;
+    use crate::replacement::{Action, BusEventKind, EventMatcher, ReplacementEffect};
+    use crate::state::GameState;
+    use crate::txn::Transactional;
+    use crate::zones::{MoveRequest, ZoneKind, Zones, ZonesConfig};
+
+    fn p(n: u64) -> PlayerId {
+        PlayerId::new(n)
+    }
+
+    fn chars() -> Characteristics {
+        Characteristics {
+            names: BTreeSet::from(["test.vanilla_2_2".to_owned()]),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: BTreeSet::from(["Creature".to_owned()]),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream(Vec::new()),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        }
+    }
+
+    /// The layer environment of the world's zones: every object with its zone record's
+    /// rules-level controller as its base controller.
+    struct Env<'a> {
+        zones: &'a Zones,
+    }
+
+    impl LayerEnvironment for Env<'_> {
+        fn objects(&self) -> Vec<ObjectId> {
+            let mut all: Vec<ObjectId> = self.zones.all_object_ids();
+            all.sort_unstable();
+            all
+        }
+
+        fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+            self.zones.object(id).map(|r| ObjectBase {
+                characteristics: chars(),
+                controller: r.rules_controller(),
+                on_battlefield: r.zone.kind() == ZoneKind::Battlefield,
+            })
+        }
+
+        fn matches(&self, _selector: &ObjectSelectorAST, _ctx: &MatchContext<'_>) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct World {
+        game: GameState,
+        zones: Zones,
+        ids: IdGenerator<ObjectId>,
+        permanents: Permanents,
+        memories: MemoryTable,
+        lki: LkiStore,
+        events: EventState,
+        registry: ReplacementRegistry,
+        layer_effects: ContinuousEffects,
+    }
+
+    impl World {
+        /// Two players, turn 1, active player 1, two competing `Skip` effects on `kind`.
+        fn new(kind: BusEventKind) -> World {
+            let mut game = GameState::new(7, 2, 20).unwrap();
+            game.set_turn_number(1);
+            game.set_active_player(Some(p(1))).unwrap();
+            let mut registry = ReplacementRegistry::new();
+            for id in [1, 2] {
+                registry
+                    .add(ReplacementEffect::new(
+                        EffectId::new(id),
+                        EventMatcher::new(kind),
+                        Action::Skip,
+                    ))
+                    .unwrap();
+            }
+            World {
+                game,
+                zones: Zones::new(&[p(1), p(2)], ZonesConfig::default()),
+                ids: IdGenerator::new(),
+                permanents: Permanents::new(),
+                memories: MemoryTable::new(),
+                lki: LkiStore::new(),
+                events: EventState::new(),
+                registry,
+                layer_effects: ContinuousEffects::new(),
+            }
+        }
+
+        /// A new object owned by `owner` in a zone of `kind`; on the battlefield it is a
+        /// permanent stored as controlled by `stored`.
+        fn create(&mut self, card: u64, owner: u64, stored: u64, kind: ZoneKind) -> ObjectId {
+            let mut req = MoveRequest::new(kind);
+            if kind == ZoneKind::Battlefield {
+                req.controller = Some(p(stored));
+            }
+            let id = self
+                .zones
+                .create_object(&mut self.ids, CardId::new(card), p(owner), req)
+                .unwrap();
+            if kind == ZoneKind::Battlefield {
+                self.permanents.enter(id, p(stored), 1).unwrap();
+            }
+            id
+        }
+
+        /// A resolved layer-2 control effect giving `object` to `to` (CR 613.1b).
+        fn give_control(&mut self, effect: u64, object: ObjectId, to: u64) {
+            self.layer_effects
+                .register(
+                    EffectId::new(effect),
+                    ContinuousEffect {
+                        source: None,
+                        controller: p(to),
+                        timestamp: Timestamp::new(effect),
+                        layer: Layer::L2,
+                        is_cda: false,
+                        origin: EffectOrigin::Resolved,
+                        affected: Affected::Objects([object].into_iter().collect()),
+                        modification: LayerModification::SetController(p(to)),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    impl Transactional for World {
+        fn state_hash(&self) -> Digest {
+            let mut bytes = encode_to_vec(&self.game.state_hash());
+            bytes.extend(encode_to_vec(&self.zones));
+            bytes.extend(encode_to_vec(&self.permanents));
+            bytes.extend(encode_to_vec(&self.memories));
+            bytes.extend(encode_to_vec(&self.lki));
+            bytes.extend(encode_to_vec(&self.events));
+            bytes.extend(encode_to_vec(&self.registry));
+            leaf_digest(&bytes)
+        }
+
+        fn priority_player(&self) -> Option<PlayerId> {
+            None
+        }
+
+        fn carry_durable(restored: Self, _before: &Self, _after: &Self) -> Self {
+            restored
+        }
+    }
+
+    /// Runs `event` through the bus with the layer-evaluated provider and returns the first
+    /// replacement request's chooser, its effects, and the final state hash (answering index 0).
+    fn chooser_of(w: &World, event: GameEvent) -> (PlayerId, Vec<String>, Digest) {
+        let batch = EventBatch::from_events(vec![event]);
+        let procedure = move |s: &mut World, ch: &mut crate::choice::ChoiceContext<'_>| {
+            let World {
+                game,
+                zones,
+                ids,
+                permanents,
+                memories,
+                lki,
+                events,
+                registry,
+                layer_effects,
+            } = s;
+            let snapshot = zones.clone();
+            let env = Env { zones: &snapshot };
+            let provider = LayeredProvider::new(layer_effects, &env);
+            let mut ctx = EventContext {
+                game,
+                zones,
+                ids,
+                permanents,
+                memories,
+                lki,
+                events,
+                provider: &provider,
+            };
+            match process_batch(&mut ctx, registry, &batch, false, ch) {
+                Ok(r) => Ok(Ok(r)),
+                Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+                Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+            }
+        };
+        let mut session = ChoiceSession::start(w.clone(), procedure).unwrap();
+        let Status::Pending(request) = session.status() else {
+            panic!("no replacement choice was asked");
+        };
+        let request = request.clone();
+        let ChoicePayload::ChooseReplacementEffect { effects, .. } = &request.payload else {
+            panic!("not a replacement request");
+        };
+        assert_eq!(request.reason.cr, "CR 616.1");
+        session
+            .submit(
+                request.request_id,
+                ChoiceResponse::SelectReplacement { index: 0 },
+            )
+            .unwrap();
+        let Status::Done { output, .. } = session.status() else {
+            panic!("more than one request");
+        };
+        assert!(output.is_ok(), "bus failed: {output:?}");
+        (request.chooser, effects.clone(), session.state_hash())
+    }
+
+    fn tap(object: ObjectId) -> GameEvent {
+        GameEvent::Tap { object }
+    }
+
+    /// REQ-REPL-*, REQ-LAYER-001, REQ-EVENT-001; CR 616.1, CR 613.1b: a creature stored as
+    /// controlled by P1 under a layer-2 effect giving it to P2 sends the choice to P2.
+    #[test]
+    fn req_repl_cr_616_1_chooser_is_evaluated_controller() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        w.give_control(1, x, 2);
+        let (chooser, effects, _) = chooser_of(&w, tap(x));
+        assert_eq!(chooser, p(2));
+        assert_eq!(effects.len(), 2);
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; CR 616.1: with no layer-2 effect the stored controller P1
+    /// chooses.
+    #[test]
+    fn req_repl_cr_616_1_chooser_without_control_effect() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        assert_eq!(chooser_of(&w, tap(x)).0, p(1));
+    }
+
+    /// REQ-REPL-*, REQ-LAYER-001; CR 616.1, CR 613.1b: stored controller P2, evaluated P1
+    /// (owned by P2): P1 chooses.
+    #[test]
+    fn req_repl_cr_616_1_chooser_evaluated_back_to_p1() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 2, 2, ZoneKind::Battlefield);
+        w.give_control(1, x, 1);
+        assert_eq!(chooser_of(&w, tap(x)).0, p(1));
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; CR 616.1, CR 108.4a: a card in a graveyard has no
+    /// controller, so its owner chooses, even if a layer-2 effect names another player.
+    #[test]
+    fn req_repl_cr_108_4a_non_permanent_owner_chooses() {
+        let mut w = World::new(BusEventKind::ZoneChange);
+        let card = w.create(1, 2, 2, ZoneKind::Graveyard);
+        w.give_control(1, card, 1);
+        let event = GameEvent::ZoneChange {
+            object: card,
+            request: MoveRequest::new(ZoneKind::Exile),
+            cause: ZoneChangeCause::Other,
+        };
+        assert_eq!(chooser_of(&w, event).0, p(2));
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; R3 (determinism): repeated runs from the same state ask the
+    /// same player for the same choice and end in the same state.
+    #[test]
+    fn req_repl_cr_616_1_chooser_is_deterministic() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        w.give_control(1, x, 2);
+        let first = chooser_of(&w, tap(x));
+        for _ in 0..4 {
+            assert_eq!(chooser_of(&w, tap(x)), first);
+        }
+    }
 }

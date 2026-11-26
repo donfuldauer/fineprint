@@ -157,3 +157,30 @@ replacement::etb projection, every `LayerEnvironment::matches` implementor readi
 `MatchContext::effect_controller` (spec-test environments whose stored controller differs from
 the source's controller, e.g. `tests/spec_layers_each_layer.rs`
 `selector_sees_layer_2_result_and_context_fields`).
+
+## CR-008 — CharacteristicsProvider::controller (REQ-LAYER-001, REQ-CORE-003, REQ-REPL-*): evaluated controller for LKI capture and the replacement chooser
+Requested by: #216 FP-160   Kind: additive   Status: open
+Change: new provided method on `memory::CharacteristicsProvider`:
+`fn controller(&self, id: ObjectId) -> Option<PlayerId>` (default `None`): the controller of `id`
+after layer 2 as of now; `None` means the provider names none and the caller falls back to the
+stored controller. `layers::LayeredProvider` overrides it with the controller of
+`evaluate(effects, env, id)` (`None` for an unknown or unevaluable object). `capture_lki_on_move`
+records, for an object leaving the battlefield, `provider.controller(id)` falling back to the zone
+record's controller; every other zone is unchanged (`ObjectRecord::rules_controller`). The
+destination of a move stays owner-based. In `replacement::bus`, the CR 616.1 chooser of an affected
+permanent is `ctx.provider.controller(object)`, falling back to `Permanent::controller`; the
+stack-object, affected-player, token and APNAP paths are unchanged. No existing signature, no
+`LkiRecord` field or canonical encoding changes; only the recorded controller VALUE can differ
+(REQ-NFR-006).
+Why: REQ-LAYER-001 (CR 613.1b: control-changing effects apply in layer 2); REQ-REPL-* (CR 616.1:
+the affected object's controller chooses); REQ-CORE-003 (CR 603.10a, CR 603.3a, CR 701.21a: a
+look-back sacrifice trigger reads the controller as the permanent last existed on the battlefield,
+through `LkiRecord::controller`). The SBA registry already reads the evaluated controller (PR #214,
+F4); this gives LKI capture and the chooser the same source of truth. Issue #216.
+Consumers affected: every `CharacteristicsProvider` implementor (default `None`: base-only fakes
+keep the stored-controller behaviour, source-compatible), `layers::LayeredProvider`,
+`memory::capture_lki_on_move`, `replacement::bus` (`Bus::chooser`). Known limit: the wrapping
+providers `LkiProvider` in `events/exec.rs` and `CeasingLki` in `sba/perform.rs` do not forward
+`controller` yet, so the event-driven (`EventContext::execute`) and SBA perform paths fall back to
+the stored controller until they forward it; that is a follow-up (those files belong to another
+unit, #209).
