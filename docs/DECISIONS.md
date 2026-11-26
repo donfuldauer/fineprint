@@ -9464,3 +9464,21 @@ inside an opaque parameter is still a mana symbol of the rules text.
 **Alternatives.** Scanning LITERAL text (rejected, above); identity from activated costs only
 (rejected: misses other typed costs). Limitations: colors and identity from CDAs and from rules
 text that is not a typed cost are not computed.
+
+## #16 FP-015 — Spec-test judgement calls
+
+**Decision.** (1) The deep-nesting spec test uses 700 instruction levels (about 2100 nested JSON
+containers) and 1200 bare array/object levels, on the default test stack. (2) The spec path
+invariant allows `text_span` on `faces[i].text` and on ability paths only. (3) For an empty text
+stream (N = 0) only "no tokens and no spanned abilities gives no finding" is asserted. (4) "Error
+for each violated criterion" (FPL-MANA-ABILITY) is asserted as at least one finding per violated
+criterion, not an exact count. (5) The no-copied-prose marker is not used as a token or link id,
+since a message may legitimately name an unknown token id.
+**Rationale.** (1) `serde_json`'s recursive Drop aborts near 1000 instruction levels and the
+existing `AbilityAST::to_real` overflows between 800 and 900, so deeper tests would test those,
+not the lint; a bigger test stack would hide real recursion problems. (2) The implementation
+attaches the ability's own span to ability-level findings, which the brief does not forbid. (3)
+The brief's "N = 0: no coverage finding" and "end >= N is an Error" conflict for a span on empty
+text. (4)–(5) The brief pins neither an exact count nor message wording.
+**Alternatives.** Running on a bigger stack; spans only on `faces[i].text`; asserting either N = 0
+outcome; exact finding counts.
