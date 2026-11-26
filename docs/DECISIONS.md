@@ -9482,3 +9482,153 @@ The brief's "N = 0: no coverage finding" and "end >= N is an Error" conflict for
 text. (4)–(5) The brief pins neither an exact count nor message wording.
 **Alternatives.** Running on a bigger stack; spans only on `faces[i].text`; asserting either N = 0
 outcome; exact finding counts.
+
+## #186 FP-146 tester - which generating-ability calls the foreign-source view tests assert
+
+**Decision:** The B-6 spec test (`spec_layers_cross_object_view.rs`) asserts, for a static
+effect whose source sS is not the object asked for, that *some* `generating_ability_exists` call
+gets the exact foreign view (sS through the end of the effect's own layer, the effect left out),
+and that *every* call for that effect respects the bounds that hold whatever the moment: `Some`
+view, layer-2 controller applied, the effect's own result absent, no result of a later layer. It
+does not require every call to show the same-layer results, because the effect also affects sS,
+and in a layer-major pass the engine legitimately asks about it for sS as the object in progress
+(before the same-layer grant applied), which a black-box test cannot tell apart. For an effect
+that does not affect its source (the layer-6 one), every call must equal the exact foreign view.
+Likewise, value-expression calls are asserted only for the object the test asks about when other
+CDA objects exist (their own 7a calls are not specified by the brief).
+
+**Rationale:** Brief B-6 defines the foreign view and keeps the in-progress view "as before" for
+the object being evaluated; layer-major evaluation (the deliverable) processes every object, so
+in-progress calls for the source are expected. The chosen assertions keep the full foreign view
+mandatory and make every call obey the layer bounds.
+
+**Alternatives:** Requiring every call to equal the foreign view (rejected: contradicts the
+in-progress rule for the source itself); making the layer-4 effect not affect its source
+(rejected: the brief asks that "the effect itself, if it modifies the source, is not reflected in
+its own view").
+
+## #186 FP-146 — Additive view API instead of a new `eval_value` signature
+
+**Decision:** The read view is a new public type `layers::EvaluatedView<'a>` (`get(id)`,
+`objects()` ascending, `layer()`) and a new defaulted trait method
+`LayerEnvironment::eval_value_with_view(expr, object, view)`, whose default calls the unchanged
+`eval_value(expr, object)`. The layer pipeline calls only `eval_value_with_view`, and only for a
+non-literal power or toughness (`literal_of` is read directly). `eval_value`, `MatchContext` and
+every other signature are unchanged; `start_layer_7` (crate-private) gains the view parameter.
+**Rationale:** Changing `eval_value` would break `state/environment.rs`, `replacement/etb.rs`, the
+benches and many test environments, all outside #186's owned paths, and would be a breaking change
+of a widely implemented trait. A defaulted method keeps every existing implementor compiling with
+its old behaviour, and an environment opts in by overriding one method.
+**Alternatives:** Change `eval_value` to take the view (rejected: breaking, outside owned paths);
+pass the view through `MatchContext` (rejected: the brief keeps `MatchContext` unchanged and a CDA
+is not a selector match); a view handed to every trait method (rejected: no requirement needs it).
+
+## #186 FP-146 — Board pass, universe and view semantics
+
+**Decision:** `evaluate`, `evaluate_with_order`, `evaluate_all` and `copiable_values` run one
+layer-major board pass (`layers/board.rs`). Universe: `env.objects()` sorted ascending and
+de-duplicated, plus the object asked for, keeping only objects whose `base` is `Some`; an object
+without a base is absent from every view and is an error only for the object asked for
+(`UnknownObject`), or, in `evaluate_all`, for the first listed object without a base by ascending
+id. Objects are always processed by ascending `ObjectId`; each keeps its own `Scratch`, its own
+`LockRecord` (CR 613.6, never shared across objects; a clone is used only for a nested evaluation
+of the same object) and its own order record. Within a layer each object is ordered against its
+own state only (the dependency trial, CR 613.8a, stays on the object under evaluation) and reads
+the others only through the start-of-layer snapshot, so no result depends on which object of the
+layer runs first. CDA view (CR 604.3, 613.4a, 613.5): frozen at the start of layer 7a before any
+object's layer 7 starts; every object after layers 1a-6; power and toughness as after layer 6 (a
+CDA object's own expression is still the raw expression): a CDA reading another object's layer-7
+values is not supported (no recursion, no cycles). Existence view (CR 613.8a, 611.3, 113.6): for
+the object under evaluation its state so far (unchanged); for another source of the universe, the
+source evaluated from its start-of-layer state and lock-in record through the end of the effect's
+own layer with the effect left out, every other step of that layer for the source applied in the
+REQ-LAYER-002 order, and inside that nested run the existence of effects of yet other sources is
+asked with their start-of-layer state (one level deep, terminating). A source outside the universe
+still gets `None`; resolved and sourceless static effects are never asked. The foreign view is
+computed lazily per (layer, effect) and memoised in a pass-local `RefCell` map: a pure function of
+the start-of-layer snapshot, so the memo never changes a result. `copiable_values` is the layers
+1a-1b prefix of the same board pass (same universe and existence views).
+**Rationale:** The issue asks that a CDA see the current controller and the earlier-layer results
+of every object and that the existence question get the foreign source's partially evaluated
+state. A plain start-of-layer snapshot of the source would miss a same-layer removal (the #183
+scenario: B's source loses B's ability to A in layer 6), so the source is run through the end of
+the effect's own layer without the effect, as the #183 `SourceEnvironment` already did for all
+layers. Stopping at the effect's own layer keeps a removal in a later layer from undoing an effect
+that already applied in an earlier one. Ascending iteration and snapshots give REQ-CORE-001
+determinism and `evaluate(id) == evaluate_all()[id]`.
+**Alternatives:** Start-of-layer snapshot only (rejected: fails the #183 same-layer trap); the
+source through all layers without the effect (rejected: a later-layer removal would retroactively
+stop an earlier-layer effect; also more work); full recursive nesting (rejected: may not
+terminate); eager computation of every foreign view at each layer start (rejected: more
+environment calls for effects that match no object, same results).
+
+## #186 FP-146 — Follow-up: the game-state and entering-permanent environments do not forward the view
+
+**Decision:** `state/environment.rs` (`GameEnvironment`, `SourceEnvironment`, `ObjectWorld`) and
+`replacement/etb.rs` (`Projected`) still use the default `eval_value_with_view`, so a real
+`GameState` evaluation does not yet hand the `EvaluatedView` to its `ObjectWorld`; adding an
+`ObjectWorld::eval_value_with_view` (or equivalent) and forwarding it from `GameEnvironment`,
+`SourceEnvironment` and `Projected` is outside #186's owned paths and is requested from the
+Orchestrator as a follow-up. The existence view needs no forwarding: `GameEnvironment` and
+`Projected` already receive and use `source_view`, so `GameEnvironment` now judges a source of the
+universe on the layer system's foreign view, and its own one-level fallback evaluation (#183
+"Existence on another source") is reached only when no view is given, that is for a source with no
+base (which then has no abilities).
+**Rationale:** R1: those files are not owned by #186. The default keeps their behaviour exactly as
+before for value expressions.
+**Alternatives:** Edit the state and replacement environments in this unit (rejected: outside the
+owned paths).
+
+## #186 FP-146 — Statements superseded
+
+**Decision:** This unit supersedes, without editing them: (1) "#33 FP-032 — Scope of the trial
+application": its rationale "evaluation is per object, so the partially evaluated state of other
+objects is not available" no longer holds; the decision itself (dependency judged on the object
+under evaluation only, the trial never evaluating other objects) is kept, and the deferred
+alternative is realised only as the read views above. (2) "#33 FP-032 — Review round 1
+dispositions" (a): "`source_view` is the state so far only when `src` is the object being
+evaluated, `None` otherwise" now reads: `Some` for every source of the universe (the foreign view
+for another object), `None` only for a source with no base. (3) "#36 FP-035 — Coarse invalidation
+and the (stateVersion, ObjectId) key" and "#36 FP-035 — Scope against #183 FP-144 and #186
+FP-146": the cache stays standalone and coarse invalidation stays sound; each cache miss now runs
+one board pass of `evaluate`; `LayerCache::evaluate_all` keeps its per-object hit/miss path
+(statistics unchanged; batching misses into one pass is left to #190 FP-147). (4) "#183 FP-144 —
+Existence on another source": the `GameEnvironment` fallback described there is now used only
+without a view (see the follow-up section above).
+**Rationale:** R8: earlier entries are not rewritten; this section names what changed.
+**Alternatives:** Editing the earlier entries (rejected: DECISIONS.md is append-only).
+
+## #186 FP-146 — Existing unit test of the foreign-source exemption updated (R10)
+
+**Decision:** `layers/ordering_tests.rs::req_layer_002_existence_exemptions_both_orders` asserted
+that a static effect whose source is another object with a base (object 2) is asked with
+`source_view == None`. Brief R-4 requires `Some(view)` for any source in the universe, so the
+case now uses a source outside the universe (object 9, no base), for which the brief keeps `None`;
+the assertions are otherwise unchanged. The in-universe foreign source is covered by
+`layers/cross_object_tests.rs` (`req_layer_001_foreign_source_view_contents`,
+`req_layer_001_same_layer_removal_on_foreign_source`).
+**Rationale:** R10: a test that contradicts the brief is corrected to assert exactly what the
+brief requires; the exemption it checks (no view, treated as existing by that environment) still
+exists for sources outside the universe.
+**Alternatives:** Keep object 2 and assert the new view (rejected: with that environment the
+grant would stop existing and the test would no longer test the exemption).
+
+## #186 FP-146 — `LayerCache::evaluate_all` visits objects by ascending id
+
+**Decision:** `LayerCache::evaluate_all` now looks objects up in ascending `ObjectId` order
+(`env.objects()` sorted, duplicates kept, so a listed duplicate is still looked up again and
+counted as before) instead of the environment's order, so its first error is the one of
+`layers::evaluate_all` (the first object without a base by ascending id, brief R-2/R-5) for any
+order of `env.objects()`. Hit/miss counting per lookup, version bumps and "entries computed before
+the first error stay stored" are unchanged. Each miss is still one `evaluate(id)` board pass;
+batching all misses into one pass is left to #190 FP-147. The unit test
+`layers/cache_tests.rs::evaluate_all_first_error_rule` (environment listing 1, 50, 2, 60 with no
+base for 50 and 60) asserted one stored entry (object 1, computed before 50 in the listed order);
+in ascending order objects 1 and 2 are computed before 50, so it now asserts two (R10: corrected to
+the brief's first-error rule; the error and the equality with `evaluate_all` are unchanged).
+**Rationale:** With layer-major evaluation `evaluate_all` sorts its universe, and the brief
+requires the cache to equal it and results to be independent of the order of `env.objects()`
+(REQ-CORE-001); the environment's order is documented as ascending anyway.
+**Alternatives:** Keep the environment's order (rejected: the cache's first error would differ
+from `evaluate_all`'s for an unsorted list); de-duplicate as well (rejected: would change the hit
+count for a listed duplicate).
