@@ -6656,12 +6656,26 @@ Choices made in it:
    option is `EtbError::Unpayable` (reported as a procedure error whose text contains "not
    payable"). A chooser absent from `payable` has no limit and runs no lookahead. The CR 616.1
    order choice (`CHOOSE_REPLACEMENT_EFFECT`, CR 616.1e) is never filtered by payability: CR
-   614.12b restricts only the choices the effects require. Every candidate is offered, but the
+   614.12b restricts only the choices the effects require. Every candidate is offered (never filtered by payability or by completion), but the
    request's `default_on_timeout` is `SelectReplacement { index: k }` with k the smallest
-   candidate index (ascending effect id) whose continuation is payable under the same exact
-   lookahead, `cheapest(c) + mincost(state + c) + later <= remaining` (u128), so a timeout never
-   picks an unpayable order when a payable one exists; k = 0 when candidate 0 is payable, when
-   no candidate is, or when the chooser has no budget (no lookahead runs). A manual answer of an
+   candidate index (ascending effect id) whose continuation (a) COMPLETES: some sequence of
+   further top-tier applications re-projects without error until nothing applies, and (b) is
+   payable under the same exact lookahead, `cheapest(c) + mincost(state + c) + later <=
+   remaining` (u128); so a timeout never picks an unpayable or failing order when another
+   exists; k = 0 when no candidate is both. A chooser without a budget runs only the completion
+   check (payability is unlimited). (issue #204 FP-153.) The completion search is a separate,
+   memoised (applied set, last copy), iterative search with its own count bounded by
+   `MAX_LOOKAHEAD_STATES`; over that bound it raises no error and every candidate stays eligible
+   (best effort, R3). Design choice: the default avoids a failing continuation; declared
+   copy-static ids are NOT validated up front, because `EtbEffects::add` and
+   `set_copy_abilities` do not know `ctx.continuous`, and an early check in `resolve_entering`
+   would reject entries that have a completing order and would still miss collisions deeper in
+   a chain. The zero-cost shortcut of the cost lookahead (no projection when no unapplied
+   effect has cost > 0) stays, for reservation only; in the cost lookahead a state whose
+   projection fails is an infeasible branch (skipped in the minimum, an infeasible root reserves
+   0), never a procedure error, so a colliding candidate beside a costed `Choose` does not abort
+   the entry before the request; the failure surfaces only when that candidate is answered.
+   Completion, not the shortcut, decides eligibility. A manual answer of an
    unpayable candidate is still the "not payable" error. Applying the reserve across the
    SEVERAL effects of one entry goes beyond the CR's literal text (which speaks of multiple
    permanents); it is kept on purpose, as the original brief required (requirement 7). A
