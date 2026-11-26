@@ -17,7 +17,7 @@ use fineprint_dsl::ability::{
 use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
 use fineprint_dsl::expr::{
     ObjectSelectorAST, PlayerGroup, PlayerSelectorAST, PredicateAST, ReferenceAST, SelectorFilter,
-    Zone,
+    WordRef, Zone,
 };
 
 use super::*;
@@ -3105,4 +3105,191 @@ fn req_event_002_cr_701_3d_unattached_from_real_execution() {
     assert_eq!(tes[0].subject_pre, Some(eq));
     assert_eq!(unattached(&tes), vec![same(eq)]);
     assert_eq!(run(&env, &tes).len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Look-back matching on layer-evaluated LKI (#184 FP-145)
+// ---------------------------------------------------------------------------------------------
+
+/// A selector "has the card type `t`".
+fn card_type_sel(t: &str) -> ObjectSelectorAST {
+    ObjectSelectorAST::Filter(SelectorFilter {
+        zones: None,
+        count: None,
+        ordering: None,
+        predicate: Some(Box::new(PredicateAST::HasCardType {
+            value: WordRef::Name(t.to_owned()),
+        })),
+    })
+}
+
+/// A trigger environment whose pre-event object matching reads how a departed object looked
+/// immediately before the event: its LKI record (CR 603.10a, CR 608.2h). `HAS_CARD_TYPE` holds
+/// iff the record's card types contain the word; nothing else matches. `regs` are listed in
+/// both views (their source stays on the battlefield).
+struct LkiTypeEnv<'a> {
+    lki: &'a LkiStore,
+    regs: Vec<TriggerRegistration>,
+}
+
+impl TriggerEnv for LkiTypeEnv<'_> {
+    fn registrations(&self, _view: StateView) -> Vec<TriggerRegistration> {
+        self.regs.clone()
+    }
+
+    fn object_matches(
+        &self,
+        view: StateView,
+        _reg: &TriggerRegistration,
+        object: ObjectId,
+        selector: &ObjectSelectorAST,
+    ) -> bool {
+        let ObjectSelectorAST::Filter(f) = selector else {
+            return false;
+        };
+        let Some(PredicateAST::HasCardType {
+            value: WordRef::Name(t),
+        }) = f.predicate.as_deref()
+        else {
+            return false;
+        };
+        view == StateView::PreEvent
+            && self
+                .lki
+                .get(object)
+                .is_some_and(|r| r.characteristics().card_types.contains(t))
+    }
+
+    fn player_matches(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _player: PlayerId,
+        _group: &PlayerGroup,
+    ) -> bool {
+        false
+    }
+
+    fn predicate_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _field: Option<&EventField>,
+    ) -> bool {
+        false
+    }
+
+    fn condition_holds(
+        &self,
+        _view: StateView,
+        _reg: &TriggerRegistration,
+        _pred: &PredicateAST,
+        _bindings: &BTreeMap<String, EventField>,
+    ) -> bool {
+        true
+    }
+
+    fn is_visible_to_all(&self, _object: ObjectId) -> bool {
+        false
+    }
+}
+
+/// A power and toughness.
+type Pt = (i64, i64);
+
+/// A creature with the scene's effects (order `a_older`) leaves the battlefield through
+/// `EventContext::execute_batch` with a layered provider (`layered`) or the base-only control;
+/// a leaves-the-battlefield trigger of another permanent whose subject selector is "has the
+/// granted card type" is then detected from `events_from_batch_with_lki`. Returns the waiting
+/// triggers, the departed object's LKI P/T and the scene's P/T.
+fn granted_type_departure(a_older: bool, layered: bool) -> (Vec<WaitingTrigger>, Option<Pt>, Pt) {
+    use crate::layers::LayeredProvider;
+    use crate::memory::consumer_guard_tests::{GRANTED_TYPE, SceneWorld, pt_of, register_scene};
+    use crate::state::GameEnvironment;
+
+    let mut game = GameState::new(7, 2, 20).unwrap();
+    game.set_turn_number(1);
+    game.set_active_player(Some(p(1))).unwrap();
+    let mut zones = Zones::new(&[p(1), p(2)], ZonesConfig::default());
+    let mut ids = IdGenerator::new();
+    let mut permanents = Permanents::new();
+    let mut memories = MemoryTable::new();
+    let mut lki = LkiStore::new();
+    let mut events = EventState::new();
+    let mut req = MoveRequest::new(ZoneKind::Battlefield);
+    req.position = Position::Bottom;
+    let x = zones
+        .create_object(&mut ids, CardId::new(1), p(1), req)
+        .unwrap();
+    permanents.enter(x, p(1), 1).unwrap();
+    let pt = register_scene(&mut game, x, a_older);
+    // The documented recipe: a snapshot taken before the context, so before the batch
+    // (CR 603.10a: the pre-event state).
+    let world = SceneWorld::of(&zones, events.markers());
+    let snap = game.clone();
+    let env = GameEnvironment::new(&snap, &world);
+    let layered_provider = LayeredProvider::new(snap.effects(), &env);
+    let provider: &dyn CharacteristicsProvider = if layered { &layered_provider } else { &world };
+    let mut ctx = EventContext {
+        game: &mut game,
+        zones: &mut zones,
+        ids: &mut ids,
+        permanents: &mut permanents,
+        memories: &mut memories,
+        lki: &mut lki,
+        events: &mut events,
+        provider,
+    };
+    ctx.execute_batch(&EventBatch::from_events(vec![GameEvent::ZoneChange {
+        object: x,
+        request: MoveRequest::new(ZoneKind::Graveyard),
+        cause: ZoneChangeCause::Destroy,
+    }]))
+    .unwrap();
+    let logged = &events.log().batches_since(0)[0];
+    let tes = events_from_batch_with_lki(logged, &lki);
+    let env = LkiTypeEnv {
+        lki: &lki,
+        regs: vec![reg(
+            99,
+            1,
+            "test.ltb_granted",
+            with_subject(
+                matcher(EventKind::LeavesBattlefield),
+                EventSubject::Object(card_type_sel(GRANTED_TYPE)),
+            ),
+        )],
+    };
+    let got = detect(&env, &mut memories, logged.turn, &tes);
+    let lki_pt = lki.get(x).and_then(|r| pt_of(r.characteristics()));
+    (got, lki_pt, pt)
+}
+
+// REQ-LAYER-001, REQ-EVENT-002, REQ-CORE-003: CR 603.10a, CR 608.2h, CR 613.1d, CR 613.4b,
+// CR 613.7. A leaves-the-battlefield trigger whose subject selector depends on an
+// effect-granted (layer-4) card type triggers, looking back, for the departed object: the LKI
+// captured through the layered provider holds the granted type, in both timestamp orders of
+// the two layer-7b effects (whose LKI P/T differ per order). With the base-only control the
+// record lacks the type and nothing triggers.
+#[test]
+fn req_layer_001_req_event_002_cr_603_10a_look_back_sees_granted_type() {
+    let mut seen = Vec::new();
+    for a_older in [true, false] {
+        let (got, lki_pt, pt) = granted_type_departure(a_older, true);
+        assert_eq!(got.len(), 1, "a_older {a_older}");
+        assert_eq!(got[0].source, o(99));
+        assert_eq!(got[0].ability_id, "test.ltb_granted");
+        assert_eq!(got[0].look_back, Some(LookBackKind::LeavesBattlefield));
+        assert_eq!(lki_pt, Some(pt));
+        seen.push(lki_pt);
+
+        let (control, control_pt, _) = granted_type_departure(a_older, false);
+        assert!(
+            control.is_empty(),
+            "a_older {a_older}: the base has no granted type"
+        );
+        assert_eq!(control_pt, Some((2, 2)));
+    }
+    assert_eq!(seen, [Some((7, 7)), Some((5, 5))]);
 }

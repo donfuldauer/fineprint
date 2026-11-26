@@ -19,7 +19,12 @@ use crate::permanent::{Permanent, Permanents};
 use crate::zones::{MoveRequest, ObjectRecord, ZoneId, ZoneKind, Zones};
 
 /// The source of the fully evaluated state of objects that LKI capture snapshots
-/// (REQ-CORE-003). The layer system plugs in here later; until then callers supply their own.
+/// (REQ-CORE-003, REQ-LAYER-001).
+///
+/// A rules caller MUST supply the characteristics evaluated through layers 1a-7d (CR 613.1-613.4,
+/// CR 608.2h), for example [`LayeredProvider`](crate::layers::LayeredProvider) over a snapshot
+/// of the game state (the recipe is in the [module documentation](crate::memory)). An
+/// implementation that returns base characteristics is for unit fakes only.
 pub trait CharacteristicsProvider {
     /// The fully evaluated characteristics of `id` as of now (CR 608.2h); `None` means unknown.
     fn characteristics(&self, id: ObjectId) -> Option<Characteristics>;
