@@ -1,0 +1,85 @@
+{
+  "cardDefId": "test.burn_3_any_target",
+  "colorIdentity": 8,
+  "definitionHash": "3da4f961c433cf3e9bb62f4b7f3340d5c19ba4b4dcc6075f9b52724aa74e6cb8",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "effect": [
+            {
+              "amount": {
+                "LITERAL": 3
+              },
+              "op": "DEAL_DAMAGE",
+              "recipients": {
+                "ref": "TARGET",
+                "slot": 0
+              },
+              "source": {
+                "ref": "SELF"
+              }
+            }
+          ],
+          "kind": "SPELL",
+          "targets": [
+            {
+              "max": 1,
+              "min": 1,
+              "selector": {
+                "conditions": [
+                  {
+                    "pred": "IS_CREATURE"
+                  },
+                  {
+                    "pred": "IS_PLAYER"
+                  },
+                  {
+                    "pred": "HAS_CARD_TYPE",
+                    "value": {
+                      "name": "Planeswalker"
+                    }
+                  }
+                ],
+                "op": "OR"
+              },
+              "slot": 0
+            }
+          ],
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Instant"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{R}",
+      "name": "test.burn_3_any_target",
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ]
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

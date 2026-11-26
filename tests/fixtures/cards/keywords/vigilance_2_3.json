@@ -1,0 +1,53 @@
+{
+  "cardDefId": "test.vigilance_2_3",
+  "colorIdentity": 1,
+  "definitionHash": "b18dc3501073a4ae41a9f3b534917d02590763246c1bdfa88366b68ef4b16588",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "keyword": "VIGILANCE",
+          "kind": "KEYWORD",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{2}{W}",
+      "name": "test.vigilance_2_3",
+      "power": {
+        "LITERAL": 2
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ],
+      "toughness": {
+        "LITERAL": 3
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

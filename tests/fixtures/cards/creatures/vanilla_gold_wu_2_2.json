@@ -1,0 +1,37 @@
+{
+  "cardDefId": "test.vanilla_gold_wu_2_2",
+  "colorIdentity": 3,
+  "definitionHash": "a47955766bf5fdcc22a8ba2311246b6b4537839b1efa93105272f0cc749daf7b",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{W}{U}",
+      "name": "test.vanilla_gold_wu_2_2",
+      "power": {
+        "LITERAL": 2
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [],
+      "toughness": {
+        "LITERAL": 2
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}
