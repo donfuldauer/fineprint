@@ -887,7 +887,10 @@ type State = (BTreeSet<EffectId>, Option<EffectId>);
 struct Lookahead<'c, 'a> {
     ctx: &'c EtbContext<'a>,
     entry: &'c EtbEntry,
-    memo: BTreeMap<State, u128>,
+    /// The least total of a state; `None` when the state is infeasible (a projection failed
+    /// at it, or every continuation of it is infeasible): such a branch commits nothing and
+    /// is skipped, never an error of the reservation (issue #204).
+    memo: BTreeMap<State, Option<u128>>,
     /// The distinct states entered so far (evaluated or being evaluated).
     entered: usize,
 }
@@ -902,21 +905,24 @@ struct Frame<'a> {
 }
 
 impl Frame<'_> {
-    /// Records `rest`, the least total after the candidate `next`, and moves to the next one.
-    fn settle(&mut self, rest: u128) {
+    /// Records `rest`, the least total after the candidate `next` (`None`: infeasible, skipped),
+    /// and moves to the next one.
+    fn settle(&mut self, rest: Option<u128>) {
         let Some(effect) = self.candidates.get(self.next) else {
             return;
         };
-        // At most one u64 per effect: u128 cannot overflow.
-        let total = cheapest(effect).saturating_add(rest);
-        self.best = Some(self.best.map_or(total, |b| b.min(total)));
+        if let Some(rest) = rest {
+            // At most one u64 per effect: u128 cannot overflow.
+            let total = cheapest(effect).saturating_add(rest);
+            self.best = Some(self.best.map_or(total, |b| b.min(total)));
+        }
         self.next = self.next.saturating_add(1);
     }
 }
 
 /// A state entered: its value is known at once, or it must be explored.
 enum Entered<'a> {
-    Done(u128),
+    Done(Option<u128>),
     Open(Frame<'a>),
 }
 
@@ -964,8 +970,8 @@ impl<'c, 'a> Lookahead<'c, 'a> {
             .values()
             .any(|e| !state.0.contains(&e.id) && cheapest(e) > 0);
         if !any_cost {
-            self.memo.insert(state, 0);
-            return Ok(Entered::Done(0));
+            self.memo.insert(state, Some(0));
+            return Ok(Entered::Done(Some(0)));
         }
         // The projection of the state: the last copy applied last.
         let (set, last) = &state;
@@ -976,11 +982,15 @@ impl<'c, 'a> Lookahead<'c, 'a> {
             chosen: BTreeMap::new(),
             order,
         };
-        let projected = project(self.ctx, self.entry, &applied).map_err(|e| procedure(&e))?;
+        // A failing projection makes the branch infeasible, not the reservation an error.
+        let Ok(projected) = project(self.ctx, self.entry, &applied) else {
+            self.memo.insert(state, None);
+            return Ok(Entered::Done(None));
+        };
         let candidates = top_tier(self.ctx, &applicable_to(self.ctx, self.entry, &projected));
         if candidates.is_empty() {
-            self.memo.insert(state, 0);
-            return Ok(Entered::Done(0));
+            self.memo.insert(state, Some(0));
+            return Ok(Entered::Done(Some(0)));
         }
         Ok(Entered::Open(Frame {
             state,
@@ -991,7 +1001,9 @@ impl<'c, 'a> Lookahead<'c, 'a> {
     }
 
     /// `mincost(set, last)`: 0 if nothing applies, else the minimum over the candidates `c` of
-    /// the top applicable tier (CR 616.1a-e) of `cheapest(c) + mincost(state + c)`.
+    /// the top applicable tier (CR 616.1a-e) of `cheapest(c) + mincost(state + c)`, skipping
+    /// infeasible continuations (a failing projection). An infeasible root gives 0: the entry
+    /// fails later, at the answer that leads there.
     fn mincost(
         &mut self,
         set: &BTreeSet<EffectId>,
@@ -999,21 +1011,21 @@ impl<'c, 'a> Lookahead<'c, 'a> {
     ) -> Result<u128, Interrupt> {
         let root: State = (set.clone(), last);
         if let Some(v) = self.memo.get(&root) {
-            return Ok(*v);
+            return Ok(v.unwrap_or(0));
         }
         let mut stack: Vec<Frame<'a>> = match self.enter(root)? {
-            Entered::Done(v) => return Ok(v),
+            Entered::Done(v) => return Ok(v.unwrap_or(0)),
             Entered::Open(frame) => vec![frame],
         };
         // The value just found for the top frame's current candidate, or for a finished frame.
-        let mut found: Option<u128> = None;
+        let mut found: Option<Option<u128>> = None;
         while let Some(top) = stack.last_mut() {
             if let Some(v) = found.take() {
                 top.settle(v);
             }
             let Some(effect) = top.candidates.get(top.next).copied() else {
                 // Every candidate explored: the state's value is known.
-                let value = top.best.unwrap_or(0);
+                let value = top.best;
                 if let Some(done) = stack.pop() {
                     self.memo.insert(done.state, value);
                 }
@@ -1033,7 +1045,139 @@ impl<'c, 'a> Lookahead<'c, 'a> {
                 },
             };
         }
-        Ok(found.unwrap_or(0))
+        Ok(found.flatten().unwrap_or(0))
+    }
+}
+
+/// The completion search of one entry: whether, from a state, at least one sequence of further
+/// top-tier applications (CR 616.1a-e, CR 616.2) re-projects without error (CR 616.1f) until no
+/// effect applies. It serves only the default of the CR 616.1e order choice and never raises an
+/// error (R3): past its own bound of [`MAX_LOOKAHEAD_STATES`] distinct states it gives up and
+/// every state counts as completing (best effort). It is memoised on (applied set, last copy),
+/// iterative (an explicit stack), and separate from the cost [`Lookahead`] and its count.
+struct Completion<'c, 'a> {
+    ctx: &'c EtbContext<'a>,
+    entry: &'c EtbEntry,
+    memo: BTreeMap<State, bool>,
+    /// The distinct states entered so far.
+    entered: usize,
+    /// The bound was exceeded: every answer is now "completes".
+    exhausted: bool,
+}
+
+/// A state of the completion search being evaluated: its top-tier candidate effects (CR 616.1a-e)
+/// and the next one to try.
+struct CompletionFrame {
+    state: State,
+    candidates: Vec<EffectId>,
+    next: usize,
+}
+
+impl<'c, 'a> Completion<'c, 'a> {
+    fn new(ctx: &'c EtbContext<'a>, entry: &'c EtbEntry) -> Self {
+        Completion {
+            ctx,
+            entry,
+            memo: BTreeMap::new(),
+            entered: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Enters a new `state`: `Ok(Some(v))` when its value is known at once (a projection error
+    /// is `false`, nothing applicable is `true`), `Ok(None)` with its frame when it must be
+    /// explored; `Err(())` when the bound is exceeded.
+    fn enter(&mut self, state: State) -> Result<Result<bool, CompletionFrame>, ()> {
+        if self.entered >= MAX_LOOKAHEAD_STATES {
+            return Err(());
+        }
+        self.entered = self.entered.saturating_add(1);
+        // CR 616.1f: the projection of the state, the last copy applied last (CR 707.2).
+        let (set, last) = &state;
+        let mut order: Vec<EffectId> = set.iter().copied().filter(|i| Some(*i) != *last).collect();
+        order.extend(*last);
+        let applied = EtbApplied {
+            effects: set.clone(),
+            chosen: BTreeMap::new(),
+            order,
+        };
+        let Ok(projected) = project(self.ctx, self.entry, &applied) else {
+            self.memo.insert(state, false);
+            return Ok(Ok(false));
+        };
+        let candidates: Vec<EffectId> =
+            top_tier(self.ctx, &applicable_to(self.ctx, self.entry, &projected))
+                .iter()
+                .map(|e| e.id)
+                .collect();
+        if candidates.is_empty() {
+            self.memo.insert(state, true);
+            return Ok(Ok(true));
+        }
+        Ok(Err(CompletionFrame {
+            state,
+            candidates,
+            next: 0,
+        }))
+    }
+
+    /// Whether the entry can complete from (`set`, `last`).
+    fn completes(&mut self, set: &BTreeSet<EffectId>, last: Option<EffectId>) -> bool {
+        if self.exhausted {
+            return true;
+        }
+        let root: State = (set.clone(), last);
+        if let Some(v) = self.memo.get(&root) {
+            return *v;
+        }
+        let mut stack: Vec<CompletionFrame> = match self.enter(root) {
+            Err(()) => {
+                self.exhausted = true;
+                return true;
+            }
+            Ok(Ok(v)) => return v,
+            Ok(Err(frame)) => vec![frame],
+        };
+        // The value just found for the child of the top frame, or for a finished frame.
+        let mut found: Option<bool> = None;
+        while let Some(top) = stack.last_mut() {
+            let mut value = None;
+            match found.take() {
+                Some(true) => value = Some(true),
+                Some(false) => top.next = top.next.saturating_add(1),
+                None => {}
+            }
+            if value.is_none() && top.next >= top.candidates.len() {
+                value = Some(false);
+            }
+            if let Some(v) = value {
+                if let Some(done) = stack.pop() {
+                    self.memo.insert(done.state, v);
+                }
+                found = Some(v);
+                continue;
+            }
+            let Some(id) = top.candidates.get(top.next).copied() else {
+                continue;
+            };
+            let child = step(self.ctx, &top.state.0, top.state.1, id);
+            found = match self.memo.get(&child).copied() {
+                Some(v) => Some(v),
+                None => match self.enter(child) {
+                    // Over the bound: best effort, the candidate stays eligible.
+                    Err(()) => {
+                        self.exhausted = true;
+                        return true;
+                    }
+                    Ok(Ok(v)) => Some(v),
+                    Ok(Err(frame)) => {
+                        stack.push(frame);
+                        None
+                    }
+                },
+            };
+        }
+        found.unwrap_or(true)
     }
 }
 
@@ -1108,6 +1252,7 @@ fn resolve_one(
     let mut applied = EtbApplied::default();
     let mut memory = Memory::new();
     let mut lookahead = Lookahead::new(ctx, entry);
+    let mut completion = Completion::new(ctx, entry);
     loop {
         // CR 616.1f, CR 616.2: re-project after every application.
         let projected = project(ctx, entry, &applied).map_err(|e| procedure(&e))?;
@@ -1121,13 +1266,21 @@ fn resolve_one(
             });
         }
         let budget = remaining.get(&entry.controller).copied();
-        // CR 616.1e: the order choice is never filtered by payability (CR 614.12b restricts
-        // only the choices the effects require); only its default is the first candidate with
-        // a payable continuation.
-        let default = if set.len() > 1
-            && let Some(b) = budget
-        {
-            first_payable(ctx, &applied, &set, &mut lookahead, later, b)?
+        // CR 616.1e: the order choice is never filtered, neither by payability nor by whether
+        // the continuation completes (CR 614.12b restricts only the choices the effects
+        // require); only its default is the first candidate whose continuation completes
+        // (every re-projection succeeds, CR 616.1f) and, for a budgeted chooser, is payable.
+        // Declared copy-static ids are not validated up front (issue #204).
+        let default = if set.len() > 1 {
+            first_eligible(
+                ctx,
+                &applied,
+                &set,
+                &mut lookahead,
+                &mut completion,
+                later,
+                budget,
+            )?
         } else {
             0
         };
@@ -1175,24 +1328,34 @@ fn resolve_one(
     }
 }
 
-/// CR 616.1e, CR 614.12b: the smallest index of `set` whose continuation is payable from
-/// `applied` with `budget` left: `cheapest(c) + mincost(state + c) + later <= budget` (u128);
-/// 0 when no candidate is.
-fn first_payable(
+/// CR 616.1e, CR 614.12b, CR 616.1f: the smallest index of `set` whose continuation both
+/// completes from `applied` (some sequence of further top-tier applications re-projects without
+/// error to the end, see [`Completion`]; a search over its bound counts as completing) and, when
+/// the chooser has a `budget`, is payable: `cheapest(c) + mincost(state + c) + later <= budget`
+/// (u128). 0 when no candidate is both. A chooser without a budget runs only the completion
+/// check. The zero-cost shortcut of [`Lookahead`] serves cost reservation only, so a failing
+/// continuation is avoided here, not by validating declared copy-static ids up front.
+fn first_eligible(
     ctx: &EtbContext<'_>,
     applied: &EtbApplied,
     set: &[&EtbEffect],
     lookahead: &mut Lookahead<'_, '_>,
+    completion: &mut Completion<'_, '_>,
     later: u128,
-    budget: u64,
+    budget: Option<u64>,
 ) -> Result<u32, Interrupt> {
     let last = last_copy(ctx, applied).map(|c| c.id);
     for (index, candidate) in set.iter().enumerate() {
         let (next, next_last) = step(ctx, &applied.effects, last, candidate.id);
-        let total = cheapest(candidate)
-            .saturating_add(lookahead.mincost(&next, next_last)?)
-            .saturating_add(later);
-        if total <= u128::from(budget) {
+        if let Some(b) = budget {
+            let total = cheapest(candidate)
+                .saturating_add(lookahead.mincost(&next, next_last)?)
+                .saturating_add(later);
+            if total > u128::from(b) {
+                continue;
+            }
+        }
+        if completion.completes(&next, next_last) {
             return Ok(u32::try_from(index).unwrap_or(0));
         }
     }
