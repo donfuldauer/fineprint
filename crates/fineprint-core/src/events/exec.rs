@@ -11,6 +11,7 @@ use fineprint_base::ids::{CardId, IdGenerator, ObjectId, PlayerId};
 
 use super::error::EventError;
 use super::history::HistoryStat;
+use super::order::{GraveyardOrder, GraveyardOrderGroup, arrange, check_orders, groups_of};
 use super::state::{EventState, ObjectMarkers};
 use super::types::{
     CounterTarget, DamageTarget, EventBatch, EventInstance, ExecutedBatch, ExecutedEvent,
@@ -178,6 +179,76 @@ impl EventContext<'_> {
         batch: &EventBatch,
         copies: &[(usize, ObjectId)],
     ) -> Result<ExecutedBatch, EventError> {
+        self.execute_planned(batch, copies, &[])
+    }
+
+    /// The simultaneous graveyard entries of `batch` that its owners may arrange
+    /// (REQ-ZONE-001, REQ-EVENT-001, CR 404.3), ascending by owner PlayerId; empty if there is
+    /// none. Ask one `ORDER_CARDS` request per group ([`GraveyardOrderGroup::request`]), in
+    /// this order (ascending PlayerId: the CR gives no sequencing and the piles are
+    /// independent), then call [`EventContext::execute_batch_ordered`].
+    ///
+    /// `batch` is final (replacements were applied before it, CR 614.6). The groups come from a
+    /// planning run of the batch exactly as [`EventContext::execute_batch`] would execute it;
+    /// the group rule is in the docs/DECISIONS.md entry "#208 FP-154": two or more nontoken
+    /// cards (CR 111.6, CR 108.2b) put by `ZoneChange` events at `Position::Top` from another
+    /// zone into the same graveyard (CR 400.3: their owner's), and still there at the end of
+    /// the batch. Draws, `Bottom` and `Index` moves, tokens and graveyard repositions take no
+    /// part. Every component of the context is left unchanged.
+    ///
+    /// # Errors
+    /// As [`EventContext::execute_batch`] (the batch would fail); nothing is changed.
+    pub fn graveyard_order_groups(
+        &mut self,
+        batch: &EventBatch,
+    ) -> Result<Vec<GraveyardOrderGroup>, EventError> {
+        let snapshot = self.snapshot();
+        let result = self
+            .run(batch, &LkiMode::Off, &[])
+            .map(|planned| groups_of(self.zones, self.events.markers(), &planned));
+        self.restore(snapshot);
+        result
+    }
+
+    /// Executes `batch` exactly as [`EventContext::execute_batch`] does (same events, same
+    /// outcomes and object ids, same log entry, LKI captured before any move, all-or-nothing),
+    /// except that the cards of each [`GraveyardOrderGroup`] end in the order `orders` gives
+    /// for its owner (REQ-ZONE-001, REQ-EVENT-001, CR 404.3). A group with no entry keeps its
+    /// [`GraveyardOrderGroup::default_order`]; the order of the entries of `orders` is
+    /// irrelevant. With no orders this is `execute_batch`.
+    ///
+    /// **Placement (CR 404.3, CR 404.1).** The group's cards take the positions ("slots") they
+    /// occupy in the `execute_batch` result, in the chosen order, `top_to_bottom[0]` in the
+    /// topmost slot. Every other object of the graveyard keeps its `execute_batch` position:
+    /// cards already there stay below, a `Bottom` or `Index` move keeps its requested place, a
+    /// token keeps its place (it ceases to exist at the next state-based-action check,
+    /// CR 111.7). So the group ends contiguous on top of the graveyard unless another object of
+    /// the batch landed between its cards (then that object stays where it landed), and an
+    /// order equal to `default_order` changes nothing. The arrangement uses same-zone
+    /// repositions only (CR 400.7): no event, no new object id.
+    ///
+    /// # Errors
+    /// [`EventError::InvalidGraveyardOrder`] if an entry names an owner with no group, an owner
+    /// twice, or a list that is not a permutation of that group's cards (the lowest such
+    /// owner), and every error of [`EventContext::execute_batch`]. Every component of the
+    /// context is then restored to its value before the call.
+    pub fn execute_batch_ordered(
+        &mut self,
+        batch: &EventBatch,
+        orders: &[GraveyardOrder],
+    ) -> Result<ExecutedBatch, EventError> {
+        self.execute_planned(batch, &[], orders)
+    }
+
+    /// The common body of the batch entry points: plan, check `orders` against the planned
+    /// groups (CR 404.3), restore, run for real with LKI captured first (CR 704.8), arrange
+    /// the ordered groups, log.
+    fn execute_planned(
+        &mut self,
+        batch: &EventBatch,
+        copies: &[(usize, ObjectId)],
+        orders: &[GraveyardOrder],
+    ) -> Result<ExecutedBatch, EventError> {
         let snapshot = self.snapshot();
         // Planning run: find which objects the batch moves out of their zones, in the exact
         // order and with the exact cards the real run will move (draws depend on library
@@ -189,8 +260,27 @@ impl EventContext<'_> {
                 return Err(e);
             }
         };
+        // CR 404.3: the chosen orders must fit the batch's final groups.
+        let orders = if orders.is_empty() {
+            Vec::new()
+        } else {
+            let groups = groups_of(self.zones, self.events.markers(), &planned);
+            match check_orders(&groups, orders) {
+                Ok(sorted) => sorted,
+                Err(e) => {
+                    self.restore(snapshot);
+                    return Err(e);
+                }
+            }
+        };
         self.restore(snapshot.clone());
-        match self.run_captured(batch, &planned, copies) {
+        let result = self
+            .run_captured(batch, &planned, copies)
+            .and_then(|events| {
+                self.arrange_all(&events, &orders)?;
+                Ok(events)
+            });
+        match result {
             Ok(events) => {
                 drop(snapshot);
                 let executed = ExecutedBatch {
@@ -208,6 +298,28 @@ impl EventContext<'_> {
                 Err(e)
             }
         }
+    }
+
+    /// CR 404.3: puts each ordered group of the real run's `events` in its chosen order.
+    fn arrange_all(
+        &mut self,
+        events: &[ExecutedEvent],
+        orders: &[GraveyardOrder],
+    ) -> Result<(), EventError> {
+        if orders.is_empty() {
+            return Ok(());
+        }
+        let renamed: BTreeMap<ObjectId, ObjectId> = events
+            .iter()
+            .filter_map(|e| match e.outcome {
+                Outcome::ZoneChange(m) => Some((m.old, m.new)),
+                _ => None,
+            })
+            .collect();
+        for order in orders {
+            arrange(self.zones, self.ids, order, &renamed)?;
+        }
+        Ok(())
     }
 
     /// The real run: captures LKI for every planned departure of an object that exists now
