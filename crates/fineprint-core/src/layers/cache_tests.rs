@@ -1045,3 +1045,240 @@ fn base_mana_value_provenance_cached_and_fresh_agree() {
     assert_eq!(evaluated_digest(&cached), evaluated_digest(&plain));
     assert_eq!(cached[&o(1)].mana_value(ManaValueContext::OffStack), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Whole-board fill (#190 FP-147)
+// ---------------------------------------------------------------------------------------------
+
+/// [`Env`] that counts the calls of [`LayerEnvironment::counters`]: a board pass asks it once
+/// per object of its universe, so `calls / objects` is the number of board passes run.
+struct Counting {
+    inner: Env,
+    /// Hidden from the environment: `base` answers `None` for these ids.
+    hidden: BTreeSet<ObjectId>,
+    /// What `objects` lists; the inner environment's objects when `None`.
+    listed: Option<Vec<ObjectId>>,
+    calls: std::cell::Cell<u64>,
+}
+
+impl Counting {
+    fn new(inner: Env) -> Counting {
+        Counting {
+            inner,
+            hidden: BTreeSet::new(),
+            listed: None,
+            calls: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl LayerEnvironment for Counting {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.listed.clone().unwrap_or_else(|| self.inner.objects())
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        if self.hidden.contains(&id) {
+            return None;
+        }
+        self.inner.base(id)
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.counters(id)
+    }
+
+    fn counter_timestamp(&self, id: ObjectId, kind: &str) -> Option<Timestamp> {
+        self.inner.counter_timestamp(id, kind)
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        self.inner.matches(selector, ctx)
+    }
+
+    fn eval_value(&self, expr: &ValueExpressionAST, object: ObjectId) -> Option<i64> {
+        self.inner.eval_value(expr, object)
+    }
+
+    fn generating_ability_exists(
+        &self,
+        _effect: EffectId,
+        _source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        // CR 613.8a, 611.3: a static effect exists while its source has an ability.
+        source_view.is_none_or(|v| !v.characteristics.abilities.is_empty())
+    }
+}
+
+/// A registry with static effects of other objects whose existence is judged on their source's
+/// view (CR 613.8a), a dependency in layer 4 and a locked set.
+fn foreign_registry() -> ContinuousEffects {
+    let mut r = registry();
+    let types = |card: &[&str]| LayerModification::AddTypes {
+        supertypes: BTreeSet::new(),
+        card_types: set(card),
+        subtypes: BTreeSet::new(),
+    };
+    r.register(
+        e(10),
+        stat(o(3), Layer::L4, 30, artifacts(), types(&["Creature"])),
+    )
+    .unwrap();
+    r.register(
+        e(11),
+        stat(
+            o(1),
+            Layer::L6,
+            5,
+            is_creature(),
+            LayerModification::AddAbility(keyword("vigilance")),
+        ),
+    )
+    .unwrap();
+    r.register(
+        e(12),
+        stat(o(2), Layer::L7c, 31, is_creature(), modify(2, 0)),
+    )
+    .unwrap();
+    r.register(
+        e(13),
+        eff(
+            Layer::L6,
+            40,
+            locked(&[2]),
+            LayerModification::RemoveAllAbilities,
+        ),
+    )
+    .unwrap();
+    r
+}
+
+// REQ-LAYER-005, REQ-LAYER-001: a cached `evaluate_all` on a cold cache runs one board pass for
+// the whole board (observed through the per-object `counters` calls of the pass: one per
+// object, not one per object per object) and stores every object; in full-recompute mode it
+// stores nothing. A single `evaluate` stores only its own object.
+#[test]
+fn req_layer_005_cold_evaluate_all_runs_one_board_pass() {
+    let env = Counting::new(Env::board());
+    let r = foreign_registry();
+    let objects = u64::try_from(env.objects().len()).unwrap();
+    let mut c = LayerCache::new();
+    let all = c.evaluate_all(&r, &env).unwrap();
+    assert_eq!(env.calls.get(), objects, "one board pass");
+    assert_eq!(all, evaluate_all(&r, &env).unwrap());
+    assert_eq!(c.len(), if FULL_RECOMPUTE { 0 } else { all.len() });
+    env.calls.set(0);
+    c.evaluate_all(&r, &env).unwrap();
+    assert_eq!(env.calls.get(), if FULL_RECOMPUTE { objects } else { 0 });
+    let mut single = LayerCache::new();
+    single.evaluate(&r, &env, o(2)).unwrap();
+    assert_eq!(single.len(), usize::from(!FULL_RECOMPUTE));
+}
+
+// REQ-LAYER-005: a cold `evaluate_all` counts one miss per object and a following one one hit
+// per object (one more miss per object in full-recompute mode); a listed duplicate is a second
+// lookup (a hit in cached mode, a miss in full-recompute mode) with the same result.
+#[test]
+fn req_layer_005_whole_board_fill_stats() {
+    let mut env = Counting::new(Env::board());
+    let r = foreign_registry();
+    let mut c = LayerCache::new();
+    c.evaluate_all(&r, &env).unwrap();
+    let cold = CacheStats {
+        hits: 0,
+        misses: 4,
+        invalidations: 0,
+    };
+    assert_eq!(c.stats(), cold);
+    c.evaluate_all(&r, &env).unwrap();
+    let (hits, misses) = if FULL_RECOMPUTE { (0, 8) } else { (4, 4) };
+    let warm = CacheStats {
+        hits,
+        misses,
+        invalidations: 0,
+    };
+    assert_eq!(c.stats(), warm);
+    // A listed duplicate on a cold cache: five lookups, one board pass.
+    env.listed = Some(vec![o(4), o(2), o(1), o(3), o(2)]);
+    env.calls.set(0);
+    let mut d = LayerCache::new();
+    let all = d.evaluate_all(&r, &env).unwrap();
+    assert_eq!(env.calls.get(), 4);
+    assert_eq!(all, evaluate_all(&r, &env).unwrap());
+    let (hits, misses) = if FULL_RECOMPUTE { (0, 5) } else { (1, 4) };
+    assert_eq!(
+        d.stats(),
+        CacheStats {
+            hits,
+            misses,
+            invalidations: 0
+        }
+    );
+}
+
+// REQ-LAYER-005, REQ-LAYER-001, REQ-CORE-001: a cache whose entries were partly stored by
+// single `evaluate` calls, then filled by `evaluate_all`, gives the uncached `evaluate_all` map;
+// the stored objects are hits and the others misses answered from one board pass.
+#[test]
+fn req_layer_005_partial_then_whole_board_fill() {
+    let env = Counting::new(Env::board());
+    let r = foreign_registry();
+    let fresh = evaluate_all(&r, &env).unwrap();
+    for stored in [
+        vec![],
+        vec![o(2)],
+        vec![o(1), o(4)],
+        vec![o(1), o(2), o(3), o(4)],
+    ] {
+        let mut c = LayerCache::new();
+        for &id in &stored {
+            assert_eq!(c.evaluate(&r, &env, id).unwrap(), fresh[&id]);
+        }
+        env.calls.set(0);
+        assert_eq!(c.evaluate_all(&r, &env).unwrap(), fresh, "{stored:?}");
+        let k = stored.len() as u64;
+        let (hits, misses) = if FULL_RECOMPUTE { (0, k + 4) } else { (k, 4) };
+        assert_eq!(c.stats().hits, hits, "{stored:?}");
+        assert_eq!(c.stats().misses, misses, "{stored:?}");
+        // No board pass when every object is stored.
+        let passes = u64::from(FULL_RECOMPUTE || k < 4);
+        assert_eq!(env.calls.get(), passes * 4, "{stored:?}");
+        assert_eq!(c.len(), if FULL_RECOMPUTE { 0 } else { 4 });
+    }
+}
+
+// REQ-LAYER-005, REQ-CORE-001: the first-error rule with the whole-board fill. Objects 1, 3, 4
+// have a base and 2 does not (listed 1, 3, 4, 2): the error is `UnknownObject(2)`, the same as
+// the uncached `evaluate_all`; object 1, visited before it, is stored with the result
+// `evaluate` gives (its universe skips 2); objects 3 and 4, after the error, are not stored
+// (docs/DECISIONS.md "#190 FP-147 - Whole-board cache fill").
+#[test]
+fn req_layer_005_whole_board_fill_first_error() {
+    let mut env = Counting::new(Env::board());
+    env.hidden.insert(o(2));
+    env.listed = Some(vec![o(1), o(3), o(4), o(2)]);
+    let r = foreign_registry();
+    let mut c = LayerCache::new();
+    assert_eq!(
+        c.evaluate_all(&r, &env),
+        Err(LayerError::UnknownObject(o(2)))
+    );
+    assert_eq!(evaluate_all(&r, &env), Err(LayerError::UnknownObject(o(2))));
+    assert_eq!(
+        c.stats(),
+        CacheStats {
+            hits: 0,
+            misses: 2,
+            invalidations: 0
+        }
+    );
+    assert_eq!(c.len(), usize::from(!FULL_RECOMPUTE));
+    assert_eq!(c.evaluate(&r, &env, o(1)), evaluate(&r, &env, o(1)));
+    assert_eq!(c.stats().hits, u64::from(!FULL_RECOMPUTE));
+    // Object 3 was not stored: its lookup is a miss.
+    let misses = c.stats().misses;
+    assert_eq!(c.evaluate(&r, &env, o(3)), evaluate(&r, &env, o(3)));
+    assert_eq!(c.stats().misses, misses + 1);
+}

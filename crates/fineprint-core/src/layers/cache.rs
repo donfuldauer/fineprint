@@ -26,21 +26,62 @@
 //! [`LayerEnvironment`] methods, and the caller declares it with [`LayerCache::invalidate`]
 //! (see [`Invalidation`] for the SRS 6.5 inputs each cause covers).
 //!
-//! **Expected evaluation cost.** Let `E` be the number of registered effects and `N` the number
-//! of objects.
+//! **Expected evaluation cost.** Let `E` be the number of registered effects, `N` the number
+//! of objects, and `k` the number of steps (effects of the layer and counters) one object has
+//! in one layer.
+//! - A board pass ([`super::board`]) runs every object through the eleven layers and
+//!   sublayers. Per layer it lists the layer's effects once (`O(E)`), computes one
+//!   foreign-source view per static effect of the layer whose source is on the board (one
+//!   single-object run of the layer each, so at most `E` such runs per pass), and runs the
+//!   layer for each of the `N` objects. One object's layer builds its `k` steps and orders them
+//!   (REQ-LAYER-002): each selection asks the dependency relation lazily, so finding the
+//!   earliest independent step usually costs `O(k)` trial applications (a copy of the object's
+//!   characteristics and one application each), `O(k^2)` per layer; only when no step is
+//!   independent (a dependency loop) is the whole relation, `O(k^2)` trials, computed. Each
+//!   trial of a selector effect also asks [`LayerEnvironment::matches`]. A pass is therefore
+//!   about `O(N * sum of k^2 over the layers)` trial applications plus `O(E * k)` for the
+//!   foreign views, and copies each object's state once (at the start of layer 7a, moved, not
+//!   cloned).
 //! - A hit costs one comparison of the registry with the snapshot (`O(E)`, done once per
 //!   [`LayerCache::evaluate_all`] call and once per [`LayerCache::evaluate`] call), one ordered
 //!   map lookup (`O(log N)`) and one clone of the stored [`Evaluated`].
-//! - A miss costs the same comparison plus one layer-major board pass of
-//!   [`evaluate`](super::evaluate) (every object of the universe through every layer from 1a to
-//!   7d, each layer's ordering including the trial applications that find dependencies, roughly
-//!   quadratic in the number of steps that apply to an object in one layer, the selector
-//!   matching of every effect of each layer against each object, and the nested source
-//!   evaluations of the existence question); plus the insertion. Its result is the asked
-//!   object's.
+//! - A miss of [`LayerCache::evaluate`] costs the same comparison plus one board pass of
+//!   [`evaluate`](super::evaluate) and the insertion; its result is the asked object's.
+//! - [`LayerCache::evaluate_all`] answers all its misses from at most one board pass, run at
+//!   the first miss: a call with `m` misses costs one pass plus `O(m log N)` insertions (no pass
+//!   when every object is a hit).
 //! - An invalidation costs dropping every entry (`O(N)`); a registry change also clones the
 //!   registry once (`O(E)`) into the snapshot.
-//! - A full-board recompute ([`LayerCache::evaluate_all`] after an invalidation) is `N` misses.
+//! - A full-board recompute ([`LayerCache::evaluate_all`] after an invalidation) is therefore
+//!   one board pass and `N` insertions; before #190 FP-147 it was `N` misses of one board pass
+//!   each.
+//!
+//! Where the time goes (callgrind on one [`evaluate_all`](super::evaluate_all) of the
+//! `layers_recompute` board: 200 permanents, 4 players, 21 effects in layers 4-7c with a
+//! layer-4 dependency, locked sets, counters and characteristic-defining P/T). At commit
+//! 1360900 a pass took about 1.24 G instructions: 97% in the ordering within layers, of which
+//! 60% compared ability lists in the dependency trial (counting copies of every ability with
+//! JSON equality, for every pair of steps), 14% copied the object's characteristics for trial
+//! applications and 7% dropped them; copying every object's state and lock-in record at the
+//! start of every layer took about 3%. After #190 FP-147 a pass takes about 166 M instructions
+//! (7.4 times fewer): about 61% in the lazy dependency relation, most of it copying and
+//! dropping the characteristics of trial applications (the `Characteristics` value with its
+//! string sets and JSON abilities), 6% applying steps and 6% in the set and ability-list
+//! comparisons; no per-layer board copy remains. Further gains need a cheaper copy of an
+//! object's characteristics (outside this module).
+//!
+//! Benchmark medians of `cargo bench --locked -p fineprint-core --bench layers_recompute --
+//! --noplot` (criterion `median`, same 4-core development machine and command for both, not the
+//! CI reference runner, with other work running, so figures vary by about 15% between runs;
+//! the CI `bench (ubuntu-latest)` artifacts are the trend of record, REQ-NFR-009). The cold and
+//! after-invalidation figures at 1360900 are 200 board passes each:
+//!
+//! | benchmark | 1360900 | #190 FP-147 |
+//! |---|---|---|
+//! | `full_recompute_200` | 93.0 ms | 13.0 ms |
+//! | `cached_cold_200` | 18.33 s | 16.8 ms |
+//! | `cached_warm_200` | 421 µs | 380 µs |
+//! | `cached_after_invalidation_200` | 18.44 s | 16.0 ms |
 //!
 //! The SRS target is at most 2 ms per full-board recompute for a 4-player board with 200
 //! permanents on the reference runner (GitHub's standard hosted `ubuntu-latest`, REQ-NFR-009).
@@ -63,7 +104,11 @@ use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::ObjectId;
 use serde::Serialize;
 
+use fineprint_dsl::ability::Layer;
+
+use super::board::{run_board, universe_known};
 use super::error::LayerError;
+use super::ordering::OrderStep;
 use super::pipeline::{self, Evaluated, LayerEnvironment};
 use super::registry::{ContinuousEffects, ManaValueProvenance, ValueSource};
 use crate::objects::Characteristics;
@@ -233,9 +278,17 @@ impl LayerCache {
     /// again, as before), equal to [`evaluate_all`](super::evaluate_all); each object is a hit or
     /// a miss as for [`LayerCache::evaluate`]. The registry is compared once per call.
     ///
+    /// Every miss of the call is answered from at most one layer-major board pass over the
+    /// objects of `env.objects()` that have a base, run at the first miss (REQ-LAYER-005); for
+    /// each of those objects it gives exactly what [`evaluate`](super::evaluate) gives. In
+    /// cached mode each miss stores its object's result as it is visited; in full-recompute mode
+    /// nothing is stored.
+    ///
     /// # Errors
     /// The first error of [`evaluate`](super::evaluate) by ascending [`ObjectId`], as
-    /// [`evaluate_all`](super::evaluate_all); entries computed before it stay stored.
+    /// [`evaluate_all`](super::evaluate_all): [`LayerError::UnknownObject`] for the first object
+    /// without a base; entries computed before it stay stored, and the results of the objects
+    /// after it are not stored.
     pub fn evaluate_all(
         &mut self,
         effects: &ContinuousEffects,
@@ -246,9 +299,30 @@ impl LayerCache {
         // one of the uncached `evaluate_all`.
         let mut ids = env.objects();
         ids.sort_unstable();
+        let mut board: Option<BTreeMap<ObjectId, (Evaluated, Vec<OrderStep>)>> = None;
         let mut out = BTreeMap::new();
         for id in ids {
-            out.insert(id, self.lookup_or_evaluate(effects, env, id)?);
+            let key = (self.version, id);
+            if !FULL_RECOMPUTE && let Some(hit) = self.entries.get(&key) {
+                self.stats.hits += 1;
+                out.insert(id, hit.clone());
+                continue;
+            }
+            // A failed lookup counts as a miss and is never stored.
+            self.stats.misses += 1;
+            // REQ-LAYER-005: one board pass for every miss of this call, run at the first.
+            let board = board
+                .get_or_insert_with(|| run_board(effects, env, universe_known(env), Layer::ALL));
+            // Each object's result is taken once; a listed duplicate (a miss again only in
+            // full-recompute mode) reuses the result already returned for it.
+            let evaluated = match board.remove(&id) {
+                Some((evaluated, _)) => evaluated,
+                None => out.get(&id).cloned().ok_or(LayerError::UnknownObject(id))?,
+            };
+            if !FULL_RECOMPUTE {
+                self.entries.insert(key, evaluated.clone());
+            }
+            out.insert(id, evaluated);
         }
         Ok(out)
     }
