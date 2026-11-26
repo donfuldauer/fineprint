@@ -69,7 +69,7 @@ impl CanonicalEncode for AppliedEffects {
 /// "sacrifice"/"discard"/"mill" wording); it does not change execution.
 ///
 /// Canonical tags: `Other` 0, `Destroy` 1, `Sacrifice` 2, `Discard` 3, `Mill` 4, `Exile` 5,
-/// `CounterSpell` 6, `StateBasedAction` 7.
+/// `CounterSpell` 6, `StateBasedAction` 7, `StateBasedDestroy` 8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ZoneChangeCause {
     /// Any other cause.
@@ -86,8 +86,15 @@ pub enum ZoneChangeCause {
     Exile,
     /// Countering a spell (CR 701.6a).
     CounterSpell,
-    /// A state-based action (CR 704.3).
+    /// A state-based action (CR 704.3) that does not destroy the object (for example
+    /// CR 704.5f, CR 704.5i, CR 704.5j, CR 704.5k).
     StateBasedAction,
+    /// Destruction by the state-based actions that check for lethal damage (CR 704.5g) or
+    /// damage from a source with deathtouch (CR 704.5h): the object is "destroyed"
+    /// (CR 701.8b), so "destroyed" triggers see it, but it is not destruction as the result
+    /// of an effect, so a replacement keyed on [`ZoneChangeCause::Destroy`] (the shield
+    /// counter, CR 122.1c) does not apply to it.
+    StateBasedDestroy,
 }
 
 impl ZoneChangeCause {
@@ -101,6 +108,7 @@ impl ZoneChangeCause {
             ZoneChangeCause::Exile => 5,
             ZoneChangeCause::CounterSpell => 6,
             ZoneChangeCause::StateBasedAction => 7,
+            ZoneChangeCause::StateBasedDestroy => 8,
         }
     }
 }

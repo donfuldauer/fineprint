@@ -288,9 +288,12 @@ impl Plan {
 ///   order: one `Unattach` event per attachment that becomes unattached (CR 704.5n,
 ///   CR 704.5p, CR 701.3d; one event even if both entries apply), ascending id; then one
 ///   `ZoneChange` to the owner's graveyard per moving object (CR 704.5f-704.5k,
-///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedAction`]
-///   ([`ZoneChangeCause::Sacrifice`] for a Saga its controller sacrifices, CR 704.5s, even if
-///   another entry also moves it; an object with several findings moves once); then one
+///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedDestroy`] for
+///   a permanent destroyed by CR 704.5g or CR 704.5h (CR 701.8b) and
+///   [`ZoneChangeCause::StateBasedAction`] for the other moves ([`ZoneChangeCause::Sacrifice`]
+///   for a Saga its controller sacrifices, CR 704.5s, even if another entry also moves it; an
+///   object with several findings moves once, CR 704.7, with the cause of highest precedence:
+///   `Sacrifice`, then `StateBasedDestroy`, then `StateBasedAction`); then one
 ///   `RemoveCounters` event per object and counter kind (CR 704.5q, CR 704.5r), ascending id
 ///   then kind. The unattach events come first so that the bus, which executes the events
 ///   that are not zone changes in submission order (a replacement's `Instead` events at the
@@ -683,11 +686,11 @@ fn perform_findings(
     let mut dungeons: BTreeSet<ObjectId> = BTreeSet::new();
     // CR 704.5j: the legend-rule losers are put into their owners' graveyards.
     for &o in &legend_losers {
-        moving.insert(o, ZoneChangeCause::StateBasedAction);
+        merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
     }
     // CR 704.5x, CR 704.5y: no player can be chosen: its owner's graveyard.
     for &o in &unprotectable {
-        moving.entry(o).or_insert(ZoneChangeCause::StateBasedAction);
+        merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
     }
     // CR 704.5aa: the players whose speed becomes 1 (once per player).
     let mut speed_set: BTreeSet<PlayerId> = BTreeSet::new();
@@ -706,13 +709,18 @@ fn perform_findings(
                     .or_default()
                     .extend(cease_reasons(finding.entry_id, o, env));
             }
-            (SbaAction::PutIntoGraveyard | SbaAction::Destroy, SbaSubject::Object(o)) => {
-                moving.entry(o).or_insert(ZoneChangeCause::StateBasedAction);
+            // CR 704.5f, CR 704.5i, CR 704.5k: put into the graveyard, not destroyed.
+            (SbaAction::PutIntoGraveyard, SbaSubject::Object(o)) => {
+                merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
+            }
+            // CR 704.5g, CR 704.5h, CR 701.8b: destroyed by a state-based action.
+            (SbaAction::Destroy, SbaSubject::Object(o)) => {
+                merge_move(&mut moving, o, ZoneChangeCause::StateBasedDestroy);
             }
             // CR 704.5s, CR 715.4: the controller sacrifices it; the sacrifice cause wins over
             // a plain SBA move of the same object (decision #42 FP-041).
             (SbaAction::Sacrifice, SbaSubject::Object(o)) => {
-                moving.insert(o, ZoneChangeCause::Sacrifice);
+                merge_move(&mut moving, o, ZoneChangeCause::Sacrifice);
             }
             // CR 704.5n, CR 704.5p
             (SbaAction::Unattach, SbaSubject::Object(o)) => {
@@ -1243,6 +1251,39 @@ enum CeaseReason {
     CardCopy,
 }
 
+/// The precedence of a cause in the CR 704.7 merge of one object's SBA moves: higher wins.
+/// `Sacrifice` (CR 704.5s, decision #42 FP-041) over `StateBasedDestroy` (CR 704.5g,
+/// CR 704.5h: the object is destroyed, CR 701.8b) over `StateBasedAction` (decision
+/// "#209 FP-155 - SBA destruction cause"). Any other cause ranks lowest; the SBA pass submits
+/// none.
+fn move_precedence(cause: ZoneChangeCause) -> u8 {
+    match cause {
+        ZoneChangeCause::Sacrifice => 3,
+        ZoneChangeCause::StateBasedDestroy => 2,
+        ZoneChangeCause::StateBasedAction => 1,
+        ZoneChangeCause::Other
+        | ZoneChangeCause::Destroy
+        | ZoneChangeCause::Discard
+        | ZoneChangeCause::Mill
+        | ZoneChangeCause::Exile
+        | ZoneChangeCause::CounterSpell => 0,
+    }
+}
+
+/// CR 704.7: records a move of `object` with `cause`, merging with a move already recorded for
+/// it: one move per object per pass, with the cause of higher [`move_precedence`] whatever the
+/// order of the findings.
+fn merge_move(
+    moving: &mut BTreeMap<ObjectId, ZoneChangeCause>,
+    object: ObjectId,
+    cause: ZoneChangeCause,
+) {
+    let slot = moving.entry(object).or_insert(cause);
+    if move_precedence(cause) > move_precedence(*slot) {
+        *slot = cause;
+    }
+}
+
 /// The reasons a cease finding of entry `entry_id` gives for `object`, from the check snapshot.
 fn cease_reasons(entry_id: &str, object: ObjectId, env: &dyn SbaEnvironment) -> Vec<CeaseReason> {
     match entry_id {
@@ -1319,5 +1360,125 @@ fn capture_ceasing_lki(
     ) {
         Ok(_) | Err(MemoryError::NoCharacteristics(_) | MemoryError::AlreadyCaptured(_)) => Ok(()),
         Err(e) => Err(BusInterrupt::Error(BusError::Event(EventError::from(e)))),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use std::collections::BTreeMap;
+
+    use fineprint_base::ids::ObjectId;
+
+    use super::{ZoneChangeCause, merge_move};
+
+    /// Every permutation of `items`.
+    fn permutations(items: &[ZoneChangeCause]) -> Vec<Vec<ZoneChangeCause>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let first = rest.remove(i);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, first);
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// The merged cause of one object whose findings arrive in `order`.
+    fn merged(order: &[ZoneChangeCause]) -> ZoneChangeCause {
+        let o = ObjectId::new(7);
+        let mut moving = BTreeMap::new();
+        for &cause in order {
+            merge_move(&mut moving, o, cause);
+        }
+        assert_eq!(moving.len(), 1, "CR 704.7: one move per object");
+        moving[&o]
+    }
+
+    // REQ-SBA-001, CR 704.7, CR 701.8b: one object's plain SBA move (CR 704.5f, the legend-rule
+    // or unprotectable-battle pre-insert) and destroy move (CR 704.5g, CR 704.5h) merge into one
+    // `StateBasedDestroy` move in every arrival order; `Sacrifice` (CR 704.5s) wins over both in
+    // every order; a single cause is kept as it is.
+    #[test]
+    fn req_sba_001_cr_704_7_merge_precedence_in_every_order() {
+        use ZoneChangeCause::{Sacrifice, StateBasedAction, StateBasedDestroy};
+        for cause in [StateBasedAction, StateBasedDestroy, Sacrifice] {
+            assert_eq!(merged(&[cause]), cause);
+            assert_eq!(merged(&[cause, cause]), cause);
+        }
+        for order in permutations(&[StateBasedAction, StateBasedDestroy]) {
+            assert_eq!(merged(&order), StateBasedDestroy, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, StateBasedAction, StateBasedDestroy]) {
+            assert_eq!(merged(&order), StateBasedDestroy, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+        for order in permutations(&[StateBasedDestroy, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, StateBasedDestroy, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+    }
+
+    // REQ-SBA-001, CR 704.7: merging is per object; other objects keep their own cause, and the
+    // map stays ordered by object id (R3).
+    #[test]
+    fn req_sba_001_cr_704_7_merge_is_per_object() {
+        let mut moving = BTreeMap::new();
+        merge_move(
+            &mut moving,
+            ObjectId::new(3),
+            ZoneChangeCause::StateBasedDestroy,
+        );
+        merge_move(
+            &mut moving,
+            ObjectId::new(1),
+            ZoneChangeCause::StateBasedAction,
+        );
+        merge_move(&mut moving, ObjectId::new(2), ZoneChangeCause::Sacrifice);
+        merge_move(
+            &mut moving,
+            ObjectId::new(1),
+            ZoneChangeCause::StateBasedAction,
+        );
+        assert_eq!(
+            moving.into_iter().collect::<Vec<_>>(),
+            [
+                (ObjectId::new(1), ZoneChangeCause::StateBasedAction),
+                (ObjectId::new(2), ZoneChangeCause::Sacrifice),
+                (ObjectId::new(3), ZoneChangeCause::StateBasedDestroy),
+            ]
+        );
+    }
+
+    // REQ-SBA-001: a cause the SBA pass never submits ranks lowest: a recorded SBA cause is not
+    // replaced by it, and it is replaced by any SBA cause.
+    #[test]
+    fn req_sba_001_non_sba_causes_rank_lowest() {
+        for other in [
+            ZoneChangeCause::Other,
+            ZoneChangeCause::Destroy,
+            ZoneChangeCause::Discard,
+            ZoneChangeCause::Mill,
+            ZoneChangeCause::Exile,
+            ZoneChangeCause::CounterSpell,
+        ] {
+            for sba in [
+                ZoneChangeCause::StateBasedAction,
+                ZoneChangeCause::StateBasedDestroy,
+                ZoneChangeCause::Sacrifice,
+            ] {
+                assert_eq!(merged(&[other, sba]), sba);
+                assert_eq!(merged(&[sba, other]), sba);
+            }
+            assert_eq!(merged(&[other]), other);
+        }
     }
 }
