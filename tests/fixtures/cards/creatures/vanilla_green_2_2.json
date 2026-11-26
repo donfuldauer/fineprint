@@ -1,0 +1,37 @@
+{
+  "cardDefId": "test.vanilla_green_2_2",
+  "colorIdentity": 16,
+  "definitionHash": "e8744f6f3091b0523468ddb9b545c8a7213bdc9828ed949e50d7ea6450b2ffa4",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{1}{G}",
+      "name": "test.vanilla_green_2_2",
+      "power": {
+        "LITERAL": 2
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [],
+      "toughness": {
+        "LITERAL": 2
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

@@ -1,0 +1,117 @@
+{
+  "cardDefId": "test.aura_plus_2_2",
+  "colorIdentity": 1,
+  "definitionHash": "e570d8b755bd5286bca5e525cd01fd67fd6bb276cffa57de86c648a4fbb39e46",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "keyword": "ENCHANT",
+          "kind": "KEYWORD",
+          "params": {
+            "what": "CREATURE"
+          },
+          "textSpan": [
+            0,
+            0
+          ]
+        },
+        {
+          "abilityId": "a1",
+          "effect": [
+            {
+              "objects": {
+                "ref": "SELF"
+              },
+              "op": "ATTACH",
+              "to": {
+                "ref": "TARGET",
+                "slot": 0
+              }
+            }
+          ],
+          "kind": "SPELL",
+          "targets": [
+            {
+              "max": 1,
+              "min": 1,
+              "selector": {
+                "pred": "IS_CREATURE",
+                "zones": [
+                  "BATTLEFIELD"
+                ]
+              },
+              "slot": 0
+            }
+          ],
+          "textSpan": [
+            1,
+            1
+          ]
+        },
+        {
+          "abilityId": "a2",
+          "effects": [
+            {
+              "affected": {
+                "ref": "ENCHANTED"
+              },
+              "layer": "7c",
+              "modification": {
+                "op": "MODIFY_PT",
+                "power": 2,
+                "toughness": 2
+              },
+              "type": "CHAR"
+            }
+          ],
+          "kind": "STATIC",
+          "textSpan": [
+            2,
+            2
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Enchantment"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{1}{W}",
+      "name": "test.aura_plus_2_2",
+      "subtypes": [
+        "Aura"
+      ],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        },
+        {
+          "id": "t1",
+          "kind": "LITERAL",
+          "text": "test ability 1"
+        },
+        {
+          "id": "t2",
+          "kind": "LITERAL",
+          "text": "test ability 2"
+        }
+      ]
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}
