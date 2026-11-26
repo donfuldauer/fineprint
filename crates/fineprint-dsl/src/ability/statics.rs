@@ -7,7 +7,7 @@
 //! [`RuleModification`] (pass B, 613.11, one kind from the closed [`RuleKind`] set), so every
 //! static effect declares its layer or RuleSet kind, its selector and its modification.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
@@ -395,6 +395,115 @@ pub struct CharacteristicEffect {
     pub is_cda: Option<bool>,
 }
 
+/// One part of the type line a layer-4 characteristic-defining ability can define
+/// (REQ-OBJ-002, REQ-DSL-008). Card type, subtype and supertype are separate characteristics
+/// (CR 109.3, 205.1b), so a copy exception touching one part drops only the CDAs that define
+/// that part (CR 707.9d). The order (supertypes, card types, subtypes) is the type-line order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypePart {
+    /// The supertypes (wire `"SUPERTYPES"`).
+    Supertypes,
+    /// The card types (wire `"CARD_TYPES"`).
+    CardTypes,
+    /// The subtypes (wire `"SUBTYPES"`).
+    Subtypes,
+}
+
+impl TypePart {
+    /// Wire name of [`TypePart::Supertypes`].
+    pub const SUPERTYPES: &'static str = "SUPERTYPES";
+    /// Wire name of [`TypePart::CardTypes`].
+    pub const CARD_TYPES: &'static str = "CARD_TYPES";
+    /// Wire name of [`TypePart::Subtypes`].
+    pub const SUBTYPES: &'static str = "SUBTYPES";
+    /// Every part, in order.
+    pub const ALL: [TypePart; 3] = [
+        TypePart::Supertypes,
+        TypePart::CardTypes,
+        TypePart::Subtypes,
+    ];
+
+    /// The wire name (case-sensitive).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TypePart::Supertypes => TypePart::SUPERTYPES,
+            TypePart::CardTypes => TypePart::CARD_TYPES,
+            TypePart::Subtypes => TypePart::SUBTYPES,
+        }
+    }
+
+    /// The part with wire name `s` (exact, case-sensitive match), if any.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<TypePart> {
+        TypePart::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+
+    /// Parses the value of a layer-4 `defines` member (REQ-OBJ-002, REQ-DSL-008): a non-empty
+    /// JSON array of distinct wire names. Never panics, whatever `v` holds (R12).
+    ///
+    /// # Errors
+    /// A message when `v` is not an array, is empty, or has an element that is not a string,
+    /// not a known wire name (exact case) or a duplicate.
+    pub fn parse_defines(v: &Value) -> Result<BTreeSet<TypePart>, String> {
+        let Value::Array(items) = v else {
+            return Err("CHAR layer 4 member \"defines\" must be an array".to_owned());
+        };
+        if items.is_empty() {
+            return Err("CHAR layer 4 member \"defines\" must not be empty".to_owned());
+        }
+        let mut out = BTreeSet::new();
+        for item in items {
+            let Value::String(name) = item else {
+                return Err("CHAR layer 4 \"defines\" elements must be strings".to_owned());
+            };
+            let part = TypePart::from_wire(name)
+                .ok_or_else(|| format!("unknown CHAR layer 4 \"defines\" part {name:?}"))?;
+            if !out.insert(part) {
+                return Err(format!("duplicate CHAR layer 4 \"defines\" part {name:?}"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl CharacteristicEffect {
+    /// The flat modification param that lists the type-line parts a layer-4 effect defines
+    /// (REQ-OBJ-002; SRS §14.4.3).
+    pub const DEFINES: &'static str = "defines";
+
+    /// The type-line parts this effect defines (REQ-OBJ-002; CR 707.9d): `None` unless the
+    /// layer is 4; otherwise the parts listed by the modification's `defines` param, or all
+    /// three parts when `defines` is absent (the conservative default). A hand-built effect with
+    /// a malformed `defines` (which decoding and writing refuse) also gives all three parts.
+    /// Reads the effect data only; `isCDA` is not consulted.
+    #[must_use]
+    pub fn defined_type_parts(&self) -> Option<BTreeSet<TypePart>> {
+        if self.layer != Layer::L4 {
+            return None;
+        }
+        Some(
+            self.modification
+                .params
+                .get(CharacteristicEffect::DEFINES)
+                .and_then(|v| TypePart::parse_defines(v).ok())
+                .unwrap_or_else(|| TypePart::ALL.into_iter().collect()),
+        )
+    }
+
+    /// Checks the modification and, in layer 4, the `defines` param (REQ-OBJ-002); on every
+    /// other layer `defines` is an ordinary opaque param.
+    fn check(&self) -> JResult<()> {
+        self.modification.check()?;
+        if self.layer == Layer::L4
+            && let Some(v) = self.modification.params.get(CharacteristicEffect::DEFINES)
+        {
+            TypePart::parse_defines(v)?;
+        }
+        Ok(())
+    }
+}
+
 /// An effect on players applied in pass A (REQ-DSL-008, 613.10): `{"type":"PLAYER","affected",
 /// "modification"}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,7 +566,7 @@ impl StaticEffect {
     /// Checks the effect-level rules.
     fn check(&self) -> JResult<()> {
         match self {
-            StaticEffect::Char(c) => c.modification.check(),
+            StaticEffect::Char(c) => c.check(),
             StaticEffect::Player(p) => p.modification.check(),
             StaticEffect::Rule(r) => r.check(),
         }
@@ -520,7 +629,7 @@ impl FromJson for StaticEffect {
 
 impl Members for CharacteristicEffect {
     fn members<M: SerializeMap>(&self, m: &mut M) -> Result<(), M::Error> {
-        ser_check(self.modification.check())?;
+        ser_check(self.check())?;
         m.serialize_entry("type", "CHAR")?;
         m.serialize_entry("layer", &self.layer)?;
         m.serialize_entry("affected", &self.affected)?;

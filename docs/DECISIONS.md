@@ -9931,3 +9931,53 @@ order).
 **Rationale:** Each choice asserts exactly what the brief and the #37 decisions pin, never less.
 **Alternatives:** Asserting accessor rejection of empty words (rejected: not in the brief's Err
 list); a land-type word for the acceptance scenario (rejected: departs from the brief's token list).
+
+## #198 FP-151 — Per-part CDA targets for copy exceptions
+
+**Decision:** (a) A layer-4 `CHAR` effect's modification may carry `defines`, a non-empty array of
+distinct names from `"SUPERTYPES"`, `"CARD_TYPES"`, `"SUBTYPES"` (validated on decode and write
+for every layer-4 `CHAR` effect, opaque on other layers; typed view `TypePart` and
+`CharacteristicEffect::defined_type_parts`). A layer-4 CDA without `defines` defines all three
+parts, so every existing definition keeps the conservative behaviour; in fineprint-core a
+malformed `defines` (which decoding refuses) also counts as all three. (b) JUDGEMENT CALL, the CR
+is silent on multi-characteristic CDAs: a CDA is not copied as a whole as soon as it defines any
+characteristic the exception sets, retains or does not copy, so a CDA defining card types and
+subtypes is dropped by an exception touching either and kept by one touching only supertypes.
+(c) `copy_with` uses one target per type-line part (`Supertypes`, `CardTypes`, `Subtypes`):
+`Set*`/`NotCopied` of one part drop only the CDAs that define that part, so a subtype-only CDA
+survives `SetSupertypes`. (d) `AddSupertypes`, `AddCardTypes` and `AddSubtypes` keep every type
+CDA. This refines "#38 FP-037 — CDA abilities and CR 707.9d" (which dropped any layer-4 CDA on
+any type exception); the rest of that decision stands.
+**Rationale:** (a) the "absent = all three" fallback keeps #38's behaviour and every current
+test valid. (b) CR 707.9d attaches the consequence ("is not copied") to the whole
+characteristic-defining ability, and the CR has no partial-copy mechanism. (c) CR 109.3 lists
+card type, subtype and supertype as separate characteristics and CR 205.1b treats them
+separately, so 707.9d's "that characteristic" applies per part. (d) CR 707.9d last sentence: for
+"in addition to its other types" exceptions, any CDA that defines card type, supertype and/or
+subtype is copied.
+**Alternatives:** Keep one `Types` target (rejected: too broad, drops a subtype CDA when only
+supertypes are set); copy a multi-part CDA partially (rejected: no rule support); key the parts
+on a new `op` vocabulary (rejected: ops are free strings in the DSL).
+
+## #198 FP-151 — Change request number
+
+**Decision:** The contract change requested as "CR-003" is recorded as `CR-006` in
+`contracts/CHANGE_REQUESTS.md`.
+**Rationale:** CR-003 to CR-005 already exist and the file is append-only; reusing a number would
+make two entries ambiguous.
+**Alternatives:** Reusing CR-003 (rejected: duplicate id); editing the existing CR-003 (rejected:
+append-only, R2).
+
+## #198 FP-151 — `TypePart` reached through the `statics` module
+
+**Decision:** `TypePart` is defined in `crates/fineprint-dsl/src/ability/statics.rs` and
+re-exported from `fineprint_dsl::ability` (the Orchestrator added `ability/mod.rs` to the unit's
+owned paths for this one change). fineprint-core's copy exceptions parse a layer-4 `defines`
+value with `TypePart::parse_defines`, so the wire vocabulary lives only in the DSL; any `Err`, or
+an absent value, still means all three parts.
+**Rationale:** One source for the vocabulary; the behaviour is identical to the earlier direct
+JSON read (absent, non-array, empty, non-string, unknown, wrongly-cased and duplicate all fall
+back to all three parts). Core already depended on fineprint-dsl.
+**Alternatives:** Core reading the `defines` JSON itself (rejected: duplicated vocabulary);
+moving `TypePart` to another exported module (rejected: `statics` is where layer-4 CHAR
+modifications are defined).
