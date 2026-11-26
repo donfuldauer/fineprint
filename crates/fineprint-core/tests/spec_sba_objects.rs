@@ -27,7 +27,18 @@ fn assert_died(r: &SbaRun, old: ObjectId) {
     assert_eq!(moves.len(), 1, "{old:?} moved exactly once");
     let (_, new, kind, cause) = moves[0];
     assert_eq!(kind, ZoneKind::Graveyard);
-    assert_eq!(cause, ZoneChangeCause::StateBasedAction);
+    // CR 701.8b: 704.5g and 704.5h destroy, so those moves carry `StateBasedDestroy`; every other
+    // SBA move here carries `StateBasedAction`.
+    let destroyed = r.outcome().findings.iter().any(|f| {
+        f.subject == fineprint_core::sba::SbaSubject::Object(old)
+            && matches!(f.entry_id, "704.5g" | "704.5h")
+    });
+    let expected = if destroyed {
+        ZoneChangeCause::StateBasedDestroy
+    } else {
+        ZoneChangeCause::StateBasedAction
+    };
+    assert_eq!(cause, expected);
     assert_eq!(
         r.after.zones.object(new).expect("moved object").zone,
         ZoneId::Graveyard(owner)
