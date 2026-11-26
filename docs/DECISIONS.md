@@ -9323,3 +9323,144 @@ decision that LKI matches what the events did.
 or a borrow of `game` the context already holds mutably; the field set is frozen); routing LKI
 counters through `LayeredProvider::counters` (rejected: same amounts, and it would break the
 single-source decision); a runtime file-reading guard (rejected: R3).
+
+## #16 FP-015 — Lint API and lint ids
+
+**Decision.** `fineprint_dsl::lint` exposes exactly the brief's API: `Severity` (`Error` <
+`Warning`), `LintId` (a private `&'static str`, ordered by its string) with the twelve constants
+`FPL-SCHEMA`, `FPL-MANA-ABILITY`, `FPL-TIER-HINT`, `FPL-LAYER-KIND`, `FPL-TEXT-COVERAGE`,
+`FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-TOKEN-REF`, `FPL-LINK-ID`, `FPL-MANA-VALUE`, `FPL-COLORS`,
+`FPL-COLOR-IDENTITY` and `LintId::ALL` in that order; `LintLocation`, `Lint`, `LintReport`,
+`SourceFaceCharacteristics`, `SourceCharacteristics`, `LintContext` and the pure function
+`lint_definition`. The report is sorted by (face, ability, id string, severity, span, path,
+message), `None` first, then de-duplicated. Ability-level findings carry the ability's own
+`textSpan` in `text_span` when it is well-formed and fits `u32`; card-level and face-level
+findings other than coverage gaps have none. Messages copy only identifiers from the input
+(ability ids, token ids, link ids, member names), clipped to 64 characters; decoder messages of
+`FPL-SCHEMA` are clipped to 240 characters; JSON paths in messages show `$` and at most the last
+eight segments. The two touches outside `src/lint/` are the `pub mod lint;` line in `lib.rs`
+and the regenerated `docs/cr-citations.json`.
+**Rationale.** A string-backed id is stable on the wire and sorts the same everywhere. Filling
+`text_span` for ability findings is what "locations with text spans" asks for. Clipping keeps
+untrusted input from flooding reports (R12) and bounds path rendering whatever the nesting depth.
+**Alternatives.** An enum of lint ids (rejected: the string is the contract); unclipped decoder
+messages (rejected: an untrusted override could put megabytes of text in one finding).
+
+## #16 FP-015 — Raw versus typed lint inputs
+
+**Decision.** The typed decoders already refuse a `REPEAT_WHILE` without `maxIter`, a `CHAR`
+effect without `layer` and look-back keys, so `FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-LAYER-KIND`,
+`FPL-LINK-ID`, `FPL-TOKEN-REF` and the span reading of `FPL-TEXT-COVERAGE` run on the raw
+`serde_json::Value` of every ability, decodable or not, through one iterative walk (explicit
+stack, no recursion). `FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the ability part of
+`FPL-COLOR-IDENTITY` run only where `to_real()` succeeds. `FPL-SCHEMA` is emitted in addition
+for every position that fails to decode (all positions, not only the first). Partner abilities
+get `FPL-SCHEMA`, `FPL-LOOK-BACK`, `FPL-MAX-ITER` and `FPL-TOKEN-REF` (location
+`commanderEligibility.partnerAbilities[k]`); the face-specific checks do not apply to them.
+**Rationale.** A failing definition then reports the specific lint id and not only a generic
+schema error; typed checks need a decoded value to be meaningful.
+**Alternatives.** Typed-only checks (rejected: the specific violations would be unreportable);
+recursive raw walks (rejected: stack overflow on hostile nesting).
+
+## #16 FP-015 — Mana-ability check baseline
+
+**Decision.** Only `isManaAbility: true` can be a finding. KEYWORD abilities are skipped (macros
+expand later); SPELL, STATIC and REPLACEMENT with `true` are Errors (CR 605.1 covers activated and
+triggered abilities only). ACTIVATED (CR 605.1a): one Error per violated criterion: requires a
+target (any top-level or mode target slot, CR 115.6); loyalty (`isLoyalty: true` or a `LOYALTY`
+cost node, `COMPOSITE` included); library movement (`SEARCH_LIBRARY`, `MILL`, `DRAW`,
+`PUT_ON_TOP_OR_BOTTOM` anywhere in `effect` or `modes`, a `MOVE` whose `toZone` is `LIBRARY` or
+whose `objects` selector names the `LIBRARY` zone, an `EXILE_FROM_ZONE` cost from `LIBRARY`); no
+instruction at all (top-level `effect` empty and no mode with an instruction). TRIGGERED
+(CR 605.1b): requires a target; the trigger is not an `EVENT` trigger of kind `ACTIVATED` or
+`RESOLVED`; no instruction. The loyalty and library criteria are not applied to triggered
+abilities. `None` and `false` are never findings.
+**Rationale.** This DSL baseline has no add-mana instruction and no "mana added to a pool" event,
+so "could add mana" can be neither proved nor disproved from structure; the check is weakened to
+"has some instruction" and the triggering event set to the two events that exist. Implementing
+the CR text, not the looser SRS paraphrase, keeps library and loyalty criteria off triggers.
+**Alternatives.** Reporting `None`/`false` on abilities that might add mana (rejected:
+undecidable, would be noise). Follow-up: add a mana-production instruction and a "mana added"
+event, then make the check strict in both directions.
+
+## #16 FP-015 — Tier-hint check baseline
+
+**Decision.** A typed REPLACEMENT with a `tierHint` is an Error if `match.event` is not `ENTERS`
+(a `ZONE_CHANGE`-based hint is rejected in this baseline) and, separately, if every
+`replaceWith` operation is `SKIP` or `PREVENT`. An absent hint is never a finding (616.1e);
+`isSelfReplacement` (616.1a) is not compared with the hint.
+**Rationale.** CR 616.1b–d all concern how an object enters the battlefield, which the DSL
+models as the `ENTERS` event; an operation that only skips or prevents modifies nothing about the
+entry. The wire catalogue has no field naming a control, copy or back-face modification, so the
+three hints cannot be told apart structurally.
+**Alternatives.** Accepting `ZONE_CHANGE` with a `to: BATTLEFIELD` filter (rejected for now: two
+spellings of one event). Follow-up: a wire convention naming the modified aspect, then check each
+hint against 616.1b, 616.1c and 616.1d individually.
+
+## #16 FP-015 — Text coverage
+
+**Decision.** `textSpan` is an inclusive token index range `[start, end]` into `face.text`
+(N = raw array length). A well-formed span (two non-negative integers, `start <= end`) with
+`end >= N` is an Error at the ability, and still covers its in-range part; a present but
+malformed span (wrong type, wrong length, negative, `start > end`) is also an Error at the
+ability and covers nothing. Each maximal uncovered run is one finding at `faces[i].text` with
+`text_span = (first, last)`: Error for `VERIFIED` and `AUTO_PARSED`, Warning for `PARTIAL`. For
+`UNSUPPORTED` the whole check is skipped. Overlaps are fine; reminder text is not excluded.
+**Rationale.** REQ-ING-009 requires full coverage for `AUTO_PARSED` and above; a `PARTIAL`
+definition is expected to have gaps but they are still worth surfacing. Treating malformed spans
+as "any other out-of-range span" keeps a client override from hiding a gap behind garbage.
+**Alternatives.** Half-open spans (rejected: SRS §14.3 says "[start, end]" and the typed decoder
+allows `start == end`); ignoring malformed spans here (rejected: they would only surface as
+`FPL-SCHEMA`).
+
+## #16 FP-015 — Linked abilities structurally
+
+**Decision.** Declarations are the string `linkIds` of every face ability (all faces form one
+card, CR 607.1b); references are objects `{"ref":"LINKED","linkId":<string>}` at any depth of any
+face ability. A reference to an id no ability declares is an Error at the referencing ability.
+An id declared by exactly one ability and referenced by none is a Warning at that ability. An
+ability that declares and references the same id is linked to itself (CR 607.1c) and passes;
+ids declared by several abilities, and abilities declaring several ids, pass (CR 607.4).
+**Rationale.** It is the structural reading of "linked abilities share a `LinkId`": every
+reference resolves, and a lone declaration is suspicious but could be a deliberate unpaired
+link in a partial definition.
+**Alternatives.** Error for a lone declaration (rejected: too strong for an unpaired link that
+the toolchain cannot prove wrong).
+
+## #16 FP-015 — Source characteristics and token ids
+
+**Decision.** Source data reaches the lints through `LintContext`: `source` (per-face integer
+mana value and colors, and a color identity) and `known_token_ids`. An absent input skips the
+checks that need it with no finding: `FPL-MANA-VALUE` and `FPL-COLORS` need `source` with a
+value for that face index (extra or missing entries are ignored); the source comparison of
+`FPL-COLOR-IDENTITY` needs `source.color_identity`; `FPL-TOKEN-REF` needs `known_token_ids`.
+`FPL-COLOR-IDENTITY` always compares with the definition's own `colorIdentity`.
+**Rationale.** The lint is a pure function; the caller converts the source's floating `cmc` to an
+integer (REQ-ING-002 forbids it as a rules value). Skipping silently keeps definitions without a
+source (client overrides) lintable.
+**Alternatives.** A finding "source missing" (rejected: noise for every override).
+
+## #16 FP-015 — Characteristics checks
+
+**Decision.** Mana value per face is integer (`u64`, saturating): generic n, X/Y/Z 0 (202.3e),
+`{n/c}` max(n, 1) (202.3f), every other symbol 1 (202.3g for Phyrexian). No mana cost is 0
+(202.3a); the `BACK` face of a `DFC_NONMODAL` card uses the cost of its first `MAIN` face
+(202.3b); `LEFT_HALF`/`RIGHT_HALF` faces of a `SPLIT` card each have the combined cost of all
+halves (202.3d, off the stack); `MELD_RESULT` faces are skipped (202.3c is a runtime property).
+Colors per face are the colors of its cost symbols (hybrid and Phyrexian symbols count all their
+colors, 202.2d) plus its color indicator (204.2). Color identity is the union over all faces
+(903.4d) of cost colors and indicators, plus the symbols of every `PAY_MANA` or `WATERBEND` cost
+node (`{"cost":...,"mana":...}`) found anywhere in a decodable ability's JSON. For colors and
+identity, a computed color missing from the declared/source value is an Error and a
+declared/source color that cannot be derived is a Warning. LITERAL text tokens are never scanned
+for symbols.
+**Rationale.** Asymmetry: a computed color is certain, while an extra declared color may come
+from a characteristic-defining ability or rules text this baseline does not compute (105.2,
+903.4). Reminder text (903.4c) cannot be told apart reliably in LITERAL tokens, so scanning them
+would produce false identity. Cost nodes in a decodable ability are typed `CostAST` values;
+scanning the decoded-and-canonical JSON reaches every one (activated costs, `COMPOSITE`, RULE
+costs, instruction `unless`/`altCost`/`cost` lists) without a 72-op visitor, and a cost node
+inside an opaque parameter is still a mana symbol of the rules text.
+**Alternatives.** Scanning LITERAL text (rejected, above); identity from activated costs only
+(rejected: misses other typed costs). Limitations: colors and identity from CDAs and from rules
+text that is not a typed cost are not computed.
