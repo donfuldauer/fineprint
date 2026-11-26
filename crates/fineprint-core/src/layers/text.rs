@@ -212,7 +212,7 @@ pub fn text_token_matches(
 /// A clone of `pred` in which every [`WordRef::TextToken`] reachable through the boolean
 /// operators, the `HAS_CARD_TYPE`/`HAS_SUBTYPE`/`HAS_SUPERTYPE`/`HAS_COLOR` leaves, `CONTROLS`
 /// selectors, selector predicates and the value expressions reached from those nodes
-/// (devotion, mana colour, counts, history conditions) is replaced by [`WordRef::Name`] of its
+/// (devotion, mana colour, counts, history conditions; [`resolve_value_words`]) is replaced by [`WordRef::Name`] of its
 /// current value in `stream` (REQ-DSL-012, SRS §14.5). [`WordRef::Name`], `TEXT_TOKEN_MATCH`
 /// and references (including `{"ref":"SELF"}`, CR 201.5) are unchanged. An `Ok` result holds no
 /// [`WordRef::TextToken`].
@@ -225,7 +225,7 @@ pub fn resolve_predicate_words(
     stream: &TextTokenStream,
 ) -> Result<PredicateAST, TextWordError> {
     let word = |w: &WordRef| resolve_word_ref(stream, w).map(WordRef::Name);
-    let value = |v: &ValueExpressionAST| resolve_value(v, stream).map(Box::new);
+    let value = |v: &ValueExpressionAST| resolve_value_words(v, stream).map(Box::new);
     Ok(match pred {
         PredicateAST::And(all) => PredicateAST::And(resolve_all(all, stream)?),
         PredicateAST::Or(any) => PredicateAST::Or(resolve_all(any, stream)?),
@@ -297,7 +297,7 @@ pub fn resolve_selector_words(
         ObjectSelectorAST::Filter(f) => Ok(ObjectSelectorAST::Filter(SelectorFilter {
             zones: f.zones.clone(),
             count: match &f.count {
-                Some(v) => Some(Box::new(resolve_value(v, stream)?)),
+                Some(v) => Some(Box::new(resolve_value_words(v, stream)?)),
                 None => None,
             },
             ordering: f.ordering,
@@ -309,9 +309,18 @@ pub fn resolve_selector_words(
     }
 }
 
-/// A clone of a value expression with its word references resolved (devotion colours, the mana
-/// colour of a history query, and the selectors and predicates it contains).
-fn resolve_value(
+/// A clone of the value expression `v` in which every [`WordRef::TextToken`] reachable from it
+/// (devotion colours, the mana colour of a history query, counts, and the selectors and
+/// predicates it contains, walked as [`resolve_selector_words`] and [`resolve_predicate_words`]
+/// do) is replaced by [`WordRef::Name`] of its current value in `stream` (REQ-DSL-012, SRS
+/// §14.5). [`WordRef::Name`] and references (including `{"ref":"SELF"}`, CR 201.5) are
+/// unchanged. An `Ok` result holds no [`WordRef::TextToken`]. This is the resolver for word
+/// references reachable only from a value expression, outside any predicate or selector.
+///
+/// # Errors
+/// The first unresolvable token, walking children in declaration order: as
+/// [`resolve_word_ref`].
+pub fn resolve_value_words(
     v: &ValueExpressionAST,
     stream: &TextTokenStream,
 ) -> Result<ValueExpressionAST, TextWordError> {
@@ -333,8 +342,8 @@ fn resolve_value(
         },
         ValueExpressionAST::Math { op, lhs, rhs } => ValueExpressionAST::Math {
             op: *op,
-            lhs: Box::new(resolve_value(lhs, stream)?),
-            rhs: Box::new(resolve_value(rhs, stream)?),
+            lhs: Box::new(resolve_value_words(lhs, stream)?),
+            rhs: Box::new(resolve_value_words(rhs, stream)?),
         },
         ValueExpressionAST::Distinct { attr, selector } => ValueExpressionAST::Distinct {
             attr: *attr,

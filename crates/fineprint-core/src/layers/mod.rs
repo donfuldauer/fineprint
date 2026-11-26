@@ -168,6 +168,7 @@
 
 mod board;
 mod cache;
+mod compile;
 mod copy;
 mod encode;
 mod error;
@@ -183,6 +184,8 @@ mod timestamps;
 
 #[cfg(test)]
 mod cache_tests;
+#[cfg(test)]
+mod compile_tests;
 #[cfg(test)]
 mod copy_tests;
 #[cfg(test)]
@@ -204,6 +207,7 @@ pub use board::EvaluatedView;
 pub use cache::{
     CacheStats, FULL_RECOMPUTE, Invalidation, LayerCache, StateVersion, evaluated_digest,
 };
+pub use compile::{compile_text_effect, compile_text_modification};
 pub use copy::{
     CopiableValues, CopiedCharacteristic, CopyException, ValueSource, copiable_characteristics,
     copiable_effect, copiable_values, merge_effect, modification_effect,
@@ -232,7 +236,8 @@ pub use registry::{
 };
 pub use text::{
     TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
-    resolve_selector_words, resolve_word_ref, rewrite_text_words, text_token_matches,
+    resolve_selector_words, resolve_value_words, resolve_word_ref, rewrite_text_words,
+    text_token_matches,
 };
 pub use timestamps::{
     CounterHolder, SimultaneousStamp, StampReason, TimestampLedger, restamp_static_effects,
