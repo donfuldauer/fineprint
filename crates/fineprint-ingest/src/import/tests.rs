@@ -16,9 +16,11 @@ use super::cli::{parse_fetch_args, parse_import_args};
 use super::fetch::{
     CachedFile, MIN_CURL_VERSION, Request, SourceMeta, check_curl_version, copy_stream_capped,
     curl_args, curl_failure_message, is_fresh, parse_bulk_data, parse_curl_version,
-    parse_source_meta, part_path, read_stream_capped, render_source_meta, run_capped,
-    run_capped_to_file, validate_atomic_cards, validate_download_uri, validate_scryfall_bulk,
+    parse_source_meta, part_path, read_stream_capped, render_source_meta, validate_atomic_cards,
+    validate_download_uri, validate_scryfall_bulk,
 };
+#[cfg(unix)]
+use super::fetch::{run_capped, run_capped_to_file};
 use super::json_array::{ArrayError, parse_elements, split_array, validate_array};
 use super::mtgjson::{cross_check, parse_atomic};
 use super::normalize::{
@@ -450,6 +452,7 @@ fn curl_version_check() {
 /// A new, empty scratch directory created exclusively under the private root
 /// `<workspace>/target/fp-import-tests`. The leaf name combines the pid, a counter and the
 /// clock (for uniqueness only, R7); an existing leaf is retried with a new name.
+#[cfg(unix)]
 fn scratch(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -473,12 +476,14 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 
 /// A part file that already exists (as `create_part` makes it), holding stale bytes that the
 /// download must truncate.
+#[cfg(unix)]
 fn existing_part(dir: &std::path::Path) -> std::path::PathBuf {
     let p = dir.join("test.part");
     std::fs::write(&p, b"stale bytes that must be truncated").unwrap();
     p
 }
 
+#[cfg(unix)]
 fn sh(script: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new("sh");
     cmd.args(["-c", script]);
