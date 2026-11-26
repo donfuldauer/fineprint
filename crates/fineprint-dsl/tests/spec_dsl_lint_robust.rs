@@ -379,25 +379,108 @@ fn req_ing_009_random_values_in_each_position() {
     }
 }
 
-/// REQ-ING-009 (R12): an ability nested a few thousand JSON levels deep does not crash the lint.
-/// 700 instruction levels are about 2100 nested JSON containers; deeper values overflow the
-/// default test-thread stack in serde_json's own recursive `Drop` (measured: dropping 1000
-/// instruction levels, or 2000 bare array/object levels, aborts), which the brief says to avoid.
-#[test]
-fn req_ing_009_deep_nesting() {
-    let depth = 700;
+/// `levels` alternating IF / MAY instruction levels around a REPEAT_WHILE with no `maxIter`,
+/// built by moving each value into the next level (no `json!` interpolation, no clone).
+fn deep_instruction(levels: usize) -> Value {
     let mut inner = json!({"op":"REPEAT_WHILE","cond":{"pred":"TAPPED"},"body":[draw()]});
-    for i in 0..depth {
-        inner = if i % 2 == 0 {
-            json!({"op":"IF","cond":{"pred":"TAPPED"},"then":[inner]})
+    for i in 0..levels {
+        let mut m = Map::new();
+        if i % 2 == 0 {
+            m.insert("op".to_owned(), json!("IF"));
+            m.insert("cond".to_owned(), json!({"pred":"TAPPED"}));
+            m.insert("then".to_owned(), Value::Array(vec![inner]));
         } else {
-            json!({"op":"MAY","player":{"ref":"CONTROLLER"},"body":[inner, {"lookBack": true}]})
+            m.insert("op".to_owned(), json!("MAY"));
+            m.insert("player".to_owned(), json!({"ref":"CONTROLLER"}));
+            m.insert(
+                "body".to_owned(),
+                Value::Array(vec![inner, json!({"lookBack": true})]),
+            );
+        }
+        inner = Value::Object(m);
+    }
+    inner
+}
+
+/// A SPELL ability whose effect list holds `effect`, built without recursion.
+fn deep_spell(id: &str, effect: Value) -> Value {
+    let mut m = Map::new();
+    m.insert("abilityId".to_owned(), json!(id));
+    m.insert("kind".to_owned(), json!("SPELL"));
+    m.insert("effect".to_owned(), Value::Array(vec![effect]));
+    Value::Object(m)
+}
+
+/// `levels` alternating array / object levels of plain data, built without recursion.
+fn deep_raw(levels: usize) -> Value {
+    let mut raw = Value::Null;
+    for i in 0..levels {
+        raw = if i % 2 == 0 {
+            Value::Array(vec![raw])
+        } else {
+            let mut m = Map::new();
+            m.insert("k".to_owned(), raw);
+            Value::Object(m)
         };
     }
-    let ab_v = spell("deep", json!([inner]));
-    let d = def_abilities(vec![ab_v]);
-    let r = lint_definition(&d, &ctx0());
-    assert_invariants(&d, &r);
+    raw
+}
+
+/// Drops a deep value without recursion.
+fn drop_deep(v: Value) {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Array(items) => stack.extend(items),
+            Value::Object(map) => stack.extend(map.into_iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+}
+
+/// Drops every raw wrapper of `def` without recursion.
+fn drop_def(mut def: CardDefinitionDSL) {
+    for face in std::mem::take(&mut def.faces) {
+        face.abilities.into_iter().for_each(|a| drop_deep(a.0));
+        face.power.into_iter().for_each(|p| drop_deep(p.0));
+        face.toughness.into_iter().for_each(|p| drop_deep(p.0));
+        face.text.0.into_iter().for_each(drop_deep);
+    }
+    if let Some(e) = def.commander_eligibility.take() {
+        e.partner_abilities.into_iter().for_each(|p| drop_deep(p.0));
+    }
+}
+
+/// Owns a deep definition and drops it iteratively, also when an assertion panics.
+struct DeepDef(Option<CardDefinitionDSL>);
+
+impl DeepDef {
+    fn get(&self) -> &CardDefinitionDSL {
+        self.0.as_ref().expect("definition present until drop")
+    }
+}
+
+impl Drop for DeepDef {
+    fn drop(&mut self) {
+        if let Some(d) = self.0.take() {
+            drop_def(d);
+        }
+    }
+}
+
+/// REQ-ING-009 (R12): an ability nested thousands of JSON levels deep does not crash the lint.
+/// The fixtures are built by moving values (never `json!` interpolation or `clone`, which
+/// recurse) and dropped iteratively (`DeepDef`, also on panic paths), so the stack use of the
+/// test is independent of depth. 5000 instruction levels are about 15 000 nested containers,
+/// and the bare array/object value has 20 000 levels.
+#[test]
+fn req_ing_009_deep_nesting() {
+    let d = DeepDef(Some(def_abilities(vec![deep_spell(
+        "deep",
+        deep_instruction(5000),
+    )])));
+    let r = lint_definition(d.get(), &ctx0());
+    assert_invariants(d.get(), &r);
     // The innermost REPEAT_WHILE has no maxIter and look-back keys are present.
     assert_at(
         &r,
@@ -411,20 +494,13 @@ fn req_ing_009_deep_nesting() {
         fineprint_dsl::lint::Severity::Error,
         "faces[0].abilities[0]",
     );
-    // Deeply nested arrays and objects of plain data as well.
-    let mut raw = Value::Null;
-    for i in 0..1200 {
-        raw = if i % 2 == 0 {
-            Value::Array(vec![raw])
-        } else {
-            json!({"k": raw})
-        };
-    }
-    let mut d2 = def_abilities(vec![raw.clone()]);
-    d2.faces[0].text = TextTokenStream(vec![raw.clone()]);
-    d2.faces[0].power = Some(ValueExpressionAST(raw));
-    let r2 = lint_definition(&d2, &ctx0());
-    assert_invariants(&d2, &r2);
+    // Deeply nested arrays and objects of plain data as well, one builder call per use.
+    let mut def2 = def_abilities(vec![deep_raw(20_000)]);
+    def2.faces[0].text = TextTokenStream(vec![deep_raw(20_000)]);
+    def2.faces[0].power = Some(ValueExpressionAST(deep_raw(20_000)));
+    let d2 = DeepDef(Some(def2));
+    let r2 = lint_definition(d2.get(), &ctx0());
+    assert_invariants(d2.get(), &r2);
     assert_at(
         &r2,
         LintId::SCHEMA,

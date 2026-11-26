@@ -9632,3 +9632,18 @@ requires the cache to equal it and results to be independent of the order of `en
 **Alternatives:** Keep the environment's order (rejected: the cache's first error would differ
 from `evaluate_all`'s for an unsorted list); de-duplicate as well (rejected: would change the hit
 count for a listed duplicate).
+
+## #16 FP-015 — Deep-input spec tests build and drop fixtures without recursion
+
+**Decision.** Supersedes item (1) of "#16 FP-015 — Spec-test judgement calls". Deep-input spec
+tests build their fixtures by moving values into `serde_json::Map` / `Value::Array` (no `json!`
+interpolation of deep values, no `clone` of them) and drop them with an explicit-stack helper, so
+their stack use does not depend on depth. `req_ing_009_deep_nesting` now runs at 5000 instruction
+levels and 20 000 bare array/object levels on the default test stack.
+**Rationale.** The 700-level test overflowed on `test (windows-latest)`. The issue-investigator
+measured the cause as the test's own fixture code (`json!` interpolation deep-copies through
+`serde_json::to_value`, plus recursive `clone` and Drop); `lint_definition` and every `to_real`
+decoder use constant stack (about 183 KiB) up to 50 000 levels. The earlier notes that serde Drop
+aborts near 1000 levels and `to_real` overflows at 800–900 were measurements of the fixture code.
+**Alternatives.** A larger-stack test thread (rejected: hides real recursion); a lower depth
+(rejected: weaker R12 coverage and still platform-dependent).
