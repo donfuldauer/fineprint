@@ -450,8 +450,9 @@ impl LayerEnvironment for Broken {
     }
 }
 
-// REQ-LAYER-005: evaluate_all follows env.objects() and returns the first error, as
-// layers::evaluate_all does; the entries computed before the error stay valid.
+// REQ-LAYER-005, REQ-LAYER-001, REQ-CORE-001: evaluate_all visits env.objects() by ascending
+// id (1, 2, 50, 60 for the listed 1, 50, 2, 60) and returns the first error, as
+// layers::evaluate_all does; the entries computed before the error (1 and 2) stay valid.
 #[test]
 fn evaluate_all_first_error_rule() {
     let env = Broken(Env::board());
@@ -462,7 +463,7 @@ fn evaluate_all_first_error_rule() {
         c.evaluate_all(&r, &env),
         Err(LayerError::UnknownObject(o(50)))
     );
-    assert_eq!(c.len(), if FULL_RECOMPUTE { 0 } else { 1 });
+    assert_eq!(c.len(), if FULL_RECOMPUTE { 0 } else { 2 });
     assert_eq!(c.evaluate(&r, &env, o(1)), evaluate(&r, &env, o(1)));
 }
 

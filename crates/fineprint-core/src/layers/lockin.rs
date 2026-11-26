@@ -206,7 +206,10 @@ pub(super) fn prepare_group(
 
 /// The lock-in record of one per-object evaluation (CR 613.6): the effects that applied to the
 /// object so far, and the links of `SameAsLayer` parts to their anchors. Lives only for that
-/// evaluation, so static selectors are matched again on every computation (CR 611.3a).
+/// evaluation, so static selectors are matched again on every computation (CR 611.3a). A board
+/// pass keeps one per object; a clone serves only a nested source evaluation of the same object
+/// ([`super::board`]), never another object.
+#[derive(Clone)]
 pub(super) struct LockRecord<'a> {
     /// `SameAsLayer` part to anchor, from the registry.
     links: &'a BTreeMap<EffectId, EffectId>,

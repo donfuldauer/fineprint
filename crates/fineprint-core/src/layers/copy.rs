@@ -43,10 +43,9 @@ use fineprint_dsl::card::{AbilityAST, ColorBitmask, LayoutBehavior, ValueExpress
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
 
+use super::board::{run_board, universe_for};
 use super::error::LayerError;
-use super::lockin::LockRecord;
-use super::ordering::{Keyed, Scratch, run_layer};
-use super::pipeline::{Evaluated, LayerEnvironment, Step};
+use super::pipeline::{Evaluated, LayerEnvironment};
 pub use super::registry::ValueSource;
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
@@ -583,35 +582,21 @@ pub fn copiable_values(
     ))
 }
 
-/// `id` after layers 1a and 1b only (CR 613.2, 613.2c).
+/// `id` after layers 1a and 1b only (CR 613.2, 613.2c): the layer-1 prefix of the layer-major
+/// board pass of [`super::evaluate`] (the same universe, so the existence of an effect generated
+/// by another object is judged the same way, CR 613.8a).
 fn layer_one(
     effects: &ContinuousEffects,
     env: &dyn LayerEnvironment,
     id: ObjectId,
 ) -> Result<Evaluated, LayerError> {
-    // CR 613.1: start with the actual object.
-    let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
-    let mut scratch = Scratch {
-        state: Evaluated {
-            characteristics: base.characteristics,
-            controller: base.controller,
-            // CR 202.3b, 202.3c, 713.5c: the base's own mana-value provenance (plain by default).
-            mana_value_provenance: env.base_mana_value_provenance(id),
-        },
-        pt: None,
-    };
-    let mut locks = LockRecord::new(effects);
-    let mut record = Vec::new();
-    // CR 613.2, 613.2c: layer 1 only; its result is the copiable values.
-    for layer in [Layer::L1a, Layer::L1b] {
-        let steps: Vec<Keyed<'_>> = effects
-            .iter()
-            .filter(|(_, e)| e.layer == layer)
-            .map(|(eid, e)| (e.timestamp, Step::Effect(eid, e)))
-            .collect();
-        run_layer(layer, steps, env, id, &mut scratch, &mut locks, &mut record);
-    }
-    Ok(scratch.state)
+    // CR 613.1: start with the actual object; CR 613.2, 613.2c: layer 1 only, whose result is
+    // the copiable values.
+    let universe = universe_for(env, id)?;
+    run_board(effects, env, universe, &[Layer::L1a, Layer::L1b])
+        .remove(&id)
+        .map(|(state, _)| state)
+        .ok_or(LayerError::UnknownObject(id))
 }
 
 /// A layer-1a continuous effect (CR 613.2a) carrying these copiable values, with the given
