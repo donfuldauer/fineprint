@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 
 use fineprint_base::ids::{ObjectId, PlayerId, Timestamp};
-use fineprint_dsl::ability::Layer;
+use fineprint_dsl::ability::{CharacteristicEffect, Layer, TypePart};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, LayoutBehavior, ValueExpressionAST};
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
@@ -161,40 +161,49 @@ pub enum CopiedCharacteristic {
     LifeModifier,
 }
 
-/// A characteristic a characteristic-defining ability can define, for CR 707.9d.
+/// A characteristic a characteristic-defining ability can define, for CR 707.9d. Supertype,
+/// card type and subtype are separate characteristics (CR 109.3, 205.1b), so each is its own
+/// target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CdaTarget {
-    /// The type line (layer 4).
-    Types,
+    /// The supertypes (layer 4).
+    Supertypes,
+    /// The card types (layer 4).
+    CardTypes,
+    /// The subtypes (layer 4).
+    Subtypes,
     /// The colors (layer 5).
     Colors,
     /// Power and toughness (layer 7a).
     PowerToughness,
 }
 
+/// Every type-line target: what a layer-4 CDA without a valid `defines` defines.
+const ALL_TYPE_TARGETS: [CdaTarget; 3] = [
+    CdaTarget::Supertypes,
+    CdaTarget::CardTypes,
+    CdaTarget::Subtypes,
+];
+
 impl CopyException {
     /// The characteristic whose copied CDA this exception stops from being copied (CR 707.9d):
-    /// a set value or a value not copied. `Add*` types keep their CDAs (707.9d last sentence).
-    ///
-    /// Any type-line exception drops any layer-4 CDA: the placeholder ability data does not say
-    /// which part of the type line a layer-4 CDA defines; per-part targets are tracked in #198.
+    /// a set value or a value not copied, one type-line part at a time (CR 109.3, 205.1b).
+    /// `Add*` types ("in addition to its other types") keep their CDAs (707.9d last sentence).
     fn cda_target(&self) -> Option<CdaTarget> {
         match self {
             CopyException::SetColors(_)
             | CopyException::NotCopied(CopiedCharacteristic::Colors) => Some(CdaTarget::Colors),
+            // CR 707.9d, 109.3, 205.1b: each type-line part is a characteristic of its own.
             CopyException::SetSupertypes(_)
-            | CopyException::SetCardTypes(_)
-            | CopyException::SetSubtypes(_)
-            | CopyException::NotCopied(
-                CopiedCharacteristic::Supertypes
-                | CopiedCharacteristic::CardTypes
-                | CopiedCharacteristic::Subtypes,
-            ) => {
-                // Any type-line exception drops any layer-4 CDA: the placeholder ability data
-                // does not say which part of the type line a layer-4 CDA defines; per-part
-                // targets are tracked in #198.
-                Some(CdaTarget::Types)
+            | CopyException::NotCopied(CopiedCharacteristic::Supertypes) => {
+                Some(CdaTarget::Supertypes)
             }
+            CopyException::SetCardTypes(_)
+            | CopyException::NotCopied(CopiedCharacteristic::CardTypes) => {
+                Some(CdaTarget::CardTypes)
+            }
+            CopyException::SetSubtypes(_)
+            | CopyException::NotCopied(CopiedCharacteristic::Subtypes) => Some(CdaTarget::Subtypes),
             CopyException::SetPower(_)
             | CopyException::SetToughness(_)
             | CopyException::NotCopied(
@@ -205,10 +214,29 @@ impl CopyException {
     }
 }
 
+/// The type-line parts a layer-4 CDA effect defines (CR 707.9d), from its modification's
+/// `defines` value as parsed by [`TypePart::parse_defines`] (SRS §14.4.3); `parsed` is `None`
+/// when `defines` is absent. Absent or malformed (not an array, empty, unknown or wrongly-cased
+/// name, non-string, duplicate: decoding would have refused it) gives all three parts. Never
+/// panics (R12).
+fn layer4_targets(parsed: Option<Result<BTreeSet<TypePart>, String>>) -> BTreeSet<CdaTarget> {
+    match parsed {
+        Some(Ok(parts)) => parts
+            .into_iter()
+            .map(|p| match p {
+                TypePart::Supertypes => CdaTarget::Supertypes,
+                TypePart::CardTypes => CdaTarget::CardTypes,
+                TypePart::Subtypes => CdaTarget::Subtypes,
+            })
+            .collect(),
+        _ => ALL_TYPE_TARGETS.into_iter().collect(),
+    }
+}
+
 /// The characteristics a characteristic-defining ability defines, read from the placeholder
 /// ability JSON: a `"STATIC"` ability with a `"CHAR"` effect marked `"isCDA": true` defines the
-/// characteristic of its layer (4: types, 5: colors, 7a: power and toughness). Reads ability
-/// data only, never card identity (R4).
+/// characteristic of its layer (4: the type-line parts of [`layer4_targets`], 5: colors, 7a:
+/// power and toughness). Reads ability data only, never card identity (R4).
 fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
     let mut out = BTreeSet::new();
     let Some(object) = ability.0.as_object() else {
@@ -227,11 +255,22 @@ fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
             continue;
         }
         match effect.get("layer").and_then(|l| l.as_str()) {
-            Some("4") => out.insert(CdaTarget::Types),
-            Some("5") => out.insert(CdaTarget::Colors),
-            Some("7a") => out.insert(CdaTarget::PowerToughness),
-            _ => false,
-        };
+            // CR 707.9d: per type-line part (CR 109.3, 205.1b).
+            Some("4") => {
+                let parsed = effect
+                    .get("modification")
+                    .and_then(|m| m.get(CharacteristicEffect::DEFINES))
+                    .map(TypePart::parse_defines);
+                out.extend(layer4_targets(parsed));
+            }
+            Some("5") => {
+                out.insert(CdaTarget::Colors);
+            }
+            Some("7a") => {
+                out.insert(CdaTarget::PowerToughness);
+            }
+            _ => {}
+        }
     }
     out
 }
@@ -456,10 +495,13 @@ impl CopiableValues {
     /// [`CopyException::NotCopied`], CR 707.9c).
     ///
     /// Only the characteristics are copied: no status, counter or non-copy effect (CR 707.2).
-    /// When an exception sets, keeps or does not copy the types, the colors or power and
-    /// toughness, a copied characteristic-defining ability that defines it is not copied
-    /// (CR 707.9d; recognised from the ability data, see `cda_targets`); `Add*` type exceptions
-    /// keep those abilities. Gained abilities are never dropped.
+    /// When an exception sets, keeps or does not copy the supertypes, the card types, the
+    /// subtypes, the colors or power and toughness, a copied characteristic-defining ability
+    /// that defines that characteristic is not copied (CR 707.9d; recognised from the ability
+    /// data, see `cda_targets`). A layer-4 CDA defines the type-line parts its `defines` param
+    /// lists (all three when absent); one that defines several parts is dropped whole as soon
+    /// as any of them is touched. `Add*` type exceptions ("in addition to its other types")
+    /// keep every type CDA. Gained abilities are never dropped.
     ///
     /// The result's source is [`ValueSource::CopyOfBackFaceOrMelded`] if this one is
     /// `CopyOfBackFaceOrMelded` or a `Fixed` from a nonmodal back face or melded permanent
@@ -472,7 +514,7 @@ impl CopiableValues {
         // CR 707.2: the copiable values only.
         let mut c = self.characteristics.clone();
         // CR 707.9d: a CDA defining a characteristic the effect sets, keeps or does not copy
-        // is not copied.
+        // is not copied, as a whole (no partial copy of a multi-part CDA).
         let dropped: BTreeSet<CdaTarget> = exceptions
             .iter()
             .filter_map(CopyException::cda_target)

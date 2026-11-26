@@ -105,3 +105,27 @@ state, hashed and replayed); REQ-LAYER-002 existence (CR 613.8a): each static (a
 linked to the ability on its source that generates it.
 Consumers affected: fineprint-core state and txn; golden state hashes; bindings and replay format
 (not yet implemented); #184, #186, #193.
+
+## CR-006 — Card DSL (SRS 14.4.3): optional "defines" on layer-4 CHAR modifications
+Requested by: #198 FP-151   Kind: additive   Status: open
+Change: a `CHAR` static effect whose `layer` is `"4"` (with or without `isCDA`) may carry the
+flat modification param `"defines"`, e.g. `{"type":"CHAR","layer":"4","affected":{"ref":"SELF"},
+"modification":{"op":"ANY_OP","defines":["SUBTYPES"]},"isCDA":true}`. Its value is a non-empty
+JSON array of distinct strings drawn from exactly `"SUPERTYPES"`, `"CARD_TYPES"`, `"SUBTYPES"`
+(case-sensitive). Decoding and writing a layer-4 `CHAR` effect reject an empty array, a
+duplicate, an unknown or wrongly-cased name, and a non-array or non-string element. Absent
+`defines` means the effect defines all three parts. On every other layer, and in `PLAYER`
+modifications and `RULE` params, `defines` stays an ordinary opaque param. New public API in
+`fineprint_dsl::ability` (defined in `ability/statics.rs`; `TypePart` needs adding to the
+`pub use self::statics::{...}` re-export list): `enum TypePart {Supertypes, CardTypes, Subtypes}` (with
+`SUPERTYPES`, `CARD_TYPES`, `SUBTYPES` wire-name consts, `ALL`, `as_str`, `from_wire`,
+`parse_defines`), `CharacteristicEffect::DEFINES` and `CharacteristicEffect::defined_type_parts()`
+(`None` off layer 4). `dslVersion` stays "1.0"; decode and RFC 8785 canonical serialisation of
+every existing valid definition are unchanged and a valid `defines` round-trips byte-identically.
+The only definitions that become invalid are ones that already used a layer-4 `CHAR` `defines`
+param with a non-conforming value (none exist in the repository). Numbered CR-006 because
+CR-003 to CR-005 were already taken (docs/DECISIONS.md "#198 FP-151 — Change request number").
+Why: REQ-OBJ-002 / CR 707.9d needs to know which type-line part (supertypes, card types,
+subtypes; separate characteristics, CR 109.3, 205.1b) a layer-4 characteristic-defining ability
+defines, so a copy exception touching one part drops only the CDAs that define that part.
+Consumers affected: fineprint-dsl ability statics, fineprint-core layers/copy.

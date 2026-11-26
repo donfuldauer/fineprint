@@ -866,7 +866,7 @@ interface EventMatcher {
 
 #### 14.4.3 Static Abilities: Characteristic Effects vs Rule Modifications (`REQ-DSL-008`)
 A static ability holds one or more **effects**, and each effect is exactly one of the following:
-* **`CharacteristicEffect`:** applied in a layer (1a, 1b, 2–6, 7a–7d). Fields: `layer`, `affected` (selector, or `SAME_AS_LAYER(n)` to declare 613.6 lock-in explicitly), `modification`, `isCDA`.
+* **`CharacteristicEffect`:** applied in a layer (1a, 1b, 2–6, 7a–7d). Fields: `layer`, `affected` (selector, or `SAME_AS_LAYER(n)` to declare 613.6 lock-in explicitly), `modification`, `isCDA`. In layer 4 the `modification` may carry `defines`, a non-empty array of distinct type-line parts (`"SUPERTYPES"`, `"CARD_TYPES"`, `"SUBTYPES"`) the effect defines, absent meaning all three, so a copy exception that touches one part leaves uncopied only the characteristic-defining abilities that define that part.
 * **`PlayerEffect`:** applied in pass A (613.10). Examples: hexproof or protection for a player, "can't lose the game", "can't gain life".
 * **`RuleModification`:** applied in pass B (613.11). It is one kind from the closed set below. Each kind is consulted by exactly one engine procedure (§14.6):
 
