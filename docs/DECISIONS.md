@@ -9793,6 +9793,68 @@ application and the lock-in record grows, so reuse would need a proof per case f
 restrict which fields a modification can touch (rejected: a second description of every
 modification that could drift from `apply_effect`).
 
+## #193 FP-148 — Independent tester: golden replays not applicable
+
+**Decision.** No golden replay check was run for this unit. `crates/fineprint-core/tests/golden/` does
+not exist on main (DECISIONS "#183 FP-144 — Golden state hashes regenerated"), and the new target
+`spec_layers_cache_diff_state_check.rs` pins no golden hash value, only cached == reference equality.
+**Rationale.** Nothing to replay; the brief says to record this.
+**Alternatives.** Creating a golden file (rejected: outside owned paths and forbidden by the brief).
+
+## #193 FP-148 — Independent tester: evaluation feedback into the state hash
+
+**Decision.** Each step writes, per player, `life` (first 12 hex digits of `evaluated_digest` of the
+objects that player controls) and the player counter `test.power` (sum of literal evaluated powers)
+through `player_mut`, to both the cached and the reference state. These feedback writes are not
+followed by `Invalidation::PlayerValue`, because the wrapper world and effects used read no state
+player value; a declared `PlayerValue` there would flush the cache and hide the stale-cache cases.
+Player-value changes the wrapper does read (`player_value`) and `set_turn_number` /
+`set_active_player` writes are declared with `PlayerValue`.
+**Rationale.** The cache is not part of `GameState`, so the hash can depend on evaluation only through
+fed-back state; the table's `PlayerValue` is for values a CDA or condition reads.
+**Alternatives.** Declaring `PlayerValue` after each feedback (rejected: makes the stale test vacuous).
+
+## #193 FP-148 — Invalidation declared by the scenarios (implementer)
+
+**Decision.** The scenarios of `spec_layers_cache_diff_state.rs` declare the `Invalidation` values of
+the `state::environment` table themselves, after every mutation (`ZoneChange`, `ControlChange`,
+`CounterChange`, `Attachment`, `Status`, `Designation`, `Timestamp`, `PlayerValue`, `EffectExpiry`;
+registrations are left to the cache's own registry detection except one scenario that declares
+`EffectRegistration`).
+**Rationale.** Issue #241 FP-167 (calling `LayerCache::invalidate` from the real zone, control,
+counter, attachment and status mutation points) is open and not a dependency. On main the `GameState`
+holds no objects, so the world is a test double owned by the scenarios; nothing here has to change
+when #241 lands.
+**Alternatives.** Waiting for #241 (rejected: not a dependency, and the differential needs to exist
+now); declaring every invalidation after every step (rejected: hides missing declarations).
+
+## #193 FP-148 — State hash fed by cached evaluations (implementer)
+
+**Decision.** After each evaluation a scenario writes the evaluated characteristics into the state
+through `player_mut`: life = 20 + total evaluated power of the objects the player controls, and the
+player counters `test.abilities` and `test.types` (numbers of evaluated abilities and card types). The
+cached state is fed from the cached evaluation, a cloned reference state from the uncached
+`layers::evaluate_all`. The feedback writes are followed by `Invalidation::PlayerValue` (they are
+player writes) and by a second, re-warming cached evaluation, so the next mutation is declared
+against a warm cache and an undeclared one is observable. Players' `test.rank` counter, written by the
+scenarios, is what the wrapper world's selectors and CDA read. Per-step mismatches are collected; the
+`.statehash` file is written first, then equality is asserted.
+**Rationale.** The cache is not part of `GameState` and `state_hash` hashes only the state, so
+evaluating alone cannot change it; only fed-back evaluations make the hash a function of the cache.
+Without the re-warm, the required `PlayerValue` after the feedback would empty the cache and make
+every stale case vacuous.
+**Alternatives.** Hashing the evaluated map next to the state (rejected: not `GameState::state_hash`);
+omitting `PlayerValue` after feedback (rejected: the brief requires it).
+
+## #193 FP-148 — Golden replays not applicable (implementer)
+
+**Decision.** No golden replay check is added. There is no `tests/golden/` directory and no golden
+replay corpus on main (see "#183 FP-144 — Golden state hashes regenerated": "There are no golden
+replay files yet"); replay verification lands with #83 FP-081 and #106 FP-104, so the issue's third
+deliverable has nothing to check yet. No test pins a new golden value of `state_hash`.
+**Rationale.** Nothing to replay.
+**Alternatives.** Creating a corpus here (rejected: outside owned paths, belongs to those units).
+
 ## #195 FP-150 — Typed REPLACE_TEXT_WORD accessor, no new wire rejection
 
 **Decision:** The DSL keeps `REPLACE_TEXT_WORD` as an opaque op on the wire. `Modification` gains
