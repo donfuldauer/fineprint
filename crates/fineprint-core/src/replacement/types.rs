@@ -514,7 +514,7 @@ impl ReplacementEffect {
 
     /// The destroy half of a shield counter (CR 122.1c): if `object` would be destroyed as the
     /// result of an effect (cause `Destroy`), instead remove a shield counter from it. A
-    /// state-based destruction (cause `StateBasedAction`, CR 701.8b, CR 704.1) is not replaced.
+    /// state-based destruction (cause `StateBasedDestroy`, CR 701.8b, CR 704.1) is not replaced.
     #[must_use]
     pub fn shield_counter_destroy(id: EffectId, object: ObjectId) -> Self {
         // CR 122.1c
