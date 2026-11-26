@@ -59,7 +59,7 @@ fn face(name: &str, mana_cost: Option<ManaCostDSL>, card_types: &[&str]) -> Card
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(Vec::new()),
+        text: TextTokenStream::default(),
         abilities: Vec::new(),
     }
 }
@@ -646,14 +646,14 @@ fn from_face_copies_all_fields() {
     f.color_indicator = Some(ColorBitmask::BLUE);
     f.supertypes = vec!["Legendary".to_owned(), "Snow".to_owned()];
     f.subtypes = vec![creature_sub.clone()];
-    f.power = Some(ValueExpressionAST(2.into()));
-    f.toughness = Some(ValueExpressionAST(2.into()));
+    f.power = Some(ValueExpressionAST::Literal(2));
+    f.toughness = Some(ValueExpressionAST::Literal(2));
     f.loyalty = Some(3);
     f.defense = Some(4);
     f.hand_modifier = Some(-1);
     f.life_modifier = Some(5);
-    f.text = TextTokenStream(vec!["test.token".into()]);
-    f.abilities = vec![AbilityAST("test.ability".into())];
+    f.text = literal_text("test.token");
+    f.abilities = vec![test_ability("test.ability")];
     let c = Characteristics::from_face(&f, v).unwrap();
     assert_eq!(c.names, BTreeSet::from(["test.vanilla_2_2".to_owned()]));
     assert_eq!(c.mana_cost, Some(cost("{1}{G}")));
@@ -709,15 +709,15 @@ fn from_face_propagates_errors() {
 fn pt_applies_cases() {
     let v = vocab();
     let mut noncreature = face("test.vehicle_like_3_3", Some(cost("{3}")), &["Artifact"]);
-    noncreature.power = Some(ValueExpressionAST(3.into()));
-    noncreature.toughness = Some(ValueExpressionAST(3.into()));
+    noncreature.power = Some(ValueExpressionAST::Literal(3));
+    noncreature.toughness = Some(ValueExpressionAST::Literal(3));
     let nc = Characteristics::from_face(&noncreature, v).unwrap();
     assert!(nc.pt_applies(false));
     assert!(!nc.pt_applies(true));
 
     let mut creature = face("test.vanilla_2_2", Some(cost("{1}{G}")), &["Creature"]);
-    creature.power = Some(ValueExpressionAST(2.into()));
-    creature.toughness = Some(ValueExpressionAST(2.into()));
+    creature.power = Some(ValueExpressionAST::Literal(2));
+    creature.toughness = Some(ValueExpressionAST::Literal(2));
     let cr = Characteristics::from_face(&creature, v).unwrap();
     assert!(cr.pt_applies(false));
     assert!(cr.pt_applies(true));
@@ -728,7 +728,7 @@ fn pt_applies_cases() {
 
     // Only one of power or toughness printed still counts as printed.
     let mut half = face("test.half_pt", None, &["Creature"]);
-    half.toughness = Some(ValueExpressionAST(1.into()));
+    half.toughness = Some(ValueExpressionAST::Literal(1));
     let h = Characteristics::from_face(&half, v).unwrap();
     assert!(h.pt_applies(true));
 
@@ -751,7 +751,7 @@ fn pt_applies_creature_status_separate_from_printed() {
     assert!(bare.pt_applies(false));
 
     let mut power_only = face("test.power_only_artifact", None, &["Artifact"]);
-    power_only.power = Some(ValueExpressionAST(2.into()));
+    power_only.power = Some(ValueExpressionAST::Literal(2));
     let po = Characteristics::from_face(&power_only, v).unwrap();
     assert!(!po.pt_applies(true));
     assert!(po.pt_applies(false));
@@ -761,4 +761,25 @@ fn pt_applies_creature_status_separate_from_printed() {
             .unwrap();
     assert!(!plain.pt_applies(true));
     assert!(!plain.pt_applies(false));
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }

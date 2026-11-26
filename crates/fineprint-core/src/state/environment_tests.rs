@@ -98,7 +98,7 @@ impl ObjectWorld for World {
     }
 
     fn eval_value(&self, expr: &ValueExpressionAST, _: ObjectId) -> Option<i64> {
-        (expr.0.as_str() == Some("test.life")).then_some(self.life)
+        matches!(expr, ValueExpressionAST::Memory(key) if key == "test.life").then_some(self.life)
     }
 }
 
@@ -515,10 +515,10 @@ fn hook_contract_and_delegation() {
     assert_eq!(env.attached_here(o(1)), [o(2)]);
     assert!(env.attached_here(o(2)).is_empty());
     assert_eq!(
-        env.eval_value(&ValueExpressionAST("test.life".into()), o(1)),
+        env.eval_value(&ValueExpressionAST::Memory("test.life".to_owned()), o(1)),
         Some(13)
     );
-    assert_eq!(env.eval_value(&ValueExpressionAST(5.into()), o(1)), None);
+    assert_eq!(env.eval_value(&ValueExpressionAST::Literal(5), o(1)), None);
     assert!(std::ptr::eq(env.state(), &s));
     assert_eq!(env.world().objects(), world.objects());
     // The trait defaults.
@@ -539,7 +539,7 @@ fn hook_contract_and_delegation() {
     assert!(minimal.attached_here(o(1)).is_empty());
     assert!(minimal.base_mana_value_provenance(o(1)).is_plain());
     assert_eq!(
-        minimal.eval_value(&ValueExpressionAST(5.into()), o(1)),
+        minimal.eval_value(&ValueExpressionAST::Literal(5), o(1)),
         Some(5)
     );
     // Evaluation through the environment: object 2 gets the marker (CR 613.1f).
@@ -566,7 +566,7 @@ fn same_as_full(cache: &mut LayerCache, s: &GameState, world: &World) {
 #[test]
 fn d7_cache_with_documented_invalidations_equals_full_recompute() {
     let mut base = creature(vec![ability("own")]);
-    base.power = Some(ValueExpressionAST("test.life".into()));
+    base.power = Some(ValueExpressionAST::Memory("test.life".to_owned()));
     let mut world = World::default()
         .with(o(1), base)
         .with(o(2), creature(Vec::new()));

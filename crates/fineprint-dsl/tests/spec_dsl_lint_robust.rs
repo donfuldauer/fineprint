@@ -9,6 +9,13 @@
 //! is sorted and de-duplicated per S-0 and whose locations follow the path grammar. Also a
 //! deep-nesting case and an empty `faces` list. Black-box: written from the brief only.
 //! Synthetic data only (R5).
+//!
+//! #232 FP-164 (C5, REQ-DSL-010): AST positions are typed, so hostile JSON no longer reaches the
+//! lint inside a `CardDefinitionDSL`. Random content that decodes as the typed value of its
+//! position is linted; content that does not is asserted to be refused by `from_json` with
+//! `Schema` (or replaced by a valid fallback in the bulk generator). Over-deep documents are
+//! refused by `from_json` without a stack overflow; the lint still walks typed content nested
+//! close to the depth limit.
 
 #[path = "spec_dsl_lint_common/report.rs"]
 mod report;
@@ -17,8 +24,9 @@ mod spec_dsl_lint_common;
 use std::collections::BTreeSet;
 
 use fineprint_dsl::card::{
-    AbilityAST, CardDefinitionDSL, ColorBitmask, CommanderEligibilityDSL, FaceKind, LayoutBehavior,
-    PartnerAbilityDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
+    AbilityAST, CardDefinitionDSL, CardDefinitionError, ColorBitmask, CommanderEligibilityDSL,
+    FaceKind, LayoutBehavior, PartnerAbilityDSL, SupportStatus, TextTokenStream,
+    ValueExpressionAST,
 };
 use fineprint_dsl::lint::{
     LintContext, LintId, SourceCharacteristics, SourceFaceCharacteristics, lint_definition,
@@ -162,9 +170,13 @@ fn rand_value(rng: &mut Rng, depth: u32) -> Value {
     }
 }
 
-/// A valid fixture with one member replaced or removed at random, or a fully random value.
-fn rand_ability(rng: &mut Rng) -> Value {
-    let base = match rng.below(10) {
+/// A valid fixture with one member replaced or removed at random, or a fully random value, and
+/// the unmutated base fixture it came from (`None` for a fully random value).
+fn rand_ability_with_base(rng: &mut Rng) -> (Value, Option<Value>) {
+    // #232 FP-164: cases 8 and 9 are valid typed abilities with a look-back key in opaque
+    // NATIVE_EFFECT params and a tier hint on a mismatched event, so that the generator still
+    // reaches those lints with typed content (their former route was undecodable JSON).
+    let base = match rng.below(12) {
         0 => good_activated_mana("r"),
         1 => good_triggered_mana("r", "RESOLVED"),
         2 => with(
@@ -187,9 +199,15 @@ fn rand_ability(rng: &mut Rng) -> Value {
             json!([{"cost":"COMPOSITE","costs":[{"cost":"PAY_MANA","mana":"{G}"}]}]),
             json!([search_library()]),
         ),
-        _ => return rand_value(rng, 4),
+        8 => spell("r", json!([native_with(json!({"lookBack": true}))])),
+        9 => with(
+            &replacement("r", "DIES", json!([modify_event()])),
+            "tierHint",
+            json!("COPY_ETB"),
+        ),
+        _ => return (rand_value(rng, 4), None),
     };
-    let mut v = base;
+    let mut v = base.clone();
     if let Value::Object(m) = &mut v {
         let k = (*rng.pick(&KEYS)).to_string();
         match rng.below(3) {
@@ -202,7 +220,7 @@ fn rand_ability(rng: &mut Rng) -> Value {
             _ => {}
         }
     }
-    v
+    (v, Some(base))
 }
 
 fn rand_cost(rng: &mut Rng) -> Option<fineprint_dsl::mana::ManaCostDSL> {
@@ -243,6 +261,16 @@ fn rand_bits(rng: &mut Rng) -> ColorBitmask {
     bits(u8::try_from(rng.below(32)).unwrap())
 }
 
+/// `v` decoded as the typed value `T`, if it decodes.
+fn typed<T: serde::de::DeserializeOwned>(v: Value) -> Option<T> {
+    serde_json::from_value(v).ok()
+}
+
+/// `v` as a typed value expression, or the valid fallback `{"LITERAL":1}` (#232 FP-164).
+fn value_or_fallback(v: Value) -> ValueExpressionAST {
+    typed(v).unwrap_or(ValueExpressionAST::Literal(1))
+}
+
 fn rand_def(rng: &mut Rng) -> (CardDefinitionDSL, LintContext) {
     let nf = rng.below(4);
     let mut faces = Vec::new();
@@ -253,29 +281,40 @@ fn rand_def(rng: &mut Rng) -> (CardDefinitionDSL, LintContext) {
             f.color_indicator = Some(rand_bits(rng));
         }
         if rng.coin() {
-            f.power = Some(ValueExpressionAST(if rng.coin() {
+            f.power = Some(value_or_fallback(if rng.coin() {
                 json!({"LITERAL": 1})
             } else {
                 rand_value(rng, 3)
             }));
         }
         if rng.coin() {
-            f.toughness = Some(ValueExpressionAST(rand_value(rng, 3)));
+            f.toughness = Some(value_or_fallback(rand_value(rng, 3)));
         }
         let nt = rng.below(8);
-        f.text = TextTokenStream(
-            (0..nt)
-                .map(|i| {
-                    if rng.below(5) == 0 {
-                        rand_value(rng, 2)
-                    } else {
-                        lit(&format!("t{i}"), MARKER)
-                    }
-                })
-                .collect(),
-        );
+        let tokens: Vec<Value> = (0..nt)
+            .map(|i| {
+                if rng.below(5) == 0 {
+                    rand_value(rng, 2)
+                } else {
+                    lit(&format!("t{i}"), MARKER)
+                }
+            })
+            .collect();
+        // #232 FP-164: an undecodable stream falls back to its literal tokens only.
+        f.text = typed::<TextTokenStream>(Value::Array(tokens.clone())).unwrap_or_else(|| {
+            tx(tokens
+                .into_iter()
+                .filter(|t| t.get("kind") == Some(&json!("LITERAL")))
+                .collect())
+        });
         let na = rng.below(6);
-        f.abilities = (0..na).map(|_| AbilityAST(rand_ability(rng))).collect();
+        // #232 FP-164: a mutation that does not decode falls back to its valid base fixture.
+        f.abilities = (0..na)
+            .filter_map(|_| {
+                let (mutated, base) = rand_ability_with_base(rng);
+                typed::<AbilityAST>(mutated).or_else(|| base.and_then(typed::<AbilityAST>))
+            })
+            .collect();
         faces.push(f);
     }
     let mut d = def_of(*rng.pick(&LayoutBehavior::ALL), faces);
@@ -290,8 +329,8 @@ fn rand_def(rng: &mut Rng) -> (CardDefinitionDSL, LintContext) {
         d.commander_eligibility = Some(CommanderEligibilityDSL {
             eligible: rng.coin(),
             partner_abilities: (0..n)
-                .map(|_| {
-                    PartnerAbilityDSL(if rng.coin() {
+                .filter_map(|_| {
+                    typed::<PartnerAbilityDSL>(if rng.coin() {
                         json!({"abilityId":"p","kind":"KEYWORD","keyword":"PARTNER"})
                     } else {
                         rand_value(rng, 3)
@@ -354,159 +393,192 @@ fn req_ing_009_random_definitions_total_and_ordered() {
     assert!(seen.len() >= 8, "generator too tame: {seen:?}");
 }
 
-/// REQ-ING-009 (R12): random raw values in every wrapper position, one position at a time.
+/// REQ-ING-009, REQ-DSL-010 (R12): random raw values in every AST position, one position at a
+/// time. #232 FP-164 (C5): a value that decodes as the typed position is put there and linted;
+/// one that does not is refused by `from_json` with `Schema` in that position of the document.
 #[test]
 fn req_ing_009_random_values_in_each_position() {
     let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    let mut linted = 0usize;
     for _ in 0..300 {
         let mut d = clean_def();
         let v = rand_value(&mut rng, 5);
-        match rng.below(6) {
-            0 => d.faces[0].abilities[1] = AbilityAST(v),
-            1 => d.faces[1].text.0.push(v),
-            2 => d.faces[0].power = Some(ValueExpressionAST(v)),
-            3 => d.faces[1].toughness = Some(ValueExpressionAST(v)),
-            4 => {
-                d.commander_eligibility
-                    .as_mut()
-                    .expect("clean_def has partners")
-                    .partner_abilities
-                    .push(PartnerAbilityDSL(v));
+        let (ptr, ok) = match rng.below(6) {
+            0 => (
+                "/faces/0/abilities/1",
+                typed::<AbilityAST>(v.clone()).map(|a| d.faces[0].abilities[1] = a),
+            ),
+            1 => {
+                let mut tokens = tokens_of(&d.faces[1].text);
+                tokens.push(v.clone());
+                (
+                    "/faces/1/text/2",
+                    typed::<TextTokenStream>(Value::Array(tokens)).map(|t| d.faces[1].text = t),
+                )
             }
-            _ => d.faces[1].abilities.push(AbilityAST(v)),
+            2 => (
+                "/faces/0/power",
+                typed::<ValueExpressionAST>(v.clone()).map(|x| d.faces[0].power = Some(x)),
+            ),
+            3 => (
+                "/faces/1/toughness",
+                typed::<ValueExpressionAST>(v.clone()).map(|x| d.faces[1].toughness = Some(x)),
+            ),
+            4 => (
+                "/commanderEligibility/partnerAbilities/1",
+                typed::<PartnerAbilityDSL>(v.clone()).map(|p| {
+                    d.commander_eligibility
+                        .as_mut()
+                        .expect("clean_def has partners")
+                        .partner_abilities
+                        .push(p)
+                }),
+            ),
+            _ => (
+                "/faces/1/abilities/2",
+                typed::<AbilityAST>(v.clone()).map(|a| d.faces[1].abilities.push(a)),
+            ),
+        };
+        if ok.is_some() {
+            linted += 1;
+            run0(&d);
+        } else {
+            let doc = patched_document(&clean_def(), &[(ptr, v.clone())]);
+            assert_document_schema_rejected(&doc, &format!("{ptr} = {v}"));
         }
-        run0(&d);
     }
+    let _ = linted;
 }
 
 /// `levels` alternating IF / MAY instruction levels around a REPEAT_WHILE with no `maxIter`,
-/// built by moving each value into the next level (no `json!` interpolation, no clone).
-fn deep_instruction(levels: usize) -> Value {
-    let mut inner = json!({"op":"REPEAT_WHILE","cond":{"pred":"TAPPED"},"body":[draw()]});
+/// as JSON text (#232 FP-164: built as text, so neither building nor dropping it can recurse).
+fn deep_instruction_text(levels: usize) -> String {
+    let mut s = String::new();
     for i in 0..levels {
-        let mut m = Map::new();
         if i % 2 == 0 {
-            m.insert("op".to_owned(), json!("IF"));
-            m.insert("cond".to_owned(), json!({"pred":"TAPPED"}));
-            m.insert("then".to_owned(), Value::Array(vec![inner]));
+            s.push_str(r#"{"op":"IF","cond":{"pred":"TAPPED"},"then":["#);
         } else {
-            m.insert("op".to_owned(), json!("MAY"));
-            m.insert("player".to_owned(), json!({"ref":"CONTROLLER"}));
-            m.insert(
-                "body".to_owned(),
-                Value::Array(vec![inner, json!({"lookBack": true})]),
-            );
+            s.push_str(r#"{"op":"MAY","player":{"ref":"CONTROLLER"},"body":["#);
         }
-        inner = Value::Object(m);
     }
-    inner
-}
-
-/// A SPELL ability whose effect list holds `effect`, built without recursion.
-fn deep_spell(id: &str, effect: Value) -> Value {
-    let mut m = Map::new();
-    m.insert("abilityId".to_owned(), json!(id));
-    m.insert("kind".to_owned(), json!("SPELL"));
-    m.insert("effect".to_owned(), Value::Array(vec![effect]));
-    Value::Object(m)
-}
-
-/// `levels` alternating array / object levels of plain data, built without recursion.
-fn deep_raw(levels: usize) -> Value {
-    let mut raw = Value::Null;
-    for i in 0..levels {
-        raw = if i % 2 == 0 {
-            Value::Array(vec![raw])
+    s.push_str(r#"{"op":"REPEAT_WHILE","cond":{"pred":"TAPPED"},"body":[]}"#);
+    for i in (0..levels).rev() {
+        if i % 2 == 0 {
+            s.push_str("]}");
         } else {
-            let mut m = Map::new();
-            m.insert("k".to_owned(), raw);
-            Value::Object(m)
-        };
-    }
-    raw
-}
-
-/// Drops a deep value without recursion.
-fn drop_deep(v: Value) {
-    let mut stack = vec![v];
-    while let Some(v) = stack.pop() {
-        match v {
-            Value::Array(items) => stack.extend(items),
-            Value::Object(map) => stack.extend(map.into_iter().map(|(_, v)| v)),
-            _ => {}
+            s.push_str(r#",{"lookBack":true}]}"#);
         }
     }
+    s
 }
 
-/// Drops every raw wrapper of `def` without recursion.
-fn drop_def(mut def: CardDefinitionDSL) {
-    for face in std::mem::take(&mut def.faces) {
-        face.abilities.into_iter().for_each(|a| drop_deep(a.0));
-        face.power.into_iter().for_each(|p| drop_deep(p.0));
-        face.toughness.into_iter().for_each(|p| drop_deep(p.0));
-        face.text.0.into_iter().for_each(drop_deep);
-    }
-    if let Some(e) = def.commander_eligibility.take() {
-        e.partner_abilities.into_iter().for_each(|p| drop_deep(p.0));
-    }
-}
-
-/// Owns a deep definition and drops it iteratively, also when an assertion panics.
-struct DeepDef(Option<CardDefinitionDSL>);
-
-impl DeepDef {
-    fn get(&self) -> &CardDefinitionDSL {
-        self.0.as_ref().expect("definition present until drop")
-    }
-}
-
-impl Drop for DeepDef {
-    fn drop(&mut self) {
-        if let Some(d) = self.0.take() {
-            drop_def(d);
+/// `levels` alternating array / object levels of plain data, as JSON text.
+fn deep_raw_text(levels: usize) -> String {
+    let mut open = String::new();
+    let mut close = String::new();
+    for i in (0..levels).rev() {
+        if i % 2 == 0 {
+            open.push('[');
+            close.insert(0, ']');
+        } else {
+            open.push_str(r#"{"k":"#);
+            close.insert(0, '}');
         }
     }
+    open + "null" + &close
 }
 
-/// REQ-ING-009 (R12): an ability nested thousands of JSON levels deep does not crash the lint.
-/// The fixtures are built by moving values (never `json!` interpolation or `clone`, which
-/// recurse) and dropped iteratively (`DeepDef`, also on panic paths), so the stack use of the
-/// test is independent of depth. 5000 instruction levels are about 15 000 nested containers,
-/// and the bare array/object value has 20 000 levels.
+/// A valid typed SPELL ability `levels` IF levels deep around a NATIVE_EFFECT whose opaque
+/// params hold a look-back key, decoded from JSON built level by level.
+fn nested_look_back_spell(levels: usize) -> Value {
+    let mut inner = native_with(json!({"lookBack": true}));
+    for _ in 0..levels {
+        inner = if_then(Value::Array(vec![inner]));
+    }
+    spell("deep", Value::Array(vec![inner]))
+}
+
+/// REQ-ING-009, REQ-DSL-010 (R12): an ability nested thousands of JSON levels deep cannot crash
+/// anything. #232 FP-164: such content can no longer be held by a `CardDefinitionDSL` (its typed
+/// positions only decode within the depth limit), so (a) the over-deep documents are refused by
+/// `from_json` with an error instead of a stack overflow, built and fed as text, and (b) the lint
+/// walks the deepest typed content that still decodes and reports the look-back key at the
+/// ability. 5000 instruction levels are about 15 000 nested containers, and the bare
+/// array/object value has 20 000 levels.
 #[test]
 fn req_ing_009_deep_nesting() {
-    let d = DeepDef(Some(def_abilities(vec![deep_spell(
-        "deep",
-        deep_instruction(5000),
-    )])));
-    let r = lint_definition(d.get(), &ctx0());
-    assert_invariants(d.get(), &r);
-    // The innermost REPEAT_WHILE has no maxIter and look-back keys are present.
-    assert_at(
-        &r,
-        LintId::MAX_ITER,
-        fineprint_dsl::lint::Severity::Error,
-        "faces[0].abilities[0]",
+    let base = String::from_utf8(
+        def_abilities(vec![keyword("k0")])
+            .seal()
+            .unwrap()
+            .to_canonical_json()
+            .unwrap(),
+    )
+    .unwrap();
+    let needle = r#""abilities":["#;
+    assert!(base.contains(needle));
+    let deep_spell = format!(
+        r#"{{"abilityId":"deep","kind":"SPELL","effect":[{}]}},"#,
+        deep_instruction_text(5000)
     );
+    for (what, doc) in [
+        (
+            "deep instruction",
+            base.replacen(needle, &format!("{needle}{deep_spell}"), 1),
+        ),
+        (
+            "deep raw ability",
+            base.replacen(needle, &format!("{needle}{},", deep_raw_text(20_000)), 1),
+        ),
+        (
+            "deep raw text",
+            base.replacen(
+                r#""text":[]"#,
+                &format!(r#""text":[{}]"#, deep_raw_text(20_000)),
+                1,
+            ),
+        ),
+        (
+            "deep raw power",
+            base.replacen(
+                r#""name":"#,
+                &format!(r#""power":{},"name":"#, deep_raw_text(20_000)),
+                1,
+            ),
+        ),
+    ] {
+        assert_ne!(doc, base, "{what}: needle");
+        assert!(
+            matches!(
+                CardDefinitionDSL::from_json(doc.as_bytes()),
+                Err(CardDefinitionError::Canonical(_) | CardDefinitionError::Schema(_))
+            ),
+            "{what}: must be refused"
+        );
+    }
+    // The deepest nesting that still decodes as typed content is linted normally.
+    let mut levels = 0;
+    for l in (1..200).rev() {
+        if serde_json::from_value::<AbilityAST>(nested_look_back_spell(l)).is_ok()
+            && def_abilities(vec![nested_look_back_spell(l)])
+                .seal()
+                .is_ok()
+        {
+            levels = l;
+            break;
+        }
+    }
+    assert!(levels >= 20, "only {levels} IF levels decode and seal");
+    let d = def_abilities(vec![nested_look_back_spell(levels)]);
+    let r = lint_definition(&d, &ctx0());
+    assert_invariants(&d, &r);
     assert_at(
         &r,
         LintId::LOOK_BACK,
         fineprint_dsl::lint::Severity::Error,
         "faces[0].abilities[0]",
     );
-    // Deeply nested arrays and objects of plain data as well, one builder call per use.
-    let mut def2 = def_abilities(vec![deep_raw(20_000)]);
-    def2.faces[0].text = TextTokenStream(vec![deep_raw(20_000)]);
-    def2.faces[0].power = Some(ValueExpressionAST(deep_raw(20_000)));
-    let d2 = DeepDef(Some(def2));
-    let r2 = lint_definition(d2.get(), &ctx0());
-    assert_invariants(d2.get(), &r2);
-    assert_at(
-        &r2,
-        LintId::SCHEMA,
-        fineprint_dsl::lint::Severity::Error,
-        "faces[0].abilities[0]",
-    );
+    assert_none(&r, LintId::SCHEMA);
 }
 
 /// REQ-ING-009 (R12): an empty `faces` list is linted without panicking.

@@ -59,7 +59,7 @@ fn card(name: &str, card_type: &str, power: i64, toughness: i64) -> Characterist
         supertypes: BTreeSet::new(),
         card_types: set([card_type]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),

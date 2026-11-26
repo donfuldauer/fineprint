@@ -158,9 +158,19 @@ fn layer_6_cda_first_add_ability() {
         .characteristics
         .abilities
         .iter()
-        .filter_map(|a| a.0.get("keyword").and_then(|k| k.as_str()))
+        .filter_map(|a| match a {
+            fineprint_dsl::card::AbilityAST::Keyword(k) => Some(k.keyword.as_str()),
+            _ => None,
+        })
         .collect();
-    assert_eq!(kws, vec!["test.kw_cda", "test.kw_non_cda"]);
+    // #232 FP-164: typed keywords are the DSL names of the synthetic keywords.
+    assert_eq!(
+        kws,
+        vec![
+            kw_name("test.kw_cda").as_str(),
+            kw_name("test.kw_non_cda").as_str()
+        ]
+    );
     assert_cda_first(&rec, Layer::L6);
 }
 

@@ -114,12 +114,15 @@ pub(super) struct SbaView<'a> {
 /// The vocabulary id of the start your engines! keyword ability (CR 702.179).
 const START_YOUR_ENGINES: &str = "START_YOUR_ENGINES";
 
-/// Whether `abilities` hold the keyword ability `keyword` (an ability of kind `KEYWORD`).
+/// The vocabulary id of the indestructible keyword ability (read for the CR 702.12b check below).
+const INDESTRUCTIBLE: &str = "INDESTRUCTIBLE";
+
+/// Whether `abilities` hold the keyword ability `keyword` (a `KEYWORD` ability whose keyword
+/// name is `keyword`).
 fn has_keyword(abilities: &[fineprint_dsl::card::AbilityAST], keyword: &str) -> bool {
-    abilities.iter().any(|a| {
-        a.0.get("kind").and_then(|k| k.as_str()) == Some("KEYWORD")
-            && a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword)
-    })
+    abilities
+        .iter()
+        .any(|a| matches!(a, fineprint_dsl::card::AbilityAST::Keyword(k) if k.keyword == keyword))
 }
 
 impl<'a> SbaView<'a> {
@@ -163,7 +166,7 @@ impl<'a> SbaView<'a> {
                     planeswalker: c.card_types.contains("Planeswalker"),
                     toughness,
                     // CR 702.12b
-                    indestructible: has_keyword(&c.abilities, "indestructible"),
+                    indestructible: has_keyword(&c.abilities, INDESTRUCTIBLE),
                     loyalty,
                     names: c.names.clone(),
                     // CR 205.4: supertypes.

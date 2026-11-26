@@ -20,13 +20,19 @@ use fineprint_dsl::canonical::{
 };
 use fineprint_dsl::card::{
     AbilityAST, CardDefinitionDSL, CardDefinitionError, CardFaceDSL, ColorBitmask,
-    CommanderEligibilityDSL, FaceKind, LayoutBehavior, Legality, Origin, PartnerAbilityDSL,
-    ProvenanceDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
+    CommanderEligibilityDSL, FaceKind, LayoutBehavior, Legality, Origin, ProvenanceDSL,
+    SupportStatus, TextTokenStream, ValueExpressionAST,
 };
 use fineprint_dsl::mana::{Color, ManaCostDSL, ManaParseError, ManaSymbol, Variable};
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Serialize, Serializer};
 use serde_json::{Value, json};
+
+mod typed_ast_support;
+use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST};
+use fineprint_dsl::expr::MathOp;
+use fineprint_dsl::text::{RewritableCategory, TextError, TextToken};
+use typed_ast_support::{ability_of, pa, tx, vx};
 
 // ---------------------------------------------------------------- synthetic definitions
 
@@ -53,7 +59,7 @@ fn plain_face(kind: FaceKind, name: &str) -> CardFaceDSL {
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![]),
+        text: tx(vec![]),
         abilities: vec![],
     }
 }
@@ -62,8 +68,8 @@ fn minimal() -> CardDefinitionDSL {
     let mut face = plain_face(FaceKind::Main, "Test Vanilla");
     face.mana_cost = Some(mana("{1}{G}"));
     face.card_types = vec!["Creature".to_string()];
-    face.power = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    face.toughness = Some(ValueExpressionAST(json!({"LITERAL": 1})));
+    face.power = Some(vx(json!({"LITERAL": 1})));
+    face.toughness = Some(vx(json!({"LITERAL": 1})));
     let mut legalities = BTreeMap::new();
     legalities.insert("testformat".to_string(), Legality::Legal);
     CardDefinitionDSL {
@@ -101,24 +107,24 @@ fn rich() -> CardDefinitionDSL {
     front.subtypes = vec!["Testkin".to_string()];
     // #159 FP-140: real content replaces the former free-form placeholders (a nested expression
     // with a variable; a nested and a maximal-integer ability payload, now as KEYWORD params).
-    front.power = Some(ValueExpressionAST(
+    front.power = Some(vx(
         json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1}, "rhs": "X"}}),
     ));
-    front.toughness = Some(ValueExpressionAST(json!({"LITERAL": 3})));
+    front.toughness = Some(vx(json!({"LITERAL": 3})));
     front.loyalty = Some(4);
     front.defense = Some(5);
     front.hand_modifier = Some(-1);
     front.life_modifier = Some(7);
-    front.text = TextTokenStream(vec![
+    front.text = tx(vec![
         json!({"id": "t1", "kind": "LITERAL", "text": "Test"}),
         json!({"id": "t2", "kind": "WORD", "category": "COLOR_WORD", "value": "Hue"}),
     ]);
     front.abilities = vec![
-        AbilityAST(
+        ability_of(
             json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
             "params": {"nested": {"a": [1, 2, {"b": false}]}}}),
         ),
-        AbilityAST(
+        ability_of(
             json!({"abilityId": "a2", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
             "params": {"cost": "{T}", "n": MAX_SAFE_INTEGER}}),
         ),
@@ -147,7 +153,7 @@ fn rich() -> CardDefinitionDSL {
         color_identity: bitmask(0b10011),
         commander_eligibility: Some(CommanderEligibilityDSL {
             eligible: true,
-            partner_abilities: vec![PartnerAbilityDSL(
+            partner_abilities: vec![pa(
                 json!({"abilityId": "p1", "kind": "KEYWORD", "keyword": "PARTNER"}),
             )],
         }),
@@ -161,7 +167,7 @@ fn rich() -> CardDefinitionDSL {
 /// valid real content (#159 FP-140).
 fn with_text() -> CardDefinitionDSL {
     let mut d = minimal();
-    d.faces[0].text = TextTokenStream(vec![
+    d.faces[0].text = tx(vec![
         json!({"id": "t1", "kind": "LITERAL", "text": "Test Literal"}),
         json!({"id": "t2", "kind": "WORD", "category": "COLOR_WORD", "value": "Testhue"}),
     ]);
@@ -543,13 +549,29 @@ fn req_nfr_006_noncharacters_in_text_tokens() {
                 }
             }
         }
+        // #232 FP-164: the text position is a validated typed stream, so a token holding a
+        // noncharacter can no longer reach `seal`; the typed stream refuses it instead.
         for i in 0..2 {
-            let mut d = with_text();
-            let member = if i == 0 { "text" } else { "value" };
-            d.faces[0].text.0[i][member] = json!(format!("T{ch}V"));
+            let bad = format!("T{ch}V");
+            let mut tokens = with_text().faces[0].text.tokens().to_vec();
+            tokens[i] = if i == 0 {
+                TextToken::Literal {
+                    id: "t1".into(),
+                    text: bad,
+                }
+            } else {
+                TextToken::Word {
+                    id: "t2".into(),
+                    category: RewritableCategory::ColorWord,
+                    value: bad,
+                }
+            };
             assert!(
-                is_serialize_err(d.seal()),
-                "U+{:04X} seal token {i}",
+                matches!(
+                    TextTokenStream::new(tokens),
+                    Err(TextError::Noncharacter { .. })
+                ),
+                "U+{:04X} typed token {i}",
                 *ch as u32
             );
         }
@@ -891,11 +913,39 @@ fn math_chain(k: usize) -> Value {
     v
 }
 
+/// The typed value of `math_chain(k)`, built directly (#232 FP-164: a chain past the decoder's
+/// depth limit cannot be decoded from JSON, but the typed value can still be built and handed to
+/// `seal`, `compute_hash` and `to_canonical_json`).
+fn typed_chain(k: usize) -> ValueExpressionAST {
+    let mut v = if k % 2 == 1 {
+        ValueExpressionAST::Literal(1)
+    } else {
+        ValueExpressionAST::X
+    };
+    for _ in 0..k / 2 {
+        v = ValueExpressionAST::Math {
+            op: MathOp::Add,
+            lhs: Box::new(v),
+            rhs: Box::new(ValueExpressionAST::X),
+        };
+    }
+    v
+}
+
+/// A KEYWORD ability whose opaque `params` hold `value` under `deep` (#232 FP-164: KEYWORD
+/// `params` are one of the opaque free-form places, docs/DECISIONS.md "#161 FP-141"), built
+/// directly so that over-deep content needs no decoding.
+fn keyword_with_params(value: Value) -> AbilityAST {
+    let mut k = KeywordInstanceAST::new(AbilityBase::new("a1"), "TEST_KEYWORD");
+    k.params = Some(BTreeMap::from([("deep".to_string(), value)]));
+    AbilityAST::Keyword(k)
+}
+
 /// #159 FP-140: formerly `k` nested arrays as a free-form ability placeholder; now a valid MATH
 /// chain of `k` containers in `power`, which reaches the same depth limit with real content.
 fn depth_def(k: usize) -> CardDefinitionDSL {
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(math_chain(k)));
+    d.faces[0].power = Some(typed_chain(k));
     d
 }
 
@@ -985,18 +1035,40 @@ fn insert_hash(body_without_hash: &str) -> Vec<u8> {
 /// REQ-DSL-002, REQ-NFR-006: numbers in AST positions normalise so that sealed equals loaded.
 /// #159 FP-140: the numbers sit in a real LITERAL and in KEYWORD params (formerly bare
 /// placeholders); `seal` normalises `-0.0`/`1.0` to `0`/`1` before the AST check, like the
-/// loader's canonical step.
+/// loader's canonical step. #232 FP-164: a typed LITERAL holds an `i64`, so `-0.0`/`1.0` can no
+/// longer be put into `power` of a built definition (plain serde of the typed value refuses
+/// them); they normalise on the loader path instead (a document spelling them loads as the
+/// sealed integer definition), also inside opaque KEYWORD `params`; a hand-built typed ability
+/// holding such a float in `params` is refused by `seal` (the real ability type re-checks its
+/// params on write, `fineprint_dsl::ability` module docs), never written un-normalised.
 #[test]
 fn req_dsl_002_nfr_006_number_normalisation_in_placeholders() {
     for (text, int) in [("-0.0", 0), ("1.0", 1)] {
         let n: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            serde_json::from_value::<ValueExpressionAST>(json!({ "LITERAL": n.clone() })).is_err(),
+            "{text}: typed LITERAL"
+        );
         let mut d = minimal();
-        d.faces[0].power = Some(ValueExpressionAST(json!({ "LITERAL": n.clone() })));
+        d.faces[0].power = Some(ValueExpressionAST::Literal(int));
         let s = sealed(d);
+        let body = String::from_utf8(canonical_bytes(&s))
+            .unwrap()
+            .replace(
+                &format!("\"definitionHash\":\"{}\",", s.definition_hash),
+                "",
+            )
+            .replace(
+                &format!("\"power\":{{\"LITERAL\":{int}}},"),
+                &format!("\"power\":{{\"LITERAL\":{text}}},"),
+            );
+        assert!(body.contains(text), "{text}: {body}");
+        let loaded = load(&insert_hash(&body)).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+        assert_eq!(loaded, s, "{text}: loader normalisation");
         assert_eq!(s.verify_hash(), Ok(()), "{text}");
         assert_eq!(
             s.faces[0].power,
-            Some(ValueExpressionAST(json!({ "LITERAL": int }))),
+            Some(vx(json!({ "LITERAL": int }))),
             "{text}"
         );
         let back = load(&canonical_bytes(&s)).unwrap_or_else(|e| panic!("{text}: {e:?}"));
@@ -1007,14 +1079,27 @@ fn req_dsl_002_nfr_006_number_normalisation_in_placeholders() {
         v.as_object_mut().unwrap().remove("definitionHash");
         let oracle = sha256(&canonicalize(&serde_json::to_vec(&v).unwrap()).unwrap()).to_hex();
         assert_eq!(s.definition_hash, oracle, "{text}");
-        // Nested in a larger placeholder too.
+        // Nested in a larger placeholder too: the loader normalises it inside KEYWORD params.
         let mut d = minimal();
-        d.faces[0].abilities = vec![AbilityAST(
-            json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
-                "params": {"k": [n.clone()]}}),
-        )];
+        d.faces[0].abilities = vec![keyword_with_params(json!([int]))];
         let s = sealed(d);
         assert_eq!(load(&canonical_bytes(&s)).unwrap(), s, "{text} nested");
+        let body = String::from_utf8(canonical_bytes(&s))
+            .unwrap()
+            .replace(
+                &format!("\"definitionHash\":\"{}\",", s.definition_hash),
+                "",
+            )
+            .replace(&format!("\"deep\":[{int}]"), &format!("\"deep\":[{text}]"));
+        assert!(body.contains(text), "{text} nested: {body}");
+        assert_eq!(load(&insert_hash(&body)), Ok(s), "{text} nested normalised");
+        // A hand-built typed ability with the float in params never reaches the output.
+        let mut d = minimal();
+        d.faces[0].abilities = vec![keyword_with_params(json!([n.clone()]))];
+        assert!(
+            matches!(d.seal(), Err(CanonicalError::Serialize(_))),
+            "{text} nested hand-built"
+        );
     }
 }
 
@@ -1049,10 +1134,7 @@ fn req_dsl_002_nfr_006_one_point_zero_equals_one() {
     );
     let doc_neg = insert_hash(&body_neg);
     let c = load(&doc_neg).expect("-0.0 loads");
-    assert_eq!(
-        c.faces[0].power,
-        Some(ValueExpressionAST(json!({"LITERAL": 0})))
-    );
+    assert_eq!(c.faces[0].power, Some(vx(json!({"LITERAL": 0}))));
     assert_eq!(c.verify_hash(), Ok(()));
     assert_ne!(c.definition_hash, s.definition_hash);
 }
@@ -1395,12 +1477,13 @@ fn deep_value(depth: usize) -> Value {
 /// REQ-NFR-006, REQ-DSL-001: a 100_000-deep placeholder makes `compute_hash` and
 /// `to_canonical_json` return `Serialize` without recursing or cloning. Runs on the default
 /// test stack; the definition is forgotten because `Value`'s `Drop` is recursive.
-/// #159 FP-140: this stays on free-form placeholder content on purpose: `compute_hash` and
-/// `to_canonical_json` do not validate ASTs, and the subject is their depth limit.
+/// #159 FP-140: this stays on free-form content on purpose: the subject is the depth limit of
+/// `compute_hash` and `to_canonical_json`. #232 FP-164: the free-form content moved from `power`
+/// (now a typed value expression) into the opaque KEYWORD `params` of an ability.
 #[test]
 fn req_nfr_006_deep_value_compute_hash_errors_without_overflow() {
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(deep_value(100_000)));
+    d.faces[0].abilities = vec![keyword_with_params(deep_value(100_000))];
     let h = d.compute_hash();
     let j = d.to_canonical_json();
     let h_ok = matches!(h, Err(CanonicalError::Serialize(_)));
@@ -1413,14 +1496,16 @@ fn req_nfr_006_deep_value_compute_hash_errors_without_overflow() {
 /// REQ-NFR-006, REQ-DSL-002: nesting past MAX_DEPTH is a `Serialize` error for `seal` and
 /// `compute_hash`; a shallow value still hashes. #159 FP-140: `seal` is checked with a valid
 /// over-deep MATH chain as well as the placeholder; the `compute_hash` cases stay on placeholder
-/// content because `compute_hash` does not validate ASTs.
+/// content because `compute_hash` does not validate ASTs. #232 FP-164: the free-form content is
+/// in opaque KEYWORD `params` (two containers deeper than `power`, still clearly over or under
+/// the limit), and the MATH chains are typed values built directly.
 #[test]
 fn req_nfr_006_seal_over_max_depth_is_serialize_error() {
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(deep_value(1_000)));
+    d.faces[0].abilities = vec![keyword_with_params(deep_value(1_000))];
     assert!(matches!(d.seal(), Err(CanonicalError::Serialize(_))));
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(math_chain(1_000)));
+    d.faces[0].power = Some(typed_chain(1_000));
     assert!(matches!(
         d.clone().seal(),
         Err(CanonicalError::Serialize(_))
@@ -1430,17 +1515,18 @@ fn req_nfr_006_seal_over_max_depth_is_serialize_error() {
         Err(CanonicalError::Serialize(_))
     ));
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(math_chain(100)));
+    d.faces[0].power = Some(vx(math_chain(100)));
+    assert_eq!(d.faces[0].power, Some(typed_chain(100)));
     assert!(d.compute_hash().is_ok());
     assert!(d.seal().is_ok());
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(deep_value(128)));
+    d.faces[0].abilities = vec![keyword_with_params(deep_value(128))];
     assert!(matches!(
         d.compute_hash(),
         Err(CanonicalError::Serialize(_))
     ));
     let mut d = minimal();
-    d.faces[0].power = Some(ValueExpressionAST(deep_value(100)));
+    d.faces[0].abilities = vec![keyword_with_params(deep_value(100))];
     assert!(d.compute_hash().is_ok());
 }
 

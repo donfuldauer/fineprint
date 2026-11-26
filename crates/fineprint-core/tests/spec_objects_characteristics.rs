@@ -9,7 +9,7 @@
 //! (CR 202.2), the no-cost versus `{0}` distinction (CR 202.3a), mana value through the
 //! characteristics, and when printed power and toughness apply (CR 208.3) (REQ-OBJ-001).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use fineprint_core::objects::{
     CdaColors, Characteristics, ManaValueContext, ManaValueSubject, ObjectError, VariableValues,
@@ -37,25 +37,33 @@ fn mask(bits: u8) -> ColorBitmask {
     ColorBitmask::new(bits).expect("bits in 0..=31")
 }
 
-/// Round-trips a serialisable value through MessagePack into one of the DSL placeholder types
-/// (which wrap a JSON value), so no direct `serde_json` dependency is needed.
-fn via_msgpack<In: serde::Serialize, Out: serde::de::DeserializeOwned>(value: &In) -> Out {
-    let bytes = rmp_serde::to_vec(value).expect("encode");
-    rmp_serde::from_slice(&bytes).expect("decode")
-}
-
+/// A printed value `Literal(n)` (#232 FP-164: formerly the bare JSON integer placeholder).
 fn printed(n: i64) -> ValueExpressionAST {
-    via_msgpack(&n)
+    ValueExpressionAST::Literal(n)
 }
 
+/// Rules text of one LITERAL token per word, ids `w0`, `w1`, ... (#232 FP-164: formerly a
+/// placeholder list of bare JSON strings, which is not a valid token stream).
 fn text_tokens(tokens: &[&str]) -> TextTokenStream {
-    via_msgpack(&tokens.to_vec())
+    let tokens = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, w)| serde_json::json!({"id": format!("w{i}"), "kind": "LITERAL", "text": w}))
+        .collect();
+    serde_json::from_value(serde_json::Value::Array(tokens)).expect("valid synthetic text")
 }
 
+/// A synthetic ability identified by `(key, n)` (#232 FP-164: formerly the free-form JSON
+/// object `{key: n}`): the KEYWORD ability with `abilityId` `key`, the synthetic keyword
+/// `TEST_SYNTHETIC` and the opaque parameter `n`.
 fn ability(key: &str, n: i64) -> AbilityAST {
-    let mut m = BTreeMap::new();
-    m.insert(key.to_string(), n);
-    via_msgpack(&m)
+    serde_json::from_value(serde_json::json!({
+        "abilityId": key,
+        "kind": "KEYWORD",
+        "keyword": "TEST_SYNTHETIC",
+        "params": {"n": n},
+    }))
+    .expect("valid synthetic ability")
 }
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -82,7 +90,7 @@ fn blank_face(face_name: &str) -> CardFaceDSL {
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(Vec::new()),
+        text: TextTokenStream::default(),
         abilities: Vec::new(),
     }
 }
@@ -197,7 +205,7 @@ fn chars_109_3_blank_face_maps_to_empty() {
     assert_eq!(ch.defense, None);
     assert_eq!(ch.hand_modifier, None);
     assert_eq!(ch.life_modifier, None);
-    assert_eq!(ch.rules_text, TextTokenStream(Vec::new()));
+    assert_eq!(ch.rules_text, TextTokenStream::default());
     assert!(ch.abilities.is_empty());
 }
 

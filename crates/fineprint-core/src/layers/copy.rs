@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 
 use fineprint_base::ids::{ObjectId, PlayerId, Timestamp};
-use fineprint_dsl::ability::{CharacteristicEffect, Layer, TypePart};
+use fineprint_dsl::ability::{CharacteristicEffect, Layer, StaticEffect, TypePart};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, LayoutBehavior, ValueExpressionAST};
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
@@ -82,6 +82,9 @@ pub struct CopiableValues {
 }
 
 /// One "except ..." clause of a copy effect, applied in slice order (CR 707.9).
+// The typed `AbilityAST` payload is large; it stays unboxed so the public variants keep the
+// shape callers build (docs/DECISIONS.md "#232 FP-164 — Typed card AST positions").
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CopyException {
     /// CR 707.9a: the copy gains the ability (appended to the abilities); it is part of the
@@ -233,40 +236,36 @@ fn layer4_targets(parsed: Option<Result<BTreeSet<TypePart>, String>>) -> BTreeSe
     }
 }
 
-/// The characteristics a characteristic-defining ability defines, read from the placeholder
-/// ability JSON: a `"STATIC"` ability with a `"CHAR"` effect marked `"isCDA": true` defines the
-/// characteristic of its layer (4: the type-line parts of [`layer4_targets`], 5: colors, 7a:
-/// power and toughness). Reads ability data only, never card identity (R4).
+/// The characteristics a characteristic-defining ability defines: a `STATIC` ability with a
+/// `CHAR` effect marked `isCDA: true` defines the characteristic of its layer (4: the
+/// type-line parts of [`layer4_targets`], 5: colors, 7a: power and toughness). Reads ability
+/// data only, never card identity (R4).
 fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
     let mut out = BTreeSet::new();
-    let Some(object) = ability.0.as_object() else {
+    let AbilityAST::Static(ability) = ability else {
         return out;
     };
-    if object.get("kind").and_then(|k| k.as_str()) != Some("STATIC") {
-        return out;
-    }
-    let Some(effects) = object.get("effects").and_then(|e| e.as_array()) else {
-        return out;
-    };
-    for effect in effects {
-        let is_cda_char = effect.get("type").and_then(|t| t.as_str()) == Some("CHAR")
-            && effect.get("isCDA").and_then(|b| b.as_bool()) == Some(true);
-        if !is_cda_char {
+    for effect in &ability.effects {
+        let StaticEffect::Char(effect) = effect else {
+            continue;
+        };
+        if effect.is_cda != Some(true) {
             continue;
         }
-        match effect.get("layer").and_then(|l| l.as_str()) {
+        match effect.layer {
             // CR 707.9d: per type-line part (CR 109.3, 205.1b).
-            Some("4") => {
+            Layer::L4 => {
                 let parsed = effect
-                    .get("modification")
-                    .and_then(|m| m.get(CharacteristicEffect::DEFINES))
+                    .modification
+                    .params
+                    .get(CharacteristicEffect::DEFINES)
                     .map(TypePart::parse_defines);
                 out.extend(layer4_targets(parsed));
             }
-            Some("5") => {
+            Layer::L5 => {
                 out.insert(CdaTarget::Colors);
             }
-            Some("7a") => {
+            Layer::L7a => {
                 out.insert(CdaTarget::PowerToughness);
             }
             _ => {}

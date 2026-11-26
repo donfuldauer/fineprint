@@ -150,7 +150,7 @@ pub(crate) fn scene_base() -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: BTreeSet::from(["Creature".to_owned()]),
         subtypes: BTreeSet::from(["Testkin".to_owned()]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(2)),
         toughness: Some(literal(2)),

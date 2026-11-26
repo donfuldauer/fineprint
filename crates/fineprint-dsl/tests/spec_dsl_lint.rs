@@ -15,8 +15,8 @@ mod spec_dsl_lint_common;
 use std::collections::BTreeSet;
 
 use fineprint_dsl::card::{
-    AbilityAST, CardDefinitionDSL, ColorBitmask, CommanderEligibilityDSL, FaceKind, LayoutBehavior,
-    PartnerAbilityDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
+    CardDefinitionDSL, ColorBitmask, CommanderEligibilityDSL, FaceKind, LayoutBehavior,
+    SupportStatus,
 };
 use fineprint_dsl::lint::{
     Lint, LintContext, LintId, LintLocation, LintReport, Severity, SourceCharacteristics,
@@ -205,7 +205,38 @@ fn req_ing_009_default_context() {
 
 // ================================================================ S-0 ordering, determinism
 
-/// A definition with findings on several faces, abilities and ids, both severities.
+/// The abilities of `noisy_def` before #232 FP-164 that no longer decode as typed abilities
+/// (REPEAT_WHILE without `maxIter`, a look-back trigger filter, a CHAR effect without a layer),
+/// plus the former invalid power `3` and STATIC partner; `noisy_def` replaced them with valid
+/// content that still produces findings.
+fn noisy_def_former_invalid() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "/faces/0/abilities/1",
+            spell("x1", json!([repeat_while(None, json!([draw()]))])),
+        ),
+        (
+            "/faces/0/abilities/2",
+            triggered(
+                "x2",
+                json!({"mode":"EVENT","event":{"kind":"DIES","filters":{"lookBack":true}}}),
+                json!([native()]),
+            ),
+        ),
+        (
+            "/faces/0/abilities/4",
+            static_ab("x4", json!([char_effect(None)])),
+        ),
+        ("/faces/0/power", json!(3)),
+        (
+            "/commanderEligibility/partnerAbilities/0",
+            static_ab("p0", json!([rule_effect(Some("SKIP"))])),
+        ),
+    ]
+}
+
+/// A definition with findings on several faces, abilities and ids, both severities. #232
+/// FP-164: every AST position holds valid typed content (see `noisy_def_former_invalid`).
 fn noisy_def() -> (CardDefinitionDSL, LintContext) {
     let mut f0 = face_with(vec![
         with(
@@ -213,33 +244,33 @@ fn noisy_def() -> (CardDefinitionDSL, LintContext) {
             "abilityWord",
             json!(MARKER),
         ),
-        spell("x1", json!([repeat_while(None, json!([draw()]))])),
+        spell("x1", json!([native_with(json!({"lookBack": true}))])),
         triggered(
             "x2",
-            json!({"mode":"EVENT","event":{"kind":"DIES","filters":{"lookBack":true}}}),
-            json!([native()]),
+            json!({"mode":"EVENT","event":{"kind":"DIES"}}),
+            json!([native_with(json!({"look_back": 1}))]),
         ),
         spanned(&keyword("x3"), 0, 9),
-        static_ab("x4", json!([char_effect(None)])),
+        static_ab("x4", json!([char_effect(Some("6"))])),
     ]);
-    f0.power = Some(ValueExpressionAST(json!(3)));
-    f0.text = TextTokenStream(tokens(5));
+    f0.power = Some(vx(json!({"LITERAL": 3})));
+    f0.text = tx(tokens(5));
     let mut f1 = face(FaceKind::Back, "Test Back");
     f1.abilities = vec![
-        AbilityAST(linked(&keyword("y0"), &["solo"])),
-        AbilityAST(spell("y1", json!([tap_linked("ghost")]))),
-        AbilityAST(with(
+        ability_of(linked(&keyword("y0"), &["solo"])),
+        ability_of(spell("y1", json!([tap_linked("ghost")]))),
+        ability_of(with(
             &replacement("y2", "DIES", json!([modify_event()])),
             "tierHint",
             json!("CONTROL_ETB"),
         )),
-        AbilityAST(spanned(
+        ability_of(spanned(
             &spell("y3", json!([create_token("test.token_zz")])),
             1,
             1,
         )),
     ];
-    f1.text = TextTokenStream(vec![
+    f1.text = tx(vec![
         lit("u0", MARKER),
         lit("u1", MARKER),
         lit("u2", MARKER),
@@ -254,10 +285,9 @@ fn noisy_def() -> (CardDefinitionDSL, LintContext) {
     ]);
     d.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
-        partner_abilities: vec![PartnerAbilityDSL(static_ab(
-            "p0",
-            json!([rule_effect(Some("SKIP"))]),
-        ))],
+        partner_abilities: vec![pa(
+            json!({"abilityId":"p0","kind":"KEYWORD","keyword":"PARTNER"}),
+        )],
     });
     let ctx = LintContext {
         source: Some(SourceCharacteristics {
@@ -283,6 +313,10 @@ fn noisy_def() -> (CardDefinitionDSL, LintContext) {
 #[test]
 fn req_ing_009_ordering_is_total_and_deterministic() {
     let (d, ctx) = noisy_def();
+    // #232 FP-164 (C5): the former invalid content is refused by `from_json` instead.
+    for (ptr, x) in noisy_def_former_invalid() {
+        assert_document_schema_rejected(&patched_document(&d, &[(ptr, x.clone())]), ptr);
+    }
     let r = run(&d, &ctx);
     assert_eq!(r.lints, sorted_dedup(&r.lints));
     let ids: BTreeSet<LintId> = r.lints.iter().map(|l| l.id).collect();
@@ -302,19 +336,29 @@ fn req_ing_009_ordering_is_total_and_deterministic() {
 /// REQ-ING-009 (S-0): reordering the abilities of a face moves each ability's findings with it.
 #[test]
 fn req_ing_009_ability_reorder_invariance() {
-    let abilities = [
-        with(&good_activated_mana("q0"), "targets", one_target()),
+    // #232 FP-164: q1 (formerly REPEAT_WHILE with `maxIter` 0) and q3 (formerly a look-back
+    // trigger filter) no longer decode as typed abilities; they are replaced by valid abilities
+    // that still have findings (a look-back key in NATIVE_EFFECT params, an unpaired link
+    // reference), and the former JSON is refused by `from_json`.
+    for former in [
         spell("q1", json!([repeat_while(Some(json!(0)), json!([draw()]))])),
-        with(
-            &replacement("q2", "DIES", json!([modify_event()])),
-            "tierHint",
-            json!("COPY_ETB"),
-        ),
         triggered(
             "q3",
             json!({"mode":"EVENT","event":{"kind":"DIES","filters":{"LOOK_BACK":1}}}),
             json!([native()]),
         ),
+    ] {
+        assert!(def_abilities_or_schema(vec![former]).is_none());
+    }
+    let abilities = [
+        with(&good_activated_mana("q0"), "targets", one_target()),
+        spell("q1", json!([native_with(json!({"LOOK_BACK": 1}))])),
+        with(
+            &replacement("q2", "DIES", json!([modify_event()])),
+            "tierHint",
+            json!("COPY_ETB"),
+        ),
+        spell("q3", json!([tap_linked("ghost")])),
     ];
     let key = |r: &LintReport, j: usize| -> Vec<(LintId, Severity)> {
         let p = ab(0, j);
@@ -382,10 +426,24 @@ fn req_ing_009_clean_definition_has_empty_report() {
 #[test]
 fn req_ing_009_messages_never_copy_text_or_ability_words() {
     let (mut d, ctx) = noisy_def();
-    // An uncovered marker-bearing text and a broken marker-bearing ability on face 1.
-    d.faces[1]
-        .abilities
-        .push(AbilityAST(json!({"abilityWord": MARKER, "kind": MARKER})));
+    // An uncovered marker-bearing text and a broken marker-bearing ability on face 1. #232
+    // FP-164: the former undecodable `{"abilityWord":MARKER,"kind":MARKER}` is refused by
+    // `from_json`; a valid ability with the marker as ability word and a finding replaces it.
+    assert_document_schema_rejected(
+        &patched_document(
+            &d,
+            &[(
+                "/faces/1/abilities/4",
+                json!({"abilityWord": MARKER, "kind": MARKER}),
+            )],
+        ),
+        "marker ability",
+    );
+    d.faces[1].abilities.push(ability_of(with(
+        &spell("y4", json!([tap_linked("ghost_marker")])),
+        "abilityWord",
+        json!(MARKER),
+    )));
     let r = run(&d, &ctx);
     assert!(!r.is_empty());
     for l in &r.lints {
@@ -399,80 +457,54 @@ fn req_ing_009_messages_never_copy_text_or_ability_words() {
 
 // ================================================================ S-1 FPL-SCHEMA
 
-/// REQ-ING-009 (S-1): every undecodable position gets one Error at that position (not only
-/// the first); a decodable position gets none.
+/// REQ-ING-009 (S-1), REQ-DSL-010: #232 FP-164 (C5) replaces "every undecodable position gets
+/// one FPL-SCHEMA Error at that position": AST positions are typed, so the same undecodable
+/// content cannot reach the lint. Each of the seven former positions, alone and all together, is
+/// refused by `from_json` with `Schema`; the same definition with valid content in those
+/// positions passes the fixture self-check, and the lint reports no FPL-SCHEMA finding.
 #[test]
 fn req_ing_009_schema_every_position() {
-    let mut f0 = face_with(vec![json!("keyword"), keyword("k1")]);
-    f0.power = Some(ValueExpressionAST(json!(3)));
-    f0.toughness = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    f0.text = TextTokenStream(vec![lit("t0", MARKER), json!({"t": "word"})]);
+    let mut f0 = face_with(vec![keyword("k0"), keyword("k1")]);
+    f0.power = Some(vx(json!({"LITERAL": 3})));
+    f0.toughness = Some(vx(json!({"LITERAL": 1})));
+    f0.text = tx(vec![lit("t0", MARKER), lit("t1", MARKER)]);
     let mut f1 = face(FaceKind::Back, "Test Back");
-    f1.power = Some(ValueExpressionAST(json!({"LITERAL": 2})));
-    f1.toughness = Some(ValueExpressionAST(json!(3)));
+    f1.power = Some(vx(json!({"LITERAL": 2})));
+    f1.toughness = Some(vx(json!({"LITERAL": 3})));
     f1.abilities = vec![
-        AbilityAST(keyword("k2")),
-        AbilityAST(json!({"kind": "FLYING"})),
-        AbilityAST(keyword("k3")),
-        AbilityAST(Value::Null),
+        ability_of(keyword("k2")),
+        ability_of(keyword("k4")),
+        ability_of(keyword("k3")),
+        ability_of(keyword("k5")),
     ];
     let mut d = def_of(LayoutBehavior::DfcNonmodal, vec![f0, f1]);
     d.support_status = SupportStatus::Unsupported;
     d.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
         partner_abilities: vec![
-            PartnerAbilityDSL(json!({"abilityId":"p1","kind":"KEYWORD","keyword":"PARTNER"})),
-            PartnerAbilityDSL(static_ab("p2", json!([rule_effect(Some("SKIP"))]))),
+            pa(json!({"abilityId":"p1","kind":"KEYWORD","keyword":"PARTNER"})),
+            pa(json!({"abilityId":"p2","kind":"KEYWORD","keyword":"PARTNER"})),
         ],
     });
-    let expected: BTreeSet<String> = undecodable_positions(&d)
-        .into_iter()
-        .map(|(p, _)| p)
-        .collect();
-    let want: BTreeSet<String> = [
-        "faces[0].abilities[0]",
-        "faces[0].power",
-        "faces[0].text",
-        "faces[1].abilities[1]",
-        "faces[1].abilities[3]",
-        "faces[1].toughness",
-        "commanderEligibility.partnerAbilities[1]",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
-    assert_eq!(expected, want, "fixture self-check");
+    assert!(undecodable_positions(&d).is_empty(), "fixture self-check");
     let r = run0(&d);
-    let schema = of(&r, LintId::SCHEMA);
-    assert!(schema.iter().all(|l| l.severity == E));
-    let got: Vec<String> = schema.iter().map(|l| l.location.path.clone()).collect();
-    let got_set: BTreeSet<String> = got.iter().cloned().collect();
-    assert_eq!(got_set, want, "report:\n{}", dump(&r));
-    assert_eq!(
-        got.len(),
-        want.len(),
-        "one finding per position:\n{}",
-        dump(&r)
-    );
-    // exact locations
-    let p = assert_at(&r, LintId::SCHEMA, E, "faces[1].abilities[3]");
-    assert_eq!(p.location.face_index, Some(1));
-    assert_eq!(p.location.ability_index, Some(3));
-    let p = assert_at(
-        &r,
-        LintId::SCHEMA,
-        E,
-        "commanderEligibility.partnerAbilities[1]",
-    );
-    assert_eq!(
-        (p.location.face_index, p.location.ability_index),
-        (None, None)
-    );
-    let p = assert_at(&r, LintId::SCHEMA, E, "faces[0].power");
-    assert_eq!(
-        (p.location.face_index, p.location.ability_index),
-        (Some(0), None)
-    );
+    assert_none(&r, LintId::SCHEMA);
+    let bad: Vec<(&str, Value)> = vec![
+        ("/faces/0/abilities/0", json!("keyword")),
+        ("/faces/0/power", json!(3)),
+        ("/faces/0/text/1", json!({"t": "word"})),
+        ("/faces/1/abilities/1", json!({"kind": "FLYING"})),
+        ("/faces/1/abilities/3", Value::Null),
+        ("/faces/1/toughness", json!(3)),
+        (
+            "/commanderEligibility/partnerAbilities/1",
+            static_ab("p2", json!([rule_effect(Some("SKIP"))])),
+        ),
+    ];
+    for (ptr, x) in &bad {
+        assert_document_schema_rejected(&patched_document(&d, &[(ptr, x.clone())]), ptr);
+    }
+    assert_document_schema_rejected(&patched_document(&d, &bad), "all seven positions");
 }
 
 /// REQ-ING-009 (S-1): a clean definition has no FPL-SCHEMA finding.
@@ -483,14 +515,17 @@ fn req_ing_009_schema_clean() {
 
 // ================================================================ S-2 FPL-MANA-ABILITY
 
+/// #232 FP-164 (C5): an ability that does not decode as the typed `AbilityAST` can no longer be
+/// linted; the same JSON is refused by `from_json` with `Schema` instead.
 fn mana_fail(v: Value) {
-    let r = run0(&def_abilities(vec![v.clone()]));
+    let Some(d) = def_abilities_or_schema(vec![v]) else {
+        return;
+    };
+    let r = run0(&d);
     let l = assert_at(&r, LintId::MANA_ABILITY, E, &a00());
     assert_eq!(l.location.face_index, Some(0));
     assert_eq!(l.location.ability_index, Some(0));
-    if AbilityAST(v).to_real().is_err() {
-        assert_at(&r, LintId::SCHEMA, E, &a00());
-    }
+    assert_none(&r, LintId::SCHEMA);
 }
 
 fn mana_pass(v: Value) {
@@ -684,9 +719,9 @@ fn req_ing_009_mana_ability_other_kinds() {
 fn req_ing_009_mana_ability_location() {
     let mut f1 = face(FaceKind::Back, "Test Back");
     f1.abilities = vec![
-        AbilityAST(keyword("k")),
-        AbilityAST(good_activated_mana("ok")),
-        AbilityAST(with(&good_activated_mana("bad"), "effect", json!([]))),
+        ability_of(keyword("k")),
+        ability_of(good_activated_mana("ok")),
+        ability_of(with(&good_activated_mana("bad"), "effect", json!([]))),
     ];
     let d = def_of(LayoutBehavior::DfcNonmodal, vec![face_with(vec![]), f1]);
     let r = run0(&d);
@@ -807,7 +842,11 @@ fn req_ing_009_layer_kind_fail() {
         json!({"layer":"6","affected":{"ref":"SELF"},"modification":{"op":"TEST_OP"}}),
     ] {
         let v = static_ab("s", json!([char_effect(Some("6")), bad]));
-        let r = run0(&def_abilities(vec![keyword("k"), v]));
+        // #232 FP-164 (C5): an undecodable ability is refused by `from_json` instead.
+        let Some(d) = def_abilities_or_schema(vec![keyword("k"), v]) else {
+            continue;
+        };
+        let r = run0(&d);
         let l = assert_at(&r, LintId::LAYER_KIND, E, &ab(0, 1));
         assert_eq!(
             (l.location.face_index, l.location.ability_index),
@@ -838,7 +877,7 @@ fn text_def(n: usize, spans: &[(u64, u64)], status: SupportStatus) -> CardDefini
         .map(|(j, (s, e))| spanned(&keyword(&format!("k{j}")), *s, *e))
         .collect();
     let mut f = face_with(abilities);
-    f.text = TextTokenStream(tokens(n));
+    f.text = tx(tokens(n));
     let mut d = def_abilities(vec![]);
     d.faces = vec![f];
     d.support_status = status;
@@ -920,7 +959,7 @@ fn req_ing_009_text_coverage_gaps() {
 #[test]
 fn req_ing_009_text_coverage_ability_without_span() {
     let mut f = face_with(vec![keyword("k0"), spanned(&keyword("k1"), 0, 1)]);
-    f.text = TextTokenStream(tokens(4));
+    f.text = tx(tokens(4));
     let d = def_of(LayoutBehavior::Normal, vec![f]);
     let r = run0(&d);
     assert_eq!(coverage(&r), vec![(E, text_path(), Some((2, 3)))]);
@@ -930,10 +969,10 @@ fn req_ing_009_text_coverage_ability_without_span() {
 #[test]
 fn req_ing_009_text_coverage_second_face() {
     let mut f0 = face_with(vec![spanned(&keyword("k0"), 0, 1)]);
-    f0.text = TextTokenStream(tokens(2));
+    f0.text = tx(tokens(2));
     let mut f1 = face(FaceKind::Back, "Test Back");
-    f1.abilities = vec![AbilityAST(spanned(&keyword("k1"), 1, 1))];
-    f1.text = TextTokenStream(vec![
+    f1.abilities = vec![ability_of(spanned(&keyword("k1"), 1, 1))];
+    f1.text = tx(vec![
         lit("v0", MARKER),
         lit("v1", MARKER),
         lit("v2", MARKER),
@@ -1030,15 +1069,17 @@ fn req_ing_009_look_back_fail() {
                 top,
             ];
             for v in cases {
-                let r = run0(&def_abilities(vec![keyword("k0"), v.clone()]));
+                // #232 FP-164 (C5): undecodable abilities are refused by `from_json` instead.
+                let Some(d) = def_abilities_or_schema(vec![keyword("k0"), v]) else {
+                    continue;
+                };
+                let r = run0(&d);
                 assert_at(&r, LintId::LOOK_BACK, E, &ab(0, 1));
                 assert!(
                     r.with_id(LintId::LOOK_BACK)
                         .all(|l| l.location.path == ab(0, 1))
                 );
-                if AbilityAST(v).to_real().is_err() {
-                    assert_at(&r, LintId::SCHEMA, E, &ab(0, 1));
-                }
+                assert_none(&r, LintId::SCHEMA);
             }
         }
     }
@@ -1090,12 +1131,14 @@ fn req_ing_009_max_iter_fail() {
     ];
     for m in bad_values {
         for v in max_iter_wrappers(repeat_while(m.clone(), json!([draw()]))) {
-            let r = run0(&def_abilities(vec![keyword("k"), v.clone()]));
+            // #232 FP-164 (C5): undecodable abilities are refused by `from_json` instead.
+            let Some(d) = def_abilities_or_schema(vec![keyword("k"), v]) else {
+                continue;
+            };
+            let r = run0(&d);
             let l = assert_at(&r, LintId::MAX_ITER, E, &ab(0, 1));
             assert_eq!(l.location.ability_index, Some(1));
-            if AbilityAST(v).to_real().is_err() {
-                assert_at(&r, LintId::SCHEMA, E, &ab(0, 1));
-            }
+            assert_none(&r, LintId::SCHEMA);
         }
     }
 }
@@ -1110,7 +1153,8 @@ fn req_ing_009_max_iter_pass() {
             assert_none(&run0(&def_abilities(vec![v])), LintId::MAX_ITER);
         }
     }
-    // A large safe integer above u32 (decodability not asserted).
+    // A large safe integer above u32 (decodability not asserted). #232 FP-164 (C5): when it
+    // does not decode as the typed ability, `from_json` refuses it instead.
     let v = spell(
         "s",
         json!([repeat_while(
@@ -1118,14 +1162,18 @@ fn req_ing_009_max_iter_pass() {
             json!([draw()])
         )]),
     );
-    assert_none(&run0(&def_abilities(vec![v])), LintId::MAX_ITER);
+    if let Some(d) = def_abilities_or_schema(vec![v]) {
+        assert_none(&run0(&d), LintId::MAX_ITER);
+    }
     // Other ops, even with a bad maxIter member, are not this lint's concern.
     for v in [
         spell("s", json!([draw(), if_then(json!([draw()]))])),
         spell("s", json!([{"op":"NOT_REPEAT_WHILE","maxIter":0}])),
         spell("s", json!([{"op":"REPEAT","maxIter":-1}])),
     ] {
-        assert_none(&run0(&def_abilities(vec![v])), LintId::MAX_ITER);
+        if let Some(d) = def_abilities_or_schema(vec![v]) {
+            assert_none(&run0(&d), LintId::MAX_ITER);
+        }
     }
 }
 
@@ -1251,7 +1299,7 @@ fn req_ing_009_link_id_pass() {
     assert_none(&run0(&d), LintId::LINK_ID);
     // CR 607.1b: declared on face 0, referenced from face 1 of a nonmodal DFC
     let mut back = face(FaceKind::Back, "Test Back");
-    back.abilities = vec![AbilityAST(spell("s", json!([tap_linked("cross")])))];
+    back.abilities = vec![ability_of(spell("s", json!([tap_linked("cross")])))];
     let d = def_of(
         LayoutBehavior::DfcNonmodal,
         vec![face_with(vec![linked(&keyword("k"), &["cross"])]), back],
@@ -1263,7 +1311,9 @@ fn req_ing_009_link_id_pass() {
 
 struct Case {
     pass: (CardDefinitionDSL, LintContext),
-    fail: (CardDefinitionDSL, LintContext),
+    /// `None` when the failing content does not decode as a typed AST: #232 FP-164 (C5), the
+    /// same JSON was asserted to be refused by `from_json` with `Schema` when the case was built.
+    fail: Option<(CardDefinitionDSL, LintContext)>,
     severity: Severity,
     path: String,
 }
@@ -1280,11 +1330,12 @@ fn src_faces(faces: Vec<SourceFaceCharacteristics>, ci: Option<ColorBitmask>) ->
 
 fn case(id: LintId) -> Case {
     let one = |v: Value| def_abilities(vec![v]);
+    let one_fail = |v: Value| def_abilities_or_schema(vec![v]);
     let c0 = ctx0;
     if id == LintId::SCHEMA {
         Case {
             pass: (one(keyword("k")), c0()),
-            fail: (one(json!({"kind":"FLYING"})), c0()),
+            fail: one_fail(json!({"kind":"FLYING"})).map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
@@ -1292,10 +1343,8 @@ fn case(id: LintId) -> Case {
         // CR 605.1a
         Case {
             pass: (one(good_activated_mana("m")), c0()),
-            fail: (
-                one(with(&good_activated_mana("m"), "targets", one_target())),
-                c0(),
-            ),
+            fail: one_fail(with(&good_activated_mana("m"), "targets", one_target()))
+                .map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
@@ -1306,24 +1355,22 @@ fn case(id: LintId) -> Case {
                 one(tiered("CONTROL_ETB", "ENTERS", json!([modify_event()]))),
                 c0(),
             ),
-            fail: (
-                one(tiered("CONTROL_ETB", "DIES", json!([modify_event()]))),
-                c0(),
-            ),
+            fail: one_fail(tiered("CONTROL_ETB", "DIES", json!([modify_event()])))
+                .map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
     } else if id == LintId::LAYER_KIND {
         Case {
             pass: (one(static_ab("s", json!([char_effect(Some("6"))]))), c0()),
-            fail: (one(static_ab("s", json!([char_effect(None)]))), c0()),
+            fail: one_fail(static_ab("s", json!([char_effect(None)]))).map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
     } else if id == LintId::TEXT_COVERAGE {
         Case {
             pass: (text_def(3, &[(0, 2)], SupportStatus::AutoParsed), c0()),
-            fail: (text_def(3, &[(0, 1)], SupportStatus::AutoParsed), c0()),
+            fail: Some((text_def(3, &[(0, 1)], SupportStatus::AutoParsed), c0())),
             severity: E,
             path: text_path(),
         }
@@ -1334,10 +1381,8 @@ fn case(id: LintId) -> Case {
                 one(spell("s", json!([native_with(json!({"lookup":1}))]))),
                 c0(),
             ),
-            fail: (
-                one(spell("s", json!([native_with(json!({"lookBack":1}))]))),
-                c0(),
-            ),
+            fail: one_fail(spell("s", json!([native_with(json!({"lookBack":1}))])))
+                .map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
@@ -1350,13 +1395,11 @@ fn case(id: LintId) -> Case {
                 )),
                 c0(),
             ),
-            fail: (
-                one(spell(
-                    "s",
-                    json!([repeat_while(Some(json!(0)), json!([draw()]))]),
-                )),
-                c0(),
-            ),
+            fail: one_fail(spell(
+                "s",
+                json!([repeat_while(Some(json!(0)), json!([draw()]))]),
+            ))
+            .map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
@@ -1366,10 +1409,8 @@ fn case(id: LintId) -> Case {
                 one(spell("s", json!([create_token("test.token_a")]))),
                 token_ctx(),
             ),
-            fail: (
-                one(spell("s", json!([create_token("test.token_zz")]))),
-                token_ctx(),
-            ),
+            fail: one_fail(spell("s", json!([create_token("test.token_zz")])))
+                .map(|d| (d, token_ctx())),
             severity: E,
             path: a00(),
         }
@@ -1380,7 +1421,7 @@ fn case(id: LintId) -> Case {
                 one(linked(&spell("s", json!([tap_linked("l")])), &["l"])),
                 c0(),
             ),
-            fail: (one(spell("s", json!([tap_linked("l")]))), c0()),
+            fail: one_fail(spell("s", json!([tap_linked("l")]))).map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }
@@ -1399,7 +1440,7 @@ fn case(id: LintId) -> Case {
         };
         Case {
             pass: (d.clone(), mv(2)),
-            fail: (d, mv(3)),
+            fail: Some((d, mv(3))),
             severity: E,
             path: "faces[0]".to_string(),
         }
@@ -1419,7 +1460,7 @@ fn case(id: LintId) -> Case {
         };
         Case {
             pass: (d.clone(), col(ColorBitmask::GREEN)),
-            fail: (d, col(ColorBitmask::NONE)),
+            fail: Some((d, col(ColorBitmask::NONE))),
             severity: E,
             path: "faces[0]".to_string(),
         }
@@ -1431,7 +1472,7 @@ fn case(id: LintId) -> Case {
         good.color_identity = ColorBitmask::GREEN;
         Case {
             pass: (good, c0()),
-            fail: (d, c0()),
+            fail: Some((d, c0())),
             severity: E,
             path: "$".to_string(),
         }
@@ -1444,14 +1485,30 @@ fn case(id: LintId) -> Case {
 /// of that id) and a failing one (the expected finding, severity and exact location).
 #[test]
 fn req_ing_009_every_lint_has_pass_and_fail_case() {
+    // #232 FP-164: only the lints whose failing fixture is not a valid typed AST (an ability
+    // without `abilityId`, a CHAR effect without `layer`, `maxIter` 0) lose their lint-level
+    // fail case; every other lint keeps it.
+    let schema_only: BTreeSet<LintId> = LintId::ALL
+        .into_iter()
+        .filter(|id| case(*id).fail.is_none())
+        .collect();
+    let allowed: BTreeSet<LintId> = [LintId::SCHEMA, LintId::LAYER_KIND, LintId::MAX_ITER]
+        .into_iter()
+        .collect();
+    assert!(schema_only.is_subset(&allowed), "{schema_only:?}");
     for id in LintId::ALL {
         let c = case(id);
         let r = run(&c.pass.0, &c.pass.1);
         assert_none(&r, id);
-        let r = run(&c.fail.0, &c.fail.1);
+        // #232 FP-164 (C5): a failing content that cannot be typed was asserted to be refused
+        // by `from_json` with `Schema` when the case was built.
+        let Some(fail) = c.fail else {
+            continue;
+        };
+        let r = run(&fail.0, &fail.1);
         let l = assert_at(&r, id, c.severity, &c.path);
         assert_eq!(
-            parse_path(&c.fail.0, &c.path),
+            parse_path(&fail.0, &c.path),
             Some((l.location.face_index, l.location.ability_index))
         );
     }

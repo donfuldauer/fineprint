@@ -13,11 +13,15 @@ use std::collections::BTreeMap;
 
 use fineprint_dsl::card::{
     AbilityAST, CardDefinitionDSL, CardFaceDSL, ColorBitmask, CommanderEligibilityDSL, FaceKind,
-    LayoutBehavior, Legality, Origin, PartnerAbilityDSL, ProvenanceDSL, SupportStatus,
-    TextTokenStream, ValueExpressionAST,
+    LayoutBehavior, Legality, Origin, ProvenanceDSL, SupportStatus,
 };
 use fineprint_dsl::mana::{Color, ManaCostDSL, ManaSymbol};
 use serde_json::{Value, json};
+
+#[path = "../typed_ast_support/mod.rs"]
+mod typed_ast_support;
+#[allow(unused_imports)]
+pub use typed_ast_support::{ability_of, pa, tokens_of, tx, vx, wire};
 
 /// Distinctive marker string put in LITERAL token text and ability words; no lint message may
 /// contain it (S-0).
@@ -273,7 +277,7 @@ pub fn face(kind: FaceKind, name: &str) -> CardFaceDSL {
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![]),
+        text: tx(vec![]),
         abilities: vec![],
     }
 }
@@ -281,7 +285,7 @@ pub fn face(kind: FaceKind, name: &str) -> CardFaceDSL {
 /// A MAIN face with the given abilities and no text.
 pub fn face_with(abilities: Vec<Value>) -> CardFaceDSL {
     let mut f = face(FaceKind::Main, "Test Face");
-    f.abilities = abilities.into_iter().map(AbilityAST).collect();
+    f.abilities = abilities.into_iter().map(ability_of).collect();
     f
 }
 
@@ -330,17 +334,17 @@ pub fn clean_def() -> CardDefinitionDSL {
         ManaSymbol::Colored(Color::Blue),
     ]));
     front.card_types = vec!["Creature".to_string()];
-    front.power = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    front.toughness = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    front.text = TextTokenStream(tokens(6));
+    front.power = Some(vx(json!({"LITERAL": 1})));
+    front.toughness = Some(vx(json!({"LITERAL": 1})));
+    front.text = tx(tokens(6));
     front.abilities = vec![
-        AbilityAST(spanned(
+        ability_of(spanned(
             &with(&good_activated_mana("a0"), "abilityWord", json!(MARKER)),
             0,
             1,
         )),
-        AbilityAST(spanned(&linked(&keyword("a1"), &["l1"]), 2, 2)),
-        AbilityAST(spanned(
+        ability_of(spanned(&linked(&keyword("a1"), &["l1"]), 2, 2)),
+        ability_of(spanned(
             &with(
                 &replacement("a2", "ENTERS", json!([modify_event()])),
                 "tierHint",
@@ -349,7 +353,7 @@ pub fn clean_def() -> CardDefinitionDSL {
             3,
             4,
         )),
-        AbilityAST(spanned(
+        ability_of(spanned(
             &static_ab(
                 "a3",
                 json!([
@@ -364,9 +368,9 @@ pub fn clean_def() -> CardDefinitionDSL {
     ];
     let mut back = face(FaceKind::Back, "Test Back");
     back.color_indicator = Some(ColorBitmask::RED);
-    back.text = TextTokenStream(vec![lit("b0", MARKER), lit("b1", MARKER)]);
+    back.text = tx(vec![lit("b0", MARKER), lit("b1", MARKER)]);
     back.abilities = vec![
-        AbilityAST(spanned(
+        ability_of(spanned(
             &spell(
                 "b0",
                 json!([
@@ -378,13 +382,13 @@ pub fn clean_def() -> CardDefinitionDSL {
             0,
             1,
         )),
-        AbilityAST(spanned(&good_triggered_mana("b1", "RESOLVED"), 0, 0)),
+        ability_of(spanned(&good_triggered_mana("b1", "RESOLVED"), 0, 0)),
     ];
     let mut d = def_of(LayoutBehavior::DfcNonmodal, vec![front, back]);
     d.color_identity = or(ColorBitmask::BLUE, ColorBitmask::RED);
     d.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
-        partner_abilities: vec![PartnerAbilityDSL(
+        partner_abilities: vec![pa(
             json!({"abilityId":"p1","kind":"KEYWORD","keyword":"PARTNER"}),
         )],
     });
@@ -392,31 +396,49 @@ pub fn clean_def() -> CardDefinitionDSL {
     d
 }
 
-/// Every JSON position of `d` whose typed view fails, as `(path, error)`; used by the fixture
-/// self-check so that a fixture meant to be clean is proven decodable by this suite itself.
+/// Every AST position of `d` whose wire form does not decode back to the same typed value, as
+/// `(path, error)`; used by the fixture self-check so that a fixture meant to be clean is proven
+/// decodable by this suite itself. #232 FP-164: the positions are typed, so this is the
+/// single-spelling round trip `decode(encode(x)) == x` of each one (formerly `to_real`).
 pub fn undecodable_positions(d: &CardDefinitionDSL) -> Vec<(String, String)> {
+    fn check<T>(x: &T, path: String, out: &mut Vec<(String, String)>)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq,
+    {
+        let r = serde_json::to_value(x)
+            .map_err(|e| e.to_string())
+            .and_then(|v| serde_json::from_value::<T>(v).map_err(|e| e.to_string()))
+            .and_then(|back| {
+                if &back == x {
+                    Ok(())
+                } else {
+                    Err("does not round-trip".to_string())
+                }
+            });
+        if let Err(e) = r {
+            out.push((path, e));
+        }
+    }
     let mut out = Vec::new();
     for (i, f) in d.faces.iter().enumerate() {
-        if let Some(Err(e)) = f.power.as_ref().map(ValueExpressionAST::to_real) {
-            out.push((format!("faces[{i}].power"), e));
+        if let Some(p) = &f.power {
+            check(p, format!("faces[{i}].power"), &mut out);
         }
-        if let Some(Err(e)) = f.toughness.as_ref().map(ValueExpressionAST::to_real) {
-            out.push((format!("faces[{i}].toughness"), e));
+        if let Some(t) = &f.toughness {
+            check(t, format!("faces[{i}].toughness"), &mut out);
         }
-        if let Err(e) = f.text.to_real() {
-            out.push((format!("faces[{i}].text"), e));
-        }
+        check(&f.text, format!("faces[{i}].text"), &mut out);
         for (j, a) in f.abilities.iter().enumerate() {
-            if let Err(e) = a.to_real() {
-                out.push((format!("faces[{i}].abilities[{j}]"), e));
-            }
+            check(a, format!("faces[{i}].abilities[{j}]"), &mut out);
         }
     }
     if let Some(c) = &d.commander_eligibility {
         for (k, p) in c.partner_abilities.iter().enumerate() {
-            if let Err(e) = p.to_real() {
-                out.push((format!("commanderEligibility.partnerAbilities[{k}]"), e));
-            }
+            check(
+                p,
+                format!("commanderEligibility.partnerAbilities[{k}]"),
+                &mut out,
+            );
         }
     }
     out
@@ -424,7 +446,7 @@ pub fn undecodable_positions(d: &CardDefinitionDSL) -> Vec<(String, String)> {
 
 /// Asserts that the single ability `v` decodes (a fixture mistake fails here, not in a lint).
 pub fn assert_decodes(v: &Value) {
-    if let Err(e) = AbilityAST(v.clone()).to_real() {
+    if let Err(e) = serde_json::from_value::<AbilityAST>(v.clone()) {
         panic!("fixture ability does not decode: {e}\n{v}");
     }
 }
@@ -432,7 +454,85 @@ pub fn assert_decodes(v: &Value) {
 /// Asserts that the single ability `v` does NOT decode.
 pub fn assert_undecodable(v: &Value) {
     assert!(
-        AbilityAST(v.clone()).to_real().is_err(),
+        serde_json::from_value::<AbilityAST>(v.clone()).is_err(),
         "fixture ability unexpectedly decodes: {v}"
     );
+}
+
+// ---------------------------------------------------------------- #232 FP-164 typed positions
+
+/// `d` sealed, as a JSON document, with each `(JSON pointer, value)` patch applied (an array
+/// index equal to the length appends) and `definitionHash` recomputed independently (RFC 8785
+/// + SHA-256 over the document without it).
+pub fn patched_document(d: &CardDefinitionDSL, patches: &[(&str, Value)]) -> Value {
+    let mut v = serde_json::to_value(d.clone().seal().expect("fixture seals")).unwrap();
+    for (ptr, x) in patches {
+        let (parent, last) = ptr.rsplit_once('/').expect("pointer");
+        match v
+            .pointer_mut(parent)
+            .unwrap_or_else(|| panic!("{ptr}: no parent"))
+        {
+            Value::Array(items) => {
+                let i: usize = last.parse().expect("index");
+                if i == items.len() {
+                    items.push(x.clone());
+                } else {
+                    items[i] = x.clone();
+                }
+            }
+            Value::Object(m) => {
+                m.insert(last.to_string(), x.clone());
+            }
+            other => panic!("{ptr}: parent is {other}"),
+        }
+    }
+    let obj = v.as_object_mut().expect("object");
+    obj.remove("definitionHash");
+    // A patch the document-level checks refuse (a noncharacter, an unsafe or non-integer number)
+    // has no canonical form; it keeps a placeholder digest, `from_json` refuses it first anyway.
+    let h = fineprint_dsl::canonical::canonicalize(
+        &serde_json::to_vec(&Value::Object(obj.clone())).unwrap(),
+    )
+    .map(|bytes| fineprint_base::hash::sha256(&bytes).to_hex())
+    .unwrap_or_else(|_| "0".repeat(64));
+    obj.insert("definitionHash".to_string(), json!(h));
+    v
+}
+
+/// #232 FP-164 (C5, REQ-DSL-010): AST positions of a `CardDefinitionDSL` are valid by
+/// construction, so lint input can no longer hold invalid AST content. Where a lint test fed such
+/// content, it now asserts that the same JSON is refused: plain serde of the definition fails and
+/// `from_json` reports `Schema` (with a correctly recomputed `definitionHash`).
+pub fn assert_document_schema_rejected(doc: &Value, what: &str) {
+    assert!(
+        serde_json::from_value::<CardDefinitionDSL>(doc.clone()).is_err(),
+        "{what}: plain serde accepted invalid AST content"
+    );
+    let bytes = serde_json::to_vec(doc).unwrap();
+    // Document-level checks run before the typed schema (C4): content that fails them is a
+    // `Canonical` error, everything else is `Schema`.
+    let document_level = fineprint_dsl::canonical::canonicalize(&bytes).is_err();
+    match CardDefinitionDSL::from_json(&bytes) {
+        Err(fineprint_dsl::card::CardDefinitionError::Schema(_)) if !document_level => {}
+        Err(fineprint_dsl::card::CardDefinitionError::Canonical(_)) if document_level => {}
+        other => panic!("{what}: expected from_json Schema, got {other:?}"),
+    }
+}
+
+/// `def_abilities(abilities)` when every ability decodes as the typed `AbilityAST`; otherwise
+/// asserts (C5) that the same definition document with these abilities on face 0 is refused by
+/// `from_json` with `Schema`, and returns `None`.
+pub fn def_abilities_or_schema(abilities: Vec<Value>) -> Option<CardDefinitionDSL> {
+    if abilities
+        .iter()
+        .all(|a| serde_json::from_value::<AbilityAST>(a.clone()).is_ok())
+    {
+        return Some(def_abilities(abilities));
+    }
+    let doc = patched_document(
+        &def_abilities(vec![]),
+        &[("/faces/0/abilities", Value::Array(abilities.clone()))],
+    );
+    assert_document_schema_rejected(&doc, &format!("abilities {}", Value::Array(abilities)));
+    None
 }

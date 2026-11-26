@@ -313,7 +313,7 @@ fn req_obj_003_613_2c_later_layers_apply_on_top_of_the_profile() {
             let mut want_abilities = want.abilities.clone();
             want_abilities.push(kw_ability("test.fd_granted", "flying"));
             assert_eq!(got.abilities, want_abilities);
-            assert!(got.rules_text.0.is_empty());
+            assert!(got.rules_text.is_empty());
 
             // CR 613.2c, 707.2: copiable values are the profile, without layers 2-7.
             let cc = norm(&copiable_characteristics(&effects, &env(), oid(X)).unwrap());

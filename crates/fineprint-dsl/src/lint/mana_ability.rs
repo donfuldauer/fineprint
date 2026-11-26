@@ -25,7 +25,7 @@ const LIBRARY_OPS: [&str; 4] = ["SEARCH_LIBRARY", "MILL", "DRAW", "PUT_ON_TOP_OR
 /// Checks every typed ability that declares `isManaAbility: true`.
 pub(super) fn check(_def: &CardDefinitionDSL, facts: &CardFacts<'_>, out: &mut Vec<Lint>) {
     for a in &facts.abilities {
-        let Ok(typed) = &a.typed else { continue };
+        let typed = a.typed;
         if typed.base().is_mana_ability != Some(true) {
             continue;
         }

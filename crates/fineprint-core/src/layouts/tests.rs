@@ -125,14 +125,14 @@ fn face(kind: FaceKind, tag: &str, mana_cost: Option<&str>, card_types: &[&str])
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![format!("test.text.{tag}").into()]),
-        abilities: vec![AbilityAST(format!("test.ability.{tag}").into())],
+        text: tagged_text(tag),
+        abilities: vec![test_ability(&format!("test.ability.{tag}"))],
     }
 }
 
 fn with_pt(mut f: CardFaceDSL, p: i64, t: i64) -> CardFaceDSL {
-    f.power = Some(ValueExpressionAST(p.into()));
-    f.toughness = Some(ValueExpressionAST(t.into()));
+    f.power = Some(ValueExpressionAST::Literal(p));
+    f.toughness = Some(ValueExpressionAST::Literal(t));
     f
 }
 
@@ -480,21 +480,21 @@ fn printed_layouts_every_zone_cast_status() {
 fn leveler_uppermost_pt_and_gating() {
     let mut d = valid(LayoutBehavior::Leveler);
     d.faces[0].abilities = vec![
-        AbilityAST("test.level_up".into()),
-        AbilityAST("test.band_1".into()),
-        AbilityAST("test.band_2".into()),
+        test_ability("test.level_up"),
+        test_ability("test.band_1"),
+        test_ability("test.band_2"),
     ];
     for zone in ZoneKind::ALL {
         let c = base(&d, q(zone)).unwrap();
-        assert_eq!(c.power, Some(ValueExpressionAST(4.into())));
-        assert_eq!(c.toughness, Some(ValueExpressionAST(4.into())));
+        assert_eq!(c.power, Some(ValueExpressionAST::Literal(4)));
+        assert_eq!(c.toughness, Some(ValueExpressionAST::Literal(4)));
         assert_eq!(c.abilities, d.faces[0].abilities);
     }
     assert_eq!(
         gating(&d),
         Ok(Some(Gating::Leveler {
-            uppermost_power: Some(ValueExpressionAST(4.into())),
-            uppermost_toughness: Some(ValueExpressionAST(4.into())),
+            uppermost_power: Some(ValueExpressionAST::Literal(4)),
+            uppermost_toughness: Some(ValueExpressionAST::Literal(4)),
             abilities: d.faces[0].abilities.clone(),
         }))
     );
@@ -510,10 +510,7 @@ fn saga_class_case_gating() {
         LayoutBehavior::Case,
     ] {
         let mut d = valid(layout);
-        d.faces[0].abilities = vec![
-            AbilityAST("test.second".into()),
-            AbilityAST("test.first".into()),
-        ];
+        d.faces[0].abilities = vec![test_ability("test.second"), test_ability("test.first")];
         let abilities = d.faces[0].abilities.clone();
         let expected = match layout {
             LayoutBehavior::Saga => Gating::Saga { abilities },
@@ -577,9 +574,9 @@ fn split_off_stack_combined() {
             assert_eq!(c.supertypes, set(&["Legendary"]));
             assert_eq!(c.card_types, set(&["Instant", "Sorcery"]));
             assert_eq!(c.subtypes, l.subtypes);
-            let mut text = l.rules_text.0.clone();
-            text.extend(r.rules_text.0.clone());
-            assert_eq!(c.rules_text, TextTokenStream(text));
+            let mut text = l.rules_text.tokens().to_vec();
+            text.extend(r.rules_text.tokens().iter().cloned());
+            assert_eq!(c.rules_text, TextTokenStream::new(text).unwrap());
             let mut abilities = l.abilities.clone();
             abilities.extend(r.abilities.clone());
             assert_eq!(c.abilities, abilities);
@@ -742,8 +739,8 @@ fn flip_flipped_on_battlefield() {
         assert_eq!(c.supertypes, set(&["Legendary"]));
         assert_eq!(c.card_types, alt.card_types);
         assert_eq!(c.subtypes, alt.subtypes);
-        assert_eq!(c.power, Some(ValueExpressionAST(5.into())));
-        assert_eq!(c.toughness, Some(ValueExpressionAST(6.into())));
+        assert_eq!(c.power, Some(ValueExpressionAST::Literal(5)));
+        assert_eq!(c.toughness, Some(ValueExpressionAST::Literal(6)));
         assert_eq!(c.loyalty, Some(7));
         assert_eq!(c.defense, Some(8));
         assert_eq!(c.hand_modifier, Some(-1));
@@ -1030,8 +1027,8 @@ fn prototype_prototyped_stack_and_battlefield() {
             let query = q(zone).with_cast(CastChoice::Prototype).with_status(s);
             let c = base(&d, query).unwrap();
             assert_eq!(c.mana_cost, Some(cost("{X}{1}{R}")));
-            assert_eq!(c.power, Some(ValueExpressionAST(2.into())));
-            assert_eq!(c.toughness, Some(ValueExpressionAST(1.into())));
+            assert_eq!(c.power, Some(ValueExpressionAST::Literal(2)));
+            assert_eq!(c.toughness, Some(ValueExpressionAST::Literal(1)));
             assert_eq!(c.colors, ColorBitmask::RED);
             assert_eq!(
                 c.colors,
@@ -1258,4 +1255,52 @@ fn nonmodal_copying_back_face_zone_matrix() {
             "{zone:?}"
         );
     }
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t.<tag>` whose text is `test.text.<tag>`
+/// (R5; #232: replaces the former string placeholder text; ids differ between faces).
+fn tagged_text(tag: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: format!("t.{tag}"),
+        text: format!("test.text.{tag}"),
+    }])
+    .expect("valid synthetic text")
+}
+
+// REQ-OBJ-002, REQ-DSL-012; CR 709.4c (#232): the combined rules text of a split card holds the
+// left half's tokens, then the right half's; a right-half token whose id the left half already
+// uses gets `'` appended (until unique), so the combined stream stays a valid token stream.
+#[test]
+fn split_combined_text_keeps_ids_unique() {
+    let d = split_def();
+    let mut l = printed(&d, FaceKind::LeftHalf);
+    let mut r = printed(&d, FaceKind::RightHalf);
+    let token = |id: &str, text: &str| fineprint_dsl::text::TextToken::Literal {
+        id: id.to_owned(),
+        text: text.to_owned(),
+    };
+    l.rules_text = TextTokenStream::new(vec![token("t1", "a"), token("t1'", "b")]).unwrap();
+    r.rules_text = TextTokenStream::new(vec![token("t1", "c"), token("t2", "d")]).unwrap();
+    let c = super::split::combined(l, r);
+    assert_eq!(
+        c.rules_text,
+        TextTokenStream::new(vec![
+            token("t1", "a"),
+            token("t1'", "b"),
+            token("t1''", "c"),
+            token("t2", "d"),
+        ])
+        .unwrap()
+    );
 }

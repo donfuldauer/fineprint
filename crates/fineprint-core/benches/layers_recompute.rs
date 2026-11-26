@@ -17,10 +17,10 @@ use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_core::layers::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, Evaluated, Invalidation,
     LayerCache, LayerEnvironment, LayerModification, MatchContext, ObjectBase, evaluate_all,
-    literal, literal_of,
+    keyword_id, literal, literal_of,
 };
 use fineprint_core::objects::Characteristics;
-use fineprint_dsl::ability::Layer;
+use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST, Layer};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::{ObjectSelectorAST, PredicateAST, SelectorFilter, WordRef};
 
@@ -35,16 +35,12 @@ fn words(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// A synthetic keyword ability with the keyword name of `word` (for example `VIGILANCE`).
 fn keyword(word: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("test.{word}")),
-            ("keyword", word.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(KeywordInstanceAST::new(
+        AbilityBase::new(format!("test.{word}")),
+        keyword_id(word),
+    ))
 }
 
 fn filter(pred: PredicateAST) -> Affected {
@@ -89,7 +85,7 @@ fn permanent(i: u64) -> ObjectBase {
         supertypes: BTreeSet::new(),
         card_types: words(&["Creature"]),
         subtypes: words(&[SUBTYPES[usize::try_from(player).unwrap_or(0)]]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: vec![keyword("vigilance")],
         power: Some(literal(size)),
         toughness: Some(literal(size + 1)),
@@ -99,7 +95,8 @@ fn permanent(i: u64) -> ObjectBase {
         life_modifier: None,
     };
     if i <= PLAYERS {
-        let cda = ValueExpressionAST("test.count_controlled".into());
+        // A characteristic-defining expression the board evaluates per controller.
+        let cda = ValueExpressionAST::Memory("test.count_controlled".to_owned());
         c.power = Some(cda.clone());
         c.toughness = Some(cda);
     } else if i.is_multiple_of(5) {

@@ -55,13 +55,12 @@
 //! the [`OrderRecord`] of the order used, ready for a rules-trace event.
 //!
 //! **Text changes** (REQ-DSL-012, SRS 14.5). [`LayerModification::ReplaceTextWord`] is the
-//! layer 3 text-changing effect `REPLACE_TEXT_WORD` (CR 612.1, 613.1c): it decodes the object's
-//! rules text into a token stream ([`decode_rules_text`]), replaces every rewritable word of its
-//! category whose value is exactly `from` by `to` ([`rewrite_text_words`]) and writes the text
-//! back only if a word changed ([`encode_rules_text`]). Literal text, name references (CR 201.5,
-//! 612.2) and card-name words are never rewritten; category `CARD_NAME` and empty or
-//! noncharacter words are rejected at registration (CR 612.2). Text that is empty or does not
-//! decode is left unchanged. Only the object's own text changes: abilities granted by effects
+//! layer 3 text-changing effect `REPLACE_TEXT_WORD` (CR 612.1, 613.1c): it replaces every
+//! rewritable word of the object's rules text (a typed token stream) of its category whose value
+//! is exactly `from` by `to` ([`rewrite_text_words`]) and writes the text back only if a word
+//! changed. Literal text, name references (CR 201.5, 612.2) and card-name words are never
+//! rewritten; category `CARD_NAME` and empty or noncharacter words are rejected at registration
+//! (CR 612.2). Empty text is left unchanged. Only the object's own text changes: abilities granted by effects
 //! are not rewritten (CR 612.3). Chained text effects are ordered by the generic dependency
 //! trial above (CR 613.8). AST nodes read rewritable words by token id: [`resolve_word_ref`],
 //! [`text_token_matches`], [`resolve_predicate_words`] and [`resolve_selector_words`] read them
@@ -212,7 +211,7 @@ pub use copy::{
     CopiableValues, CopiedCharacteristic, CopyException, ValueSource, copiable_characteristics,
     copiable_effect, copiable_values, merge_effect, modification_effect,
 };
-pub(crate) use encode::{effect_links, provenance_from_parts, provenance_parts, put_json};
+pub(crate) use encode::{effect_links, provenance_from_parts, provenance_parts, put_typed};
 pub use error::LayerError;
 pub use facedown::{
     FaceDownRefusal, FaceDownTarget, FaceUpRefusal, face_down_effect, turn_face_down, turn_face_up,
@@ -221,8 +220,8 @@ pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
 pub use ordering::{OrderItem, OrderRecord, OrderStep, Selection};
 pub use pipeline::{
     Evaluated, KEYWORD_COUNTER_KINDS, LayerEnvironment, MatchContext, ObjectBase, evaluate,
-    evaluate_all, evaluate_with_order, keyword_counter_ability, keyword_counter_keyword, literal,
-    literal_of, pt_counter_delta,
+    evaluate_all, evaluate_with_order, keyword_counter_ability, keyword_counter_keyword,
+    keyword_id, literal, literal_of, pt_counter_delta,
 };
 pub use post::{
     AppliedPlayerEffect, CostStages, DEFAULT_LAND_PLAYS, DEFAULT_MAX_HAND_SIZE, PlayerAffected,
@@ -235,9 +234,8 @@ pub use registry::{
     ManaValueProvenance,
 };
 pub use text::{
-    TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
-    resolve_selector_words, resolve_value_words, resolve_word_ref, rewrite_text_words,
-    text_token_matches,
+    TextWordError, resolve_predicate_words, resolve_selector_words, resolve_value_words,
+    resolve_word_ref, rewrite_text_words, text_token_matches,
 };
 pub use timestamps::{
     CounterHolder, SimultaneousStamp, StampReason, TimestampLedger, restamp_static_effects,

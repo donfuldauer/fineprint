@@ -54,7 +54,7 @@ fn object(name: &str, card_types: &[&str], pt: Option<(i64, i64)>) -> Characteri
         supertypes: BTreeSet::new(),
         card_types: strings(card_types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: pt.map(|(p, _)| literal(p)),
         toughness: pt.map(|(_, t)| literal(t)),
@@ -67,7 +67,7 @@ fn object(name: &str, card_types: &[&str], pt: Option<(i64, i64)>) -> Characteri
 
 /// The marker ability that generates the static effects of the removal tests.
 fn generator() -> AbilityAST {
-    AbilityAST("test.ability.generator".into())
+    test_ability("test.ability.generator")
 }
 
 fn filter(pred: PredicateAST) -> ObjectSelectorAST {
@@ -1588,4 +1588,15 @@ fn bad_link_display() {
         LayerError::BadLink(e(7)).to_string(),
         "effect 7 links to no part of an earlier layer of its group"
     );
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
 }

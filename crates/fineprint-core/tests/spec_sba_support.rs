@@ -116,28 +116,38 @@ fn try_via_msgpack<In: serde::Serialize, Out: serde::de::DeserializeOwned>(
     rmp_serde::from_slice(&bytes).ok()
 }
 
-/// `ValueExpressionAST::Literal(n)` in the placeholder form held by `Characteristics`.
+/// `ValueExpressionAST::Literal(n)` (#232 FP-164: `Characteristics` holds the typed AST).
 pub fn lit(n: i64) -> ValueExpressionAST {
-    via_msgpack(&fineprint_dsl::expr::ValueExpressionAST::Literal(n))
+    ValueExpressionAST::Literal(n)
 }
 
-/// Reads a literal placeholder value (`{"LITERAL": n}` or a bare integer).
+/// Reads a literal value (`{"LITERAL": n}`, the only literal form of the typed AST).
 pub fn literal_of(v: &ValueExpressionAST) -> Option<i64> {
-    if let Some(fineprint_dsl::expr::ValueExpressionAST::Literal(n)) =
-        try_via_msgpack::<_, fineprint_dsl::expr::ValueExpressionAST>(v)
-    {
-        return Some(n);
+    match v {
+        ValueExpressionAST::Literal(n) => Some(*n),
+        _ => None,
     }
-    try_via_msgpack::<_, i64>(v)
 }
 
-/// A keyword ability with the given ability id and keyword.
+/// A keyword ability with the given ability id and keyword, written in rules-text form and
+/// stored as the DSL keyword name (`"indestructible"` → `"INDESTRUCTIBLE"`, #232 FP-164).
 pub fn kw_ability(id: &str, kw: &str) -> AbilityAST {
-    let mut m: BTreeMap<&str, &str> = BTreeMap::new();
-    m.insert("kind", "KEYWORD");
-    m.insert("abilityId", id);
-    m.insert("keyword", kw);
-    via_msgpack(&m)
+    let keyword: String = kw
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                '_'
+            } else {
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "KEYWORD",
+        "keyword": keyword,
+    }))
+    .expect("valid synthetic keyword ability")
 }
 
 fn set(items: &[&str]) -> BTreeSet<String> {
@@ -154,7 +164,7 @@ pub fn blank(name: &str, types: &[&str]) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,

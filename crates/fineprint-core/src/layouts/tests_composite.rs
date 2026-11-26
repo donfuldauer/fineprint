@@ -93,23 +93,28 @@ fn colors_of(text: &str) -> ColorBitmask {
 }
 
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 fn abilities(tags: &[&str]) -> Vec<AbilityAST> {
     tags.iter().map(|t| ability(t)).collect()
 }
 
+/// A rules text of one LITERAL token `t.<tag>` (text `test.text.<tag>`) per tag.
 fn texts(tags: &[&str]) -> TextTokenStream {
-    TextTokenStream(
+    TextTokenStream::new(
         tags.iter()
-            .map(|t| format!("test.text.{t}").into())
+            .map(|t| fineprint_dsl::text::TextToken::Literal {
+                id: format!("t.{t}"),
+                text: format!("test.text.{t}"),
+            })
             .collect(),
     )
+    .expect("valid synthetic text")
 }
 
 fn pt(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(n.into())
+    ValueExpressionAST::Literal(n)
 }
 
 /// A synthetic face whose name, text and ability are distinguishable by `tag`.
@@ -1422,4 +1427,15 @@ fn composite_layout_sweep_deterministic() {
             assert_eq!(layout.gating(d), layout.gating(d));
         }
     }
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
 }

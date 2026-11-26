@@ -34,7 +34,7 @@ use fineprint_dsl::card::AbilityAST;
 use super::{GameState, StateError};
 use crate::layers::{
     ContinuousEffect, ContinuousEffects, CounterHolder, EffectOrigin, LayerEnvironment, LayerError,
-    SimultaneousStamp, StampReason, TimestampLedger, put_json, restamp_static_effects,
+    SimultaneousStamp, StampReason, TimestampLedger, put_typed, restamp_static_effects,
     stamp_resolved_effect, stamp_static_and_resolved,
 };
 
@@ -64,7 +64,7 @@ impl CanonicalEncode for GeneratingAbility {
     /// canonical JSON, or the structural fallback; `crate::layers` encoding documentation).
     fn encode_canonical(&self, out: &mut Vec<u8>) {
         self.source.encode_canonical(out);
-        put_json(out, &self.ability);
+        put_typed(out, &self.ability);
     }
 }
 

@@ -10,19 +10,20 @@
 //! [`LintLocation`] (face, ability, JSON path and text span). The report is sorted by a total key
 //! and de-duplicated, so the output is a pure, deterministic function of the input (R3).
 //!
-//! The checks take untrusted definitions (client overrides, R12): the AST positions of a
-//! definition are raw `serde_json::Value` wrappers, so every check is total. Raw JSON is walked
-//! with an explicit stack (never recursion), whatever its depth; the typed decoders guard their
-//! own depth. Messages carry only identifiers the definition itself holds (ability ids, token
+//! The checks take untrusted definitions (client overrides, R12), so every check is total. The
+//! AST positions of a definition are the real typed ASTs (docs/DECISIONS.md, "#232 FP-164 —
+//! Lint schema check after typed storage"); the checks that read JSON read each ability's JSON
+//! form, encoded once with the depth-checked serializer and walked with an explicit stack (never
+//! recursion). Messages carry only identifiers the definition itself holds (ability ids, token
 //! ids, link ids, JSON member names), clipped to a short length.
 //!
 //! Raw versus typed (docs/DECISIONS.md, "#16 FP-015 — Raw versus typed lint inputs"): the
 //! checks for violations the typed decoders make unrepresentable (`FPL-LOOK-BACK`,
 //! `FPL-MAX-ITER`, `FPL-LAYER-KIND`) and the structural checks (`FPL-LINK-ID`,
-//! `FPL-TOKEN-REF`, the span reading of `FPL-TEXT-COVERAGE`) read the raw JSON of every ability,
-//! decodable or not; `FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the typed parts of the
-//! characteristics checks run only where `to_real` succeeds. `FPL-SCHEMA` reports every position
-//! that fails to decode, in addition.
+//! `FPL-TOKEN-REF`, the span reading of `FPL-TEXT-COVERAGE`) read the JSON form of every
+//! ability; `FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the characteristics checks read the typed
+//! abilities, always. `FPL-SCHEMA` reports every position whose typed value does not encode (a
+//! hand-built value that breaks an invariant of its type), in addition.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -310,17 +311,28 @@ pub struct LintContext {
 /// nesting, wrong types, `null`, huge integers, no faces) makes it panic or overflow the stack.
 #[must_use]
 pub fn lint_definition(def: &CardDefinitionDSL, ctx: &LintContext) -> LintReport {
-    let facts = walk::CardFacts::collect(def);
+    let raw = walk::RawJson::of(def);
+    let facts = walk::CardFacts::collect(def, &raw);
+    lint_facts(def, &facts, ctx)
+}
+
+/// Runs every check over `facts` (the facts of `def`) and returns the sorted, de-duplicated
+/// report.
+fn lint_facts(
+    def: &CardDefinitionDSL,
+    facts: &walk::CardFacts<'_>,
+    ctx: &LintContext,
+) -> LintReport {
     let mut out = Vec::new();
-    schema::check(def, &facts, &mut out);
-    mana_ability::check(def, &facts, &mut out);
-    replacement::check(def, &facts, &mut out);
-    statics::check(def, &facts, &mut out);
-    text::check(def, &facts, &mut out);
-    walk::check_raw(&facts, &mut out);
-    links::check_tokens(def, &facts, ctx, &mut out);
-    links::check_links(&facts, &mut out);
-    characteristics::check(def, &facts, ctx, &mut out);
+    schema::check(def, facts, &mut out);
+    mana_ability::check(def, facts, &mut out);
+    replacement::check(def, facts, &mut out);
+    statics::check(def, facts, &mut out);
+    text::check(def, facts, &mut out);
+    walk::check_raw(facts, &mut out);
+    links::check_tokens(def, facts, ctx, &mut out);
+    links::check_links(facts, &mut out);
+    characteristics::check(def, facts, ctx, &mut out);
     out.sort_by(|a, b| a.key().cmp(&b.key()));
     out.dedup();
     LintReport { lints: out }

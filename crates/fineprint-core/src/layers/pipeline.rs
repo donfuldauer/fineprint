@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
-use fineprint_dsl::ability::Layer;
+use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST, Layer};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
@@ -239,39 +239,50 @@ pub trait LayerEnvironment {
     }
 }
 
-/// The number of a literal power or toughness: a JSON integer or `{"LITERAL": n}`; `None` for
-/// any other expression.
+/// The number of a literal power or toughness (`{"LITERAL": n}`); `None` for any other
+/// expression.
 #[must_use]
 pub fn literal_of(expr: &ValueExpressionAST) -> Option<i64> {
-    if let Some(n) = expr.0.as_i64() {
-        return Some(n);
+    match expr {
+        ValueExpressionAST::Literal(n) => Some(*n),
+        _ => None,
     }
-    let object = expr.0.as_object()?;
-    if object.len() != 1 {
-        return None;
-    }
-    object.get("LITERAL")?.as_i64()
 }
 
-/// The literal power or toughness `n` (a JSON integer, the form card faces use).
+/// The literal power or toughness `n` (`{"LITERAL": n}`, the form card faces use).
 #[must_use]
 pub fn literal(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(n.into())
+    ValueExpressionAST::Literal(n)
 }
 
-/// The keyword ability a keyword counter of `kind` grants (CR 122.1b): kind `KEYWORD`, ability
-/// id `counter:<kind>`, keyword `<kind>`.
+/// The keyword name of a keyword ability the engine builds from a lower-case keyword or counter
+/// name: ASCII letters upper-cased, ASCII digits kept, every other character `_`, so
+/// `"first strike"` gives `"FIRST_STRIKE"` and `"hexproof from red"` gives
+/// `"HEXPROOF_FROM_RED"` (the `[A-Z][A-Z0-9_]*` form a `KEYWORD` ability requires, REQ-DSL-005;
+/// docs/DECISIONS.md "#232 FP-164 — Typed card AST positions"). A name that is already a
+/// keyword name is unchanged. The result is a valid keyword name whenever `name` starts with an
+/// ASCII letter.
+#[must_use]
+pub fn keyword_id(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The keyword ability a keyword counter of `kind` grants (CR 122.1b): a `KEYWORD` ability with
+/// ability id `counter:<kind>` and keyword [`keyword_id`] of `kind`.
 #[must_use]
 pub fn keyword_counter_ability(kind: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("counter:{kind}")),
-            ("keyword", kind.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(KeywordInstanceAST::new(
+        AbilityBase::new(format!("counter:{kind}")),
+        keyword_id(kind),
+    ))
 }
 
 /// The keyword a keyword counter of `kind` grants (CR 122.1b): `Some(kind)` when `kind` is one of
@@ -302,21 +313,24 @@ pub(super) fn is_variant_of(candidate: &str, name: &str) -> bool {
 }
 
 /// Whether `ability` is a keyword ability that removing keyword `keyword` removes (CR 613.1f):
-/// its keyword is `keyword` exactly, or `keyword` is hexproof and its keyword is a
-/// "hexproof from [quality]" variant ([`is_variant_of`], CR 702.11e).
+/// a `KEYWORD` ability whose keyword is [`keyword_id`] of `keyword`, or, when `keyword` is
+/// hexproof, the keyword name of a "hexproof from [quality]" variant: that name, `_`, then a
+/// non-empty rest that does not start with `_` (CR 702.11e).
 fn is_keyword(ability: &AbilityAST, keyword: &str) -> bool {
-    let Some(object) = ability.0.as_object() else {
+    let AbilityAST::Keyword(instance) = ability else {
         return false;
     };
-    if object.get("kind").and_then(|k| k.as_str()) != Some("KEYWORD") {
-        return false;
-    }
-    let Some(candidate) = object.get("keyword").and_then(|k| k.as_str()) else {
-        return false;
-    };
+    let wanted = keyword_id(keyword);
+    let candidate = instance.keyword.as_str();
     // CR 702.11e: losing hexproof loses every "hexproof from [quality]" ability.
-    candidate == keyword
-        || (REMOVAL_REMOVES_VARIANTS.contains(&keyword) && is_variant_of(candidate, keyword))
+    candidate == wanted
+        || (REMOVAL_REMOVES_VARIANTS
+            .iter()
+            .any(|name| keyword_id(name) == wanted)
+            && candidate
+                .strip_prefix(wanted.as_str())
+                .and_then(|rest| rest.strip_prefix('_'))
+                .is_some_and(|param| !param.is_empty() && !param.starts_with('_')))
 }
 
 /// The per-counter (power, toughness) change of a P/T counter kind `+X/+Y` or `-X/-Y`
@@ -820,7 +834,7 @@ mod static_controller_tests {
             supertypes: BTreeSet::new(),
             card_types: ["Artifact".to_owned()].into_iter().collect(),
             subtypes: BTreeSet::new(),
-            rules_text: TextTokenStream(Vec::new()),
+            rules_text: TextTokenStream::default(),
             abilities: Vec::new(),
             power: None,
             toughness: None,

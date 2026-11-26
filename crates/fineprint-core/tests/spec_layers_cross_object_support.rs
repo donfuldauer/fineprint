@@ -25,7 +25,7 @@ use fineprint_core::layers::{
     evaluate_all, evaluate_with_order, literal, literal_of,
 };
 use fineprint_core::objects::Characteristics;
-use fineprint_dsl::ability::Layer;
+use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST, Layer};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::{ObjectSelectorAST, PredicateAST, SelectorFilter, WordRef};
 
@@ -64,8 +64,10 @@ pub const COUNT_KEY: &str = "TEST_COUNT_CREATURES_YOU_CONTROL";
 // ---------------------------------------------------------------------------------------------
 
 /// The non-literal CDA expression "number of creatures your controller controls" (CR 604.3).
+/// #232 FP-164: a valid typed expression the test environment recognises, `{"MEMORY": COUNT_KEY}`
+/// (formerly the free-form placeholder `{COUNT_KEY: 0}`).
 pub fn count_expr() -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!({ COUNT_KEY: 0 }))
+    ValueExpressionAST::Memory(COUNT_KEY.to_owned())
 }
 
 /// A synthetic colorless creature with literal P/T, no subtypes and no abilities.
@@ -78,7 +80,7 @@ pub fn creature(power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -108,26 +110,47 @@ pub fn noncreature(card_type: &str) -> Characteristics {
     c
 }
 
-/// A synthetic ability `{"kind":"KEYWORD","abilityId":id,"keyword":kw}`.
-pub fn keyword_ability(kw: &str, id: &str) -> AbilityAST {
-    AbilityAST(serde_json::json!({ "kind": "KEYWORD", "abilityId": id, "keyword": kw }))
+/// The DSL keyword name of a synthetic keyword string: upper case, every character outside
+/// `[A-Z0-9]` as `_` (#232 FP-164: a typed KEYWORD ability holds `[A-Z][A-Z0-9_]*`).
+pub fn kw_name(kw: &str) -> String {
+    let s: String = kw
+        .chars()
+        .map(|c| {
+            let u = c.to_ascii_uppercase();
+            if u.is_ascii_uppercase() || u.is_ascii_digit() {
+                u
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+        s
+    } else {
+        format!("K{s}")
+    }
 }
 
-/// The `abilityId` (or `"?"`) of every ability, in order.
+/// A synthetic ability `{"kind":"KEYWORD","abilityId":id,"keyword":kw_name(kw)}`.
+pub fn keyword_ability(kw: &str, id: &str) -> AbilityAST {
+    AbilityAST::Keyword(KeywordInstanceAST::new(AbilityBase::new(id), kw_name(kw)))
+}
+
+/// The `abilityId` of every ability, in order.
 pub fn ability_ids(c: &Characteristics) -> Vec<String> {
     c.abilities
         .iter()
-        .map(|a| {
-            a.0.get("abilityId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_owned()
-        })
+        .map(|a| a.base().ability_id.clone())
         .collect()
 }
 
+/// Rules text of one LITERAL token holding `word` (#232 FP-164: formerly the bare string).
 pub fn text(word: &str) -> TextTokenStream {
-    TextTokenStream(vec![word.into()])
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "w0".to_owned(),
+        text: word.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }
 
 /// The literal P/T of `c`, if both are literals.
@@ -211,7 +234,7 @@ pub fn pred_holds(pred: &PredicateAST, view: &Evaluated) -> bool {
         PredicateAST::HasKeyword { keyword } => c
             .abilities
             .iter()
-            .any(|a| a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword.as_str())),
+            .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == kw_name(keyword))),
         _ => false,
     }
 }
@@ -494,7 +517,9 @@ impl LayerEnvironment for Env {
         match self.value_mode {
             ValueMode::Fixed(v) => v,
             ValueMode::Count => {
-                expr.0.get(COUNT_KEY)?;
+                if *expr != count_expr() {
+                    return None;
+                }
                 let me = view.get(object)?.controller;
                 let n = objects
                     .iter()

@@ -13,6 +13,14 @@
 //!
 //! Fixture rule (brief): no non-empty `effect` list appears in any fixture, because open issue
 //! #161 (FP-141) replaces that placeholder and would change hashes.
+//!
+//! #232 FP-164 (REQ-DSL-003, REQ-DSL-010, REQ-DSL-012, REQ-NFR-006): the positions now hold the
+//! typed ASTs themselves, so invalid content can no longer be put into a built definition. Where
+//! a test formerly checked that `seal` refuses invalid content in a position, it now checks that
+//! the typed value of that position cannot be decoded from it (plain serde) and, unchanged, that
+//! `from_json` refuses the document with `Schema`. `from_json` messages are no longer required to
+//! name the position (the #232 contract lists only the error kind; docs/DECISIONS.md "#232 FP-164
+//! — Spec-test migration").
 
 use std::collections::BTreeMap;
 
@@ -25,10 +33,14 @@ use fineprint_dsl::card::{
     CommanderEligibilityDSL, FaceKind, LayoutBehavior, Legality, Origin, PartnerAbilityDSL,
     ProvenanceDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
 };
+use fineprint_dsl::expr::MathOp;
 use fineprint_dsl::expr::ValueExpressionAST as RealValue;
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::text::TextTokenStream as RealText;
 use serde_json::{Value, json};
+
+mod typed_ast_support;
+use typed_ast_support::{ability_of, pa, tokens_of, tx, vx, wire};
 
 // ---------------------------------------------------------------- synthetic fixtures
 
@@ -59,7 +71,7 @@ fn face(kind: FaceKind, name: &str) -> CardFaceDSL {
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![]),
+        text: TextTokenStream::default(),
         abilities: vec![],
     }
 }
@@ -71,21 +83,21 @@ fn base() -> CardDefinitionDSL {
     let mut left = face(FaceKind::LeftHalf, "Test Split Left");
     left.mana_cost = Some(ManaCostDSL::parse("{1}{G}").unwrap());
     left.card_types = vec!["Creature".to_string()];
-    left.power = Some(ValueExpressionAST(json!({"LITERAL": 2})));
-    left.toughness = Some(ValueExpressionAST(json!("X")));
-    left.text = TextTokenStream(vec![lit("t1", "Test left text")]);
-    left.abilities = vec![AbilityAST(kw("l1", "TEST_KEYWORD"))];
+    left.power = Some(vx(json!({"LITERAL": 2})));
+    left.toughness = Some(vx(json!("X")));
+    left.text = tx(vec![lit("t1", "Test left text")]);
+    left.abilities = vec![ability_of(kw("l1", "TEST_KEYWORD"))];
     let mut right = face(FaceKind::RightHalf, "Test Split Right");
     right.card_types = vec!["Creature".to_string()];
-    right.power = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    right.toughness = Some(ValueExpressionAST(json!({"LITERAL": 1})));
-    right.text = TextTokenStream(vec![
+    right.power = Some(vx(json!({"LITERAL": 1})));
+    right.toughness = Some(vx(json!({"LITERAL": 1})));
+    right.text = tx(vec![
         lit("t1", "Test right text"),
         word("t2", "COLOR_WORD", "Hue"),
     ]);
     right.abilities = vec![
-        AbilityAST(kw("r1", "TEST_KEYWORD")),
-        AbilityAST(
+        ability_of(kw("r1", "TEST_KEYWORD")),
+        ability_of(
             json!({"abilityId":"r2","kind":"STATIC","effects":[{"type":"RULE","kind":"SKIP"}]}),
         ),
     ];
@@ -112,8 +124,8 @@ fn base() -> CardDefinitionDSL {
         commander_eligibility: Some(CommanderEligibilityDSL {
             eligible: true,
             partner_abilities: vec![
-                PartnerAbilityDSL(kw("p1", "PARTNER")),
-                PartnerAbilityDSL(
+                pa(kw("p1", "PARTNER")),
+                pa(
                     json!({"abilityId":"p2","kind":"KEYWORD","keyword":"PARTNER",
                            "params":{"with":"test.partner_other"}}),
                 ),
@@ -187,20 +199,18 @@ impl Pos {
         }
     }
 
-    /// Substrings the error message must contain (the brief: index and member names).
-    fn markers(self) -> Vec<String> {
-        match self {
-            Pos::Power(f) => vec![format!("faces[{f}]"), "power".into()],
-            Pos::Toughness(f) => vec![format!("faces[{f}]"), "toughness".into()],
-            Pos::Text(f, _) => vec![format!("faces[{f}]"), "text".into()],
-            Pos::Ability(f, i) => vec![format!("faces[{f}]"), format!("abilities[{i}]")],
-            Pos::Partner(i) => vec![format!("partnerAbilities[{i}]")],
+    /// Puts valid content `x` into the position of a built definition (the slot must exist, or
+    /// be the next index of a vector); panics when `x` does not decode as the typed value.
+    fn set(self, d: &mut CardDefinitionDSL, x: Value) {
+        if let Err(e) = self.try_set(d, x.clone()) {
+            panic!("{self:?} = {x}: not valid typed content: {e}");
         }
     }
 
-    /// Puts `x` into the position of a built definition (the slot must exist, or be the next
-    /// index of a vector).
-    fn set(self, d: &mut CardDefinitionDSL, x: Value) {
+    /// #232 FP-164: decodes `x` as the typed value of the position (for a text element, the
+    /// whole stream with `x` put at its index) through plain serde and stores it; `Err` (and `d`
+    /// unchanged) when it does not decode.
+    fn try_set(self, d: &mut CardDefinitionDSL, x: Value) -> Result<(), String> {
         fn put<T>(v: &mut Vec<T>, i: usize, t: T) {
             if i == v.len() {
                 v.push(t);
@@ -208,17 +218,28 @@ impl Pos {
                 v[i] = t;
             }
         }
-        match self {
-            Pos::Power(f) => d.faces[f].power = Some(ValueExpressionAST(x)),
-            Pos::Toughness(f) => d.faces[f].toughness = Some(ValueExpressionAST(x)),
-            Pos::Text(f, i) => put(&mut d.faces[f].text.0, i, x),
-            Pos::Ability(f, i) => put(&mut d.faces[f].abilities, i, AbilityAST(x)),
-            Pos::Partner(i) => put(
-                &mut d.commander_eligibility.as_mut().unwrap().partner_abilities,
-                i,
-                PartnerAbilityDSL(x),
-            ),
+        fn decode<T: serde::de::DeserializeOwned>(x: Value) -> Result<T, String> {
+            serde_json::from_value(x).map_err(|e| e.to_string())
         }
+        match self {
+            Pos::Power(f) => d.faces[f].power = Some(decode::<ValueExpressionAST>(x)?),
+            Pos::Toughness(f) => d.faces[f].toughness = Some(decode::<ValueExpressionAST>(x)?),
+            Pos::Text(f, i) => {
+                let mut tokens = tokens_of(&d.faces[f].text);
+                put(&mut tokens, i, x);
+                d.faces[f].text = decode::<TextTokenStream>(Value::Array(tokens))?;
+            }
+            Pos::Ability(f, i) => put(&mut d.faces[f].abilities, i, decode::<AbilityAST>(x)?),
+            Pos::Partner(i) => {
+                let p = decode::<PartnerAbilityDSL>(x)?;
+                put(
+                    &mut d.commander_eligibility.as_mut().unwrap().partner_abilities,
+                    i,
+                    p,
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Puts `x` into the position of a definition document.
@@ -242,31 +263,32 @@ impl Pos {
     }
 }
 
-fn markers_in(msg: &str, pos: Pos, what: &str) {
-    for m in pos.markers() {
-        assert!(
-            msg.contains(&m),
-            "{what}: message {msg:?} does not name {m:?}"
-        );
-    }
-}
-
-/// `x` at `pos` is rejected by `seal` (Serialize, naming the position) and by `from_json`
-/// (Schema, naming the position) with a correctly recomputed `definitionHash`.
+/// `x` at `pos` cannot become typed content of a built definition (plain serde of the position's
+/// typed value refuses it, #232 FP-164: formerly `seal` refused it with a `Serialize` error), the
+/// whole definition document holding it does not decode through plain serde either, and
+/// `from_json` refuses it with `Schema` even with a correctly recomputed `definitionHash`.
 fn assert_rejected(pos: Pos, x: &Value) {
     let what = format!("{pos:?} = {x}");
     let mut d = base();
-    pos.set(&mut d, x.clone());
-    match d.seal() {
-        Err(CanonicalError::Serialize(msg)) => markers_in(&msg, pos, &format!("seal {what}")),
-        other => panic!("seal {what}: expected Serialize, got {other:?}"),
-    }
+    let before = d.clone();
+    assert!(
+        pos.try_set(&mut d, x.clone()).is_err(),
+        "typed decode {what}: accepted"
+    );
+    assert_eq!(
+        d, before,
+        "typed decode {what}: a failed decode changed the definition"
+    );
     let mut v = to_value(&sealed(base()));
     pos.set_value(&mut v, x.clone());
+    assert!(
+        serde_json::from_value::<CardDefinitionDSL>(v.clone()).is_err(),
+        "plain serde {what}: accepted"
+    );
     redigest(&mut v);
     match load_value(&v) {
         Err(CardDefinitionError::Schema(msg)) => {
-            markers_in(&msg, pos, &format!("from_json {what}"))
+            assert!(!msg.is_empty(), "from_json {what}: empty message")
         }
         other => panic!("from_json {what}: expected Schema, got {other:?}"),
     }
@@ -295,8 +317,8 @@ fn invalid_values() -> Vec<Value> {
 }
 
 /// REQ-DSL-003, REQ-DSL-010: power and toughness that are not a real `ValueExpressionAST`
-/// (including a present `null`, a bare number and SRS call-style shorthand) are rejected by
-/// `seal` and `from_json`, naming the face index and member.
+/// (including a present `null`, a bare number and SRS call-style shorthand) cannot be decoded as
+/// the typed position and are rejected by `from_json` with `Schema`.
 #[test]
 fn req_dsl_003_010_invalid_power_toughness_rejected_by_seal_and_from_json() {
     for x in invalid_values() {
@@ -309,12 +331,14 @@ fn req_dsl_003_010_invalid_power_toughness_rejected_by_seal_and_from_json() {
 /// REQ-DSL-003, REQ-NFR-006: an unsafe integer inside a LITERAL is rejected by both. `from_json`
 /// runs the canonical-level checks first (FP-010 order), so it reports
 /// `Canonical(UnsafeInteger)`; `seal` reports the canonical-level error too (`UnsafeInteger`) or
-/// `Serialize`. 2^53-1 itself is accepted and round-trips.
+/// `Serialize`. 2^53-1 itself is accepted and round-trips. #232 FP-164: the typed value
+/// `Literal(n)` is built directly (its wire form does not decode), so `seal` still sees it.
 #[test]
 fn req_dsl_003_nfr_006_unsafe_literal_rejected() {
     for n in [9_007_199_254_740_992_i64, -9_007_199_254_740_992] {
+        assert!(serde_json::from_value::<ValueExpressionAST>(json!({ "LITERAL": n })).is_err());
         let mut d = base();
-        Pos::Power(1).set(&mut d, json!({ "LITERAL": n }));
+        d.faces[1].power = Some(ValueExpressionAST::Literal(n));
         // Canonical-level limit: `seal` may report it as the canonical error itself or as
         // `Serialize` (docs/DECISIONS.md "#159 FP-140 — Spec test migration and golden hash").
         let r = d.seal();
@@ -342,7 +366,8 @@ fn req_dsl_003_nfr_006_unsafe_literal_rejected() {
 
 /// REQ-DSL-012, REQ-DSL-010: text elements that are not valid tokens (null, a bare string, a
 /// duplicate id, an empty id, empty literal text, an unknown kind, an unknown member, SELF with a
-/// name, OTHER without one) are rejected by `seal` and `from_json`, naming the face and `text`.
+/// name, OTHER without one) cannot be decoded as the typed stream and are rejected by
+/// `from_json` with `Schema`.
 #[test]
 fn req_dsl_012_010_invalid_text_rejected_by_seal_and_from_json() {
     let bad = [
@@ -375,7 +400,7 @@ fn trig_event(event: Value) -> Value {
 /// REQ-DSL-010: abilities that are not a real `AbilityAST` (bare string, keyword name as kind,
 /// missing abilityId, unknown kind, unknown member, present null optional, trigger member on a
 /// STATIC ability, a look-back key under `filters`/`bind` per decision "#13 FP-012 — Rule E5")
-/// are rejected by `seal` and `from_json`, naming face and ability index.
+/// cannot be decoded as the typed ability and are rejected by `from_json` with `Schema`.
 #[test]
 fn req_dsl_010_invalid_abilities_rejected_by_seal_and_from_json() {
     let mut with_null_span = kw("z", "TEST_KEYWORD");
@@ -409,7 +434,8 @@ fn req_dsl_010_invalid_abilities_rejected_by_seal_and_from_json() {
 }
 
 /// REQ-DSL-010: a partner ability must be a real KEYWORD-kind `AbilityAST`: a valid non-KEYWORD
-/// ability, a free-form kind and a number are rejected, naming `partnerAbilities[i]`.
+/// ability, a free-form kind and a number cannot be decoded as a `PartnerAbilityDSL` and are
+/// rejected by `from_json` with `Schema`.
 #[test]
 fn req_dsl_010_invalid_partner_abilities_rejected_by_seal_and_from_json() {
     let bad = [
@@ -456,7 +482,7 @@ fn req_dsl_010_nfr_006_check_order() {
         let mut v = good.clone();
         pos.set_value(&mut v, x.clone());
         match load_value(&v) {
-            Err(CardDefinitionError::Schema(msg)) => markers_in(&msg, *pos, "stale hash"),
+            Err(CardDefinitionError::Schema(_)) => {}
             other => panic!("{pos:?}: stale hash: expected Schema, got {other:?}"),
         }
         v["definitionHash"] = json!(wrong);
@@ -640,7 +666,7 @@ fn req_dsl_003_012_010_nfr_006_valid_content_accepted_and_round_trips() {
         assert_eq!(real.len(), tokens.len());
         for f in 0..2 {
             let mut d = base();
-            d.faces[f].text = TextTokenStream(tokens.clone());
+            d.faces[f].text = tx(tokens.clone());
             let mut doc = doc0.clone();
             doc["faces"][f]["text"] = stream.clone();
             assert_accepted(d, &doc, &format!("faces[{f}].text = {stream}"));
@@ -665,8 +691,7 @@ fn req_dsl_003_012_010_nfr_006_valid_content_accepted_and_round_trips() {
         let mut d = base();
         Pos::Partner(1).set(&mut d, x.clone());
         // Keep the two partner ids distinct.
-        d.commander_eligibility.as_mut().unwrap().partner_abilities[0] =
-            PartnerAbilityDSL(kw("p0", "PARTNER"));
+        d.commander_eligibility.as_mut().unwrap().partner_abilities[0] = pa(kw("p0", "PARTNER"));
         let mut doc = doc0.clone();
         Pos::Partner(1).set_value(&mut doc, x.clone());
         Pos::Partner(0).set_value(&mut doc, kw("p0", "PARTNER"));
@@ -736,10 +761,7 @@ fn req_nfr_006_dsl_003_single_spelling_on_load() {
     assert_ne!(float_doc, text);
     let loaded = load(float_doc.as_bytes()).expect("2.0 normalises to 2 and loads");
     assert_eq!(loaded, s);
-    assert_eq!(
-        loaded.faces[0].power,
-        Some(ValueExpressionAST(json!({"LITERAL": 2})))
-    );
+    assert_eq!(loaded.faces[0].power, Some(ValueExpressionAST::Literal(2)));
 
     // Member-order variants of a MATH node and of an ability object.
     let m = math("SUB", json!({"LITERAL": 5}), json!("X"));
@@ -771,40 +793,44 @@ fn req_nfr_006_dsl_003_single_spelling_on_load() {
 
 // ---------------------------------------------------------------- 1e plain serde
 
-/// REQ-NFR-006: the `card::` wrappers keep permissive transparent serde: any JSON constructs and
-/// round-trips through `serde_json`, and `compute_hash`/`to_canonical_json` work on free-form
-/// placeholder content (only `seal` and `from_json` validate).
+/// REQ-NFR-006, REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232 FP-164, replaces
+/// `req_nfr_006_wrappers_keep_plain_serde`, whose only subject, permissive wrappers holding
+/// free-form placeholders, no longer exists): the same placeholder content (`"test.ability"`,
+/// `["test.word"]`, `{"kind":"TEST_PARTNER"}`, a bare `1`) is refused by plain serde of each typed
+/// position and of a whole definition document, while `compute_hash`/`to_canonical_json` of a
+/// definition holding valid typed content still equal the independent oracle and plain serde
+/// round-trips it.
 #[test]
-fn req_nfr_006_wrappers_keep_plain_serde() {
-    let a: AbilityAST = serde_json::from_value(json!("test.ability")).unwrap();
-    assert_eq!(a, AbilityAST(json!("test.ability")));
-    assert_eq!(serde_json::to_value(&a).unwrap(), json!("test.ability"));
-    let t = TextTokenStream(vec![json!("test.word")]);
-    assert_eq!(serde_json::to_value(&t).unwrap(), json!(["test.word"]));
-    let back: TextTokenStream = serde_json::from_value(json!(["test.word"])).unwrap();
-    assert_eq!(back, t);
-    let p: PartnerAbilityDSL = serde_json::from_value(json!({"kind": "TEST_PARTNER"})).unwrap();
-    assert_eq!(
-        serde_json::to_value(&p).unwrap(),
-        json!({"kind": "TEST_PARTNER"})
-    );
-    let v: ValueExpressionAST = serde_json::from_value(json!(1)).unwrap();
-    assert_eq!(v, ValueExpressionAST(json!(1)));
+fn req_nfr_006_typed_positions_refuse_placeholder_content_in_plain_serde() {
+    assert!(serde_json::from_value::<AbilityAST>(json!("test.ability")).is_err());
+    assert!(serde_json::from_value::<TextTokenStream>(json!(["test.word"])).is_err());
+    assert!(serde_json::from_value::<PartnerAbilityDSL>(json!({"kind": "TEST_PARTNER"})).is_err());
+    assert!(serde_json::from_value::<ValueExpressionAST>(json!(1)).is_err());
+    let good = to_value(&base());
+    for (pos, x) in [
+        (Pos::Ability(0, 0), json!("test.ability")),
+        (Pos::Text(0, 0), json!("test.word")),
+        (Pos::Partner(0), json!({"kind": "TEST_PARTNER"})),
+        (Pos::Power(0), json!(1)),
+    ] {
+        let mut v = good.clone();
+        pos.set_value(&mut v, x.clone());
+        assert!(
+            serde_json::from_value::<CardDefinitionDSL>(v).is_err(),
+            "{pos:?} = {x}: plain serde accepted placeholder content"
+        );
+    }
 
-    let mut d = base();
-    d.faces[0].power = Some(v);
-    d.faces[0].text = t;
-    d.faces[0].abilities = vec![a];
-    d.commander_eligibility.as_mut().unwrap().partner_abilities = vec![p];
+    let d = base();
     let h = d
         .compute_hash()
-        .expect("compute_hash does not validate ASTs");
+        .expect("compute_hash of valid typed content");
     assert_eq!(h, oracle_hash_value(&to_value(&d)));
     assert!(d.to_canonical_json().is_ok());
     let round: CardDefinitionDSL =
         serde_json::from_slice(&serde_json::to_vec(&d).unwrap()).unwrap();
     assert_eq!(round, d);
-    assert!(matches!(d.seal(), Err(CanonicalError::Serialize(_))));
+    assert_eq!(sealed(d.clone()).definition_hash, h);
 }
 
 // ---------------------------------------------------------------- 1f properties
@@ -903,15 +929,15 @@ fn gen_definition(rng: &mut Pcg64Dxsm) -> (CardDefinitionDSL, Vec<Value>) {
         };
         pieces.extend(p.iter().cloned());
         pieces.extend(t.iter().cloned());
-        d.faces[f].power = p.map(ValueExpressionAST);
-        d.faces[f].toughness = t.map(ValueExpressionAST);
+        d.faces[f].power = p.map(vx);
+        d.faces[f].toughness = t.map(vx);
         let text = gen_text(rng);
-        d.faces[f].text = TextTokenStream(text);
+        d.faces[f].text = tx(text);
         let keywords = ["TEST_KEYWORD", "TEST_KW_A", "TEST_KW_2"];
         d.faces[f].abilities = (0..below(rng, 4))
             .map(|i| {
                 let k = keywords[below(rng, 3) as usize];
-                AbilityAST(gen_keyword(rng, &format!("a{f}_{i}"), k))
+                ability_of(gen_keyword(rng, &format!("a{f}_{i}"), k))
             })
             .collect();
     }
@@ -921,7 +947,7 @@ fn gen_definition(rng: &mut Pcg64Dxsm) -> (CardDefinitionDSL, Vec<Value>) {
         Some(CommanderEligibilityDSL {
             eligible: below(rng, 2) == 0,
             partner_abilities: (0..below(rng, 3))
-                .map(|i| PartnerAbilityDSL(gen_keyword(rng, &format!("p{i}"), "PARTNER")))
+                .map(|i| pa(gen_keyword(rng, &format!("p{i}"), "PARTNER")))
                 .collect(),
         })
     };
@@ -941,9 +967,11 @@ fn req_dsl_003_012_nfr_006_random_valid_asts_seal_and_round_trip() {
             let _: RealValue = single_spelling(p);
         }
         for f in &d.faces {
-            let _: RealText = single_spelling(&Value::Array(f.text.0.clone()));
+            let real: RealText = single_spelling(&Value::Array(tokens_of(&f.text)));
+            assert_eq!(real, f.text);
             for a in &f.abilities {
-                let _: RealAbility = single_spelling(&a.0);
+                let real: RealAbility = single_spelling(&wire(a));
+                assert_eq!(&real, a);
             }
         }
         let s = d
@@ -1017,8 +1045,9 @@ fn random_json(rng: &mut Pcg64Dxsm, depth: u32) -> Value {
 }
 
 /// REQ-DSL-010, REQ-NFR-006 (property, R12): random JSON in each of the five positions never
-/// panics, and `seal` and `from_json` agree: both reject, or both accept with an exact round
-/// trip to the same value.
+/// panics, and the typed position and `from_json` agree: plain serde of the typed position
+/// refuses it and `from_json` reports `Schema`, or both accept, `seal` succeeds and the result
+/// round-trips exactly to the same value (#232 FP-164: formerly `seal` was the left side).
 #[test]
 fn req_dsl_010_nfr_006_random_json_in_positions_seal_and_load_agree() {
     let mut rng = Pcg64Dxsm::from_u64_seed(0xF1E0_0140_A570_0002);
@@ -1035,20 +1064,19 @@ fn req_dsl_010_nfr_006_random_json_in_positions_seal_and_load_agree() {
         let pos = positions[i % positions.len()];
         let x = random_json(&mut rng, 3);
         let mut d = base();
-        pos.set(&mut d, x.clone());
-        let sealed_r = d.seal();
+        let typed_r = pos.try_set(&mut d, x.clone()).map(|()| d.seal());
         let mut v = good.clone();
         pos.set_value(&mut v, x.clone());
         redigest(&mut v);
         let loaded_r = load_value(&v);
-        match (sealed_r, loaded_r) {
-            (Ok(s), Ok(l)) => {
+        match (typed_r, loaded_r) {
+            (Ok(Ok(s)), Ok(l)) => {
                 accepted += 1;
                 assert_eq!(s, l, "{pos:?} = {x}");
                 assert_eq!(load(&s.to_canonical_json().unwrap()), Ok(s.clone()));
             }
-            (Err(CanonicalError::Serialize(_)), Err(CardDefinitionError::Schema(_))) => {}
-            (s, l) => panic!("{pos:?} = {x}: seal {s:?} vs from_json {l:?}"),
+            (Err(_), Err(CardDefinitionError::Schema(_))) => {}
+            (s, l) => panic!("{pos:?} = {x}: typed/seal {s:?} vs from_json {l:?}"),
         }
     }
     let _ = accepted;
@@ -1172,7 +1200,17 @@ fn req_dsl_003_nfr_006_deep_valid_math_seals_up_to_the_limit() {
     Pos::Power(0).set(&mut d, chain(40));
     let s = sealed(d);
     assert_eq!(load(&s.to_canonical_json().unwrap()), Ok(s));
+    // #232 FP-164: a 200-level chain does not decode from JSON (over the depth limit), so it is
+    // built directly as the typed value; `seal` still refuses it.
+    let mut deep = ValueExpressionAST::Literal(1);
+    for _ in 0..200 {
+        deep = ValueExpressionAST::Math {
+            op: MathOp::Add,
+            lhs: Box::new(deep),
+            rhs: Box::new(ValueExpressionAST::X),
+        };
+    }
     let mut d = base();
-    Pos::Power(0).set(&mut d, chain(200));
+    d.faces[0].power = Some(deep);
     assert!(matches!(d.seal(), Err(CanonicalError::Serialize(_))));
 }

@@ -64,32 +64,35 @@ fn objs(ids: &[ObjectId]) -> BTreeSet<ObjectId> {
     ids.iter().copied().collect()
 }
 
-fn json_obj(pairs: &[(&str, &str)]) -> AbilityAST {
-    AbilityAST(
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect(),
-    )
+/// `v` decoded as a typed ability (valid synthetic content).
+fn ability_json(v: serde_json::Value) -> AbilityAST {
+    serde_json::from_value(v).expect("valid synthetic ability")
 }
 
-/// An enters-the-battlefield-like triggered ability (synthetic JSON).
+/// A synthetic keyword ability `id` with keyword name `keyword`.
+fn keyword_ability(id: &str, keyword: &str) -> AbilityAST {
+    ability_json(serde_json::json!({"kind": "KEYWORD", "abilityId": id, "keyword": keyword}))
+}
+
+/// An enters-the-battlefield-like triggered ability (synthetic).
 fn etb_ability(tag: &str) -> AbilityAST {
-    json_obj(&[
-        ("kind", "TRIGGERED"),
-        ("trigger", "ENTERS_BATTLEFIELD"),
-        ("abilityId", &format!("test.{tag}.etb")),
-    ])
+    ability_json(serde_json::json!({
+        "kind": "TRIGGERED",
+        "abilityId": format!("test.{tag}.etb"),
+        "trigger": {"mode": "EVENT", "event": {"kind": "ENTERS", "subject": {"ref": "SELF"}}},
+        "effect": [],
+    }))
 }
 
-/// The ward {2} ability JSON pinned by the brief.
+/// The ward {2} ability of the disguise and cloak profiles (#232: keyword `WARD`, the cost as
+/// the keyword parameter `cost`).
 fn ward_2() -> AbilityAST {
-    json_obj(&[
-        ("kind", "KEYWORD"),
-        ("abilityId", "facedown:ward"),
-        ("keyword", "ward"),
-        ("cost", "{2}"),
-    ])
+    ability_json(serde_json::json!({
+        "kind": "KEYWORD",
+        "abilityId": "facedown:ward",
+        "keyword": "WARD",
+        "params": {"cost": "{2}"},
+    }))
 }
 
 /// A synthetic face-up card `tag`: a name, a cost, a subtype, rules text, an ETB-like ability,
@@ -103,7 +106,7 @@ fn card(tag: &str) -> Characteristics {
         supertypes: set(&["Legendary"]),
         card_types: set(&["Creature"]),
         subtypes: set(&[&format!("Sub{tag}")]),
-        rules_text: TextTokenStream(vec![format!("test.text.{tag}").into()]),
+        rules_text: literal_text(&format!("test.text.{tag}")),
         abilities: vec![etb_ability(tag)],
         power: Some(literal(5)),
         toughness: Some(literal(5)),
@@ -124,11 +127,8 @@ fn other(tag: &str) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Artifact", "Creature"]),
         subtypes: set(&[&format!("Other{tag}")]),
-        rules_text: TextTokenStream(vec![format!("test.text.{tag}").into()]),
-        abilities: vec![json_obj(&[
-            ("kind", "STATIC"),
-            ("abilityId", &format!("test.{tag}.static")),
-        ])],
+        rules_text: literal_text(&format!("test.text.{tag}")),
+        abilities: vec![test_ability(&format!("test.{tag}.static"))],
         power: Some(literal(1)),
         toughness: Some(literal(4)),
         loyalty: None,
@@ -256,13 +256,13 @@ fn face(tag: &str, mana_cost: &str, pt: (i64, i64), subtype: &str) -> CardFaceDS
         supertypes: Vec::new(),
         card_types: vec!["Creature".to_owned()],
         subtypes: vec![subtype.to_owned()],
-        power: Some(ValueExpressionAST(pt.0.into())),
-        toughness: Some(ValueExpressionAST(pt.1.into())),
+        power: Some(ValueExpressionAST::Literal(pt.0)),
+        toughness: Some(ValueExpressionAST::Literal(pt.1)),
         loyalty: None,
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![format!("test.text.{tag}").into()]),
+        text: literal_text(&format!("test.text.{tag}")),
         abilities: vec![etb_ability(tag)],
     }
 }
@@ -515,11 +515,7 @@ fn req_obj_003_copy_of_a_face_down_object_copies_the_profile() {
 #[test]
 fn req_obj_003_later_layers_apply_to_face_down_object() {
     let profile = FaceDownProfile::default_2_2();
-    let granted = json_obj(&[
-        ("kind", "KEYWORD"),
-        ("abilityId", "t"),
-        ("keyword", "flying"),
-    ]);
+    let granted = keyword_ability("t", "FLYING");
     let env = Env::default().with(o(1), card("hidden"));
     let r = registry(vec![
         (1, fd(&profile, o(1), 5)),
@@ -763,11 +759,7 @@ fn req_obj_003_turn_face_up_restores_with_new_timestamp() {
     let mut r = ContinuousEffects::new();
     let (mut l, mut g) = clock(0);
     let t_down = down(&mut r, 1, FaceDownTarget::default(), o(1), &mut l, &mut g).unwrap();
-    let granted = json_obj(&[
-        ("kind", "KEYWORD"),
-        ("abilityId", "t"),
-        ("keyword", "reach"),
-    ]);
+    let granted = keyword_ability("t", "REACH");
     let t_l6 = stamp_resolved_effect(&mut g).unwrap();
     r.register(
         e(2),
@@ -1228,8 +1220,7 @@ fn random_chars(rng: &mut Lcg, tag: u64) -> Characteristics {
     };
     c.mana_cost = Some(cost(costs[rng.below(costs.len())]));
     for k in 0..rng.below(3) {
-        c.abilities
-            .push(json_obj(&[("abilityId", &format!("test.r{tag}.{k}"))]));
+        c.abilities.push(test_ability(&format!("test.r{tag}.{k}")));
     }
     c
 }
@@ -1343,4 +1334,24 @@ fn property_down_then_up_is_identity_on_copiable_values() {
         assert_eq!(after.characteristics, before.characteristics, "case {case}");
         assert_eq!(after.provenance(), before.provenance(), "case {case}");
     }
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    ability_json(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
 }

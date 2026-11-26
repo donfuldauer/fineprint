@@ -48,7 +48,7 @@ fn creature(power: i64, toughness: i64, abilities: Vec<AbilityAST>) -> Character
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: set(["Testkin"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities,
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -73,20 +73,15 @@ fn artifact() -> Characteristics {
 
 /// A keyword ability.
 fn kw(keyword: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("test.kw.{keyword}")),
-            ("keyword", keyword.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(format!("test.kw.{keyword}")),
+        keyword_id(keyword),
+    ))
 }
 
 /// A non-keyword ability.
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 fn filter(pred: PredicateAST) -> Affected {
@@ -146,7 +141,7 @@ fn modify_pt(power: i64, toughness: i64) -> LayerModification {
 }
 
 fn text(word: &str) -> LayerModification {
-    LayerModification::SetText(TextTokenStream(vec![word.into()]))
+    LayerModification::SetText(literal_text(word))
 }
 
 fn eff(layer: Layer, t: u64, affected: Affected, m: LayerModification) -> ContinuousEffect {
@@ -312,7 +307,7 @@ fn pt(c: &Characteristics) -> Option<(i64, i64)> {
 fn has_kw(c: &Characteristics, keyword: &str) -> bool {
     c.abilities
         .iter()
-        .any(|a| a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword))
+        .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == keyword_id(keyword)))
 }
 
 fn layer_index(layer: Layer) -> usize {
@@ -403,7 +398,7 @@ fn req_layer_002_cda_first_layer_3() {
     );
     assert_eq!(
         ev.characteristics.rules_text,
-        TextTokenStream(vec!["test.word_plain".into()])
+        literal_text("test.word_plain")
     );
 }
 
@@ -1245,7 +1240,7 @@ fn random_effect(rng: &mut Lcg, affected: Affected) -> ContinuousEffect {
         ),
         3 => (
             Layer::L3,
-            LayerModification::SetText(TextTokenStream(vec![rng.pick(&words).into()])),
+            LayerModification::SetText(literal_text(&rng.pick(&words))),
         ),
         4 => (Layer::L4, add_subtypes([rng.pick(&words).as_str()])),
         5 => (
@@ -2083,4 +2078,25 @@ fn req_layer_005_comparison_shortcuts_equal_definitions() {
         );
     }
     assert!(shortcut_true > 100, "{shortcut_true}");
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }

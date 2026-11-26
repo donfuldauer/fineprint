@@ -27,9 +27,8 @@ use fineprint_base::ids::ObjectId;
 use fineprint_core::layers::{
     Affected, ContinuousEffect, ContinuousEffects, LayerCache, LayerError, LayerModification,
     MatchContext, OrderItem, OrderRecord, TextWordError, compile_text_effect,
-    compile_text_modification, decode_rules_text, encode_rules_text, evaluate, evaluate_all,
-    evaluate_with_order, evaluated_digest, resolve_predicate_words, resolve_selector_words,
-    resolve_value_words,
+    compile_text_modification, evaluate, evaluate_all, evaluate_with_order, evaluated_digest,
+    resolve_predicate_words, resolve_selector_words, resolve_value_words,
 };
 use fineprint_core::objects::Characteristics;
 use fineprint_dsl::ability::{self as dsl, CharacteristicEffect, Layer, Modification};
@@ -98,12 +97,14 @@ fn stream(tokens: Vec<TextToken>) -> Stream {
     Stream::new(tokens).expect("valid stream")
 }
 
+/// #232 FP-164: the rules text of `Characteristics` is the typed stream itself, so the former
+/// `encode_rules_text`/`decode_rules_text` bridge is the identity.
 fn enc(tokens: Vec<TextToken>) -> card::TextTokenStream {
-    encode_rules_text(&stream(tokens))
+    stream(tokens)
 }
 
 fn dec(t: &card::TextTokenStream) -> Stream {
-    decode_rules_text(t).expect("evaluated rules text decodes")
+    t.clone()
 }
 
 fn with_text(name: &str, tokens: Vec<TextToken>) -> Characteristics {

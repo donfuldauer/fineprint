@@ -2,9 +2,14 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at
 // https://mozilla.org/MPL/2.0/.
 
-//! Facts read once from a definition for every check (REQ-ING-009): the typed view of every
-//! ability and one iterative walk over its raw JSON, plus the raw checks `FPL-LOOK-BACK`
-//! (CR 603.10) and `FPL-MAX-ITER` (REQ-DSL-010, SRS §14.4.5).
+//! Facts read once from a definition for every check (REQ-ING-009): every typed ability, its
+//! JSON form (encoded once, [`RawJson`]) and one iterative walk over that JSON, plus the raw
+//! checks `FPL-LOOK-BACK` (CR 603.10) and `FPL-MAX-ITER` (REQ-DSL-010, SRS §14.4.5).
+//!
+//! The AST positions of a [`CardDefinitionDSL`] hold the real typed ASTs (docs/DECISIONS.md,
+//! "#232 FP-164 — Lint schema check after typed storage"), so every decoded ability is valid;
+//! only a hand-built value that breaks an invariant of its type fails to encode, and then its
+//! JSON form is `null` (nothing to walk) and the encoder's message is kept for `FPL-SCHEMA`.
 //!
 //! The walk uses an explicit stack, so a value nested far beyond
 //! [`crate::canonical::MAX_DEPTH`] is walked without recursion (R12). Paths in messages are
@@ -13,7 +18,8 @@
 use serde_json::Value;
 
 use super::{CLIP, Lint, LintId, LintLocation, Severity, clip, push};
-use crate::ability;
+use crate::ability::AbilityAST;
+use crate::canonical;
 use crate::card::CardDefinitionDSL;
 
 /// How many trailing path segments a message shows.
@@ -240,10 +246,13 @@ pub(super) struct AbilityFacts<'a> {
     pub(super) face: usize,
     /// Ability index within the face.
     pub(super) index: usize,
-    /// The raw JSON.
+    /// The JSON form (`null` when the ability does not encode).
     pub(super) raw: &'a Value,
-    /// The typed view, or the decoder's message.
-    pub(super) typed: Result<ability::AbilityAST, String>,
+    /// The typed ability.
+    pub(super) typed: &'a AbilityAST,
+    /// The encoder's message when the typed ability does not encode (a hand-built value that
+    /// breaks an invariant of its type).
+    pub(super) error: Option<&'a str>,
     /// The raw `textSpan`.
     pub(super) span: RawSpan,
     /// The raw walk.
@@ -252,7 +261,35 @@ pub(super) struct AbilityFacts<'a> {
     pub(super) link_ids: Vec<&'a str>,
 }
 
-impl AbilityFacts<'_> {
+impl<'a> AbilityFacts<'a> {
+    /// The facts of the ability at `faces[face].abilities[index]`: `typed`, its JSON form `raw`
+    /// and the encoder's message `error` when it does not encode (then `raw` is `null`).
+    pub(super) fn new(
+        face: usize,
+        index: usize,
+        typed: &'a AbilityAST,
+        raw: &'a Value,
+        error: Option<&'a str>,
+    ) -> AbilityFacts<'a> {
+        let mut link_ids: Vec<&str> = raw
+            .get("linkIds")
+            .and_then(Value::as_array)
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        link_ids.sort_unstable();
+        link_ids.dedup();
+        AbilityFacts {
+            face,
+            index,
+            raw,
+            typed,
+            error,
+            span: RawSpan::read(raw),
+            scan: scan(raw),
+            link_ids,
+        }
+    }
+
     /// The ability's location, with its span when well-formed.
     pub(super) fn location(&self) -> LintLocation {
         LintLocation::ability(self.face, self.index, self.span.as_u32())
@@ -264,8 +301,8 @@ impl AbilityFacts<'_> {
 pub(super) struct PartnerFacts<'a> {
     /// Index in `partnerAbilities`.
     pub(super) index: usize,
-    /// The typed view's error, if it fails.
-    pub(super) error: Option<String>,
+    /// The encoder's message when the partner ability does not encode.
+    pub(super) error: Option<&'a str>,
     /// The raw walk.
     pub(super) scan: Scan<'a>,
 }
@@ -289,38 +326,76 @@ pub(super) struct CardFacts<'a> {
     pub(super) partners: Vec<PartnerFacts<'a>>,
 }
 
+/// The JSON form of one typed value: its checked JSON, or `null` and the encoder's message.
+#[derive(Debug)]
+pub(super) struct Encoded {
+    /// The JSON form (`null` when it does not encode).
+    value: Value,
+    /// The encoder's message when it does not encode.
+    error: Option<String>,
+}
+
+impl Encoded {
+    /// Encodes `value` with the checked serializer of [`crate::canonical`] (depth-checked,
+    /// never recursing past the budget).
+    fn of<T: serde::Serialize>(value: &T) -> Encoded {
+        match canonical::to_checked_value(value) {
+            Ok(value) => Encoded { value, error: None },
+            Err(e) => Encoded {
+                value: Value::Null,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+}
+
+/// The JSON forms of every face ability (per face) and partner ability of a definition,
+/// encoded once so the facts can borrow them.
+#[derive(Debug)]
+pub(super) struct RawJson {
+    /// Per face, per ability.
+    abilities: Vec<Vec<Encoded>>,
+    /// Per partner ability.
+    partners: Vec<Encoded>,
+}
+
+impl RawJson {
+    /// Encodes every face and partner ability of `def`.
+    pub(super) fn of(def: &CardDefinitionDSL) -> RawJson {
+        RawJson {
+            abilities: def
+                .faces
+                .iter()
+                .map(|f| f.abilities.iter().map(Encoded::of).collect())
+                .collect(),
+            partners: def
+                .commander_eligibility
+                .iter()
+                .flat_map(|e| e.partner_abilities.iter())
+                .map(|p| Encoded::of(p.as_ability()))
+                .collect(),
+        }
+    }
+}
+
 impl<'a> CardFacts<'a> {
-    /// Decodes and walks every ability of `def` once.
-    pub(super) fn collect(def: &'a CardDefinitionDSL) -> CardFacts<'a> {
+    /// Collects the facts of every ability of `def`, walking the JSON forms in `raw` (which
+    /// must be [`RawJson::of`] the same definition) once.
+    pub(super) fn collect(def: &'a CardDefinitionDSL, raw: &'a RawJson) -> CardFacts<'a> {
         let mut abilities = Vec::new();
-        for (i, face) in def.faces.iter().enumerate() {
-            for (j, a) in face.abilities.iter().enumerate() {
-                let mut link_ids: Vec<&str> =
-                    a.0.get("linkIds")
-                        .and_then(Value::as_array)
-                        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
-                        .unwrap_or_default();
-                link_ids.sort_unstable();
-                link_ids.dedup();
-                abilities.push(AbilityFacts {
-                    face: i,
-                    index: j,
-                    raw: &a.0,
-                    typed: a.to_real(),
-                    span: RawSpan::read(&a.0),
-                    scan: scan(&a.0),
-                    link_ids,
-                });
+        for (i, (face, encoded)) in def.faces.iter().zip(&raw.abilities).enumerate() {
+            for (j, (a, e)) in face.abilities.iter().zip(encoded).enumerate() {
+                abilities.push(AbilityFacts::new(i, j, a, &e.value, e.error.as_deref()));
             }
         }
-        let partners = def
-            .commander_eligibility
+        let partners = raw
+            .partners
             .iter()
-            .flat_map(|e| e.partner_abilities.iter().enumerate())
-            .map(|(k, p)| PartnerFacts {
+            .enumerate()
+            .map(|(k, e)| PartnerFacts {
                 index: k,
-                error: p.to_real().err(),
-                scan: scan(&p.0),
+                error: e.error.as_deref(),
+                scan: scan(&e.value),
             })
             .collect();
         CardFacts {
@@ -358,7 +433,7 @@ fn raw_findings(scan: &Scan<'_>, location: &LintLocation, out: &mut Vec<Lint>) {
 }
 
 /// `FPL-LOOK-BACK` (CR 603.10) and `FPL-MAX-ITER` (REQ-DSL-010) over every face and partner
-/// ability, on the raw JSON (decodable or not).
+/// ability, on its JSON form.
 pub(super) fn check_raw(facts: &CardFacts<'_>, out: &mut Vec<Lint>) {
     for a in &facts.abilities {
         raw_findings(&a.scan, &a.location(), out);

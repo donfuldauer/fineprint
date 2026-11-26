@@ -43,13 +43,13 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 }
 
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 /// The characteristic-defining expression "the number of creatures its controller controls"
-/// as the synthetic environment reads it (a non-literal single-key JSON object).
+/// as the synthetic environment reads it (a non-literal expression, `{"MEMORY": key}`).
 fn count_expr() -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!({ "test.count_controller_creatures": true }))
+    ValueExpressionAST::Memory("test.count_controller_creatures".to_owned())
 }
 
 /// A synthetic creature `test.<name>` with literal P/T and the given abilities.
@@ -62,7 +62,7 @@ fn creature(name: &str, power: i64, toughness: i64, abilities: Vec<AbilityAST>) 
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: set(&["Golem"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities,
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -1229,4 +1229,15 @@ fn req_layer_001_board_adapters_forward_the_environment() {
     assert_eq!(answers.len(), 3);
     assert_eq!(answers[0], answers[1]);
     assert_eq!(answers[0], answers[2]);
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
 }

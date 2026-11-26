@@ -95,14 +95,21 @@ fn effect(layer: &str, defines: Option<Value>, is_cda: Option<bool>) -> Value {
 }
 
 /// Accepts the effect standalone, inside a STATIC ability, and through the card-level
-/// ability placeholder's typed view (`fineprint_dsl::card::AbilityAST::to_real`).
+/// ability position's typed view (#232 FP-164: `fineprint_dsl::card::AbilityAST` is the real
+/// ability type, so the former `to_real` probe is a plain serde decode of the canonical value
+/// plus the single-spelling check that re-serialising reproduces it).
 fn accept_effect(e: &Value) -> StaticEffect {
     let ability = stat(json!([e]));
     accept::<AbilityAST>(&text(&ability));
     let canon: Value =
         serde_json::from_slice(&canonicalize(text(&ability).as_bytes()).unwrap()).unwrap();
-    if let Err(err) = fineprint_dsl::card::AbilityAST(canon).to_real() {
-        panic!("card-level to_real rejected {e}: {err}");
+    match serde_json::from_value::<fineprint_dsl::card::AbilityAST>(canon.clone()) {
+        Ok(typed) => assert_eq!(
+            serde_json::to_value(&typed).unwrap(),
+            canon,
+            "card-level typed view does not reproduce {e}"
+        ),
+        Err(err) => panic!("card-level typed view rejected {e}: {err}"),
     }
     accept::<StaticEffect>(&text(e))
 }
@@ -114,8 +121,8 @@ fn reject_effect(e: &Value) {
     let ability = stat(json!([e]));
     reject::<AbilityAST>(&text(&ability));
     assert!(
-        fineprint_dsl::card::AbilityAST(ability).to_real().is_err(),
-        "card-level to_real accepted {e}"
+        serde_json::from_value::<fineprint_dsl::card::AbilityAST>(ability).is_err(),
+        "card-level typed view accepted {e}"
     );
 }
 
@@ -358,7 +365,7 @@ fn req_dsl_008_random_bytes_do_not_panic() {
             let _ = serde_json::from_slice::<StaticEffect>(&bytes);
             let _ = serde_json::from_slice::<AbilityAST>(&bytes);
             if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                let _ = fineprint_dsl::card::AbilityAST(v).to_real();
+                let _ = serde_json::from_value::<fineprint_dsl::card::AbilityAST>(v);
             }
         }
     }

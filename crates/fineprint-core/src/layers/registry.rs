@@ -157,6 +157,9 @@ pub enum Affected {
 
 /// What a continuous effect does to an object; each variant belongs to the layers named in its
 /// documentation (CR 613.1, 613.2, 613.4). [`LayerModification::belongs_to`] is the table.
+// The typed `AbilityAST` payload is large; it stays unboxed so the public variants keep the
+// shape callers build (docs/DECISIONS.md "#232 FP-164 — Typed card AST positions").
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayerModification {
     /// Layer 1a (CR 613.2a): replaces all characteristics with the given copiable values. The
@@ -192,9 +195,8 @@ pub enum LayerModification {
     /// rewritable word of the rules text with this `category` and exactly the value `from`
     /// becomes `to`; literal text, name references and card-name words are never rewritten, and
     /// granted abilities are not text (CR 612.3). Category `CARD_NAME` and empty or
-    /// noncharacter words are rejected at registration ([`LayerError::Unsupported`]). Rules text
-    /// that is empty or does not decode as a token stream is left unchanged
-    /// ([`crate::layers::rewrite_text_words`], [`crate::layers::decode_rules_text`]).
+    /// noncharacter words are rejected at registration ([`LayerError::Unsupported`]). Empty
+    /// rules text is left unchanged ([`crate::layers::rewrite_text_words`]).
     ReplaceTextWord {
         /// The word category (`COLOR_WORD`, `BASIC_LAND_TYPE`, `CREATURE_TYPE` or `NUMBER`).
         category: RewritableCategory,
@@ -232,8 +234,10 @@ pub enum LayerModification {
     AddAbility(AbilityAST),
     /// Layer 6 (CR 613.1f): removes every ability.
     RemoveAllAbilities,
-    /// Layer 6 (CR 613.1f): removes every keyword ability whose `keyword` is this string, and,
-    /// for hexproof, every "hexproof from [quality]" variant (CR 702.11e).
+    /// Layer 6 (CR 613.1f): removes every keyword ability whose `keyword` is the keyword name
+    /// of this string ([`crate::layers::keyword_id`]: `"flying"` and `"FLYING"` both remove a
+    /// `FLYING` ability), and, for hexproof, every "hexproof from [quality]" variant
+    /// (CR 702.11e).
     RemoveKeyword(String),
     /// Layer 7a or 7b (CR 613.4a, 613.4b): `Some(n)` sets that value to `n`; `None` leaves it.
     SetPt {

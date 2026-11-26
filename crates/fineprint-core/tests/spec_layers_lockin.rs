@@ -89,10 +89,12 @@ struct IdProbe {
     ability_id: Option<String>,
 }
 
-/// The ability id of a placeholder ability, if it has one.
+/// The ability id of an ability (#232 FP-164: read from the typed ability; the MessagePack
+/// probe is kept as a cross-check of the wire form).
 fn ability_id(a: &AbilityAST) -> Option<String> {
     let bytes = rmp_serde::to_vec_named(a).ok()?;
     let p: IdProbe = rmp_serde::from_slice(&bytes).ok()?;
+    assert_eq!(p.ability_id.as_deref(), Some(a.base().ability_id.as_str()));
     p.ability_id
 }
 
