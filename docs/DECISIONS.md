@@ -10059,3 +10059,33 @@ sourced static's controller is the source's evaluated controller. The corrected 
 that contract (a stale stored value must not be seen), so it is stronger, not weaker.
 **Alternatives:** Moving the source under P2 and keeping stored P2 (rejected: would no longer
 distinguish stored from evaluated controller); leaving the test (rejected: contradicts the brief).
+
+## #211 FP-157 — Retire ceased CardIds in Zones
+
+**Decision:** `Zones` has a private `retired: Arc<BTreeSet<CardId>>` (empty in `Zones::new`,
+written with `Arc::make_mut`). `cease_to_exist` inserts the removed object's CardId after the
+removal, only on success; `send_outside` and `move_object` do not retire. New
+`ZoneError::CardCeased(CardId)`. Precedence: after `require_player` (an unknown player still gives
+`UnknownPlayer`) and before every other check: `create_object` rejects before `CardAlreadyPresent`
+and the controller check; `enter_from_outside` rejects before `NoSuchOutsideCard` (a retired card
+is in no pool, so the caller learns the real reason); `add_outside_card` also rejects before
+`CardAlreadyPresent` (judgement call: otherwise a retired card could re-enter through a pool).
+All checks run before any mutation, so the container and generator are unchanged on error. The
+retired set is part of `PartialEq` and of the canonical encoding, written (length prefix, ascending
+CardIds) after the command zone and before `max_issued`, which stays the last 8 bytes. `state/`
+and every golden state hash are unaffected because `Zones` is not in the state hash yet; the
+encoding of a `Zones` with an empty set grows only by the 8-byte zero length prefix.
+`events::ObjectMarkers` is deliberately not cleared: a retired id is now unreachable through
+`Zones`, so the stale token mark cannot be hit. The perform.rs dungeon-removal placeholder (CR
+704.5t) calls `cease_to_exist` until #215 adds an outside pool, so it retires that card; #215 must
+switch it to `send_outside`. The "#41 FP-040" sentence "enforcement ... is a known follow-up" is
+now done (that entry is append-only and unchanged).
+**Rationale:** CardIds are match-scoped and never reused (REQ-CORE-002); the engine never reissues
+one, but `Zones` did not enforce it. Unlike ObjectIds (issued by a generator `Zones` sees, where
+the #167 high-water mark suffices and tracking every id was rejected as unbounded), CardIds are
+supplied by the caller and need not be dense, so an exact set is the only precise way; it is
+bounded by the number of tokens and copies that ever ceased in a match.
+**Alternatives:** Clearing the token mark on cease (rejected: outside owned paths, and would
+silently allow id reuse); a high-water CardId mark only (rejected: CardIds are not issued by
+`Zones` and need not be dense); rejecting only in `create_object` / `enter_from_outside`
+(rejected: `add_outside_card` would be a back door).

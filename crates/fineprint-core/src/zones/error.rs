@@ -19,6 +19,8 @@ pub enum ZoneError {
     UnknownObject(ObjectId),
     /// The card is already in a zone or an outside-the-game pool.
     CardAlreadyPresent(CardId),
+    /// The card ceased to exist earlier in this match (CardIds are never reused, REQ-CORE-002).
+    CardCeased(CardId),
     /// The object id generator has already issued `u64::MAX` (REQ-CORE-002).
     IdExhausted,
     /// A controller was given for, or set on, an object outside the battlefield and the stack.
@@ -53,6 +55,13 @@ impl fmt::Display for ZoneError {
                 write!(
                     f,
                     "card {} is already in a zone or outside-the-game pool",
+                    id.get()
+                )
+            }
+            ZoneError::CardCeased(id) => {
+                write!(
+                    f,
+                    "card {} ceased to exist earlier in this match and cannot return",
                     id.get()
                 )
             }
