@@ -31,10 +31,13 @@
 //! - A hit costs one comparison of the registry with the snapshot (`O(E)`, done once per
 //!   [`LayerCache::evaluate_all`] call and once per [`LayerCache::evaluate`] call), one ordered
 //!   map lookup (`O(log N)`) and one clone of the stored [`Evaluated`].
-//! - A miss costs the same comparison plus one full per-object evaluation: every layer from 1a
-//!   to 7d, each layer's ordering including the trial applications that find dependencies
-//!   (roughly quadratic in the number of steps that apply to the object in one layer), and the
-//!   selector matching of every effect of each layer against the object; plus the insertion.
+//! - A miss costs the same comparison plus one layer-major board pass of
+//!   [`evaluate`](super::evaluate) (every object of the universe through every layer from 1a to
+//!   7d, each layer's ordering including the trial applications that find dependencies, roughly
+//!   quadratic in the number of steps that apply to an object in one layer, the selector
+//!   matching of every effect of each layer against each object, and the nested source
+//!   evaluations of the existence question); plus the insertion. Its result is the asked
+//!   object's.
 //! - An invalidation costs dropping every entry (`O(N)`); a registry change also clones the
 //!   registry once (`O(E)`) into the snapshot.
 //! - A full-board recompute ([`LayerCache::evaluate_all`] after an invalidation) is `N` misses.
@@ -226,20 +229,25 @@ impl LayerCache {
         self.lookup_or_evaluate(effects, env, id)
     }
 
-    /// Every object of `env.objects()` in that order, equal to
-    /// [`evaluate_all`](super::evaluate_all); each object is a hit or a miss as for
-    /// [`LayerCache::evaluate`]. The registry is compared once per call.
+    /// Every object of `env.objects()` by ascending [`ObjectId`] (a listed duplicate is looked up
+    /// again, as before), equal to [`evaluate_all`](super::evaluate_all); each object is a hit or
+    /// a miss as for [`LayerCache::evaluate`]. The registry is compared once per call.
     ///
     /// # Errors
-    /// The first error of [`evaluate`](super::evaluate); entries computed before it stay stored.
+    /// The first error of [`evaluate`](super::evaluate) by ascending [`ObjectId`], as
+    /// [`evaluate_all`](super::evaluate_all); entries computed before it stay stored.
     pub fn evaluate_all(
         &mut self,
         effects: &ContinuousEffects,
         env: &dyn LayerEnvironment,
     ) -> Result<BTreeMap<ObjectId, Evaluated>, LayerError> {
         self.sync_registry(effects);
+        // REQ-CORE-001: ascending ids, never the environment's order, so the first error is the
+        // one of the uncached `evaluate_all`.
+        let mut ids = env.objects();
+        ids.sort_unstable();
         let mut out = BTreeMap::new();
-        for id in env.objects() {
+        for id in ids {
             out.insert(id, self.lookup_or_evaluate(effects, env, id)?);
         }
         Ok(out)

@@ -1488,8 +1488,11 @@ fn replay(
     };
     for &layer in Layer::ALL {
         if layer == Layer::L7a {
-            // The evaluator's own start of layer 7 (CR 613.4, 208.3).
-            scratch.pt = start_layer_7(&mut scratch.state, env, o(1), base.on_battlefield);
+            // The evaluator's own start of layer 7 (CR 613.4, 208.3), with the view of the one
+            // replayed object after layers 1-6 (CR 613.4a, 613.5).
+            let states = std::collections::BTreeMap::from([(o(1), scratch.state.clone())]);
+            let view = super::board::EvaluatedView::new(&states, Layer::L7a);
+            scratch.pt = start_layer_7(&mut scratch.state, env, o(1), base.on_battlefield, &view);
         }
         for s in rec.steps.iter().filter(|s| s.layer == layer) {
             match &s.item {
@@ -1638,16 +1641,18 @@ fn req_layer_002_generating_ability_kept_effect_applies_both_orders() {
     }
 }
 
-/// REQ-LAYER-002, CR 613.8a, 611.2, 613.8b: exempt effects. A resolved effect with a source
-/// (CR 611.2: it exists independently of its source's abilities), a static effect whose source
-/// is another object (its existence is not judged here: `source_view` is `None`, treated as
-/// existing), and a static effect without a source: in each case the grant depends on the
-/// remover and applies after it in both timestamp orders, and the marker is granted.
+/// REQ-LAYER-002, REQ-LAYER-001, CR 613.8a, 611.2, 613.8b: exempt effects. A resolved effect
+/// with a source (CR 611.2: it exists independently of its source's abilities), a static effect
+/// whose source is not in the evaluation's universe (it has no base: `source_view` is `None`,
+/// treated as existing by this environment), and a static effect without a source: in each case
+/// the grant depends on the remover and applies after it in both timestamp orders, and the
+/// marker is granted. (A source that is another object of the universe gets its own view since
+/// #186 FP-146, see `cross_object_tests`; this case uses object 9, which has no base.)
 #[test]
 fn req_layer_002_existence_exemptions_both_orders() {
     let cases = [
         (EffectOrigin::Resolved, Some(o(1))),
-        (static_origin(), Some(o(2))),
+        (static_origin(), Some(o(9))),
         (static_origin(), None),
     ];
     for (origin, source) in cases {
@@ -1673,10 +1678,10 @@ fn req_layer_002_existence_exemptions_both_orders() {
                 vec![(fx(1), first, true), (fx(2), Selection::Timestamp, true)]
             );
             let calls = env.generator_calls.borrow();
-            if source == Some(o(2)) {
-                // CR 613.8a: another object's source is asked without a view.
+            if source == Some(o(9)) {
+                // CR 613.8a: a source outside the universe is asked without a view.
                 assert!(!calls.is_empty());
-                assert!(calls.iter().all(|&call| call == (e(2), o(2), false)));
+                assert!(calls.iter().all(|&call| call == (e(2), o(9), false)));
             } else {
                 // Resolved, or no source: the hook is never asked.
                 assert!(calls.is_empty(), "{origin:?} {source:?}");
