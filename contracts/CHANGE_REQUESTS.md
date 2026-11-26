@@ -129,3 +129,31 @@ Why: REQ-OBJ-002 / CR 707.9d needs to know which type-line part (supertypes, car
 subtypes; separate characteristics, CR 109.3, 205.1b) a layer-4 characteristic-defining ability
 defines, so a copy exception touching one part drops only the CDAs that define that part.
 Consumers affected: fineprint-dsl ability statics, fineprint-core layers/copy.
+
+## CR-007 — Layer evaluator (REQ-LAYER-001/002): sourced static effects use the source's evaluated controller
+Requested by: #203 FP-152   Kind: breaking   Status: open
+Change: for a `ContinuousEffect` with `origin: EffectOrigin::Static { .. }` and `source:
+Some(s)`, the `MatchContext::effect_controller` passed to `LayerEnvironment::matches` is now the
+controller of `s` as evaluated in the layer pass at the point the effect applies (the candidate's
+own state so far when `s` is the candidate; otherwise `s` evaluated through the end of the
+effect's layer without the effect, the view the existence question already uses), not the
+`ContinuousEffect::controller` stored at registration. For effects of layers 3-7d this is the
+controller after layer 2; for layers 1a, 1b and 2 the source's state so far in that layer. The
+stored controller remains the fallback when the source is not in the universe or has no
+evaluated controller. Effects with `EffectOrigin::Resolved`, without a source, with a locked
+`Affected::Objects` set or linked `Affected::SameAsLayer` parts are unchanged. New provided
+method `LayerEnvironment::static_source_state(&self, effect: EffectId, source: ObjectId) ->
+Option<&Evaluated>` (default `None`), answered by the board pass's own environments
+(`layers::board` `BoardEnv` / `NestedEnv`); a caller's environment is never asked. The
+`MatchContext` field set and the `matches` signature are unchanged. In `replacement::etb`, the
+copied statics bound to the entrant (`bind_to`) therefore use the entrant's controller after the
+existing layer-2 effects; their stored `entry.controller` is only the fallback.
+Why: REQ-LAYER-002 (CR 109.5: "you" of a static ability is the current controller of the object
+it is on; CR 611.3a: a static effect is not locked in; CR 613.1b: control changes apply in layer
+2, before every later layer; CR 613.7/613.8 order only within a layer); REQ-LAYER-001; ETB
+projection CR 614.12, 110.2. Issue #203.
+Consumers affected: fineprint-core layers pipeline and board, layer cache (`LayerCache`),
+replacement::etb projection, every `LayerEnvironment::matches` implementor reading
+`MatchContext::effect_controller` (spec-test environments whose stored controller differs from
+the source's controller, e.g. `tests/spec_layers_each_layer.rs`
+`selector_sees_layer_2_result_and_context_fields`).
