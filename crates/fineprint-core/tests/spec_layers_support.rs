@@ -8,12 +8,10 @@
 //! Each `spec_layers_*.rs` test file includes this file with `#[path]`; on its own it is an
 //! empty test target. Every card here is synthetic and neutrally named (R5).
 //!
-//! Representation of the DSL placeholders (the `Characteristics` fields wrap a JSON value):
-//! a literal power or toughness `ValueExpressionAST::Literal(n)` is the DSL JSON form of the
-//! typed `fineprint_dsl::expr::ValueExpressionAST::Literal(n)` (`{"LITERAL": n}`), and a keyword
-//! ability `AbilityAST::Keyword` is the DSL JSON form of a keyword instance
-//! (`{"kind": "KEYWORD", "abilityId": id, "keyword": kw}`). Both are built and read here through
-//! MessagePack, so no `serde_json` dependency is needed.
+//! #232 FP-164: the `Characteristics` fields hold the typed DSL ASTs (REQ-DSL-003, REQ-DSL-012):
+//! a literal power or toughness is `ValueExpressionAST::Literal(n)` (`{"LITERAL": n}`), a keyword
+//! ability is `AbilityAST::Keyword` with an upper-case keyword name, and rules text is a valid
+//! token stream.
 
 #![allow(dead_code)]
 
@@ -27,6 +25,7 @@ use fineprint_core::layers::{
 };
 use fineprint_core::objects::Characteristics;
 pub use fineprint_dsl::ability::Layer;
+pub use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST};
 pub use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::{ObjectSelectorAST, ReferenceAST};
 
@@ -71,47 +70,38 @@ fn try_via_msgpack<In: serde::Serialize, Out: serde::de::DeserializeOwned>(
     rmp_serde::from_slice(&bytes).ok()
 }
 
-/// `ValueExpressionAST::Literal(n)` in the placeholder form held by `Characteristics`.
+/// `ValueExpressionAST::Literal(n)` (#232 FP-164: `Characteristics` holds the typed AST).
 pub fn lit(n: i64) -> ValueExpressionAST {
-    via_msgpack(&fineprint_dsl::expr::ValueExpressionAST::Literal(n))
+    ValueExpressionAST::Literal(n)
 }
 
 /// A non-literal value expression (`"X"`), used as a CDA-like base power.
 pub fn non_literal_x() -> ValueExpressionAST {
-    via_msgpack(&fineprint_dsl::expr::ValueExpressionAST::X)
+    ValueExpressionAST::X
 }
 
 /// A second non-literal value expression, distinct from [`non_literal_x`].
 pub fn non_literal_memory(key: &str) -> ValueExpressionAST {
-    via_msgpack(&fineprint_dsl::expr::ValueExpressionAST::Memory(
-        key.to_string(),
-    ))
+    ValueExpressionAST::Memory(key.to_string())
 }
 
-/// Reads a placeholder value expression in the DSL form of `Literal(n)` (`{"LITERAL": n}`).
+/// Reads a value expression that is `Literal(n)`.
 pub fn dsl_literal_of(v: &ValueExpressionAST) -> Option<i64> {
-    match try_via_msgpack::<_, fineprint_dsl::expr::ValueExpressionAST>(v)? {
-        fineprint_dsl::expr::ValueExpressionAST::Literal(n) => Some(n),
+    match v {
+        ValueExpressionAST::Literal(n) => Some(*n),
         _ => None,
     }
 }
 
-/// A literal as a bare JSON integer `n`: the placeholder form of `ValueExpressionAST::Literal(n)`
-/// fixed by decision "#32 FP-031 — Placeholder DSL trees in `Characteristics`" (the evaluator
-/// emits it and reads both it and `{"LITERAL": n}`).
-pub fn bare(n: i64) -> ValueExpressionAST {
-    via_msgpack(&n)
-}
-
-/// Reads a placeholder value expression as a literal integer: the DSL form `{"LITERAL": n}`
-/// or a bare JSON integer (both are literals per the decision above;
-/// `evaluated_pt_uses_the_logged_literal_form` asserts the emitted form on its own).
+/// Reads a value expression as a literal integer. #232 FP-164: the former bare-JSON-integer
+/// placeholder form of a literal no longer exists (the typed AST has the single form
+/// `{"LITERAL": n}`), so this is [`dsl_literal_of`].
 pub fn literal_of(v: &ValueExpressionAST) -> Option<i64> {
-    dsl_literal_of(v).or_else(|| try_via_msgpack::<_, i64>(v))
+    dsl_literal_of(v)
 }
 
-/// `c` with every literal power/toughness (either form) rewritten to [`lit`], so whole
-/// characteristics can be compared independently of the literal representation.
+/// `c` with every literal power/toughness rewritten to [`lit`] (kept for the callers; with the
+/// single literal form it is the identity on literals).
 pub fn norm(c: &Characteristics) -> Characteristics {
     let fix = |v: &Option<ValueExpressionAST>| {
         v.as_ref()
@@ -124,39 +114,57 @@ pub fn norm(c: &Characteristics) -> Characteristics {
     }
 }
 
-/// A keyword ability `AbilityAST::Keyword { base.ability_id = id, keyword = kw }`.
+/// The DSL keyword name (`[A-Z][A-Z0-9_]*`) of a keyword written in rules-text form: upper case
+/// with spaces as underscores (`"first strike"` → `"FIRST_STRIKE"`). #232 FP-164: a typed
+/// KEYWORD ability only holds the upper-case form.
+pub fn kw_id(kw: &str) -> String {
+    kw.chars()
+        .map(|c| {
+            if c == ' ' {
+                '_'
+            } else {
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect()
+}
+
+/// The rules-text form of a DSL keyword name (inverse of [`kw_id`] for keywords written with
+/// lower-case words and single spaces).
+pub fn kw_text(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c == '_' {
+                ' '
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+/// A keyword ability `AbilityAST::Keyword { base.ability_id = id, keyword = kw_id(kw) }`.
 pub fn kw_ability(id: &str, kw: &str) -> AbilityAST {
-    let mut m: BTreeMap<&str, &str> = BTreeMap::new();
-    m.insert("kind", "KEYWORD");
-    m.insert("abilityId", id);
-    m.insert("keyword", kw);
-    via_msgpack(&m)
+    AbilityAST::Keyword(KeywordInstanceAST::new(AbilityBase::new(id), kw_id(kw)))
 }
 
-/// A non-keyword (static) ability with the given id; its body is opaque here.
+/// A non-keyword (STATIC) ability with the given id; its body (one RULE effect) is opaque here.
 pub fn static_ability(id: &str) -> AbilityAST {
-    let mut m: BTreeMap<&str, &str> = BTreeMap::new();
-    m.insert("kind", "STATIC");
-    m.insert("abilityId", id);
-    via_msgpack(&m)
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic STATIC ability")
 }
 
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct AbilityProbe {
-    kind: Option<String>,
-    #[serde(rename = "abilityId")]
-    ability_id: Option<String>,
-    keyword: Option<String>,
-}
-
-/// `(ability_id, keyword)` if `a` is a keyword ability.
+/// `(ability_id, keyword)` if `a` is a keyword ability, the keyword in rules-text form
+/// ([`kw_text`]).
 pub fn keyword_of(a: &AbilityAST) -> Option<(String, String)> {
-    let p: AbilityProbe = try_via_msgpack(a)?;
-    if p.kind.as_deref() != Some("KEYWORD") {
-        return None;
+    match a {
+        AbilityAST::Keyword(k) => Some((k.base.ability_id.clone(), kw_text(&k.keyword))),
+        _ => None,
     }
-    Some((p.ability_id?, p.keyword?))
 }
 
 /// Every keyword ability of `c`, as `(ability_id, keyword)`, in list order.
@@ -164,9 +172,12 @@ pub fn keywords(c: &Characteristics) -> Vec<(String, String)> {
     c.abilities.iter().filter_map(keyword_of).collect()
 }
 
-/// How many keyword abilities of `c` have keyword `kw`.
+/// How many KEYWORD abilities of `c` have the DSL keyword name `kw_id(kw)`.
 pub fn count_kw(c: &Characteristics, kw: &str) -> usize {
-    keywords(c).iter().filter(|(_, k)| k == kw).count()
+    c.abilities
+        .iter()
+        .filter(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == kw_id(kw)))
+        .count()
 }
 
 pub fn has_kw(c: &Characteristics, kw: &str) -> bool {
@@ -194,8 +205,20 @@ pub fn spt(p: i64, t: i64) -> (Option<i64>, Option<i64>) {
     (Some(p), Some(t))
 }
 
+/// Rules text of one LITERAL token per word, ids `w0`, `w1`, ... (#232 FP-164: formerly a
+/// placeholder list of bare JSON strings, which is not a valid token stream).
 pub fn text(words: &[&str]) -> TextTokenStream {
-    TextTokenStream(words.iter().map(|w| (*w).into()).collect())
+    TextTokenStream::new(
+        words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| fineprint_dsl::text::TextToken::Literal {
+                id: format!("w{i}"),
+                text: (*w).to_string(),
+            })
+            .collect(),
+    )
+    .expect("valid synthetic text")
 }
 
 pub fn set(items: &[&str]) -> BTreeSet<String> {
@@ -220,7 +243,7 @@ pub fn blank(name: &str, types: &[&str]) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,

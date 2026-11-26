@@ -48,18 +48,23 @@ pub fn some_cost(text: &str) -> Option<ManaCostDSL> {
     Some(cost(text))
 }
 
-/// A synthetic opaque ability: the JSON object `{key: n}`.
+/// A synthetic opaque ability identified by `(key, n)` (#232 FP-164: formerly the free-form
+/// JSON object `{key: n}`, which is not a valid ability): the KEYWORD ability with `abilityId`
+/// `key`, the synthetic keyword `TEST_SYNTHETIC` and the opaque parameter `n`.
 pub fn json_ability(key: &str, n: i64) -> AbilityAST {
-    let mut m = BTreeMap::new();
-    m.insert(key.to_string(), n);
-    via_msgpack(&m)
+    serde_json::from_value(serde_json::json!({
+        "abilityId": key,
+        "kind": "KEYWORD",
+        "keyword": "TEST_SYNTHETIC",
+        "params": {"n": n},
+    }))
+    .expect("valid synthetic ability")
 }
 
-/// A CDA-like, non-literal power/toughness expression: the JSON object `{"CDA": key}`.
+/// A CDA-like, non-literal power/toughness expression (#232 FP-164: formerly the free-form JSON
+/// object `{"CDA": key}`): `{"MEMORY": key}`, distinct per key.
 pub fn cda_like(key: &str) -> ValueExpressionAST {
-    let mut m = BTreeMap::new();
-    m.insert("CDA".to_string(), key.to_string());
-    via_msgpack(&m)
+    ValueExpressionAST::Memory(key.to_string())
 }
 
 pub fn oset(ids: &[ObjectId]) -> BTreeSet<ObjectId> {
@@ -268,8 +273,8 @@ pub fn creature_face(
         mana_cost: ManaCostDSL::parse_optional(mana).expect("synthetic cost"),
         card_types: vec!["Creature".to_string()],
         subtypes: vec![subtype.to_string()],
-        power: Some(bare(pt.0)),
-        toughness: Some(bare(pt.1)),
+        power: Some(lit(pt.0)),
+        toughness: Some(lit(pt.1)),
         abilities: vec![json_ability(face_name, 1)],
         ..blank_face(kind, face_name)
     }
@@ -322,8 +327,8 @@ pub fn proto_def() -> CardDefinitionDSL {
     };
     let proto = CardFaceDSL {
         mana_cost: some_cost("{X}{2}{R}{R}"),
-        power: Some(bare(3)),
-        toughness: Some(bare(2)),
+        power: Some(lit(3)),
+        toughness: Some(lit(2)),
         abilities: vec![json_ability("test.proto_inset", 1)],
         ..blank_face(FaceKind::Prototype, "test.proto_inset")
     };

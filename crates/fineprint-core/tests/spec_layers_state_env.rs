@@ -33,7 +33,8 @@ const T: u64 = 3;
 
 /// B's generating ability (scenario PR #187).
 fn b_ability() -> AbilityAST {
-    AbilityAST(serde_json::json!({ "synthetic": "marker_granter" }))
+    // #232 FP-164: a valid inert ability instead of `{"synthetic":"marker_granter"}`.
+    ability("marker_granter")
 }
 
 /// A's generating ability.

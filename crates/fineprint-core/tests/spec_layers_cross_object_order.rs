@@ -17,12 +17,15 @@ use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::ValueExpressionAST;
 use support::*;
 
+/// #232 FP-164: the former bare-JSON-integer literal form no longer exists (refused as a typed
+/// value expression), so both helpers give the single literal form `Literal(n)`.
 fn json_lit(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!(n))
+    assert!(serde_json::from_value::<ValueExpressionAST>(serde_json::json!(n)).is_err());
+    ValueExpressionAST::Literal(n)
 }
 
 fn tagged_lit(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!({ "LITERAL": n }))
+    serde_json::from_value(serde_json::json!({ "LITERAL": n })).expect("valid literal")
 }
 
 /// Objects 1-3 listed, 4 not listed; every power and toughness a literal in both forms.

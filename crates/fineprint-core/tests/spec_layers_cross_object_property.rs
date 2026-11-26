@@ -268,8 +268,20 @@ fn req_layer_001_property_arbitrary_value_expressions_never_panic() {
         Some(i64::MIN),
     ];
     for case_no in 0..200 {
-        let pw = ValueExpressionAST(random_json(&mut rng, 3));
-        let th = ValueExpressionAST(random_json(&mut rng, 3));
+        // #232 FP-164: base P/T are typed; random JSON that does not decode as a value
+        // expression is replaced by a random valid one (a literal or a non-literal MEMORY key).
+        let typed = |rng: &mut Rng| {
+            let v = random_json(rng, 3);
+            serde_json::from_value::<ValueExpressionAST>(v).unwrap_or_else(|_| {
+                if rng.below(2) == 0 {
+                    ValueExpressionAST::Literal(i64::try_from(rng.below(41)).unwrap() - 20)
+                } else {
+                    ValueExpressionAST::Memory(format!("test.m{}", rng.below(5)))
+                }
+            })
+        };
+        let pw = typed(&mut rng);
+        let th = typed(&mut rng);
         let answer = answers[case_no % answers.len()];
         let mut c = creature(0, 0);
         c.power = Some(pw.clone());

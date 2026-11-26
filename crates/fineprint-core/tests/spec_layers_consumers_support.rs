@@ -19,6 +19,10 @@
 
 #![allow(dead_code)]
 
+#[path = "typed_ast_support/mod.rs"]
+mod typed_ast_support;
+use typed_ast_support::synthetic_ability;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::encode::CanonicalEncode;
@@ -62,14 +66,16 @@ pub fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }
 
-/// A literal printed power/toughness value.
+/// A literal printed power/toughness value `Literal(n)` (#232 FP-164: formerly the bare JSON
+/// integer placeholder).
 pub fn printed(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!(n))
+    ValueExpressionAST::Literal(n)
 }
 
-/// A synthetic ability identified by value.
+/// A synthetic ability identified by value (#232 FP-164: a valid inert KEYWORD ability instead
+/// of the former free-form `{"synthetic": name}` placeholder).
 pub fn ability(name: &str) -> AbilityAST {
-    AbilityAST(serde_json::json!({ "synthetic": name }))
+    synthetic_ability(name)
 }
 
 /// A synthetic creature with the given name and printed power/toughness, no abilities.
@@ -82,7 +88,7 @@ pub fn creature(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(printed(power)),
         toughness: Some(printed(toughness)),

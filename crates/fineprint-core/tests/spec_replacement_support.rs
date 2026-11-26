@@ -242,8 +242,9 @@ fn via_msgpack<In: serde::Serialize, Out: serde::de::DeserializeOwned>(value: &I
     rmp_serde::from_slice(&bytes).expect("decode")
 }
 
+/// A printed value `Literal(n)` (#232 FP-164: formerly the bare JSON integer placeholder).
 fn printed(n: i64) -> ValueExpressionAST {
-    via_msgpack(&n)
+    ValueExpressionAST::Literal(n)
 }
 
 fn set(items: &[&str]) -> BTreeSet<String> {
@@ -260,7 +261,7 @@ pub fn chars(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(printed(power)),
         toughness: Some(printed(toughness)),

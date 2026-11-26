@@ -15,6 +15,7 @@ use fineprint_dsl::card::{CardDefinitionDSL, ColorBitmask};
 use fineprint_dsl::lint::{
     LintContext, LintId, Severity, SourceCharacteristics, SourceFaceCharacteristics,
 };
+use fineprint_dsl::text::TextToken;
 
 const FAMILIES: [&str; 6] = [
     "creatures",
@@ -243,9 +244,9 @@ fn req_nfr_004_no_card_data_members() {
     }
     for card in card_library::load_all() {
         for face in &card.def.faces {
-            for token in &face.text.0 {
-                if token["kind"] == "LITERAL" {
-                    let text = token["text"].as_str().expect("literal text");
+            // #232 FP-164: the text position is the typed token stream.
+            for token in face.text.tokens() {
+                if let TextToken::Literal { text, .. } = token {
                     assert!(
                         text.starts_with("test "),
                         "{}: LITERAL token {text:?} does not start with \"test \"",

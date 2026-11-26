@@ -79,7 +79,7 @@ pub fn chars(name: &str, types: &[&str]) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,

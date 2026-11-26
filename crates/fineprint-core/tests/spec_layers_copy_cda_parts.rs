@@ -16,8 +16,12 @@ use std::collections::BTreeSet;
 
 use fineprint_core::layers::{CopiableValues, CopiedCharacteristic, CopyException};
 use fineprint_core::objects::Characteristics;
-use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
+use fineprint_dsl::card::{AbilityAST, ColorBitmask, ValueExpressionAST};
 use serde_json::{Value, json};
+
+#[path = "typed_ast_support/mod.rs"]
+mod typed_ast_support;
+use typed_ast_support::{ability_of, synthetic_ability, tx};
 
 // ---------------------------------------------------------------------------------------------
 // helpers (local copies; R1: no shared helper is edited)
@@ -31,13 +35,19 @@ fn mask(bits: u8) -> ColorBitmask {
     ColorBitmask::new(bits).expect("valid mask")
 }
 
-/// A literal power/toughness in the bare-integer placeholder form.
+/// A literal power/toughness `Literal(n)` (#232 FP-164: formerly the bare-integer placeholder).
 fn lit(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(json!(n))
+    ValueExpressionAST::Literal(n)
 }
 
+/// `v` as a typed ability; panics when it is not valid.
 fn ab(v: Value) -> AbilityAST {
-    AbilityAST(v)
+    ability_of(v)
+}
+
+/// `v` as a typed ability, if it decodes (#232 FP-164).
+fn try_ab(v: Value) -> Option<AbilityAST> {
+    serde_json::from_value(v).ok()
 }
 
 /// A CHAR effect of `layer` on its own object with the given modification and `isCDA` member.
@@ -61,14 +71,19 @@ fn static_with(id: &str, effects: Vec<Value>) -> AbilityAST {
     ab(json!({"abilityId": id, "kind": "STATIC", "effects": effects}))
 }
 
-/// A layer-4 CDA whose modification carries `defines` as the raw JSON value given (`None`:
-/// the member is absent, which means all three type-line parts).
-fn cda4_raw(id: &str, defines: Option<Value>) -> AbilityAST {
+/// The JSON of a layer-4 CDA whose modification carries `defines` as the raw JSON value given
+/// (`None`: the member is absent, which means all three type-line parts).
+fn cda4_json(id: &str, defines: Option<Value>) -> Value {
     let mut m = json!({"op": "ANY_OP"});
     if let Some(d) = defines {
         m.as_object_mut().unwrap().insert("defines".to_string(), d);
     }
-    static_with(id, vec![char_effect("4", m, Some(true))])
+    json!({"abilityId": id, "kind": "STATIC", "effects": [char_effect("4", m, Some(true))]})
+}
+
+/// A layer-4 CDA whose modification carries `defines` (see [`cda4_json`]).
+fn cda4_raw(id: &str, defines: Option<Value>) -> AbilityAST {
+    ab(cda4_json(id, defines))
 }
 
 /// A layer-4 CDA defining exactly `parts` (each one of `SUPERTYPES`, `CARD_TYPES`,
@@ -98,9 +113,9 @@ fn cda7a(id: &str) -> AbilityAST {
     )
 }
 
-/// A plain opaque test ability.
+/// A plain opaque test ability (#232 FP-164: a valid inert ability instead of `{id: 1}`).
 fn plain(id: &str) -> AbilityAST {
-    ab(json!({ id: 1 }))
+    synthetic_ability(id)
 }
 
 /// The copied original: a legendary artifact creature Elf with the given abilities.
@@ -113,7 +128,9 @@ fn source(abilities: Vec<AbilityAST>) -> Characteristics {
         supertypes: set(&["Legendary"]),
         card_types: set(&["Artifact", "Creature"]),
         subtypes: set(&["Elf"]),
-        rules_text: TextTokenStream(vec![json!("test.cda_source")]),
+        rules_text: tx(vec![
+            json!({"id": "w0", "kind": "LITERAL", "text": "test.cda_source"}),
+        ]),
         abilities,
         power: Some(lit(3)),
         toughness: Some(lit(4)),
@@ -134,7 +151,9 @@ fn own() -> Characteristics {
         supertypes: set(&["Snow"]),
         card_types: set(&["Enchantment"]),
         subtypes: set(&["Shrine"]),
-        rules_text: TextTokenStream(vec![json!("test.cda_copier")]),
+        rules_text: tx(vec![
+            json!({"id": "w0", "kind": "LITERAL", "text": "test.cda_copier"}),
+        ]),
         abilities: vec![plain("test.cda_copier.own")],
         power: Some(lit(1)),
         toughness: Some(lit(1)),
@@ -521,6 +540,14 @@ fn req_obj_002_not_copied_colors_drops_color_cda_only() {
 fn req_obj_002_non_cdas_are_never_dropped() {
     let m_sub = json!({"op": "ANY_OP", "defines": ["SUBTYPES"]});
     let m_none = json!({"op": "ANY_OP"});
+    for former in [
+        json!({"abilityId": "test.triggered", "kind": "TRIGGERED",
+            "effects": [char_effect("4", m_none.clone(), Some(true))]}),
+        json!({"abilityId": "test.static.noeffects", "kind": "STATIC"}),
+        json!({"kind": "KEYWORD", "abilityId": "test.kw", "keyword": "test_kw"}),
+    ] {
+        assert!(try_ab(former.clone()).is_none(), "{former}");
+    }
     let keep = vec![
         static_with(
             "test.l4.false",
@@ -538,14 +565,21 @@ fn req_obj_002_non_cdas_are_never_dropped() {
             "test.l4.absent.nodefines",
             vec![char_effect("4", m_none.clone(), None)],
         ),
+        // #232 FP-164: valid typed abilities with the same intent replace the former
+        // placeholders (a TRIGGERED ability holding CHAR effects, a STATIC ability without
+        // effects, a lower-case keyword), which the typed ability refuses.
         ab(json!({
             "abilityId": "test.triggered",
             "kind": "TRIGGERED",
-            "effects": [char_effect("4", m_none.clone(), Some(true))],
+            "trigger": {"mode": "STATE", "state": {"pred": "IS_CREATURE"}},
+            "effect": [],
         })),
-        ab(json!({"abilityId": "test.static.noeffects", "kind": "STATIC"})),
+        static_with(
+            "test.static.noeffects",
+            vec![json!({"type": "RULE", "kind": "SKIP"})],
+        ),
         plain("test.plain"),
-        ab(json!({"kind": "KEYWORD", "abilityId": "test.kw", "keyword": "test_kw"})),
+        ab(json!({"kind": "KEYWORD", "abilityId": "test.kw", "keyword": "TEST_KW"})),
     ];
     let src = source(keep.clone());
     let mut all: Vec<Vec<CopyException>> = Vec::new();
@@ -640,7 +674,9 @@ fn req_obj_002_surviving_order_is_preserved() {
 
 /// REQ-OBJ-002, CR 707.9d; R12: a malformed `defines` that bypassed decode (built as raw JSON)
 /// never panics in `copy_with` and is treated as the no-`defines` fallback: dropped by any of
-/// the six type-line exceptions, kept by `Add*` and `SetNames`.
+/// the six type-line exceptions, kept by `Add*` and `SetNames`. #232 FP-164: abilities are typed
+/// now, so a `defines` the typed ability refuses can no longer bypass decode; for those the
+/// refusal is asserted instead, and any that still decodes keeps the fallback check.
 #[test]
 fn req_obj_002_malformed_defines_fall_back_to_all_parts() {
     let malformed = [
@@ -657,7 +693,9 @@ fn req_obj_002_malformed_defines_fall_back_to_all_parts() {
         json!(null),
     ];
     for (n, d) in malformed.into_iter().enumerate() {
-        let cda = cda4_raw(&format!("test.cda.bad{n}"), Some(d.clone()));
+        let Some(cda) = try_ab(cda4_json(&format!("test.cda.bad{n}"), Some(d.clone()))) else {
+            continue;
+        };
         for part in PARTS {
             for (exl, ex) in touching(part) {
                 check_one(&cda, &[ex], true, &format!("defines {d} under {exl}"));
@@ -679,27 +717,28 @@ fn req_obj_002_malformed_defines_fall_back_to_all_parts() {
 }
 
 /// R12: abilities that are not well-formed at all (wrong JSON shapes for `effects`, `layer`,
-/// `modification`) never panic `copy_with`.
+/// `modification`) never panic `copy_with`. #232 FP-164: they are refused as typed abilities, so
+/// only the shapes that still decode reach `copy_with`.
 #[test]
 fn req_obj_002_odd_ability_shapes_do_not_panic() {
-    let odd = vec![
-        ab(json!(null)),
-        ab(json!([])),
-        ab(json!("STATIC")),
-        ab(json!({"kind": "STATIC", "effects": null})),
-        ab(json!({"kind": "STATIC", "effects": {}})),
-        ab(json!({"kind": "STATIC", "effects": [null, 1, "x"]})),
-        ab(json!({"kind": "STATIC", "effects": [{"type": "CHAR", "layer": 4, "isCDA": true}]})),
-        ab(
+    let odd: Vec<Option<AbilityAST>> = vec![
+        try_ab(json!(null)),
+        try_ab(json!([])),
+        try_ab(json!("STATIC")),
+        try_ab(json!({"kind": "STATIC", "effects": null})),
+        try_ab(json!({"kind": "STATIC", "effects": {}})),
+        try_ab(json!({"kind": "STATIC", "effects": [null, 1, "x"]})),
+        try_ab(json!({"kind": "STATIC", "effects": [{"type": "CHAR", "layer": 4, "isCDA": true}]})),
+        try_ab(
             json!({"kind": "STATIC", "effects": [{"type": "CHAR", "layer": "4", "isCDA": "true",
             "modification": "ANY_OP"}]}),
         ),
-        ab(
+        try_ab(
             json!({"kind": "STATIC", "effects": [{"type": "CHAR", "layer": "4", "isCDA": true,
             "modification": {"defines": ["SUBTYPES"]}}]}),
         ),
     ];
-    let src = source(odd);
+    let src = source(odd.into_iter().flatten().collect());
     for part in PARTS {
         for ex in [set_ex(part), not_copied_ex(part), add_ex(part)] {
             let _ = copy(&src, &[ex]);
@@ -835,10 +874,13 @@ fn ability_pool() -> Vec<Pooled> {
         ability: cda4_all("test.pool.none"),
         defines: Some(PARTS.to_vec()),
     });
-    pool.push(Pooled {
-        ability: cda4_raw("test.pool.bad", Some(json!(["NOPE"]))),
-        defines: Some(PARTS.to_vec()),
-    });
+    // #232 FP-164: a malformed `defines` only enters the pool if the typed ability holds it.
+    if let Some(ability) = try_ab(cda4_json("test.pool.bad", Some(json!(["NOPE"])))) {
+        pool.push(Pooled {
+            ability,
+            defines: Some(PARTS.to_vec()),
+        });
+    }
     pool.push(Pooled {
         ability: cda5("test.pool.colors"),
         defines: None,

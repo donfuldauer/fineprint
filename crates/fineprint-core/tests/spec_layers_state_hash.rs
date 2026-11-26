@@ -415,14 +415,28 @@ fn variants() -> Vec<(&'static str, ContinuousEffect)> {
             "text a",
             in_layer(
                 Layer::L3,
-                LayerModification::SetText(TextTokenStream(vec![serde_json::json!("test.word_a")])),
+                // #232 FP-164: a valid LITERAL token instead of the bare string.
+                LayerModification::SetText(
+                    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+                        id: "w0".into(),
+                        text: "test.word_a".into(),
+                    }])
+                    .unwrap(),
+                ),
             ),
         ),
         (
             "text b",
             in_layer(
                 Layer::L3,
-                LayerModification::SetText(TextTokenStream(vec![serde_json::json!("test.word_b")])),
+                // #232 FP-164: a valid LITERAL token instead of the bare string.
+                LayerModification::SetText(
+                    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+                        id: "w0".into(),
+                        text: "test.word_b".into(),
+                    }])
+                    .unwrap(),
+                ),
             ),
         ),
         (
@@ -616,8 +630,11 @@ fn group_state(second: Affected) -> GameState {
 }
 
 /// The digest of [`small_state`], computed by running this test against the Implementer's code
-/// (see the report); it pins the canonical encoding of the three new leaves.
-const GOLDEN_SMALL_STATE: &str = "13e35cf7e24c0de507022934867a4fc1e2c8731c449a1ddd2147de6305bc3381";
+/// (see the report); it pins the canonical encoding of the three new leaves. #232 FP-164:
+/// re-recorded when the state's abilities moved from the invalid placeholder
+/// `{"synthetic": name}` to the valid typed KEYWORD ability of `synthetic_ability(name)`
+/// (previously `13e35cf7e24c0de507022934867a4fc1e2c8731c449a1ddd2147de6305bc3381`).
+const GOLDEN_SMALL_STATE: &str = "a478cd161601de9f51b8a80c682b37d04788a09467f8c06f7c6196ea2afb9818";
 
 // REQ-NFR-006, REQ-CORE-001, REQ-CORE-006 (T1f): ten repeated builds hash identically; the
 // small state's digest is pinned.

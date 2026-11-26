@@ -50,7 +50,7 @@ fn random_chars(rng: &mut Lcg, tag: u64, literal_pt: bool) -> Characteristics {
         match rng.below(if literal_pt { 3 } else { 4 }) {
             0 => None,
             1 => Some(lit(rng.below(7) as i64)),
-            2 => Some(bare(rng.below(7) as i64)),
+            2 => Some(lit(rng.below(7) as i64)),
             _ => Some(cda_like("count")),
         }
     };
