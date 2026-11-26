@@ -10125,3 +10125,45 @@ objects below it (rejected: moves `Index` arrivals away from their requested pos
 an explicitly submitted default differ from `execute_batch`). APNAP sequencing of owners
 (rejected: not stated by CR 404.3; ascending `PlayerId` is recorded instead). Using
 `Zones::reorder_graveyard` (rejected: gated by the CR 404.2 tournament flag).
+
+## #209 FP-155 - SBA destruction cause
+
+**Decision.** A new zone-change cause `ZoneChangeCause::StateBasedDestroy` (canonical tag 8; tags
+0-7 unchanged) marks a permanent destroyed by the lethal-damage (CR 704.5g) or deathtouch
+(CR 704.5h) state-based action: such a permanent is "destroyed" (CR 701.8b). `perform_findings`
+submits the move of a `SbaAction::Destroy` finding with `StateBasedDestroy`; `PutIntoGraveyard`
+findings (CR 704.5f, CR 704.5i, CR 704.5k, ...) and the legend-rule and unprotectable-battle moves
+keep `StateBasedAction`. In the CR 704.7 merge, one object still moves once per pass, with the
+cause of the highest fixed precedence, whatever the order of its findings or pre-inserts:
+`Sacrifice` (CR 704.5s, decision #42 FP-041) over `StateBasedDestroy` (the object was destroyed,
+CR 701.8b) over `StateBasedAction`; every finding is still reported in `SbaOutcome.findings`.
+Trigger normalization maps `StateBasedDestroy` exactly like `Destroy` (zone-derived kinds plus
+`DESTROYED`), so "whenever a creature is destroyed" listeners fire for CR 704.5g/h deaths and not
+for CR 704.5f/i deaths. `Destroy` (destruction as the result of an effect) remains the only cause
+the shield counter's destroy replacement matches (CR 122.1c); `shield_counter_destroy` is
+unchanged, so a shield counter still does not stop a CR 704.5g/h death. Consequences for
+replacement matchers (which compare `cause` by equality): a matcher keyed on `StateBasedAction`
+no longer matches CR 704.5g/h moves; a matcher keyed on `StateBasedDestroy` does not match
+CR 704.5f/i moves; a regeneration hook (CR 701.8c, not modelled yet) would match
+`StateBasedDestroy`. A state containing a matcher keyed on the new cause hashes differently from
+any existing state; existing states and goldens are unchanged.
+
+This entry supersedes the "Alternatives" remark (and the sentence "Every move uses
+`ZoneChangeCause::StateBasedAction`") in "#41 FP-040 — CR 704.7 merging per subject and result
+kind", and the remark "a separate 'SBA destroy' cause (not needed ...)" in "#29 FP-028 — SBA
+destruction and the shield counter's destroy replacement". The rest of the FP-028 decision holds:
+a mixed `Destroy` + `StateBasedAction` group applies the shield to the `Destroy` member only.
+
+**Rationale.** CR 701.8b: a permanent is destroyed by an effect that uses the word "destroy" or by
+the state-based actions that check for lethal damage or deathtouch damage; a permanent put into
+its owner's graveyard for any other reason has not been destroyed. Triggers on destruction must
+therefore see CR 704.5g/h deaths, while CR 122.1c limits the shield counter to destruction as the
+result of an effect. A distinct cause expresses both facts with the existing equality matcher and
+an explicit precedence keeps the merge deterministic (R3).
+
+**Alternatives.** A flag on `StateBasedAction` (rejected: the replacement matcher compares a plain
+cause by equality, so the flag would either be invisible to matchers or change the meaning of
+every existing `StateBasedAction` matcher). Making SBA destruction `Destroy` (rejected: the shield
+counter would then wrongly replace it; see decision "#29 FP-028 — SBA destruction and the shield
+counter's destroy replacement"). Letting the first finding decide the merged cause (rejected:
+depends on registry order instead of a rule).

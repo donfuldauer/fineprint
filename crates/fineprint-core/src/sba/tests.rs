@@ -997,11 +997,18 @@ fn several_sbas_are_one_event() {
     assert_eq!(batch.events.len(), 5);
     let (moves, removals) = batch_shape(&out);
     assert_eq!(moves.len(), 3);
-    assert!(
-        moves
-            .iter()
-            .all(|&(_, cause)| cause == ZoneChangeCause::StateBasedAction)
-    );
+    // CR 701.8b (#209 FP-155): the lethal-damage creature (CR 704.5g) is destroyed, cause
+    // `StateBasedDestroy`; the 0-toughness creature (CR 704.5f) and the 0-loyalty planeswalker
+    // (CR 704.5i) are put into the graveyard, cause `StateBasedAction`.
+    for &(o, cause) in &moves {
+        let card = w.lki.get(o).expect("LKI of a moved permanent").card();
+        let want = if card == cards[1] {
+            ZoneChangeCause::StateBasedDestroy
+        } else {
+            ZoneChangeCause::StateBasedAction
+        };
+        assert_eq!(cause, want, "{o:?}");
+    }
     let zero = moves
         .iter()
         .map(|&(o, _)| o)
@@ -1132,7 +1139,7 @@ fn one_use_replacement_applies_once_to_merged_object() {
 }
 
 // REQ-SBA-001, CR 122.1c, CR 701.8b: the shield counter's destroy replacement does not apply to
-// SBA destruction (cause StateBasedAction).
+// SBA destruction (cause StateBasedDestroy).
 #[test]
 fn shield_counter_does_not_stop_sba_destruction() {
     let mut w = World::new();
@@ -6382,4 +6389,221 @@ fn fp042_environment_defaults() {
     assert!(stored.battle_ability_pending(o));
     assert_eq!(stored.attachment_timestamp(o), 8);
     assert_eq!(SPEED, "speed");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The state-based destruction cause (#209 FP-155, CR 701.8b)
+// ---------------------------------------------------------------------------------------------
+
+/// The `Destroyed` trigger kind of each executed zone change of `out`, by pre-event object id.
+fn destroyed_kinds(out: &SbaOutcome) -> BTreeMap<ObjectId, bool> {
+    out.executed
+        .iter()
+        .flat_map(crate::triggers::events_from_batch)
+        .filter_map(|e| {
+            e.subject_pre.map(|o| {
+                (
+                    o,
+                    e.kinds
+                        .contains(&fineprint_dsl::ability::EventKind::Destroyed),
+                )
+            })
+        })
+        .collect()
+}
+
+// REQ-SBA-001, REQ-EVENT-001, CR 701.8b, CR 704.5g, CR 704.5h, CR 704.5f, CR 704.5i: a
+// creature with lethal damage (704.5g) and one with deathtouch damage (704.5h) move with cause
+// `StateBasedDestroy` and their trigger events carry `Destroyed`; a 0-toughness creature
+// (704.5f) and a 0-loyalty planeswalker (704.5i) move with `StateBasedAction` and carry no
+// `Destroyed`. All four moves are in the one SBA batch.
+#[test]
+fn req_sba_001_cr_701_8b_destroy_findings_move_as_state_based_destroy() {
+    let mut w = World::new();
+    let lethal = w.creature(1, 2);
+    w.damage(lethal, 2);
+    let touched = w.creature(1, 4);
+    w.damage(touched, 1);
+    w.env.deathtouch = BTreeSet::from([touched]);
+    let zero = w.creature(2, 0);
+    let walker = w.create(
+        2,
+        ZoneKind::Battlefield,
+        noncreature("test.walker_0", "Planeswalker"),
+    );
+    assert_eq!(w.found(obj(lethal)), ["704.5g"]);
+    assert_eq!(w.found(obj(touched)), ["704.5h"]);
+    assert_eq!(w.found(obj(zero)), ["704.5f"]);
+    assert_eq!(w.found(obj(walker)), ["704.5i"]);
+    let out = pass(&mut w);
+    assert_eq!(out.executed.len(), 1);
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (lethal, ZoneChangeCause::StateBasedDestroy),
+            (touched, ZoneChangeCause::StateBasedDestroy),
+            (zero, ZoneChangeCause::StateBasedAction),
+            (walker, ZoneChangeCause::StateBasedAction),
+        ]
+    );
+    assert_eq!(
+        destroyed_kinds(&out),
+        BTreeMap::from([
+            (lethal, true),
+            (touched, true),
+            (zero, false),
+            (walker, false)
+        ])
+    );
+    for o in [lethal, touched, zero, walker] {
+        assert!(w.zones.object(o).is_none());
+    }
+}
+
+// REQ-SBA-001, CR 704.7, CR 701.8b, CR 704.5g, CR 704.5h: a creature with both a lethal-damage
+// and a deathtouch finding moves once, cause `StateBasedDestroy`; both findings are reported.
+#[test]
+fn req_sba_001_cr_704_7_two_destroy_findings_one_state_based_destroy_move() {
+    let mut w = World::new();
+    let c = w.creature(1, 2);
+    w.damage(c, 2);
+    w.env.deathtouch = BTreeSet::from([c]);
+    let out = pass(&mut w);
+    assert_eq!(
+        out.findings,
+        [
+            SbaFinding {
+                entry_id: "704.5g",
+                subject: obj(c)
+            },
+            SbaFinding {
+                entry_id: "704.5h",
+                subject: obj(c)
+            }
+        ]
+    );
+    assert_eq!(
+        batch_shape(&out).0,
+        [(c, ZoneChangeCause::StateBasedDestroy)]
+    );
+}
+
+// REQ-SBA-001, CR 704.7, CR 704.5j, CR 704.5g, CR 701.8b: a legendary creature that loses the
+// legend rule (the legend-rule pre-insert, cause `StateBasedAction`) and also has lethal damage
+// moves once, cause `StateBasedDestroy`, whichever legend is kept; the kept one (undamaged)
+// stays.
+#[test]
+fn req_sba_001_cr_704_7_legend_loser_with_lethal_damage_is_destroyed() {
+    let mut legend = legendary(&["test.legend_a"]);
+    legend.card_types = set(&["Artifact", "Creature"]);
+    legend.power = Some(literal(1));
+    legend.toughness = Some(literal(2));
+    let mut w = World::new();
+    let a = w.create_controlled(1, 1, legend.clone());
+    let b = w.create_controlled(1, 1, legend);
+    w.damage(a, 2);
+    let mut found = w.found(obj(a));
+    found.sort_unstable();
+    assert_eq!(found, ["704.5g", "704.5j"]);
+    // Keep b: a is both a legend-rule loser and destroyed.
+    let (run, asked) = drive_answers(&w, &[select(&[b])]);
+    assert_eq!(asked.len(), 1);
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [(a, ZoneChangeCause::StateBasedDestroy)]
+    );
+    assert_eq!(destroyed_kinds(&out), BTreeMap::from([(a, true)]));
+    // Keep a: a is destroyed (704.5g), b is a plain legend-rule loser.
+    let (run, _) = drive_answers(&w, &[select(&[a])]);
+    let out = run.out.unwrap();
+    assert_eq!(
+        batch_shape(&out).0,
+        [
+            (a, ZoneChangeCause::StateBasedDestroy),
+            (b, ZoneChangeCause::StateBasedAction)
+        ]
+    );
+}
+
+// REQ-SBA-001, CR 704.7, CR 704.5x, CR 704.5g, CR 701.8b: a battle creature no player can
+// protect (the unprotectable pre-insert, cause `StateBasedAction`) that also has lethal damage
+// moves once, cause `StateBasedDestroy`.
+#[test]
+fn req_sba_001_cr_704_7_unprotectable_battle_with_lethal_damage_is_destroyed() {
+    let mut c = battle(false);
+    c.card_types = set(&["Battle", "Creature"]);
+    c.power = Some(literal(1));
+    c.toughness = Some(literal(2));
+    let mut w = World::new();
+    let b = w.create_controlled(2, 1, c);
+    w.counters(b, "defense", 3);
+    w.env.illegal_protectors.insert((b, p(1)));
+    w.damage(b, 2);
+    let mut found = w.found(obj(b));
+    found.sort_unstable();
+    assert_eq!(found, ["704.5g", "704.5x"]);
+    let card = w.card_of(b);
+    let out = pass(&mut w);
+    assert_eq!(
+        batch_shape(&out).0,
+        [(b, ZoneChangeCause::StateBasedDestroy)]
+    );
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(2))));
+}
+
+// REQ-SBA-001, CR 704.7, CR 704.5s, CR 704.5g: a Saga creature that is sacrificed (704.5s) and
+// also has lethal damage (704.5g) moves once with the Sacrifice cause (decision #42 FP-041;
+// decision "#209 FP-155 - SBA destruction cause").
+#[test]
+fn req_sba_001_cr_704_7_sacrifice_wins_over_state_based_destroy() {
+    let mut w = World::new();
+    let mut c = with_subtypes(creature("test.saga_creature", 2), &["Saga"]);
+    c.card_types = set(&["Creature", "Enchantment"]);
+    let s = w.create(1, ZoneKind::Battlefield, c);
+    w.counters(s, "lore", 1);
+    w.env.saga_final_chapter = BTreeMap::from([(s, 1)]);
+    w.damage(s, 2);
+    w.env.deathtouch = BTreeSet::from([s]);
+    assert_eq!(w.found(obj(s)), ["704.5g", "704.5h", "704.5s"]);
+    let out = pass(&mut w);
+    assert_eq!(out.findings.len(), 3);
+    assert_eq!(batch_shape(&out).0, [(s, ZoneChangeCause::Sacrifice)]);
+}
+
+// REQ-SBA-001, REQ-EVENT-001, CR 122.1c, CR 701.8b, CR 704.5g, CR 704.5h: a shield counter does
+// not stop a lethal-damage or a deathtouch death: the shield counter's destroy replacement
+// matches the effect cause `Destroy` only; it is never applied and no counter is removed.
+#[test]
+fn req_sba_001_cr_122_1c_shield_counter_does_not_stop_5g_or_5h() {
+    for deathtouch in [false, true] {
+        let mut w = World::new();
+        let c = w.creature(1, 4);
+        w.counters(c, "shield", 1);
+        if deathtouch {
+            w.damage(c, 1);
+            w.env.deathtouch = BTreeSet::from([c]);
+        } else {
+            w.damage(c, 4);
+        }
+        w.registry
+            .add(ReplacementEffect::shield_counter_destroy(e(1), c))
+            .unwrap();
+        let registry = w.registry.clone();
+        let card = w.card_of(c);
+        let out = pass(&mut w);
+        assert_eq!(
+            out.findings[0].entry_id,
+            if deathtouch { "704.5h" } else { "704.5g" }
+        );
+        assert_eq!(
+            batch_shape(&out),
+            (vec![(c, ZoneChangeCause::StateBasedDestroy)], vec![])
+        );
+        assert_eq!(w.zone_of_card(card), Some(ZoneId::Graveyard(p(1))));
+        // The replacement was never applied: still registered, unchanged.
+        assert_eq!(w.registry, registry);
+        // The LKI shows the shield counter still on it as it died.
+        assert_eq!(w.lki.get(c).unwrap().counters().get("shield"), Some(&1));
+    }
 }

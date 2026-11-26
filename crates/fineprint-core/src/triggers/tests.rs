@@ -31,6 +31,9 @@ use crate::permanent::{AttachTarget, Permanents};
 use crate::state::GameState;
 use crate::zones::{MoveRequest, Moved, Position, ZoneId, ZoneKind, Zones, ZonesConfig};
 
+// The state-based destruction cause in trigger normalization (#209 FP-155, CR 701.8b).
+mod state_based_destroy;
+
 // ---------------------------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------------------------
@@ -1602,6 +1605,8 @@ fn req_event_002_mapping_zone_change_kinds() {
     for (cause, kind) in [
         (ZoneChangeCause::Sacrifice, Some(K::Sacrificed)),
         (ZoneChangeCause::Destroy, Some(K::Destroyed)),
+        // CR 701.8b (#209 FP-155): destruction by the CR 704.5g / CR 704.5h SBA.
+        (ZoneChangeCause::StateBasedDestroy, Some(K::Destroyed)),
         (ZoneChangeCause::Discard, Some(K::Discarded)),
         (ZoneChangeCause::Mill, Some(K::Milled)),
         (ZoneChangeCause::CounterSpell, Some(K::Countered)),

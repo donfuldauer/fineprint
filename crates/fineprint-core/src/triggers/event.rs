@@ -119,7 +119,9 @@ fn zone_change_kinds(from: ZoneKind, to: ZoneKind, cause: ZoneChangeCause) -> Ve
     };
     let by_cause = match cause {
         ZoneChangeCause::Sacrifice => Some(EventKind::Sacrificed),
-        ZoneChangeCause::Destroy => Some(EventKind::Destroyed),
+        // CR 701.8b: destruction by an effect or by the CR 704.5g / CR 704.5h state-based
+        // actions.
+        ZoneChangeCause::Destroy | ZoneChangeCause::StateBasedDestroy => Some(EventKind::Destroyed),
         ZoneChangeCause::Discard => Some(EventKind::Discarded),
         ZoneChangeCause::Mill => Some(EventKind::Milled),
         // CR 701.6a, CR 603.10e
