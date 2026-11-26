@@ -1,0 +1,57 @@
+{
+  "cardDefId": "test.draw_two",
+  "colorIdentity": 2,
+  "definitionHash": "2de8baeed4d632a5c76d70d79b199cd1a29d97f128e1ca463f1dbea8614e134a",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "effect": [
+            {
+              "count": {
+                "LITERAL": 2
+              },
+              "op": "DRAW",
+              "player": {
+                "ref": "CONTROLLER"
+              }
+            }
+          ],
+          "kind": "SPELL",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Sorcery"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{2}{U}",
+      "name": "test.draw_two",
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ]
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

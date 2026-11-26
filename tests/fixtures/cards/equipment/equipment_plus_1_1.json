@@ -1,0 +1,135 @@
+{
+  "cardDefId": "test.equipment_plus_1_1",
+  "colorIdentity": 0,
+  "definitionHash": "f03d7c22c8cc0bf2dbc5bf0c2e05989a8b2eed5d2a53ccff65364cca036d36d0",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "effects": [
+            {
+              "affected": {
+                "ref": "EQUIPPED"
+              },
+              "layer": "7c",
+              "modification": {
+                "op": "MODIFY_PT",
+                "power": 1,
+                "toughness": 1
+              },
+              "type": "CHAR"
+            }
+          ],
+          "kind": "STATIC",
+          "textSpan": [
+            0,
+            0
+          ]
+        },
+        {
+          "abilityId": "a1",
+          "keyword": "EQUIP",
+          "kind": "KEYWORD",
+          "params": {
+            "cost": "{1}"
+          },
+          "textSpan": [
+            1,
+            1
+          ]
+        },
+        {
+          "abilityId": "a2",
+          "cost": [
+            {
+              "cost": "PAY_MANA",
+              "mana": "{1}"
+            }
+          ],
+          "effect": [
+            {
+              "objects": {
+                "ref": "SELF"
+              },
+              "op": "ATTACH",
+              "to": {
+                "ref": "TARGET",
+                "slot": 0
+              }
+            }
+          ],
+          "kind": "ACTIVATED",
+          "targets": [
+            {
+              "max": 1,
+              "min": 1,
+              "selector": {
+                "conditions": [
+                  {
+                    "pred": "IS_CREATURE"
+                  },
+                  {
+                    "player": {
+                      "ref": "CONTROLLER"
+                    },
+                    "pred": "CONTROLLED_BY"
+                  }
+                ],
+                "op": "AND",
+                "zones": [
+                  "BATTLEFIELD"
+                ]
+              },
+              "slot": 0
+            }
+          ],
+          "textSpan": [
+            2,
+            2
+          ],
+          "timing": "SORCERY"
+        }
+      ],
+      "cardTypes": [
+        "Artifact"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{1}",
+      "name": "test.equipment_plus_1_1",
+      "subtypes": [
+        "Equipment"
+      ],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        },
+        {
+          "id": "t1",
+          "kind": "LITERAL",
+          "text": "test ability 1"
+        },
+        {
+          "id": "t2",
+          "kind": "LITERAL",
+          "text": "test ability 2"
+        }
+      ]
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

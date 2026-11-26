@@ -9647,3 +9647,53 @@ decoder use constant stack (about 183 KiB) up to 50 000 levels. The earlier note
 aborts near 1000 levels and `to_real` overflows at 800–900 were measurements of the fixture code.
 **Alternatives.** A larger-stack test thread (rejected: hides real recursion); a lower depth
 (rejected: weaker R12 coverage and still platform-dependent).
+
+## #17 FP-016 — Test and loader location
+
+**Decision.** The loader lives at `tests/fixtures/cards/loader.rs` (inside the issue's owned paths)
+and is included with `#[path]`. The library test is `crates/fineprint-dsl/tests/spec_dsl_card_library.rs`,
+the one file outside the issue's listed owned paths.
+**Rationale.** The root `tests/` directory is not a Cargo target, and `fineprint-dsl` owns the card
+type and the lints the test exercises.
+**Alternatives.** A new crate for the library (rejected: needs a coverage-floor arm and a workspace
+change).
+
+## #17 FP-016 — Mana abilities use NATIVE_EFFECT test.add_mana
+
+**Decision.** Land cards produce mana with `NATIVE_EFFECT` id `test.add_mana` version 1, params
+`{"mana":"{W}"}` etc., with `isManaAbility` true and a `TAP_SOURCE` cost.
+**Rationale.** The DSL has no add-mana instruction; a native effect is the sanctioned escape (R4).
+**Alternatives.** Inventing an `ADD_MANA` op (rejected: not in the DSL schema).
+
+## #17 FP-016 — Face name equals cardDefId; seal in place
+
+**Decision.** Every face `name` equals `cardDefId`, so a real card name cannot appear. New cards are
+written with `"definitionHash": ""` and sealed by the `#[ignore]` test `seal_library`, which rewrites
+every library file as pretty JSON (2-space indent, trailing newline).
+**Rationale.** Hand-computing SHA-256 of RFC 8785 bytes is error-prone; the generator is the only
+writer and uses the same `seal()` the loader verifies against.
+**Alternatives.** A build script or xtask command (rejected: outside owned paths).
+
+## #17 FP-016 — Opaque ENCHANT and EQUIP keyword params
+
+**Decision.** `ENCHANT` carries `{"what":"CREATURE"}` and `EQUIP` carries `{"cost":"{1}"}` as opaque
+params until keyword macros exist. Equipment also has an explicit sorcery-speed `ACTIVATED` attach
+ability (PAY_MANA {1}, target a creature you control), so both forms are present.
+**Rationale.** Keyword params are opaque in the current DSL; the explicit ability gives scenarios a
+runnable attach path independent of macro expansion.
+**Alternatives.** Leaving out the keyword or the activated ability (rejected: the brief asks for both).
+
+## #17 FP-016 — Other fixture judgement calls
+
+**Decision.** (1) The any-target selector of `burn_3_any_target` is an OR of `IS_CREATURE`,
+`IS_PLAYER` and `HAS_CARD_TYPE` `{"name":"Planeswalker"}` with no `zones` member (a player is in no
+zone). (2) The five colored mana lands declare `colorIdentity` equal to their produced color (CR 903.4,
+per the rules-researcher); `mana_land_colorless` stays 0. `FPL-COLOR-IDENTITY` cannot yet derive
+produced-mana symbols (DECISIONS "#16 FP-015 — Characteristics checks"), so
+`req_ing_009_every_card_is_lint_clean` allows exactly one `FPL-COLOR-IDENTITY` warning on exactly those
+five cards (and none elsewhere) until #252 (FP-172) removes the allowance; their identity is asserted
+directly against the table, with the source identity omitted from their lint context to keep the
+warning count at one. (3) The no-card-data test matches quoted member names so the allowed
+`oracleTextHash` does not match `oracleText`. (4) `load(id)` finds the file by stem across families.
+**Rationale.** Each is the simplest choice consistent with the lints as implemented.
+**Alternatives.** Declaring land identity 0 (rejected: wrong under CR 903.4).

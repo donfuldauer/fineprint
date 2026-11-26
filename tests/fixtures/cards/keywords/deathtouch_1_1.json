@@ -1,0 +1,53 @@
+{
+  "cardDefId": "test.deathtouch_1_1",
+  "colorIdentity": 4,
+  "definitionHash": "705c478f85df22d68efbadd085dcdcd6c603df7be754d38132ecd925de6420d0",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "keyword": "DEATHTOUCH",
+          "kind": "KEYWORD",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{B}",
+      "name": "test.deathtouch_1_1",
+      "power": {
+        "LITERAL": 1
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ],
+      "toughness": {
+        "LITERAL": 1
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}
