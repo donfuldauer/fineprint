@@ -8,8 +8,13 @@
 //! receive priority (CR 117.5, CR 704.3), counts passes, resolves the top object after a full
 //! round of passes and ends the step when every player still in the game passes with an empty
 //! stack (CR 117.4). It is written against the [`HeartbeatHost`] seam: the stack, resolution,
-//! casting and legal-action generation belong to later units. Step and phase sequencing,
-//! including the CR 500.5 end-of-step work, belongs to the turn sequencer.
+//! casting and legal-action generation belong to later units.
+//!
+//! [`steps`] is the turn sequencer of SRS 5.2 (REQ-TURN-002): it runs the phases and steps of a
+//! turn in order (CR 500.1), performs the turn-based actions outside combat (untap, draw,
+//! main-phase registry actions, cleanup) and the CR 500.4 / CR 500.5 boundary work, and runs the
+//! heartbeat in every step that gives priority. It is written against the [`TurnHost`] seam, a
+//! supertrait of [`HeartbeatHost`].
 
 #![deny(missing_docs)]
 
@@ -22,4 +27,15 @@ pub use heartbeat::{
     HeartbeatHost, HeartbeatOutcome, HeartbeatState, MAX_SETTLE_ITERATIONS, PassRecord, PassResult,
     SbaStage, SettleReport, next_player_in_turn_order, players_in_game, run_heartbeat,
     sba_pass_post_batch, settle_before_priority,
+};
+
+pub mod steps;
+
+#[cfg(test)]
+mod steps_tests;
+
+pub use steps::{
+    AsDynTurnHost, ExpiryPoint, MAX_CLEANUP_STEPS, Segment, SegmentReport, TurnBasedAction,
+    TurnBasedRegistry, TurnHost, TurnReport, TurnState, UntapOptions, first_turn_draw_skipped,
+    run_phase, run_segment, run_turn, segments_of,
 };
