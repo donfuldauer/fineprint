@@ -1592,6 +1592,7 @@ fn import_rejects_aliased_output_files() {
     assert!(!default.exists(), "nothing written");
 
     let target = cache.join("a/out.json");
+    #[cfg_attr(not(unix), allow(unused_mut))] // only the unix symlink case below pushes
     let mut same = vec![
         p(&target).to_owned(),
         format!("{c}/a/../a/out.json"),
