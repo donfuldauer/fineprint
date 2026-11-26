@@ -10376,6 +10376,128 @@ passes run); asserting `pass_count()` at the ask right after a concession (rejec
 through a host-free accessor); excluding triggers from invariant (e) (rejected: the fake host's
 placements push onto the stack the heartbeat later resolves).
 
+## #46 FP-045 — TurnHost seam
+
+**Decision.** The turn sequencer (`turn::steps`) is written against a `TurnHost` trait, a
+supertrait of `HeartbeatHost`: the host begins turns, phases and steps, expires effects at an
+`ExpiryPoint`, empties mana pools, applies phasing, runs the day/night check, reports untap
+options and untaps, draws, reports hands and maximum hand sizes, discards, performs the CR 514.2
+actions, reports Sagas and adds lore counters, and runs the combat-step actions (a no-op default).
+The sequencer itself keeps only `TurnState` (the shared `HeartbeatState` and the previous turn's
+active player) and never mutates `GameState` directly; `TurnState` is not part of the canonical
+state hash.
+**Rationale.** It mirrors "#44 FP-043 — Heartbeat seam": the real-state host, the stack, effect
+durations and zones' turn-based moves belong to later units, and a trait seam lets this unit be
+finished and tested now with a recording fake, while staying a pure function of (host, state,
+answers) for `ChoiceSession` re-execution (R3, REQ-CORE-001).
+**Alternatives.** Driving `GameState` and the zone and effect registries directly (rejected: the
+required state does not exist in core yet and other units own it); one monolithic callback per
+step (rejected: the call order of CR 502 and CR 514 would not be enforced by the sequencer).
+
+## #46 FP-045 — CR 514.3a needs-priority test
+
+**Decision.** After the CR 514.1 and CR 514.2 actions of each cleanup step the sequencer runs
+`settle_before_priority` once and gives priority (runs the heartbeat, then another cleanup step)
+iff `sba_passes > 1 || triggers_stacked > 0 || !stack_is_empty()`. Otherwise the step ends with no
+priority. A placement that only removed triggers (CR 603.3c-d) makes the settle loop back to
+another SBA pass, so `sba_passes > 1` and it counts as "needs priority".
+**Rationale.** "#44 FP-043 — Settle loop repeats on performed, not findings": the settle repeats
+only when a state-based action was performed or a trigger was stacked or removed, so a settle with
+more than one SBA pass is exactly "state-based actions were performed and/or triggers were put on
+the stack" (CR 514.3a). A non-empty stack (an object left from the end step through an unusual
+host) also needs priority to resolve. The settle performs the SBAs and stacks the triggers in the
+order CR 514.3a gives; the heartbeat's own settle then finds nothing new.
+**Alternatives.** A separate "would anything happen" query on the host (rejected: duplicates the
+settle and the trait would grow); treating a removed-only placement as nothing (rejected: the
+settle's own loop already treats it as processed, and the trigger was put on the stack first).
+
+## #46 FP-045 — First-turn draw: Two-Headed Giant out of scope
+
+**Decision.** `first_turn_draw_skipped` skips only on turn number 1, for the host's starting
+player, when the rule says so: `AlwaysSkip` skips, `NeverSkip` never does, and `CrDefault` skips
+iff `game().player_count() == 2` (CR 103.8a). CR 103.8b (the Two-Headed Giant starting team) is
+not modelled: core has no team structure yet, so in a Two-Headed Giant game `CrDefault` does not
+skip (player count 4). With no known starting player nothing is skipped.
+**Rationale.** The brief fixes this rule; teams belong to a later multiplayer unit, which can
+extend the check through the host.
+**Alternatives.** A host query "is the starting team" (rejected: not in the fixed API and no team
+state exists).
+
+## #46 FP-045 — Host-owned turn state
+
+**Decision.** The day/night designation and its cast-spell history, mana pools (including rule
+modifications of how mana empties, SRS 613.11), hands, maximum hand sizes, effect durations,
+marked damage, phasing and the current phase/step are owned by the host. The sequencer only tells
+the host when (CR 500.4, 500.5, 502, 504, 514) and passes `previous_active` (the previous turn's
+active player, `None` on the first turn) to the day/night check.
+**Rationale.** Core has no such state yet; owning it here would duplicate later units' state and
+change the canonical hash.
+**Alternatives.** Adding day/night and mana-pool fields to `GameState` (rejected: not an owned
+path, and contracts change only through R2).
+
+## #46 FP-045 — Segment, run_phase and run_segment split
+
+**Decision.** A `Segment` is a step or a main phase (main phases have no steps, CR 505.2).
+`run_turn` = `begin_turn` + `run_phase` for each phase; `run_phase` does the phase boundary work
+(`begin_phase`, `BeginPhase` expiry, segments, `EndPhase` expiry, mana) and `run_segment` the step
+boundary work (`begin_step`, `BeginStep` expiry, body, `EndStep` expiry, mana) with no phase work;
+a main-phase segment has no step boundary work (its boundary is the phase's). The cleanup segment
+repeats the whole step sequence per cleanup step and reports `cleanup_steps`. `run_phase` and
+`run_segment` read the active player from the game and fail with `ChoiceError::Procedure` when
+there is none.
+**Rationale.** Later units (combat, extra phases and turns, the game loop) need to run single
+phases and steps; the split keeps CR 500.4 and CR 500.5 at exactly one place per level and lets
+"until end of combat" expire at `EndPhase(Combat)` (CR 500.5a).
+**Alternatives.** One monolithic `run_turn` (rejected: extra combat phases and turn-structure
+changes could not reuse it).
+
+## #46 FP-045 — Registry actions take &mut dyn TurnHost
+
+**Decision.** `TurnBasedAction::run` takes `&mut dyn TurnHost` (fixed API) while the entry
+points are generic over `H: TurnHost + ?Sized`. An unsized `H` cannot be coerced to a trait
+object, so `TurnHost` also has the supertrait `AsDynTurnHost` (one method,
+`as_dyn_turn_host`), blanket-implemented for every sized `TurnHost` and available on
+`dyn TurnHost` through the supertrait. Implementors of `TurnHost` never implement it by hand.
+**Rationale.** Keeps every pinned signature unchanged and invisible to host implementors.
+**Alternatives.** A private forwarding adapter struct implementing all 30 host methods (rejected:
+large, error-prone boilerplate); requiring `H: Sized` (rejected: changes the pinned signatures).
+
+## #46 FP-045 — Hash of Segment and ExpiryPoint
+
+**Decision.** `events::Phase` and `events::Step` do not implement `Hash` (an un-owned file), so
+`Segment` and `ExpiryPoint` implement `Hash` by hand over the enum discriminants of the value and
+of its step or phase, instead of `#[derive(Hash)]`. The other derives are as pinned.
+**Rationale.** The fieldless discriminants identify the values exactly, so `Hash` agrees with the
+derived `Eq`; the public trait set is the pinned one.
+**Alternatives.** Adding `Hash` to `Phase` and `Step` (rejected: outside the owned paths; can be
+requested later and the manual impls removed).
+
+## #46 FP-045 — Registry entries of steps
+
+**Decision.** `TurnBasedRegistry` entries for a step run after the step's built-in turn-based
+actions (untap, draw, the combat hook; in the cleanup step after the CR 514.2 actions of each
+cleanup step) and before the heartbeat or the CR 514.3a check; for a main phase before the
+heartbeat. The standard registry has entries only at the precombat main phase.
+**Rationale.** The built-in actions are the ones CR 703.4 lists "immediately after" the step
+begins; an extra registered action must not run before them (for example before phasing,
+CR 502.1), and it must run before priority (CR 117.3a: after turn-based actions).
+**Alternatives.** Running step entries right after the begin-step expiry (rejected: would break
+the CR 502.1-502.3 order).
+
+## #46 FP-045 — Untap call without a choice
+
+**Decision.** When `UntapOptions::choosable` is empty the untap step makes exactly one call,
+`untap(active, &options.forced, ..)`, with the host's forced list as given (not re-sorted); an
+empty forced list makes no call. Only when a `CHOOSE_UNTAP_SET` request was asked does the sequencer build
+the union of the forced and the chosen permanents, sort and deduplicate it, and skip the call if
+the union is empty.
+**Rationale.** The brief's call order pins `untap(active, &o.forced, ..)` for the no-choice case
+and "do not call `untap` with an empty slice"; the host already promises
+ascending ids for `forced`, so passing it through loses nothing and keeps the host in charge of
+its own list (the independent spec test asserts the list is passed unchanged).
+**Alternatives.** Always sorting and skipping empty calls (rejected: contradicts the pinned call
+order).
+
 ## #232 FP-164 — Typed card AST positions
 
 **Decision.** `card::ValueExpressionAST`, `card::TextTokenStream` and `card::AbilityAST` are now
