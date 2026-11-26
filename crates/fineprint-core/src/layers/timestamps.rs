@@ -53,6 +53,17 @@ pub struct SimultaneousStamp {
     pub choice: u32,
 }
 
+/// Borrowed view of every entry of a [`TimestampLedger`] (crate-internal; see
+/// [`TimestampLedger::entries`]).
+pub(crate) struct LedgerEntries<'a> {
+    /// Object timestamps (CR 613.7d-j).
+    pub(crate) objects: &'a BTreeMap<ObjectId, Timestamp>,
+    /// Counter timestamps per holder and kind (CR 613.7c).
+    pub(crate) counters: &'a BTreeMap<(CounterHolder, String), Timestamp>,
+    /// Sticker timestamps per host and sticker (CR 613.7k).
+    pub(crate) stickers: &'a BTreeMap<(ObjectId, u32), Timestamp>,
+}
+
 /// The timestamps of objects, counters and stickers (REQ-CORE-002, CR 613.7).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct TimestampLedger {
@@ -84,6 +95,17 @@ impl TimestampLedger {
     #[must_use]
     pub fn sticker_timestamp(&self, host: ObjectId, sticker: u32) -> Option<Timestamp> {
         self.stickers.get(&(host, sticker)).copied()
+    }
+
+    /// Read access to every stored timestamp (objects, counters, stickers), for the canonical
+    /// state encoding and the wire form of the game state (crate-internal integration glue,
+    /// docs/DECISIONS.md "#183 FP-144 — Ledger read access"). No ledger behaviour depends on it.
+    pub(crate) fn entries(&self) -> LedgerEntries<'_> {
+        LedgerEntries {
+            objects: &self.objects,
+            counters: &self.counters,
+            stickers: &self.stickers,
+        }
     }
 
     /// Gives `id` a new, strictly later timestamp (CR 613.7d, 613.7e, 613.7f, 613.7g, 613.7h,

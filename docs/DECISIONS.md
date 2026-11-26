@@ -9095,3 +9095,159 @@ only on merged `issue/` branches, so a separate contract branch would also stall
 **Alternatives:** A separate `contract/` PR merged first (rejected: no extra review value for a
 plan-scheduled change, an extra unauthorised branch, and it would leave the contract on `main`
 without its implementation).
+
+## #183 FP-144 — Ability identity by value
+
+**Decision:** A static (or ETB) effect is linked to its generating ability as a
+`state::GeneratingAbility { source, ability: AbilityAST }`. The ability exists on its source iff
+the source's abilities contain an element equal to the linked `AbilityAST` (the JSON value);
+duplicate identical abilities on one source are one identity. An effect id without a link is not
+modelled and exists (`true`); a link whose source differs from the asked source is `false`. With
+`source_view` given, the view's abilities decide. No branch on card name, id or ability content.
+
+**Rationale:** Evaluated `Characteristics.abilities` is a `Vec<AbilityAST>` without ids, so value
+identity is the only identity the layer output carries (brief D4). Equality of the JSON value is
+deterministic and needs no new field on the DSL types.
+
+**Alternatives:** Ability ids inside the AST (rejected: no such field is guaranteed by the DSL);
+positional indices (rejected: layer 6 reorders and removes abilities).
+
+## #183 FP-144 — Existence on another source
+
+**Decision:** When the layer system asks without a `source_view` (the source is not the object
+under evaluation), `GameEnvironment` evaluates the source through the layers with the state's
+effects minus the effect asked about, one level deep (inside that evaluation an effect of yet
+another source is judged on that source's base), and checks the evaluated abilities. This
+replaces the base-only fallback named in brief D4.
+
+**Rationale:** The base-only fallback contradicts the issue's acceptance criterion and brief S1
+("B grants a marker to objects with no abilities, A removes all abilities; no marker results"):
+evaluated on another object, the base of sB still has B's ability, so B would grant the marker
+there although A removed the ability (CR 611.3b, 613.8a). Evaluating the source makes no object
+get the marker in both timestamp orders. The effect asked about is left out because an effect
+never depends on itself (CR 613.8a names "the other" effect): a "lose all abilities" static
+effect that also removes its own source's ability keeps applying to other objects. One level
+keeps the evaluation finite and deterministic; full layer-major evaluation across objects stays
+#186.
+
+**Alternatives:** The base-only fallback of D4 (rejected: wrong result for the acceptance
+scenario on any object other than sB); full recursive evaluation (rejected: may not terminate
+and is #186's scope); evaluating with the effect included (rejected: a self-removing remover
+would stop applying elsewhere).
+
+## #183 FP-144 — Ledger read access
+
+**Decision:** `layers::TimestampLedger` gets one crate-internal read accessor,
+`entries() -> LedgerEntries` (borrowed maps), used only by the canonical encoding
+(`layers/encode.rs`) and the state's wire form. The ledger is rebuilt on decode through its own
+public stamping operations (a generator positioned just before each stored timestamp).
+`ContinuousEffects` links are read through the existing `pub(super) links()` from
+`layers/encode.rs`; `ManaValueProvenance` parts through crate-internal helpers there.
+
+**Rationale:** The ledger's fields are private and the identifier types have no serde, so serde
+derives on the ledger would need field adapters plus a MessagePack round trip just to read the
+maps back; a read-only accessor changes no ledger behaviour and is the smallest glue.
+
+**Alternatives:** Serde derives with `#[serde(with)]` adapters (rejected: more code, and the hash
+would still need the maps); making the fields `pub` (rejected: exposes mutation).
+
+## #183 FP-144 — Wire structs, not serde derives on layer types
+
+**Decision:** The version-2 wire form of the layer components is a set of explicit wire structs
+in `state/effects_wire.rs` (raw `u64` ids, mirror enums of `LayerModification`, `CopyException`,
+`Characteristics` and the rest); no serde derive is added to a layer type. An `Option` of a JSON
+value (power, toughness) travels as an array of zero or one element so `Some(null)` survives.
+Decoding rebuilds the registry through `register` / `register_group` (each anchor with its linked
+parts; orphaned `SameAsLayer` parts through a stand-in anchor, id 0, removed at once, as removing
+the real anchor did) and requires the rebuilt registry to equal the described one. `serialize`
+does not validate: a state made inconsistent through `effects_mut()` or `timestamps_mut()`
+serializes but does not deserialize.
+
+**Rationale:** The id newtypes and `Characteristics` (outside the owned paths) have no serde, and
+the wire member names are the contract, so mirror structs are the smallest owned change and keep
+validation next to the wire. Going through registration makes decode enforce exactly what
+registration enforces.
+
+**Alternatives:** Serde derives in `layers/` with `with` adapters (rejected: touches many layer
+types for transport only); validating on serialize (rejected: transport only, and it would double
+the cost).
+
+## #183 FP-144 — Effect links for groups, removal and timestamps at registration
+
+**Decision:** `GameState::register_effect_group` registers a multi-layer effect with a link per
+part (each part checked like `register_effect`). Every static effect with a source needs a link,
+`SameAsLayer` parts included. `remove_effect` removes the continuous effect and its link, and also
+drops the link of an ETB effect id; it returns whether anything was removed.
+`register_effect` checks only what the brief lists (links, 7a, registration); an effect timestamp
+not issued by the state is accepted there but rejected by `deserialize`.
+`stamp_objects_simultaneously` uses `GameState::apnap_order`: the turn order rotated to start at
+the active player (CR 101.4: the other players follow in turn order), the plain turn order when no
+active player is set.
+
+**Rationale:** The brief pins the `register_effect` validations; groups and ETB links need the
+same link bookkeeping, and a uniform "static with a source has a link" rule is what decode checks.
+
+**Alternatives:** A timestamp check in `register_effect` (rejected: not in the pinned API's
+validation list); leaving ETB links on `remove_effect` (rejected: dangling link in the hash).
+
+## #183 FP-144 — Golden state hashes regenerated
+
+**Decision:** The state Merkle tree gains `/timestamps` and `/effect_generators` and the payload of
+`/effects` changes (CR-005), so the two golden state digests in `state/tests.rs` are recomputed
+once and replaced: `GOLDEN_NEW_42_2_20`
+f32bbec462508986efd89ed35f9184bec86a107f774505e19c4f65d3db4fb0d5 ->
+7389c79ba648f778a6925577d462382782418b603f487e7eef53a39898a87030; `GOLDEN_MUTATED`
+7ebe9f5c17abfc986c0168e1722807514fd1372a1e6dcc10dca594afdfa58371 ->
+61143120a7a8869bc2fb299244f20d4d6085bf324fefe398afb16d6cf354cb7c. A new pinned digest,
+`GOLDEN_LAYERS` 49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1
+(`state/effects_tests.rs`), covers a non-empty state: two stamped objects, one counter stamp, one
+static effect with its link, one resolved effect and one ETB link; a second build of it in another
+semantically equal call order hashes equal. There are no golden replay files yet: the replay
+corpus does not exist (no `tests/golden/` directory).
+
+**Rationale:** The layout change is intended and recorded as CR-005; the digests are values of
+the new frozen layout, recomputed once, not adjusted to make a test pass.
+
+**Alternatives:** Keeping `/effects` as an empty placeholder (rejected: the unit's goal is to hash
+the effects).
+
+## #183 FP-144 — LayerCache invalidation table
+
+**Decision:** No cache field is added to `GameState`. The `state::environment` module
+documentation maps each `GameState` mutation to the `layers::Invalidation` a cache user declares:
+registry changes none (detected; `EffectExpiry` optional on removal), ETB links none, counter
+stamps `Timestamp`, other ledger writes `Timestamp`, generator issues and the PRNG none, player and
+turn writes `PlayerValue`; world changes (zone, control, counters, attachments, status,
+designations) are declared by the world's owner. A differential unit test checks cached equals
+full recompute through `GameEnvironment` after each kind of mutation.
+
+**Rationale:** The cache detects registry changes itself; the environment reads the ledger only
+for counter timestamps and the world for everything else, so the table follows what
+`GameEnvironment` reads. Object timestamps are listed under `Timestamp` to stay safe when a later
+environment reads them.
+
+**Alternatives:** Helper methods returning the cause (rejected: the table and the test suffice,
+brief D7).
+
+## #183 FP-144 — Order record on B's source in the PR #187 scenario
+
+**Decision:** In the B-before-A timestamp order, evaluated on B's source, the test asserts what the
+brief requires: A applies, B does not apply, and B is not ordered after A by dependency
+(`Selection::Dependency` / `Selection::Loop`). The outcome-level criterion "no marker on any
+object, both orders" is asserted by `pr187_a_before_b_no_object_gets_the_marker` and
+`pr187_b_before_a_no_object_gets_the_marker`. Whether the order record must show a CR 613.8a
+existence dependency of B on A on B's own source is follow-up #242 (FP-168): it needs a
+rules-researcher answer and would change `layers/ordering`.
+
+**Rationale:** The Independent Tester read the rules-researcher's Q6 answer as "A's step precedes
+B's" on sB, but the brief's T3 clause says to assert B is not ordered after A on account of
+dependency, the issue's acceptance criterion says B is "not ordered after A by a false dependency"
+with no marker, and the merged test
+`layers::ordering_tests::req_layer_002_removed_generating_ability_stops_effect_both_orders` asserts
+the pipeline's order (`[B Timestamp not applied, A Timestamp applied]`). Trial application finds no
+dependency because B applies to sB neither with nor without A. Final characteristics are correct.
+The brief wins (R10).
+
+**Alternatives:** Changing the ordering pipeline to record the existence dependency now (rejected:
+outside this unit, rules question open, tracked in #242); dropping the test (rejected: the order
+record still deserves the brief's assertions).

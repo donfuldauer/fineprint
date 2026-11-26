@@ -360,8 +360,8 @@ fn wrong_format_version_is_decode_error() {
     let name = b"format_version";
     let at = find(&b, name).expect("named-field MessagePack keeps `format_version`");
     let vpos = at + name.len();
-    assert_eq!(b[vpos], 0x01, "format_version 1 is a positive fixint");
-    for bad in [0x02u8, 0x00, 0x7F] {
+    assert_eq!(b[vpos], 0x02, "format_version 2 is a positive fixint");
+    for bad in [0x01u8, 0x00, 0x03, 0x7F] {
         let mut c = b.clone();
         c[vpos] = bad;
         assert!(
@@ -369,9 +369,9 @@ fn wrong_format_version_is_decode_error() {
             "version byte {bad:#x}"
         );
     }
-    // Widened encodings of other versions: uint8 form of 2.
+    // Widened encodings of other versions: uint8 form of 1.
     let mut c = b[..vpos].to_vec();
-    c.extend([0xCC, 0x02]);
+    c.extend([0xCC, 0x01]);
     c.extend(&b[vpos + 1..]);
     assert!(is_decode_err(&GameState::deserialize(&c)));
 }

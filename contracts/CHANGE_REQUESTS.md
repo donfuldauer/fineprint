@@ -69,3 +69,39 @@ battlefield counts as becoming unattached) and CR 603.10c (UNATTACHED looks back
 those links are dropped without a record, so `UNATTACHED` never triggers for them.
 Consumers affected: events executor (`events/exec.rs`), trigger normalizer (`triggers/event.rs`),
 replacement bus kind mapping (`replacement/types.rs`), replay and state-hash goldens.
+
+## CR-005 — State model and canonical state hash: layers in GameState
+Requested by: #183 FP-144   Kind: breaking   Status: open
+Change: the placeholder type `state::EffectRegistry` (and its `is_empty`) is removed, with no
+compatibility alias. `GameState` stores the real `layers::ContinuousEffects`, the
+`layers::TimestampLedger` and the links `BTreeMap<EffectId, state::GeneratingAbility>` (new type
+`GeneratingAbility { source: ObjectId, ability: AbilityAST }`); `GameState::effects()` now returns
+`&ContinuousEffects`. Merkle layout (`GameState::merkle_tree`): `/effects` keeps its path and its
+payload becomes the canonical encoding of `ContinuousEffects` (`put_len` of the effect count, then
+per effect in ascending `EffectId` order the id, every field of the effect and its `SameAsLayer`
+anchor link as `Option<EffectId>`); two NEW leaves: `/timestamps`, the canonical encoding of the
+`TimestampLedger` (`put_len` of the entry count, then object entries tag 0, counter entries tag 1
+and sticker entries tag 2, each in ascending key order), and `/effect_generators`, the
+`BTreeMap<EffectId, GeneratingAbility>` (each value the source id and the ability as tag 0 and its
+RFC 8785 canonical JSON). Every enum has an explicit stable one-byte tag (table in the
+`layers::encode` module documentation); DSL values are RFC 8785 canonical JSON (tag 0) with a
+structural fallback (tag 1) for values without a JCS form, never MessagePack. Each empty
+collection is `put_len(0)` (4 zero bytes). Every other leaf (`/prng`, `/ids/*`, `/turn/*`,
+`/players/<id>/*`, `/history`) encodes exactly as before. Wire format: `STATE_FORMAT_VERSION`
+1 -> 2; `StateWire` member `effects` now holds `{effects: [{id, effect}], links: [{part,
+anchor}]}`, and the required members `timestamps` (`{objects, counters, stickers}`) and
+`effect_generators` (`[{effect, source, ability}]`) are added; the top level is a 10-member map.
+Version 1 is rejected; there is no legacy reader. The decoder validates the layer data (effect
+ids and timestamps issued by the state's generators, registration through
+`ContinuousEffects::register`/`register_group` including group links, the 7a CDA rule, the
+generating-ability links, ordered unique ledger and link entries). Golden state digests:
+`GameState::new(42, 2, 20)` f32bbec462508986efd89ed35f9184bec86a107f774505e19c4f65d3db4fb0d5 ->
+7389c79ba648f778a6925577d462382782418b603f487e7eef53a39898a87030; the mutated golden state
+7ebe9f5c17abfc986c0168e1722807514fd1372a1e6dcc10dca594afdfa58371 ->
+61143120a7a8869bc2fb299244f20d4d6085bf324fefe398afb16d6cf354cb7c; new pinned non-empty layer
+state 49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1.
+Why: REQ-LAYER-001, REQ-CORE-002, REQ-NFR-006 (effects and CR 613.7 timestamps stored in the
+state, hashed and replayed); REQ-LAYER-002 existence (CR 613.8a): each static (and ETB) effect is
+linked to the ability on its source that generates it.
+Consumers affected: fineprint-core state and txn; golden state hashes; bindings and replay format
+(not yet implemented); #184, #186, #193.
