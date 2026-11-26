@@ -137,6 +137,7 @@ fn error_display_and_error_trait() {
         ZoneError::InvalidOrder,
         ZoneError::NoSuchOutsideCard(c(6)),
         ZoneError::IdCollision(ObjectId::new(8)),
+        ZoneError::CardCeased(c(7)),
     ];
     let texts: BTreeSet<String> = all.iter().map(ToString::to_string).collect();
     assert_eq!(texts.len(), all.len());
@@ -146,6 +147,7 @@ fn error_display_and_error_trait() {
     assert!(all[7].to_string().contains('6'));
     assert!(all[8].to_string().contains('8'));
     assert!(all[8].to_string().contains("not above the highest id"));
+    assert!(all[9].to_string().contains('7'));
     let e: &dyn std::error::Error = &all[3];
     assert!(e.source().is_none());
 }
@@ -1657,7 +1659,7 @@ fn exception_400_7m_stub_is_not_implemented() {
 // reused within a match); the last step pins only that the container does not yet reject it,
 // a known gap, not a supported use.
 #[test]
-fn cease_to_exist_removes_object_and_frees_card() {
+fn cease_to_exist_removes_object_and_retires_card() {
     let mut z = two_players();
     let mut ids = IdGenerator::new();
     let gy = z
@@ -1682,12 +1684,12 @@ fn cease_to_exist_removes_object_and_frees_card() {
     }
     // Not a zone change: no id is issued.
     assert_eq!(ids, ids_before);
-    // Not yet enforced: the container accepts the retired card (a caller must not do this).
-    let again = z
-        .create_object(&mut ids, c(5), p(1), req(ZoneKind::Exile))
-        .unwrap();
-    assert!(again > other);
-    assert_eq!(z.object_of_card(c(5)), Some(again));
+    // The card is retired: the container rejects it (REQ-CORE-002).
+    assert_eq!(
+        z.create_object(&mut ids, c(5), p(1), req(ZoneKind::Exile)),
+        Err(ZoneError::CardCeased(c(5)))
+    );
+    assert_eq!(z.object_of_card(c(5)), None);
 }
 
 // REQ-SBA-001: an unknown id is an error and the container is unchanged.
@@ -1728,4 +1730,143 @@ fn cease_to_exist_does_not_affect_clones() {
     assert_eq!(encode_to_vec(&z), bytes);
     assert_eq!(z.contents(ZoneId::Library(p(1))), lib);
     assert_eq!(z.contents(ZoneId::Stack), vec![stack]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Retired CardIds (#211 FP-157)
+// ---------------------------------------------------------------------------------------------
+
+fn pools() -> [OutsidePool; 3] {
+    [
+        OutsidePool::Sideboard,
+        OutsidePool::Lesson,
+        OutsidePool::Companion,
+    ]
+}
+
+// REQ-CORE-002, REQ-ZONE-001: a ceased card cannot be created again, atomically.
+#[test]
+fn create_object_rejects_ceased_card_atomically() {
+    for kind in [ZoneKind::Battlefield, ZoneKind::Hand] {
+        let mut z = two_players();
+        let mut ids = IdGenerator::new();
+        let o = z.create_object(&mut ids, c(5), p(1), req(kind)).unwrap();
+        z.cease_to_exist(o).unwrap();
+        assert_atomic_err(&mut z, &mut ids, ZoneError::CardCeased(c(5)), |z, ids| {
+            z.create_object(ids, c(5), p(1), req(kind))
+        });
+    }
+}
+
+// REQ-CORE-002: enter_from_outside and add_outside_card reject a ceased card with CardCeased;
+// an unknown player is reported first.
+#[test]
+fn outside_paths_reject_ceased_card() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let o = z
+        .create_object(&mut ids, c(5), p(1), req(ZoneKind::Graveyard))
+        .unwrap();
+    z.cease_to_exist(o).unwrap();
+    for pool in pools() {
+        assert_atomic_err(&mut z, &mut ids, ZoneError::CardCeased(c(5)), |z, ids| {
+            z.enter_from_outside(ids, p(1), c(5), pool, req(ZoneKind::Hand))
+        });
+        assert_atomic_err(&mut z, &mut ids, ZoneError::CardCeased(c(5)), |z, _| {
+            z.add_outside_card(p(1), pool, c(5))
+        });
+        assert_atomic_err(
+            &mut z,
+            &mut ids,
+            ZoneError::UnknownPlayer(p(9)),
+            |z, ids| z.enter_from_outside(ids, p(9), c(5), pool, req(ZoneKind::Hand)),
+        );
+        assert_atomic_err(&mut z, &mut ids, ZoneError::UnknownPlayer(p(9)), |z, _| {
+            z.add_outside_card(p(9), pool, c(5))
+        });
+    }
+    assert_atomic_err(
+        &mut z,
+        &mut ids,
+        ZoneError::UnknownPlayer(p(9)),
+        |z, ids| z.create_object(ids, c(5), p(9), req(ZoneKind::Hand)),
+    );
+}
+
+// REQ-CORE-002: only cease_to_exist retires.
+#[test]
+fn only_cease_to_exist_retires() {
+    let mut z = two_players();
+    let mut ids = IdGenerator::new();
+    let o = z
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Battlefield))
+        .unwrap();
+    z.send_outside(o, OutsidePool::Sideboard).unwrap();
+    z.enter_from_outside(
+        &mut ids,
+        p(1),
+        c(1),
+        OutsidePool::Sideboard,
+        req(ZoneKind::Hand),
+    )
+    .unwrap();
+    let h = z.object_of_card(c(1)).unwrap();
+    let g = z
+        .move_object(&mut ids, h, req(ZoneKind::Graveyard))
+        .unwrap();
+    assert!(z.object(g.new).is_some());
+    // A failed cease retires nothing.
+    let before = z.clone();
+    assert_eq!(
+        z.cease_to_exist(ObjectId::new(999)),
+        Err(ZoneError::UnknownObject(ObjectId::new(999)))
+    );
+    assert_eq!(z, before);
+    // c(2) was never held, so it is still accepted.
+    z.create_object(&mut ids, c(2), p(1), req(ZoneKind::Hand))
+        .unwrap();
+}
+
+// REQ-NFR-006, REQ-CORE-002: the retired set is part of equality and of the encoding; the id
+// mark stays the last 8 bytes; clones do not share it.
+#[test]
+fn retired_set_is_part_of_equality_and_encoding() {
+    // A visible state with nothing in any zone or pool cannot be reached without retiring, so
+    // exact "differs only in the retired set" is covered by comparing against other routes.
+    let mut base = two_players();
+    let mut ids = IdGenerator::new();
+    let o = base
+        .create_object(&mut ids, c(1), p(1), req(ZoneKind::Hand))
+        .unwrap();
+    let mut ceased = base.clone();
+    ceased.cease_to_exist(o).unwrap();
+    assert_eq!(tail8(&ceased), 1u64.to_le_bytes());
+
+    // Identical operations: equal values and identical bytes.
+    let mut twin = base.clone();
+    twin.cease_to_exist(o).unwrap();
+    assert_eq!(ceased, twin);
+    assert_eq!(encode_to_vec(&ceased), encode_to_vec(&twin));
+
+    // A container that merely holds the card outside differs in contents and retired set.
+    let mut outside = base.clone();
+    outside.send_outside(o, OutsidePool::Sideboard).unwrap();
+    assert_ne!(ceased, outside);
+    assert_ne!(encode_to_vec(&ceased), encode_to_vec(&outside));
+    // The retired set grows the encoding over an empty container beyond the mark alone.
+    let empty = two_players();
+    assert_ne!(ceased, empty);
+    assert!(encode_to_vec(&ceased).len() > encode_to_vec(&empty).len());
+
+    // Clone isolation: a snapshot taken before the cease keeps its object and an empty set.
+    let snap = base.clone();
+    assert!(snap.object(o).is_some());
+    let mut snap2 = snap.clone();
+    assert_eq!(
+        snap2.create_object(&mut ids.clone(), c(1), p(1), req(ZoneKind::Hand)),
+        Err(ZoneError::CardAlreadyPresent(c(1)))
+    );
+    snap2.cease_to_exist(o).unwrap();
+    assert_eq!(snap2, ceased);
+    assert_eq!(snap.object_of_card(c(1)), Some(o));
 }
