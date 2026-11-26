@@ -21,6 +21,7 @@ use crate::expr::{
 use crate::mana::ManaCostDSL;
 
 mod props;
+mod replace_text;
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
