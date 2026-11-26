@@ -10196,3 +10196,155 @@ every existing `StateBasedAction` matcher). Making SBA destruction `Destroy` (re
 counter would then wrongly replace it; see decision "#29 FP-028 — SBA destruction and the shield
 counter's destroy replacement"). Letting the first finding decide the merged cause (rejected:
 depends on registry order instead of a rule).
+
+## #44 FP-043 — turn/ module stub
+
+**Decision.** `crates/fineprint-core/src/turn/` did not exist on main, so this unit creates
+`turn/mod.rs` with only the module documentation, `pub mod heartbeat;`, the `#[cfg(test)]` test
+module line and the re-exports of the heartbeat API, and adds `pub mod turn;` to `lib.rs`
+(between `triggers` and `txn`). Unit #46 FP-045 (the turn sequencer) appends its own module to
+`turn/mod.rs`.
+**Rationale.** R1: when two units share a module in one phase, the earlier unit pre-stubs the
+module declarations. Keeping the stub minimal leaves FP-045 a clean append.
+**Alternatives.** A top-level `heartbeat` module (rejected: the issue's owned path is
+`turn/heartbeat.rs`); leaving the declarations to FP-045 (rejected: this unit's code would not
+compile).
+
+## #44 FP-043 — Heartbeat seam: HeartbeatHost and SbaStage
+
+**Decision.** The heartbeat (`turn::heartbeat`) is written against a `HeartbeatHost` trait: the
+host supplies the game state (turn order, active player, designations), one state-based-action
+pass, trigger placement over its own waiting queue, the stack (empty test, resolve top), the
+legal priority actions as exact `ChoiceResponse`s and taking an action. The heartbeat changes
+only the priority player (`GameState::set_priority_player`) and never touches the stack. A
+host's `sba_pass` delegates to `sba_pass_post_batch(SbaStage { .. }, choices)`, which calls
+`sba::perform_all_post_batch` with the host's `PostBatchState` provider and never `perform_all`
+or `perform_all_relayered` (binding issue comments, "Gate 02-state-objects R3c"). The heartbeat
+keeps its pass state in its own `HeartbeatState` (pass set and pass log), not in `GameState`, so
+the canonical state hash is unchanged. The default `has_left_game` is "not a player of the game,
+or has the `LOST_THE_GAME` designation". When the priority player has left the game while
+deciding (a host that models leaving at any time), the answer is ignored and priority passes on
+(CR 800.4a); no pass is recorded for a player who is no longer in the game.
+**Rationale.** The stack, resolution, casting, legal-action generation and the real-state
+environments arrive in later units ("#31 FP-030 — Real-state environments belong to the
+integration unit"); a trait seam lets the heartbeat be finished and tested now with fakes and
+keeps it a pure function of (host, state, answers) for the `ChoiceSession` re-execution model.
+**Alternatives.** Adding stack and pass fields to `GameState` (rejected: changes the state hash
+and is owned by other units); calling `sba::perform_all` directly (rejected by the binding issue
+comment).
+
+## #44 FP-043 — Settle loop repeats on performed, not findings, and caps iterations
+
+**Decision.** `settle_before_priority` repeats step 1 while `SbaOutcome.performed` (never on
+findings alone, "#41 FP-040 — performed means state changed"). After step 2 it returns to step 1
+when the placement stacked OR removed any trigger; only an empty placement (nothing stacked,
+nothing removed) ends the settle. `SettleReport.triggers_stacked` counts stacked triggers only.
+Every host call of the settle (one SBA pass or one placement) counts one iteration; the call
+that would exceed `MAX_SETTLE_ITERATIONS` (10 000) is not made and the settle returns
+`ChoiceError::Procedure` naming the limit. With no player in the game, step 2 is skipped (there
+is no APNAP order and no player who can control a trigger) and the settle ends after step 1.
+**Rationale.** Rules-researcher ruling Q4 (binding, replaces the brief's provisional "removal
+does not repeat"): CR 603.3c and CR 603.3d remove a trigger "from the stack", so it was put on the
+stack and counts as processed; CR 603.3b then has the game "once again" check state-based
+actions. The cap guards against a host that never settles without affecting any legal game
+(R3: deterministic error, never a hang).
+**Alternatives.** Repeating only on stacked triggers (the brief's provisional choice, overruled
+by Q4); counting only loop rounds rather than host calls (equivalent bound, less precise).
+
+## #44 FP-043 — Priority player is None when the step ends
+
+**Decision.** When every player still in the game passes in succession with an empty stack,
+`run_heartbeat` sets the priority player to `None` and returns `HeartbeatOutcome::StepEnds`,
+doing nothing else; when no player is in the game it also sets `None` and returns
+`NoPlayerInGame` without asking. Expiring "until end of step" effects and emptying mana pools
+(CR 500.5) is the turn sequencer's (#46 FP-045).
+**Rationale.** CR 117.4: "if the stack is empty, the phase or step ends"; no player holds
+priority between steps (CR 117.3a: the active player receives priority at the beginning of most
+steps, after turn-based actions). Leaving a stale priority player would let a later reader think
+someone still holds priority. The 117.3d mana announcement is informational only (ruling Q6);
+the pass record is the engine's record.
+**Alternatives.** Keeping the last passer as the priority player (rejected: misleading);
+performing the CR 500.5 work here (rejected: the sequencer owns step boundaries).
+
+## #44 FP-043 — Priority start when the active player has left or is absent
+
+**Decision.** Whenever the active player would receive priority (the step start, CR 117.3a;
+after a resolution, CR 117.3b) and has left the game, the next player in turn order after the
+departed active player's seat who is still in the game receives it (CR 800.4j with CR 800.4a);
+APNAP order for trigger placement starts at that same player and continues in turn order over
+the players still in the game. If `TurnInfo::active_player()` is `None` (no seat is known),
+both start at the first player in turn order who is still in the game. If the player about to
+receive priority left during the settle, priority goes to the next player in turn order after
+them (CR 800.4a).
+**Rationale.** Rules-researcher ruling Q5 (a) and (b): CR 800.4j says "the next player in turn
+order receives priority"; the CR is silent on APNAP order without an active player, and starting
+both at the same player keeps one notion of "who acts first". With no active player at all the
+turn order's first in-game player is the only seat-free deterministic choice.
+**Alternatives.** Starting APNAP at the first player in turn order even when the departed active
+player's seat is known (rejected: inconsistent with the priority rule); failing with an error
+when there is no active player (rejected: CR 800.4j lets the turn continue without one).
+
+## #44 FP-043 — Mana abilities and special actions reset PassCount
+
+**Decision.** Every non-pass answer to `PRIORITY_ACTION` (casting, activating any ability
+including a mana ability, playing a land, any special action) goes through
+`HeartbeatHost::take_action`; the actor keeps priority, PassCount is reset to 0 and the heartbeat
+returns to step 1. Binding, no longer provisional.
+**Rationale.** Rules-researcher ruling Q2 (an inference; the CR has no explicit sentence): CR
+117.4 counts passes only "without taking any actions in between", CR 117.3c and CR 116.3 give
+the actor priority afterward, and CR 605.3b says a mana ability "doesn't go on the stack" but is
+still an activation. SRS 5.1's "do not reset PassCount beyond the action they are part of" is read
+as: they reset it exactly once, as the action they are. (The SRS discrepancy is recorded by the
+Orchestrator.)
+**Alternatives.** Leaving PassCount unchanged for mana abilities and special actions (rejected
+by Q2: a player who acts has not passed "in succession").
+
+## #44 FP-043 — Pass counting uses the players still in the game
+
+**Decision.** `HeartbeatState` keeps the set of players who passed since the last action,
+resolution or step start. Before every comparison the heartbeat forgets the passes of players
+who have left the game; `pass_count()` is the size of that set (the number of players still in
+the game who passed in succession), and a `PassRecord.pass_count` is that value right after the
+pass. "All players passed" is `pass_count >= players_in_game`. A departure can therefore never
+make the all-passed test succeed before every remaining player has passed.
+**Rationale.** Rules-researcher ruling Q5 (c) (CR silent; judgement call, changes the brief's
+plain counter): CR 117.4 "all players pass in succession" is about the players in the game, and
+CR 800.4j has the turn continue without the departed player.
+**Alternatives.** A plain counter compared with the current players-in-game count (rejected: a
+departed player's earlier pass would still count, so a remaining player could be skipped);
+resetting PassCount to 0 on any departure (rejected by Q5: it makes players who already passed
+pass again for no rules reason).
+
+## #44 FP-043 tester — Independent Tester judgement calls
+
+**Decision.** The black-box heartbeat spec tests (`crates/fineprint-core/tests/spec_turn_heartbeat*.rs`)
+read the brief as follows where it left room:
+
+1. `SettleReport.sba_passes` counts every `sba_pass` call of the settle (performed or not), and
+   `triggers_stacked` the total length of the `stacked` lists the placements returned.
+2. A settle loop that only removed triggers (CR 603.3c-d) returns to the SBA check (rules-researcher
+   ruling Q4, which replaces the brief's provisional "does not loop").
+3. With no active player at all (`active_player() == None`), priority and the APNAP list start at the
+   first in-game player in turn order (brief); with a departed active player they start at the next
+   in-game player after that player's seat (ruling Q5a/Q5b).
+4. `run_heartbeat` with nobody in the game returns `NoPlayerInGame` on entry: no request and no host
+   call (no settle).
+5. Ruling Q5c (a departed player's pass no longer counts) is tested on the `PassRecord`s and on the
+   all-passed decision, with a host that concedes a player between two passes inside
+   `priority_actions` (no other host call happens between passes). `HeartbeatState::pass_count()`
+   takes no host, so it is asserted only at asks where the heartbeat has observed every departure
+   (after a pass it handled), not at the ask during whose `priority_actions` a concession happens.
+6. The settle guard is checked by counting the fake's calls: `sba_pass` calls within
+   `MAX_SETTLE_ITERATIONS ± 2` for an always-performing SBA pass; `place_triggers` calls within
+   `[MAX_SETTLE_ITERATIONS / 2 - 2, MAX_SETTLE_ITERATIONS + 2]` for an always-stacking placement (an
+   iteration may count one SBA pass or one SBA-plus-placement round).
+7. Property invariant (e) counts triggers stacked by the settle as pushes: resolutions = initial
+   depth + pushes by actions + stacked triggers.
+
+**Rationale.** Each choice is the plainest reading of the brief, the SRS 5.1 diagram and the
+rules-researcher rulings; item 5 follows from the pinned signature `pass_count(&self) -> usize`.
+
+**Alternatives.** Counting only performed passes in `sba_passes` (rejected: the field name counts
+passes run); asserting `pass_count()` at the ask right after a concession (rejected: not observable
+through a host-free accessor); excluding triggers from invariant (e) (rejected: the fake host's
+placements push onto the stack the heartbeat later resolves).
