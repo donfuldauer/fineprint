@@ -53,12 +53,20 @@ pub(super) fn set<const N: usize>(items: [&str; N]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// A synthetic non-keyword ability `test.ability.<tag>`.
+/// A synthetic non-keyword (STATIC) ability `test.ability.<tag>`.
 pub(super) fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(serde_json::json!({
+    serde_json::from_value(serde_json::json!({
         "kind": "STATIC",
         "abilityId": format!("test.ability.{tag}"),
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
     }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text whose literal is `text`.
+pub(super) fn literal_text(text: &str) -> TextTokenStream {
+    serde_json::from_value(serde_json::json!([{"id": "t1", "kind": "LITERAL", "text": text}]))
+        .expect("valid synthetic text")
 }
 
 /// A synthetic 2/2 creature `test.state_creature` with `abilities`.
@@ -71,7 +79,7 @@ pub(super) fn creature(abilities: Vec<AbilityAST>) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: set(["Testkin"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities,
         power: Some(literal(2)),
         toughness: Some(literal(2)),
@@ -229,7 +237,7 @@ pub(super) fn any_modification(rng: &mut SplitMix64) -> (Layer, LayerModificatio
         ),
         5 => (
             Layer::L3,
-            LayerModification::SetText(TextTokenStream(vec![format!("w{}", below(rng, 9)).into()])),
+            LayerModification::SetText(literal_text(&format!("w{}", below(rng, 9)))),
         ),
         6 => (
             Layer::L3,
@@ -561,7 +569,12 @@ fn golden_layers_reordered() -> GameState {
     s
 }
 
-const GOLDEN_LAYERS: &str = "49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1";
+/// The state hash of [`golden_layers`]. #232 FP-164 changed it from
+/// `49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1` only because the fixture
+/// ability became a valid STATIC ability (it lacked `effects`); the base tree 242545c gives this
+/// value for the same valid content (docs/DECISIONS.md "#232 FP-164 — Golden hashes and replaced
+/// tests").
+const GOLDEN_LAYERS: &str = "e4d5ee18abcb3d3e96fbcfd9e7eea993b2d62d639a89028fe5945cf2b09f947f";
 
 // REQ-NFR-006, REQ-CORE-001, REQ-CORE-002, REQ-LAYER-001 (D9): the non-empty layer encoding
 // pinned as a literal digest; identical over 10 builds; equal for a semantically equal build
@@ -1798,13 +1811,16 @@ fn wire_rejects_inconsistent_layer_data() {
     assert!(decode_wire(&w).is_ok());
 }
 
-// REQ-CORE-001: Some(JSON null) of a power stays distinct from None through the wire.
+// REQ-CORE-001, REQ-DSL-003 (#232: replaces "Some(JSON null) of a power stays distinct from
+// None", a placeholder the typed power can no longer hold): Some(X) of a power stays distinct
+// from None through the wire, and a two-element option is rejected.
 #[test]
-fn wire_keeps_json_null_power_distinct() {
+fn wire_keeps_some_power_distinct() {
+    assert!(serde_json::from_value::<ValueExpressionAST>(serde_json::Value::Null).is_err());
     let mut s = GameState::new(2, 1, 20).unwrap();
     let ts = s.stamp_resolved_effect().unwrap();
     let mut c = creature(vec![]);
-    c.power = Some(ValueExpressionAST(serde_json::Value::Null));
+    c.power = Some(ValueExpressionAST::X);
     c.toughness = None;
     s.register_effect(
         resolved_effect(
@@ -1819,13 +1835,13 @@ fn wire_keeps_json_null_power_distinct() {
     check_round_trip(&s);
     // Two elements where at most one is allowed: rejected.
     let bytes = s.serialize().unwrap();
-    let one = [0x91_u8, 0xc0];
+    let one = [0x91_u8, 0xa1, b'X'];
     let at = bytes
         .windows(one.len())
         .position(|w| w == one)
-        .expect("Some(null) is [nil]");
+        .expect("Some(X) is [\"X\"]");
     let mut two = bytes.clone();
-    two.splice(at..at + 2, [0x92, 0xc0, 0xc0]);
+    two.splice(at..at + 3, [0x92, 0xa1, b'X', 0xa1, b'X']);
     assert_decode_err(GameState::deserialize(&two));
 }
 
@@ -1994,7 +2010,7 @@ fn wire_round_trips_every_variant() {
         (Layer::L2, LayerModification::SetController(p(2))),
         (
             Layer::L3,
-            LayerModification::SetText(TextTokenStream(Vec::new())),
+            LayerModification::SetText(TextTokenStream::default()),
         ),
         (
             Layer::L4,
@@ -2040,4 +2056,119 @@ fn wire_round_trips_every_variant() {
         assert!(s.remove_effect(ids[0]));
     }
     check_round_trip(&s);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #232: typed DSL values through the MessagePack wire
+// ---------------------------------------------------------------------------------------------
+
+/// `v` decoded as `T` (valid synthetic content).
+fn typed<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+    serde_json::from_value(v).unwrap()
+}
+
+/// Valid synthetic abilities of all six kinds (R5).
+fn typed_abilities() -> Vec<AbilityAST> {
+    [
+        serde_json::json!({"abilityId": "w1", "kind": "SPELL", "effect": [{"op": "POPULATE"}]}),
+        serde_json::json!({"abilityId": "w2", "kind": "ACTIVATED",
+            "cost": [{"cost": "TAP_SOURCE"}], "effect": [{"op": "POPULATE"}]}),
+        serde_json::json!({"abilityId": "w3", "kind": "TRIGGERED",
+            "trigger": {"mode": "STATE", "state": {"pred": "IS_CREATURE"}},
+            "effect": [{"op": "POPULATE"}]}),
+        serde_json::json!({"abilityId": "w4", "kind": "STATIC",
+            "effects": [{"type": "RULE", "kind": "SKIP"}]}),
+        serde_json::json!({"abilityId": "w5", "kind": "REPLACEMENT",
+            "match": {"event": "DIES", "affected": {"ref": "SELF"}},
+            "replaceWith": [{"op": "SKIP"}]}),
+        serde_json::json!({"abilityId": "w6", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+            "functionsIn": ["BATTLEFIELD"], "textSpan": [0, 1], "params": {"n": 2, "s": "x"}}),
+    ]
+    .into_iter()
+    .map(typed)
+    .collect()
+}
+
+/// A valid synthetic token stream with one token of each kind (R5).
+fn typed_text() -> TextTokenStream {
+    typed(serde_json::json!([
+        {"id": "t1", "kind": "NAME_REF", "ref": "SELF"},
+        {"id": "t2", "kind": "LITERAL", "text": " gets +1/+1"},
+        {"id": "t3", "kind": "WORD", "category": "CREATURE_TYPE", "value": "Testkin"},
+        {"id": "t4", "kind": "NAME_REF", "ref": "OTHER", "name": "test.other"}
+    ]))
+}
+
+/// A valid non-literal value expression.
+fn typed_math() -> ValueExpressionAST {
+    typed(serde_json::json!({"MATH": {
+        "op": "DIV_FLOOR",
+        "lhs": {"MATH": {"op": "MUL", "lhs": "X", "rhs": {"LITERAL": 2}}},
+        "rhs": {"LITERAL": 3}
+    }}))
+}
+
+// REQ-DSL-003, REQ-DSL-010, REQ-DSL-012, REQ-CORE-001, REQ-NFR-006 (#232): every wire type that
+// holds typed ASTs (SetText, AddAbility, GainAbility, SetPower, SetToughness and the
+// characteristics snapshots of CopyValues, CopyValuesWithProvenance and FaceDown, and the
+// generating ability links) round-trips through its MessagePack encoding to an equal value
+// with the same state hash.
+#[test]
+fn typed_dsl_values_round_trip_through_the_wire() {
+    let mut s = GameState::new(5, 2, 20).unwrap();
+    let mut snapshot = creature(typed_abilities());
+    snapshot.rules_text = typed_text();
+    snapshot.power = Some(typed_math());
+    snapshot.toughness = Some(ValueExpressionAST::X);
+    let mut modifications = vec![
+        (Layer::L3, LayerModification::SetText(typed_text())),
+        (
+            Layer::L3,
+            LayerModification::SetText(TextTokenStream::default()),
+        ),
+        (
+            Layer::L1a,
+            LayerModification::CopyValues(Box::new(snapshot.clone())),
+        ),
+        (
+            Layer::L1a,
+            LayerModification::CopyValuesWithProvenance {
+                characteristics: Box::new(snapshot.clone()),
+                provenance: crate::layers::ManaValueProvenance::plain(),
+            },
+        ),
+        (Layer::L1b, LayerModification::FaceDown(Box::new(snapshot))),
+        (
+            Layer::L1a,
+            LayerModification::ApplyCopyExceptions(
+                typed_abilities()
+                    .into_iter()
+                    .map(CopyException::GainAbility)
+                    .chain([
+                        CopyException::SetPower(typed_math()),
+                        CopyException::SetToughness(literal(-4)),
+                        CopyException::SetPower(ValueExpressionAST::Memory("test.m".to_owned())),
+                    ])
+                    .collect(),
+            ),
+        ),
+    ];
+    modifications.extend(
+        typed_abilities()
+            .into_iter()
+            .map(|a| (Layer::L6, LayerModification::AddAbility(a))),
+    );
+    for (layer, m) in modifications {
+        let ts = s.stamp_resolved_effect().unwrap();
+        s.register_effect(resolved_effect(ts, layer, only(&[1]), m), None)
+            .unwrap();
+    }
+    for (i, a) in typed_abilities().into_iter().enumerate() {
+        let id = s.issue_effect_id().unwrap();
+        s.link_effect_generator(id, GeneratingAbility::new(o(10 + i as u64), a))
+            .unwrap();
+    }
+    check_round_trip(&s);
+    let back = GameState::deserialize(&s.serialize().unwrap()).unwrap();
+    assert_eq!(back.effects(), s.effects());
 }

@@ -20,7 +20,7 @@ pub(super) fn check(def: &CardDefinitionDSL, facts: &CardFacts<'_>, out: &mut Ve
         SupportStatus::Unsupported => return,
     };
     for (i, face) in def.faces.iter().enumerate() {
-        let n = u64::try_from(face.text.0.len()).unwrap_or(u64::MAX);
+        let n = u64::try_from(face.text.len()).unwrap_or(u64::MAX);
         let mut covered: Vec<(u64, u64)> = Vec::new();
         for a in facts.abilities.iter().filter(|a| a.face == i) {
             match a.span {

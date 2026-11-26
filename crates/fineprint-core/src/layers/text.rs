@@ -15,18 +15,16 @@
 //! so after the rewrite every node that references the token reads the new value
 //! ([`resolve_word_ref`], [`resolve_predicate_words`], [`resolve_selector_words`]).
 //!
-//! **Placeholder bridge.** `Characteristics.rules_text` is still the placeholder
-//! [`fineprint_dsl::card::TextTokenStream`] (a list of JSON values) until #159 types it. It is
-//! converted to and from the real stream through MessagePack ([`decode_rules_text`],
-//! [`encode_rules_text`]); content that does not decode makes a text-changing effect a no-op
-//! (docs/DECISIONS.md "#37 FP-036 — Placeholder bridge").
+//! `Characteristics.rules_text` is the real token stream (`fineprint_dsl::card::TextTokenStream`
+//! is a re-export of it), so the layer-3 rewrite works on it directly; the former placeholder
+//! bridge through MessagePack is gone (docs/DECISIONS.md "#232 FP-164 — Text placeholder bridge
+//! removed").
 //!
 //! **Determinism.** Pure functions over their arguments; no float, no hash-ordered container,
 //! no I/O (REQ-CORE-001).
 
 use std::fmt;
 
-use fineprint_dsl::card;
 use fineprint_dsl::expr::{
     HistoryQuery, ObjectSelectorAST, PlayerAttr, PredicateAST, SelectorFilter, ValueExpressionAST,
     WordRef,
@@ -43,9 +41,6 @@ pub enum TextWordError {
     UnknownToken(String),
     /// The token with this id exists but is literal text or a name reference, not a word.
     NotAWord(String),
-    /// The placeholder rules text does not decode into a valid token stream (the message says
-    /// why).
-    InvalidRulesText(String),
     /// A replacement's `from` or `to` word is empty or contains a Unicode noncharacter.
     InvalidWord,
     /// A replacement of category `CARD_NAME`: the CR has no word-for-word replacement of card
@@ -59,9 +54,6 @@ impl fmt::Display for TextWordError {
             TextWordError::UnknownToken(id) => write!(f, "no text token has id {id:?}"),
             TextWordError::NotAWord(id) => {
                 write!(f, "text token {id:?} is not a rewritable word")
-            }
-            TextWordError::InvalidRulesText(msg) => {
-                write!(f, "rules text is not a valid token stream: {msg}")
             }
             TextWordError::InvalidWord => {
                 write!(f, "a replacement word is empty or contains a noncharacter")
@@ -102,35 +94,6 @@ fn check_replacement(
         return Err(TextWordError::InvalidWord);
     }
     Ok(())
-}
-
-/// Decodes the placeholder rules text of `Characteristics` into a validated token stream
-/// (REQ-DSL-012), through MessagePack. The empty placeholder decodes to the empty stream.
-/// Never panics, whatever the placeholder holds (R12).
-///
-/// # Errors
-/// [`TextWordError::InvalidRulesText`] if the content is not a valid token stream (the FP-011
-/// wire form and validity rules).
-pub fn decode_rules_text(
-    rules_text: &card::TextTokenStream,
-) -> Result<TextTokenStream, TextWordError> {
-    let bytes = rmp_serde::to_vec(rules_text)
-        .map_err(|e| TextWordError::InvalidRulesText(e.to_string()))?;
-    rmp_serde::from_slice::<TextTokenStream>(&bytes)
-        .map_err(|e| TextWordError::InvalidRulesText(e.to_string()))
-}
-
-/// Encodes a token stream as the placeholder rules text of `Characteristics` (REQ-DSL-012),
-/// through MessagePack, in the FP-011 wire form. `decode_rules_text(&encode_rules_text(s))`
-/// gives `s` back for every stream; the empty stream encodes to the empty placeholder.
-#[must_use]
-pub fn encode_rules_text(stream: &TextTokenStream) -> card::TextTokenStream {
-    // A validated stream always serialises, and its wire form is a list of JSON objects, so
-    // neither step fails; the empty placeholder is only a defensive fallback.
-    rmp_serde::to_vec(stream)
-        .ok()
-        .and_then(|bytes| rmp_serde::from_slice::<card::TextTokenStream>(&bytes).ok())
-        .unwrap_or_else(|| card::TextTokenStream(Vec::new()))
 }
 
 /// Replaces every word of `category` whose value is exactly `from` (case-sensitive) by `to`
@@ -389,19 +352,17 @@ pub(super) fn validate_modification(m: &LayerModification) -> Result<(), LayerEr
     })
 }
 
-/// Layer 3 application of `REPLACE_TEXT_WORD` to placeholder rules text (CR 612.1, 612.2,
-/// 613.1c): `Some(new text)` when at least one word changed; `None` (leave the text
-/// byte-identical) when nothing changed, the text is empty, the text does not decode or the
-/// replacement is invalid. Never panics (R12).
+/// Layer 3 application of `REPLACE_TEXT_WORD` to an object's rules text (CR 612.1, 612.2,
+/// 613.1c): `Some(new text)` when at least one word changed; `None` (leave the text unchanged)
+/// when nothing changed, the text is empty or the replacement is invalid. Never panics (R12).
 pub(super) fn replace_in_rules_text(
-    rules_text: &card::TextTokenStream,
+    rules_text: &TextTokenStream,
     category: RewritableCategory,
     from: &str,
     to: &str,
-) -> Option<card::TextTokenStream> {
-    let stream = decode_rules_text(rules_text).ok()?;
-    let rewritten = rewrite_text_words(&stream, category, from, to).ok()?;
-    (rewritten != stream).then(|| encode_rules_text(&rewritten))
+) -> Option<TextTokenStream> {
+    let rewritten = rewrite_text_words(rules_text, category, from, to).ok()?;
+    (rewritten != *rules_text).then_some(rewritten)
 }
 
 /// The tokens a `REPLACE_TEXT_WORD` of `category` and `from` applies to in `rules_text`
@@ -410,22 +371,19 @@ pub(super) fn replace_in_rules_text(
 ///
 /// CR 612.2: only words used in that category's sense count, so literal text, name references
 /// (`SELF`, `OTHER`), card-name words and words of other categories or values are never in the
-/// set. Category `CARD_NAME` (not supported by the effect, CR 612.2), empty text and text that
-/// does not decode give the empty set; never panics (R12). Reads only token data, never a card
+/// set. Category `CARD_NAME` (not supported by the effect, CR 612.2) and empty text give the
+/// empty set; never panics (R12). Reads only token data, never a card
 /// name or id (REQ-DSL-013). The dependency trial compares this set before and after another
 /// effect (docs/DECISIONS.md "#37 FP-036 — Dependency between text effects").
 pub(super) fn replace_targets(
-    rules_text: &card::TextTokenStream,
+    rules_text: &TextTokenStream,
     category: RewritableCategory,
     from: &str,
 ) -> Vec<(usize, String)> {
     if category == RewritableCategory::CardName {
         return Vec::new();
     }
-    let Ok(stream) = decode_rules_text(rules_text) else {
-        return Vec::new();
-    };
-    stream
+    rules_text
         .tokens()
         .iter()
         .enumerate()

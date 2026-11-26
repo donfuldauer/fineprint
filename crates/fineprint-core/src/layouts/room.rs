@@ -133,7 +133,7 @@ fn locked(half: Characteristics) -> Characteristics {
         names: Default::default(),
         mana_cost: None,
         colors: base_colors(None, half.color_indicator, CdaColors::None),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         ..half
     }

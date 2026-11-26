@@ -198,7 +198,11 @@ impl LayerEnvironment for Env {
 }
 
 fn text_of(r: &ContinuousEffects, env: &Env, id: ObjectId) -> TextTokenStream {
-    decode_rules_text(&evaluate(r, env, id).unwrap().characteristics.rules_text).unwrap()
+    evaluate(r, env, id)
+        .unwrap()
+        .characteristics
+        .rules_text
+        .clone()
 }
 
 fn value_of(s: &TextTokenStream, id: &str) -> String {
@@ -312,7 +316,7 @@ fn req_dsl_012_invalid_words_match_registration_error() {
 fn req_dsl_012_same_word_compiles_as_no_op() {
     let m = compiled(BLT, "Swamp", "Swamp");
     let text = stream(vec![word("t1", BLT, "Swamp")]);
-    let env = Env::default().with(o(1), object("test.bear_1", &[], encode_rules_text(&text)));
+    let env = Env::default().with(o(1), object("test.bear_1", &[], text.clone()));
     let r = registry(vec![(1, effect(1, only(&[1]), m))]);
     assert_eq!(text_of(&r, &env, o(1)), text);
 }
@@ -477,16 +481,13 @@ fn card_text() -> TextTokenStream {
 /// The synthetic card (1) and two other creatures with subtype Swamp (2) and Island (3).
 fn board() -> Env {
     Env::default()
-        .with(
-            o(1),
-            object("test.text_changer_1", &[], encode_rules_text(&card_text())),
-        )
+        .with(o(1), object("test.text_changer_1", &[], card_text()))
         .with(
             o(2),
             object(
                 "test.swamp_creature_2",
                 &["Swamp"],
-                card::TextTokenStream(Vec::new()),
+                card::TextTokenStream::default(),
             ),
         )
         .with(
@@ -494,7 +495,7 @@ fn board() -> Env {
             object(
                 "test.island_creature_3",
                 &["Island"],
-                card::TextTokenStream(Vec::new()),
+                card::TextTokenStream::default(),
             ),
         )
 }
@@ -564,10 +565,7 @@ fn req_dsl_012_compiled_effect_changes_dependent_ability() {
             }
         );
         // The base text is never mutated.
-        assert_eq!(
-            env.bases[&o(1)].characteristics.rules_text,
-            encode_rules_text(&card_text())
-        );
+        assert_eq!(env.bases[&o(1)].characteristics.rules_text, card_text());
     }
 }
 
@@ -639,10 +637,7 @@ fn req_dsl_012_resolve_value_words_errors_and_identity() {
 // ---------------------------------------------------------------------------------------------
 
 fn single(tokens: Vec<TextToken>) -> Env {
-    Env::default().with(
-        o(1),
-        object("test.bear_1", &[], encode_rules_text(&stream(tokens))),
-    )
+    Env::default().with(o(1), object("test.bear_1", &[], stream(tokens)))
 }
 
 // REQ-DSL-012, REQ-LAYER-002; CR 613.8: compiled Swamp->Island and Island->Forest on the same
@@ -695,7 +690,7 @@ fn req_dsl_012_compiled_chain_in_both_orders_cr_613_8() {
 #[test]
 fn req_dsl_012_compiled_replace_after_set_text_in_both_orders_cr_613_8() {
     let env = single(vec![word("x1", BLT, "Plains")]);
-    let new_text = encode_rules_text(&stream(vec![lit("l", "n1"), word("w", BLT, "Swamp")]));
+    let new_text = stream(vec![lit("l", "n1"), word("w", BLT, "Swamp")]);
     let want = stream(vec![lit("l", "n1"), word("w", BLT, "Island")]);
     for (t_set, t_rep) in [(1, 2), (2, 1)] {
         let r = registry(vec![

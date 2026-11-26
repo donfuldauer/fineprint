@@ -64,7 +64,7 @@ fn creature(name: &str, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(1)),
         toughness: Some(literal(toughness)),
@@ -84,16 +84,12 @@ fn noncreature(name: &str, card_type: &str) -> Characteristics {
     c
 }
 
+/// A synthetic `KEYWORD` ability with keyword name `word` (for example `INDESTRUCTIBLE`).
 fn keyword(word: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("test.kw.{word}")),
-            ("keyword", word.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(format!("test.kw.{word}")),
+        word,
+    ))
 }
 
 /// The world: every component of an event context, the replacement registry, the continuous
@@ -906,7 +902,7 @@ fn sba_704_5i_loyalty() {
 fn indestructible_survives_5g_and_5h_not_5f() {
     let mut w = World::new();
     let mut tough = creature("test.indestructible_2_2", 2);
-    tough.abilities.push(keyword("indestructible"));
+    tough.abilities.push(keyword("INDESTRUCTIBLE"));
     let mut frail = tough.clone();
     frail.toughness = Some(literal(0));
     let a = w.create(1, ZoneKind::Battlefield, tough);
@@ -1718,7 +1714,7 @@ fn toughness_read_without_eval_value() {
 fn deathtouch_window_closes_for_indestructible() {
     let mut w = World::new();
     let mut c = creature("test.indestructible_x_2", 2);
-    c.abilities.push(keyword("indestructible"));
+    c.abilities.push(keyword("INDESTRUCTIBLE"));
     let id = w.create(1, ZoneKind::Battlefield, c);
     w.env.deathtouch = BTreeSet::from([id]);
     let out = pass(&mut w);

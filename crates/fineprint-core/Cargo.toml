@@ -13,6 +13,8 @@ fineprint-base.workspace = true
 fineprint-dsl.workspace = true
 serde = { workspace = true }
 rmp-serde = { workspace = true }
+# JSON trees of DSL values in the canonical state encoding (docs/DECISIONS.md "#232 FP-164").
+serde_json = { workspace = true }
 
 [features]
 # Full-recompute debug mode of the layer cache (REQ-LAYER-005): the cache stores nothing and
@@ -23,7 +25,6 @@ full-recompute = []
 # Benchmark harness (REQ-NFR-009); exact pin, no plotters or rayon (docs/DECISIONS.md
 # "#36 FP-035 — criterion pin").
 criterion = { version = "=0.8.2", default-features = false }
-serde_json = { workspace = true }
 
 [[bench]]
 name = "layers_recompute"

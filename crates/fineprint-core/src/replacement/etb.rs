@@ -1522,7 +1522,7 @@ mod static_controller_tests {
             supertypes: BTreeSet::new(),
             card_types: ["Artifact".to_owned()].into_iter().collect(),
             subtypes: BTreeSet::new(),
-            rules_text: TextTokenStream(Vec::new()),
+            rules_text: TextTokenStream::default(),
             abilities: Vec::new(),
             power: None,
             toughness: None,
