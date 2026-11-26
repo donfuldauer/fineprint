@@ -25,6 +25,13 @@ What `--tests` counts (only test code, never production source):
      with no following `{` is ignored). The scan is lexically aware: braces and semicolons
      inside comments, strings, raw strings and char literals are ignored, and an attribute
      inside a comment or string is not an attribute;
+  c2. a file declared by a brace-less `#[cfg(test)] mod name;` (other attributes such as
+     `#[path = "x.rs"]` and a `pub` visibility may accompany it) counts in full. It is resolved
+     as rustc does: `#[path = "rel"]` gives `<dir of declaring file>/rel`; otherwise a module
+     root (mod.rs, lib.rs, main.rs) gives `<dir>/name.rs` or `<dir>/name/mod.rs`, and any other
+     `foo.rs` gives `<dir>/foo/name.rs` or `<dir>/foo/name/mod.rs`. A file that does not exist is
+     ignored. Plain `mod child;` declarations inside such a file count in full too (transitively,
+     cycles terminate), even when the child lies outside the `--tests` roots;
   d. any other file does not count.
 Files are visited in sorted order; missing roots are skipped silently.
 
@@ -34,6 +41,7 @@ Standard library plus the `gh` CLI.
 import argparse
 import fnmatch
 import json
+import os
 import pathlib
 import subprocess
 import re
@@ -211,16 +219,112 @@ def ids_in_test_code(p: pathlib.Path) -> set:
     return set()
 
 
+MOD_DECL = re.compile(r"(?<![\w])(?:pub\s*(?:\([^()]*\)\s*)?)?mod\s+([A-Za-z_]\w*)\s*;")
+ATTR_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+ATTR_PATH = re.compile(r"#\[\s*path\s*=\s*\]")
+STRING_LIT = re.compile(r'"((?:\\.|[^"\\])*)"', re.S)
+MODULE_ROOTS = {"mod.rs", "lib.rs", "main.rs"}
+
+
+def _read(p: pathlib.Path) -> str:
+    """File text, or "" when the file cannot be read (the scan never crashes on odd input)."""
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def mod_decls(text: str) -> list:
+    """Brace-less `mod name;` declarations as (name, is_cfg_test, path_attr_or_None) in source order.
+
+    Lexically aware (see `code_mask`): declarations and attributes inside comments or strings are
+    ignored. Attributes are collected backwards from the `mod`, so a `#[cfg(test)]` and a
+    `#[path = "..."]` may come in either order, with other attributes between them.
+    """
+    mask = code_mask(text)
+    blank = "".join(c if m else " " for c, m in zip(text, mask))
+    out = []
+    for m in MOD_DECL.finditer(blank):
+        k, is_test, path = m.start(), False, None
+        while True:
+            while k > 0 and blank[k - 1].isspace():
+                k -= 1
+            if k == 0 or blank[k - 1] != "]":
+                break
+            depth, j = 0, k - 1
+            while j >= 0:
+                if blank[j] == "]":
+                    depth += 1
+                elif blank[j] == "[":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j -= 1
+            if j < 1 or blank[j - 1] != "#":
+                break
+            attr_blank, attr_text = blank[j - 1:k], text[j - 1:k]
+            if ATTR_CFG_TEST.fullmatch(attr_blank):
+                is_test = True
+            elif ATTR_PATH.fullmatch(attr_blank):
+                lit = STRING_LIT.search(attr_text)
+                path = lit.group(1) if lit else None
+            k = j - 1
+        out.append((m.group(1), is_test, path))
+    return out
+
+
+def resolve_mod(declaring: pathlib.Path, name: str, path_attr) -> list:
+    """Candidate files for `mod name;` declared in `declaring`, in rustc's lookup order."""
+    base = declaring.parent
+    if path_attr is not None:
+        return [pathlib.Path(os.path.normpath(base / path_attr))]
+    if declaring.name not in MODULE_ROOTS:
+        base = base / declaring.stem
+    return [pathlib.Path(os.path.normpath(base / f"{name}.rs")),
+            pathlib.Path(os.path.normpath(base / name / "mod.rs"))]
+
+
+def declared_test_files(rs_files) -> list:
+    """Rule (c2): existing files reachable from `#[cfg(test)] mod name;` in `rs_files`.
+
+    Plain `mod child;` inside an already-found file is followed transitively. Sorted result.
+    """
+    found, queue = set(), []
+
+    def add(declaring, name, path_attr):
+        for cand in resolve_mod(declaring, name, path_attr):
+            if cand.is_file():
+                if cand not in found:
+                    found.add(cand)
+                    queue.append(cand)
+                return
+
+    for f in rs_files:
+        for name, is_test, path_attr in mod_decls(_read(f)):
+            if is_test:
+                add(f, name, path_attr)
+    while queue:
+        f = queue.pop()
+        if f.suffix == ".rs":
+            for name, _, path_attr in mod_decls(_read(f)):
+                add(f, name, path_attr)
+    return sorted(found)
+
+
 def ids_in_tree(roots) -> set:
-    found = set()
+    """REQ IDs that count as test coverage under `roots` (rules a-d and c2)."""
+    files = []
     for root in roots:
         root = pathlib.Path(root)
         if root.is_file():
-            found |= ids_in_test_code(root)
-            continue
-        for p in sorted(root.rglob("*")):
-            if p.is_file():
-                found |= ids_in_test_code(p)
+            files.append(root)
+        else:
+            files.extend(p for p in sorted(root.rglob("*")) if p.is_file())
+    found = set()
+    for p in files:
+        found |= ids_in_test_code(p)
+    for p in declared_test_files([f for f in files if f.suffix == ".rs"]):
+        found |= set(REQ.findall(_read(p)))
     return found
 
 

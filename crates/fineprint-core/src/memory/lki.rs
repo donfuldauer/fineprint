@@ -41,6 +41,15 @@ pub trait CharacteristicsProvider {
         let _ = id;
         Vec::new()
     }
+
+    /// The controller of `id` after layer 2 (CR 613.1b) as of now (REQ-LAYER-001). `None`
+    /// means the provider names none, and the caller falls back to the stored controller (the
+    /// permanent's or the zone record's). Default: `None`, so a base-only provider keeps the
+    /// stored-controller behaviour.
+    fn controller(&self, id: ObjectId) -> Option<PlayerId> {
+        let _ = id;
+        None
+    }
 }
 
 /// The last known information of one object: the object as it last existed in the zone it
@@ -84,7 +93,10 @@ impl LkiRecord {
     }
 
     /// The rules-level controller it had (CR 109.4): `None` outside the battlefield and the
-    /// stack.
+    /// stack. On the battlefield it is the controller after layer 2 (CR 613.1b) as it last
+    /// existed there, as the provider evaluated it at capture time, else the stored controller;
+    /// this is the controller a look-back trigger reads (CR 603.10a, CR 603.3a, CR 701.21a). On
+    /// the stack it is the stored controller.
     #[must_use]
     pub fn controller(&self) -> Option<PlayerId> {
         self.controller
@@ -269,9 +281,16 @@ impl CanonicalEncode for LkiStore {
 /// public zone to a hidden zone (SRS 2.3).
 ///
 /// The record holds, all as of now: the characteristics, counters and attached objects from
-/// `provider`, the rules-level controller, zone and face-down flag from `zones`, the permanent
+/// `provider`, the rules-level controller (see below), zone and face-down flag from `zones`, the permanent
 /// state from `permanents` (battlefield only), and a snapshot of the object's Memory from
 /// `memories` (empty if none).
+///
+/// **Controller** (REQ-CORE-003, CR 613.1b, CR 603.10a, CR 701.21a, CR 603.3a): for an object
+/// leaving the battlefield, the layer-evaluated controller from
+/// [`CharacteristicsProvider::controller`], falling back to the zone record's controller when
+/// the provider names none; for any other zone, the zone record's rules-level controller
+/// (CR 109.4: the stack object's controller, `None` elsewhere). The destination stays
+/// owner-based (`ZoneId::of(req.to, owner)`, CR 400.3, CR 108.4a) whoever controlled it.
 ///
 /// **Simultaneous departures** (CR 704.8: when state-based actions make several permanents
 /// leave at once, their LKI comes from the state before any of those actions): the caller
@@ -318,11 +337,21 @@ pub fn capture_lki_on_move(
     } else {
         None
     };
+    // CR 613.1b, CR 603.10a, CR 701.21a: a permanent's controller as it last existed on the
+    // battlefield is the one after layer 2; the stored controller is the fallback. Any other
+    // zone keeps the rules-level controller (CR 109.4).
+    let controller = if record.zone == ZoneId::Battlefield {
+        provider
+            .controller(id)
+            .or_else(|| record.rules_controller())
+    } else {
+        record.rules_controller()
+    };
     let lki_record = LkiRecord {
         object: id,
         card: record.card,
         owner: record.owner,
-        controller: record.rules_controller(),
+        controller,
         zone: record.zone,
         face_down: record.face_down,
         characteristics,
@@ -380,5 +409,276 @@ pub fn information_for<'a>(
         InformationUser::SpellOrAbility => lki.get(id).map(Information::Lki),
         // CR 604.7: static abilities can't use last known information.
         InformationUser::StaticAbility => None,
+    }
+}
+
+#[cfg(test)]
+mod evaluated_controller_tests {
+    // Unit tests of the evaluated controller in LKI capture: REQ-CORE-003, REQ-LAYER-001
+    // (CR 613.1b, CR 603.10a, CR 701.21a, CR 603.3a, CR 400.3, CR 108.4a). Synthetic ids and
+    // synthetic characteristics only.
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fineprint_base::encode::encode_to_vec;
+    use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
+    use fineprint_dsl::ability::Layer;
+    use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
+    use fineprint_dsl::expr::ObjectSelectorAST;
+
+    use super::*;
+    use crate::layers::{
+        Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerEnvironment,
+        LayerModification, LayeredProvider, MatchContext, ObjectBase,
+    };
+    use crate::objects::Characteristics;
+    use crate::permanent::Permanents;
+    use crate::zones::{MoveRequest, ZoneId, ZoneKind, Zones, ZonesConfig};
+
+    fn p(n: u64) -> PlayerId {
+        PlayerId::new(n)
+    }
+
+    fn chars() -> Characteristics {
+        Characteristics {
+            names: BTreeSet::from(["test.saga_like_0_0".to_owned()]),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: BTreeSet::from(["Enchantment".to_owned()]),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream(Vec::new()),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        }
+    }
+
+    /// A fake provider whose controller answer is fixed per object.
+    #[derive(Default)]
+    struct Fake {
+        controllers: BTreeMap<ObjectId, PlayerId>,
+    }
+
+    impl CharacteristicsProvider for Fake {
+        fn characteristics(&self, _id: ObjectId) -> Option<Characteristics> {
+            Some(chars())
+        }
+
+        fn controller(&self, id: ObjectId) -> Option<PlayerId> {
+            self.controllers.get(&id).copied()
+        }
+    }
+
+    /// A provider using every default, `controller` included.
+    struct BaseOnly;
+
+    impl CharacteristicsProvider for BaseOnly {
+        fn characteristics(&self, _id: ObjectId) -> Option<Characteristics> {
+            Some(chars())
+        }
+    }
+
+    struct World {
+        zones: Zones,
+        ids: IdGenerator<ObjectId>,
+        permanents: Permanents,
+        memories: MemoryTable,
+        lki: LkiStore,
+    }
+
+    impl World {
+        fn new() -> World {
+            World {
+                zones: Zones::new(&[p(1), p(2)], ZonesConfig::default()),
+                ids: IdGenerator::new(),
+                permanents: Permanents::new(),
+                memories: MemoryTable::new(),
+                lki: LkiStore::new(),
+            }
+        }
+
+        /// Card `card` owned by `owner` in a zone of `kind`; on the battlefield and the stack
+        /// stored as controlled by `controller`.
+        fn create(&mut self, card: u64, owner: u64, controller: u64, kind: ZoneKind) -> ObjectId {
+            let mut req = MoveRequest::new(kind);
+            if matches!(kind, ZoneKind::Battlefield | ZoneKind::Stack) {
+                req.controller = Some(p(controller));
+            }
+            let id = self
+                .zones
+                .create_object(&mut self.ids, CardId::new(card), p(owner), req)
+                .unwrap();
+            if kind == ZoneKind::Battlefield {
+                self.permanents.enter(id, p(controller), 1).unwrap();
+            }
+            id
+        }
+
+        fn capture(
+            &mut self,
+            provider: &dyn CharacteristicsProvider,
+            id: ObjectId,
+            to: ZoneKind,
+        ) -> Result<bool, MemoryError> {
+            capture_lki_on_move(
+                &self.zones,
+                &self.permanents,
+                &self.memories,
+                provider,
+                &mut self.lki,
+                id,
+                &MoveRequest::new(to),
+            )
+        }
+    }
+
+    /// REQ-CORE-003, REQ-LAYER-001; CR 613.1b, CR 603.10a, CR 701.21a: a permanent stored as
+    /// controlled by P1 whose evaluated controller is P2 is recorded with controller P2; owner
+    /// and zone are unchanged.
+    #[test]
+    fn req_core_003_battlefield_lki_uses_evaluated_controller() {
+        let mut w = World::new();
+        let id = w.create(1, 1, 1, ZoneKind::Battlefield);
+        let fake = Fake {
+            controllers: BTreeMap::from([(id, p(2))]),
+        };
+        assert_eq!(w.capture(&fake, id, ZoneKind::Graveyard), Ok(true));
+        let rec = w.lki.get(id).unwrap();
+        assert_eq!(rec.controller(), Some(p(2)));
+        assert_eq!(rec.owner(), p(1));
+        assert_eq!(rec.zone(), ZoneId::Battlefield);
+        // The permanent snapshot keeps its stored state unchanged.
+        assert_eq!(rec.permanent().map(Permanent::controller), Some(p(1)));
+    }
+
+    /// REQ-CORE-003, REQ-LAYER-001; CR 613.1b: with no evaluated controller (a fake naming
+    /// none, or a provider using the default) the stored controller is recorded.
+    #[test]
+    fn req_core_003_battlefield_lki_falls_back_to_stored_controller() {
+        let mut w = World::new();
+        let a = w.create(1, 2, 1, ZoneKind::Battlefield);
+        let b = w.create(2, 2, 1, ZoneKind::Battlefield);
+        assert_eq!(
+            w.capture(&Fake::default(), a, ZoneKind::Graveyard),
+            Ok(true)
+        );
+        assert_eq!(w.capture(&BaseOnly, b, ZoneKind::Exile), Ok(true));
+        assert_eq!(w.lki.get(a).unwrap().controller(), Some(p(1)));
+        assert_eq!(w.lki.get(b).unwrap().controller(), Some(p(1)));
+        assert_eq!(w.lki.get(a).unwrap().owner(), p(2));
+        assert_eq!(BaseOnly.controller(a), None);
+    }
+
+    /// REQ-CORE-003; CR 603.10a: an object leaving a hand or a graveyard has no controller in
+    /// its LKI even if a provider names one; a stack object keeps its stored controller.
+    #[test]
+    fn req_core_003_non_battlefield_lki_ignores_provider_controller() {
+        let mut w = World::new();
+        let hand = w.create(1, 1, 1, ZoneKind::Hand);
+        let yard = w.create(2, 1, 1, ZoneKind::Graveyard);
+        let spell = w.create(3, 1, 2, ZoneKind::Stack);
+        let fake = Fake {
+            controllers: BTreeMap::from([(hand, p(2)), (yard, p(2)), (spell, p(1))]),
+        };
+        assert_eq!(w.capture(&fake, hand, ZoneKind::Graveyard), Ok(true));
+        assert_eq!(w.capture(&fake, yard, ZoneKind::Exile), Ok(true));
+        assert_eq!(w.capture(&fake, spell, ZoneKind::Graveyard), Ok(true));
+        assert_eq!(w.lki.get(hand).unwrap().controller(), None);
+        assert_eq!(w.lki.get(yard).unwrap().controller(), None);
+        assert_eq!(w.lki.get(spell).unwrap().controller(), Some(p(2)));
+    }
+
+    /// REQ-CORE-003; CR 400.3, CR 108.4a, CR 701.21a: a permanent owned by P1 under P2's
+    /// evaluated control is recorded with controller P2, and its move still lands in P1's
+    /// graveyard.
+    #[test]
+    fn req_core_003_destination_stays_owner_based() {
+        let mut w = World::new();
+        let id = w.create(1, 1, 1, ZoneKind::Battlefield);
+        let fake = Fake {
+            controllers: BTreeMap::from([(id, p(2))]),
+        };
+        let r = MoveRequest::new(ZoneKind::Graveyard);
+        assert_eq!(w.capture(&fake, id, ZoneKind::Graveyard), Ok(true));
+        let moved = w.zones.move_object(&mut w.ids, id, r).unwrap();
+        assert_eq!(moved.to, ZoneId::Graveyard(p(1)));
+        assert_eq!(w.lki.get(id).unwrap().controller(), Some(p(2)));
+        // A same-zone reposition is still no capture, whatever the provider says.
+        let mut w = World::new();
+        let id = w.create(1, 1, 1, ZoneKind::Battlefield);
+        assert_eq!(w.capture(&fake, id, ZoneKind::Battlefield), Ok(false));
+        assert!(w.lki.is_empty());
+    }
+
+    /// A layer environment of battlefield objects with a base controller each.
+    struct Env {
+        bases: BTreeMap<ObjectId, ObjectBase>,
+    }
+
+    impl LayerEnvironment for Env {
+        fn objects(&self) -> Vec<ObjectId> {
+            self.bases.keys().copied().collect()
+        }
+
+        fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+            self.bases.get(&id).cloned()
+        }
+
+        fn matches(&self, _selector: &ObjectSelectorAST, _ctx: &MatchContext<'_>) -> bool {
+            false
+        }
+    }
+
+    /// REQ-CORE-003, REQ-LAYER-001; CR 613.1b, CR 701.21a, CR 603.3a: through the
+    /// [`LayeredProvider`], a permanent under a layer-2 control effect is recorded with the
+    /// evaluated controller (the one a sacrifice trigger reads), and the capture is
+    /// deterministic: repeated runs from the same state give byte-identical records (R3).
+    #[test]
+    fn req_core_003_layered_provider_capture_and_determinism() {
+        let run = || {
+            let mut w = World::new();
+            let id = w.create(1, 1, 1, ZoneKind::Battlefield);
+            let env = Env {
+                bases: BTreeMap::from([(
+                    id,
+                    ObjectBase {
+                        characteristics: chars(),
+                        controller: Some(p(1)),
+                        on_battlefield: true,
+                    },
+                )]),
+            };
+            let mut effects = ContinuousEffects::new();
+            effects
+                .register(
+                    EffectId::new(1),
+                    ContinuousEffect {
+                        source: None,
+                        controller: p(2),
+                        timestamp: Timestamp::new(1),
+                        layer: Layer::L2,
+                        is_cda: false,
+                        origin: EffectOrigin::Resolved,
+                        affected: Affected::Objects([id].into_iter().collect()),
+                        modification: LayerModification::SetController(p(2)),
+                    },
+                )
+                .unwrap();
+            let provider = LayeredProvider::new(&effects, &env);
+            assert_eq!(w.capture(&provider, id, ZoneKind::Graveyard), Ok(true));
+            assert_eq!(w.lki.get(id).unwrap().controller(), Some(p(2)));
+            assert_eq!(w.lki.get(id).unwrap().owner(), p(1));
+            encode_to_vec(&w.lki)
+        };
+        let first = run();
+        for _ in 0..4 {
+            assert_eq!(run(), first);
+        }
     }
 }
