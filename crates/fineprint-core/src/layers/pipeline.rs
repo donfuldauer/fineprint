@@ -324,6 +324,7 @@ pub fn pt_counter_delta(kind: &str) -> Option<(i64, i64)> {
 }
 
 /// One thing applied within a layer: an effect, or the counters of one kind.
+#[derive(Clone, Copy)]
 pub(super) enum Step<'a> {
     /// A continuous effect.
     Effect(EffectId, &'a ContinuousEffect),
@@ -524,22 +525,21 @@ fn applies_to(
     }
 }
 
-/// The start of layer 7 (CR 613.4): whether the object has power and toughness after layers
-/// 1-6 (CR 208.3, 208.5), and if so their starting values, written back as literals. A
-/// non-literal value is asked of [`LayerEnvironment::eval_value_with_view`] with `view` (every
-/// object after layers 1-6, CR 613.4a, 613.5); a literal never reaches the environment.
-pub(super) fn start_layer_7(
-    state: &mut Evaluated,
+/// The start of layer 7 (CR 613.4): whether the object in `state` has power and toughness after
+/// layers 1-6 (CR 208.3, 208.5), and if so their starting values. A non-literal value is asked of
+/// [`LayerEnvironment::eval_value_with_view`] with `view` (every object after layers 1-6,
+/// CR 613.4a, 613.5); a literal never reaches the environment. Reads `state` only;
+/// [`write_layer_7_start`] writes the result back.
+pub(super) fn layer_7_start_values(
+    state: &Evaluated,
     env: &dyn LayerEnvironment,
     id: ObjectId,
     on_battlefield: bool,
     view: &EvaluatedView<'_>,
 ) -> Option<(i64, i64)> {
-    let c = &mut state.characteristics;
+    let c = &state.characteristics;
     if !c.pt_applies(on_battlefield) {
         // CR 208.3: no power and toughness.
-        c.power = None;
-        c.toughness = None;
         return None;
     }
     // CR 208.5: a missing value is 0. A literal is read directly; a CDA expression
@@ -550,9 +550,36 @@ pub(super) fn start_layer_7(
             literal_of(e).unwrap_or_else(|| env.eval_value_with_view(e, id, view).unwrap_or(0))
         })
     };
-    let pt = (value(&c.power), value(&c.toughness));
-    write_pt(state, pt);
-    Some(pt)
+    Some((value(&c.power), value(&c.toughness)))
+}
+
+/// Writes the start of layer 7 ([`layer_7_start_values`]) into `state`: no power and toughness
+/// when `pt` is `None` (CR 208.3), otherwise the starting values as literals.
+pub(super) fn write_layer_7_start(state: &mut Evaluated, pt: Option<(i64, i64)>) {
+    match pt {
+        Some(pt) => write_pt(state, pt),
+        None => {
+            // CR 208.3: no power and toughness.
+            state.characteristics.power = None;
+            state.characteristics.toughness = None;
+        }
+    }
+}
+
+/// The start of layer 7 (CR 613.4) for one object: [`layer_7_start_values`] written back with
+/// [`write_layer_7_start`]; returns the P/T pair (`None` when the object has none, CR 208.3).
+/// The board pass ([`super::board`]) runs the two halves for every object around one view.
+#[cfg(test)]
+pub(super) fn start_layer_7(
+    state: &mut Evaluated,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    on_battlefield: bool,
+    view: &EvaluatedView<'_>,
+) -> Option<(i64, i64)> {
+    let pt = layer_7_start_values(state, env, id, on_battlefield, view);
+    write_layer_7_start(state, pt);
+    pt
 }
 
 /// Writes `pt` into the characteristics as literals.

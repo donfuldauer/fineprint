@@ -2179,3 +2179,269 @@ fn variant_helper_accepts_and_rejects() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Evaluation cost work (#190 FP-147): results unchanged
+// ---------------------------------------------------------------------------------------------
+
+/// A deterministic generator for the equivalence boards (no randomness outside the seed).
+struct PerfLcg(u64);
+
+impl PerfLcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// A mid-size synthetic board for the equivalence tests: objects 1..=`n` listed, object 99
+/// with a base but not listed; counters; per-player characteristic-defining P/T that reads the
+/// view (CR 604.3, 613.4a); existence of a static effect judged on its source's view (it exists
+/// while the source has an ability, or for every third effect id; CR 613.8a, 611.3).
+struct PerfEnv {
+    bases: BTreeMap<ObjectId, ObjectBase>,
+    listed: Vec<ObjectId>,
+    counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+}
+
+const PERF_SUBTYPES: [&str; 3] = ["Testkin", "Testfolk", "Testling"];
+
+impl PerfEnv {
+    fn new(seed: u64, n: u64) -> PerfEnv {
+        let mut g = PerfLcg(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut bases = BTreeMap::new();
+        let mut counters = BTreeMap::new();
+        for i in (1..=n).chain([99]) {
+            let mut c = match g.below(6) {
+                0 => noncreature(&format!("test.relic_{i}"), "Artifact"),
+                1 => {
+                    let mut c = creature(&format!("test.counter_{i}"), 0, 0);
+                    c.power = Some(ValueExpressionAST("test.count".into()));
+                    c.toughness = Some(ValueExpressionAST("test.count".into()));
+                    c
+                }
+                _ => {
+                    let size = i64::try_from(g.below(4)).unwrap() + 1;
+                    creature(&format!("test.body_{i}"), size, size + 1)
+                }
+            };
+            c.subtypes = set([PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()]]);
+            if g.below(3) != 0 {
+                c.abilities = vec![keyword("vigilance", &format!("test.v{i}"))];
+            }
+            bases.insert(
+                o(i),
+                ObjectBase {
+                    characteristics: c,
+                    controller: Some(p(g.below(2) + 1)),
+                    on_battlefield: g.below(8) != 0,
+                },
+            );
+            match g.below(4) {
+                0 => {
+                    counters.insert(o(i), BTreeMap::from([("+1/+1".to_owned(), 2)]));
+                }
+                1 => {
+                    counters.insert(o(i), BTreeMap::from([("flying".to_owned(), 1)]));
+                }
+                _ => {}
+            }
+        }
+        // Listed in a scrambled order with one duplicate; the result must not depend on it.
+        let mut listed: Vec<ObjectId> = (1..=n).rev().map(o).collect();
+        listed.push(o(1));
+        PerfEnv {
+            bases,
+            listed,
+            counters,
+        }
+    }
+
+    /// Effects in every layer, most of them static effects of objects of the board.
+    fn registry(seed: u64, n: u64, count: u64) -> ContinuousEffects {
+        let mut g = PerfLcg(seed ^ 0x5151_7e57);
+        let mut r = ContinuousEffects::new();
+        for k in 1..=count {
+            let t = g.below(40) + 1;
+            let selector = match g.below(4) {
+                0 => creatures(),
+                1 => card_type("Artifact"),
+                2 => filter(PredicateAST::HasSubtype {
+                    value: WordRef::Name(
+                        PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()].to_owned(),
+                    ),
+                }),
+                _ => white_creatures(),
+            };
+            let (layer, m) = match g.below(12) {
+                0 => (
+                    Layer::L2,
+                    LayerModification::SetController(p(g.below(2) + 1)),
+                ),
+                1 => (
+                    Layer::L4,
+                    LayerModification::AddTypes {
+                        supertypes: BTreeSet::new(),
+                        card_types: set(["Creature"]),
+                        subtypes: BTreeSet::new(),
+                    },
+                ),
+                2 => (
+                    Layer::L4,
+                    LayerModification::AddTypes {
+                        supertypes: BTreeSet::new(),
+                        card_types: BTreeSet::new(),
+                        subtypes: set([PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()]]),
+                    },
+                ),
+                3 => (
+                    Layer::L4,
+                    LayerModification::SetTypes {
+                        supertypes: None,
+                        card_types: Some(set(["Artifact"])),
+                        subtypes: None,
+                    },
+                ),
+                4 => (Layer::L5, LayerModification::AddColors(ColorBitmask::WHITE)),
+                5 => (Layer::L6, LayerModification::RemoveAllAbilities),
+                6 => (
+                    Layer::L6,
+                    LayerModification::AddAbility(keyword("flying", &format!("test.f{k}"))),
+                ),
+                7 => (
+                    Layer::L6,
+                    LayerModification::RemoveKeyword("vigilance".to_owned()),
+                ),
+                8 => (Layer::L7b, set_pt(Some(1), Some(1))),
+                9 => (Layer::L7c, modify(2, -1)),
+                10 => (Layer::L7c, modify(1, 1)),
+                _ => (Layer::L7d, LayerModification::SwitchPt),
+            };
+            let effect = if g.below(4) == 0 {
+                let ids: BTreeSet<ObjectId> = (1..=n).filter(|_| g.below(3) == 0).map(o).collect();
+                eff(layer, t, Affected::Objects(ids), m)
+            } else {
+                let source = if g.below(8) == 0 {
+                    o(500)
+                } else {
+                    o(g.below(n) + 1)
+                };
+                stat(source, layer, t, Affected::Selector(selector), m)
+            };
+            r.register(e(k), effect).unwrap();
+        }
+        r
+    }
+}
+
+impl LayerEnvironment for PerfEnv {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.listed.clone()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.bases.get(&id).cloned()
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.counters.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn counter_timestamp(&self, id: ObjectId, kind: &str) -> Option<Timestamp> {
+        Some(ts(id.get() % 40 + u64::try_from(kind.len()).unwrap()))
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        let ObjectSelectorAST::Filter(f) = selector else {
+            return false;
+        };
+        f.predicate.as_ref().is_some_and(|q| match q.as_ref() {
+            PredicateAST::HasSubtype {
+                value: WordRef::Name(w),
+            } => ctx.candidate_view.characteristics.subtypes.contains(w),
+            other => pred_holds(other, ctx.candidate_view),
+        })
+    }
+
+    fn eval_value_with_view(
+        &self,
+        _expr: &ValueExpressionAST,
+        object: ObjectId,
+        view: &EvaluatedView<'_>,
+    ) -> Option<i64> {
+        // CR 604.3, 613.4a: the creatures its controller controls after layers 1-6.
+        let controller = view.get(object)?.controller;
+        let count = view
+            .objects()
+            .into_iter()
+            .filter_map(|id| view.get(id))
+            .filter(|v| {
+                v.controller == controller && v.characteristics.card_types.contains("Creature")
+            })
+            .count();
+        i64::try_from(count).ok()
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        _source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        // CR 613.8a, 611.3: judged on the source's state when it is known.
+        effect.get().is_multiple_of(3)
+            || source_view.is_none_or(|v| !v.characteristics.abilities.is_empty())
+    }
+}
+
+/// The fingerprint of every result of one equivalence board: the digest of `evaluate_all`, and
+/// the SHA-256 of the debug form of `evaluate_with_order` for every listed object and for the
+/// unlisted object 99 (its universe differs).
+fn perf_fingerprint(seed: u64) -> String {
+    let n = 24;
+    let env = PerfEnv::new(seed, n);
+    let r = PerfEnv::registry(seed, n, 22);
+    let all = evaluate_all(&r, &env).unwrap();
+    let mut orders = String::new();
+    for id in (1..=n).chain([99]).map(o) {
+        orders.push_str(&format!("{:?}\n", evaluate_with_order(&r, &env, id)));
+    }
+    format!(
+        "{}:{}",
+        evaluated_digest(&all).to_hex(),
+        fineprint_base::hash::sha256(orders.as_bytes()).to_hex()
+    )
+}
+
+/// The fingerprints of [`perf_fingerprint`] for seeds 0-7, recorded at commit 1360900 (before
+/// the #190 FP-147 changes) with the same code.
+const GOLDEN_PERF: [&str; 8] = [
+    "41f8600345ca288c5a9d671a5f02e6817632f6fa3a3ac6f7e23e727480c4ccf5:b29c30122ce896505d053d3869d3b26dca6bd86f609df42c93972e9cb5afb7aa",
+    "e6e71a134b21a586af50593bffd910a0573c3b393cd69a4d4bb1c7295b68f4f6:7b85b7466666825de3d88e0970a45f453286251647dca3286d2b61872643a7a5",
+    "5b380d28b31cbcf7a46a03091667c5357cc176f882932059e736321316848adf:1e3660dfb2dab70115270c320197cc8b88a5655af2c6f1f8de7278e39386045d",
+    "81f88866eec0509b77a07a1ce6746b10ea13a18da081c300495c46ab55e861f1:736022f9459ad0c3cf2de299d44b5a267bcc0820984967ca86588fbc8a55fa69",
+    "ffd92d032008976dc975aa748ed856beb83e2d781f7298dd09fe9135174cd2d0:838844fdfa49be20a6f4f92479e0d2e88926321b5f88852c71905a8eb74c6a9b",
+    "de67961efa018aa4e04843e2f316d710232d3eae886e3eb381b328967a3563be:48698025b4d9541bfd24e03fa0ec96ced341809163ccd0787e8813d47e71c7e1",
+    "be956504959ef0fd61d3e94081b600128b13288528037b35e7e4db3a7a45523f:9ad70a5f30cbd8ec1700454ab69b876640a9736fc353a675f248680be3066906",
+    "65fcd2349e1aada37214f969261ece9e23f45d70ebe92fb24fb22f5ff20d71cf:c0c6e52d9c001f82d34fc23ae22db91d161ae0665bd3ccc0c7feae4d99dd2fd6",
+];
+
+// REQ-LAYER-005, REQ-LAYER-001, REQ-LAYER-002, REQ-CORE-001; CR 613.5, 613.8a, 604.3: the cost
+// work of #190 FP-147 changes no result. On eight mid-size boards with foreign-source static
+// effects, view-reading CDAs, counters, dependencies, an unlisted object and a scrambled object
+// list, `evaluate_all` and every `evaluate_with_order` (order records included) are exactly the
+// ones recorded at commit 1360900, before the change.
+#[test]
+fn req_layer_005_results_equal_pre_change_golden() {
+    let golden: [&str; 8] = GOLDEN_PERF;
+    for (seed, expected) in (0_u64..).zip(golden) {
+        assert_eq!(perf_fingerprint(seed), expected, "seed {seed}");
+    }
+}

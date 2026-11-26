@@ -144,13 +144,13 @@ pub(super) fn run_layer(
         let mut remaining = group;
         while !remaining.is_empty() {
             // CR 613.8c: the relation is recomputed against the current state each time.
-            let deps = dependencies(&steps, &remaining, env, id, scratch, locks);
-            let candidate = (0..remaining.len()).find(|&i| !deps[i].iter().any(|&d| d));
+            let mut relation = Relation::new(&steps, &remaining, env, id, scratch, locks);
+            let candidate = (0..remaining.len()).find(|&i| relation.independent(i));
             let (pick, from_loop) = match candidate {
                 // CR 613.8b: the earliest independent step.
                 Some(i) => (i, false),
                 // CR 613.8b: a dependency loop is applied in timestamp order.
-                None => (find_loop(&deps), true),
+                None => (find_loop(&relation.matrix()), true),
             };
             let index = remaining.remove(pick);
             let selection = if from_loop {
@@ -182,8 +182,8 @@ pub(super) fn run_layer(
     }
 }
 
-/// The dependency relation over `remaining` (indices into `steps`, ascending key):
-/// `result[i][j]` is whether `remaining[i]` depends on `remaining[j]` against `scratch`.
+/// The dependency relation over `remaining` (indices into `steps`, ascending key) against
+/// `scratch`: [`Relation::depends`]`(i, j)` is whether `remaining[i]` depends on `remaining[j]`.
 ///
 /// CR 613.8a: B depends on A iff (a) both are in this layer (they are), (b) applying A to a
 /// scratch copy of the current state changes whether B applies to the object (its existence and
@@ -199,7 +199,132 @@ pub(super) fn run_layer(
 /// it is judged by the whole output: B depends on it whenever the outputs differ, even if the
 /// SetText keeps B's matched word at the same position with the same id (docs/DECISIONS.md
 /// "#37 FP-036 — Dependency between text effects").
-fn dependencies(
+///
+/// The relation is computed lazily (REQ-LAYER-005): a trial application is made only when a
+/// cell that needs it is asked for, and each is made at most once per relation, so finding the
+/// earliest independent step usually costs a number of trials linear in the number of steps
+/// instead of quadratic. Every cell is a pure function of `steps`, `scratch` and `locks`, so the
+/// order in which cells are asked never changes a result (REQ-CORE-001).
+struct Relation<'r, 's, 'l> {
+    /// The steps of the layer, ascending ordering key.
+    steps: &'r [Keyed<'s>],
+    /// The unapplied steps (indices into `steps`).
+    remaining: &'r [usize],
+    /// The environment.
+    env: &'r dyn LayerEnvironment,
+    /// The object under evaluation.
+    id: ObjectId,
+    /// The current state.
+    scratch: &'r Scratch,
+    /// The lock-in record of this evaluation (CR 613.6).
+    locks: &'r LockRecord<'l>,
+    /// Per remaining step B: B applied to the current state (`None` if it does not apply),
+    /// once computed.
+    without: Vec<Option<Option<Scratch>>>,
+    /// Per remaining step A: A applied to the current state, kept only when A applies and
+    /// changes something (otherwise `None`: A changes nothing about any B), once computed.
+    after: Vec<Option<Option<Scratch>>>,
+}
+
+impl<'r, 's, 'l> Relation<'r, 's, 'l> {
+    /// A relation with no cell computed yet.
+    fn new(
+        steps: &'r [Keyed<'s>],
+        remaining: &'r [usize],
+        env: &'r dyn LayerEnvironment,
+        id: ObjectId,
+        scratch: &'r Scratch,
+        locks: &'r LockRecord<'l>,
+    ) -> Self {
+        let n = remaining.len();
+        Relation {
+            steps,
+            remaining,
+            env,
+            id,
+            scratch,
+            locks,
+            without: vec![None; n],
+            after: vec![None; n],
+        }
+    }
+
+    /// Whether `remaining[i]` depends on no other remaining step.
+    fn independent(&mut self, i: usize) -> bool {
+        (0..self.remaining.len()).all(|j| !self.depends(i, j))
+    }
+
+    /// The whole relation: `result[i][j]` is [`Relation::depends`]`(i, j)`.
+    fn matrix(&mut self) -> Vec<Vec<bool>> {
+        let n = self.remaining.len();
+        (0..n)
+            .map(|i| (0..n).map(|j| self.depends(i, j)).collect())
+            .collect()
+    }
+
+    /// Whether `remaining[i]` (B) depends on `remaining[j]` (A) against the current state.
+    fn depends(&mut self, i: usize, j: usize) -> bool {
+        if i == j {
+            return false;
+        }
+        let step_a = &self.steps[self.remaining[j]].1;
+        let step_b = &self.steps[self.remaining[i]].1;
+        // CR 613.8a (c): a CDA and a non-CDA never depend on each other.
+        if is_cda(step_a) != is_cda(step_b) {
+            return false;
+        }
+        let (env, id, scratch, locks) = (self.env, self.id, self.scratch, self.locks);
+        // CR 613.8a (b): apply A to a scratch copy; when it does not apply, or changes nothing,
+        // it changes nothing about B.
+        if self.after[j].is_none() {
+            let after_a = trial(step_a, env, id, scratch, locks).filter(|a| a != scratch);
+            self.after[j] = Some(after_a);
+        }
+        let Some(Some(after_a)) = &self.after[j] else {
+            return false;
+        };
+        // B's behaviour without A: whether it applies, and its output if it does.
+        if self.without[i].is_none() {
+            self.without[i] = Some(trial(step_b, env, id, scratch, locks));
+        }
+        let Some(without) = &self.without[i] else {
+            return false;
+        };
+        let with = trial(step_b, env, id, after_a, locks);
+        match (without, &with) {
+            // B applies (or exists) in neither state: nothing changed.
+            (None, None) => false,
+            (Some(out0), Some(out1)) => match replaced_word(step_b) {
+                // CR 613.8a (b), CR 612.2: a word replacement applies to its matching tokens
+                // and does the same thing to each, and a word replacement A rewrites only word
+                // values, so applying A changes what B applies to, or what it does, exactly when
+                // that set of tokens changes.
+                Some((category, from)) if is_word_replacement(step_a) => {
+                    replace_targets(&scratch.state.characteristics.rules_text, category, from)
+                        != replace_targets(
+                            &after_a.state.characteristics.rules_text,
+                            category,
+                            from,
+                        )
+                }
+                // CR 613.8a (b): its output differs. This includes a word replacement B after a
+                // whole-text SetText A, which changes the text B rewrites.
+                _ => !same_output(
+                    (&scratch.state, &out0.state, &after_a.state, &out1.state),
+                    declared_pt_adjustment(step_b, scratch),
+                    declared_pt_adjustment(step_b, after_a),
+                ),
+            },
+            // CR 613.8a (b): its existence or what it applies to changed.
+            _ => true,
+        }
+    }
+}
+
+/// The dependency relation as computed before #190 FP-147, every cell eagerly, kept as the
+/// reference the lazy [`Relation`] is tested against (REQ-LAYER-005: no result changes).
+#[cfg(test)]
+fn dependencies_reference(
     steps: &[Keyed<'_>],
     remaining: &[usize],
     env: &dyn LayerEnvironment,
@@ -212,36 +337,27 @@ fn dependencies(
     if n < 2 {
         return deps;
     }
-    // B's behaviour without A: whether it applies, and its output if it does.
     let without: Vec<Option<Scratch>> = remaining
         .iter()
         .map(|&b| trial(&steps[b].1, env, id, scratch, locks))
         .collect();
     for (j, &a) in remaining.iter().enumerate() {
         let step_a = &steps[a].1;
-        // CR 613.8a (b): apply A to a scratch copy.
         let Some(after_a) = trial(step_a, env, id, scratch, locks) else {
             continue;
         };
         if after_a == *scratch {
-            // A changes nothing, so it changes nothing about B.
             continue;
         }
         for (i, &b) in remaining.iter().enumerate() {
             let step_b = &steps[b].1;
-            // CR 613.8a (c): a CDA and a non-CDA never depend on each other.
             if i == j || is_cda(step_a) != is_cda(step_b) {
                 continue;
             }
             let with = trial(step_b, env, id, &after_a, locks);
             deps[i][j] = match (&without[i], &with) {
-                // B applies (or exists) in neither state: nothing changed.
                 (None, None) => false,
                 (Some(out0), Some(out1)) => match replaced_word(step_b) {
-                    // CR 613.8a (b), CR 612.2: a word replacement applies to its matching
-                    // tokens and does the same thing to each, and a word replacement A rewrites
-                    // only word values, so applying A changes what B applies to, or what it
-                    // does, exactly when that set of tokens changes.
                     Some((category, from)) if is_word_replacement(step_a) => {
                         replace_targets(&scratch.state.characteristics.rules_text, category, from)
                             != replace_targets(
@@ -250,20 +366,71 @@ fn dependencies(
                                 from,
                             )
                     }
-                    // CR 613.8a (b): its output differs. This includes a word replacement B
-                    // after a whole-text SetText A, which changes the text B rewrites.
                     _ => !same_output(
                         (&scratch.state, &out0.state, &after_a.state, &out1.state),
                         declared_pt_adjustment(step_b, scratch),
                         declared_pt_adjustment(step_b, &after_a),
                     ),
                 },
-                // CR 613.8a (b): its existence or what it applies to changed.
                 _ => true,
             };
         }
     }
     deps
+}
+
+/// What a test compares about the lazy relation over every step of `steps` against `scratch`
+/// (REQ-LAYER-005, REQ-CORE-001): the eager reference ([`dependencies_reference`]); the lazy
+/// relation with its cells asked row by row, and asked in reverse order; the earliest
+/// independent step found lazily and the one read from the reference.
+#[cfg(test)]
+pub(super) struct RelationProbe {
+    /// The eager reference relation.
+    pub reference: Vec<Vec<bool>>,
+    /// The lazy relation, cells asked row by row.
+    pub forward: Vec<Vec<bool>>,
+    /// The lazy relation, cells asked from the last to the first.
+    pub backward: Vec<Vec<bool>>,
+    /// The earliest independent step found lazily.
+    pub candidate: Option<usize>,
+    /// The earliest independent step of the reference.
+    pub reference_candidate: Option<usize>,
+}
+
+/// Builds the [`RelationProbe`] of `steps` (sorted into ordering-key order first) for object
+/// `id` in `scratch`.
+#[cfg(test)]
+pub(super) fn relation_probe(
+    mut steps: Vec<Keyed<'_>>,
+    env: &dyn LayerEnvironment,
+    id: ObjectId,
+    scratch: &Scratch,
+    locks: &LockRecord<'_>,
+) -> RelationProbe {
+    steps.sort_by(step_order);
+    let remaining: Vec<usize> = (0..steps.len()).collect();
+    let n = remaining.len();
+    let reference = dependencies_reference(&steps, &remaining, env, id, scratch, locks);
+    let forward = Relation::new(&steps, &remaining, env, id, scratch, locks).matrix();
+    let mut lazy = Relation::new(&steps, &remaining, env, id, scratch, locks);
+    let mut backward = vec![vec![false; n]; n];
+    for i in (0..n).rev() {
+        for j in (0..n).rev() {
+            backward[i][j] = lazy.depends(i, j);
+        }
+    }
+    let candidate = {
+        let mut fresh = Relation::new(&steps, &remaining, env, id, scratch, locks);
+        (0..n).find(|&i| fresh.independent(i))
+    };
+    let reference_candidate = (0..n).find(|&i| !reference[i].iter().any(|&d| d));
+    RelationProbe {
+        reference,
+        forward,
+        backward,
+        candidate,
+        reference_candidate,
+    }
 }
 
 /// The category and `from` word of a `REPLACE_TEXT_WORD` effect step that changes something
@@ -453,7 +620,22 @@ fn element(before0: bool, after0: bool, before1: bool, after1: bool) -> bool {
 }
 
 /// Element by element ([`element`]) over every element of the four sets.
-fn set(
+pub(super) fn set(
+    before0: &BTreeSet<String>,
+    after0: &BTreeSet<String>,
+    before1: &BTreeSet<String>,
+    after1: &BTreeSet<String>,
+) -> bool {
+    // REQ-LAYER-005: the same answer without the element walk when B left the same set in both
+    // states, or left the set untouched in both (then every element satisfies [`element`]).
+    if after0 == after1 || (before0 == after0 && before1 == after1) {
+        return true;
+    }
+    set_by_element(before0, after0, before1, after1)
+}
+
+/// [`set`] by its definition: [`element`] for every element of the four sets.
+pub(super) fn set_by_element(
     before0: &BTreeSet<String>,
     after0: &BTreeSet<String>,
     before1: &BTreeSet<String>,
@@ -485,7 +667,30 @@ fn bits(before0: u8, after0: u8, before1: u8, after1: u8) -> bool {
 
 /// Ability by ability, counting copies: for every distinct ability of the four lists, B left
 /// the same number of copies in both states or added (or removed) the same number in both.
-fn list<T: PartialEq>(before0: &[T], after0: &[T], before1: &[T], after1: &[T]) -> bool {
+pub(super) fn list<T: PartialEq>(before0: &[T], after0: &[T], before1: &[T], after1: &[T]) -> bool {
+    // REQ-LAYER-005: the same answer without counting when B left the same list in both states
+    // (every count is equal after) or left the list untouched in both (every change is zero).
+    if after0 == after1 || (before0 == after0 && before1 == after1) {
+        return true;
+    }
+    // REQ-LAYER-005: B appended the same items in both states (each list after B is the list
+    // before B followed by the same suffix), so every count changed by the same amount.
+    if let (Some(added0), Some(added1)) =
+        (after0.strip_prefix(before0), after1.strip_prefix(before1))
+        && added0 == added1
+    {
+        return true;
+    }
+    list_by_count(before0, after0, before1, after1)
+}
+
+/// [`list`] by its definition: the copies of every distinct item of the four lists counted.
+pub(super) fn list_by_count<T: PartialEq>(
+    before0: &[T],
+    after0: &[T],
+    before1: &[T],
+    after1: &[T],
+) -> bool {
     let count = |v: &[T], x: &T| v.iter().filter(|y| *y == x).count();
     before0
         .iter()

@@ -147,8 +147,10 @@
 //! **Cache** (REQ-LAYER-005, SRS 6.5). [`LayerCache`] caches [`Evaluated`] values keyed by
 //! `(`[`StateVersion`]`, ObjectId)`; it detects registry changes itself and takes every other
 //! change as an explicit [`LayerCache::invalidate`] with an [`Invalidation`] cause, which drops
-//! every entry. The cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI
-//! compares both modes through [`evaluated_digest`].
+//! every entry. [`LayerCache::evaluate_all`] answers all its misses from one board pass. The
+//! cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI compares both modes
+//! through [`evaluated_digest`]. The evaluation cost, its profile and the benchmark figures are
+//! in the [`LayerCache`] module documentation.
 //!
 //! **Scope.** The game state (`crate::state::GameState`) stores the [`ContinuousEffects`] and the
 //! [`TimestampLedger`], hashes them (their canonical encodings, CR-005) and evaluates them

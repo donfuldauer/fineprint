@@ -27,13 +27,24 @@
 //! on itself, CR 613.8a): from the source's start-of-layer state and lock-in record, the
 //! layer's other steps for the source are applied in the REQ-LAYER-002 order, and inside that
 //! run the existence of effects of yet other sources is judged on their start-of-layer state.
+//! These views are a pure function of the start-of-layer snapshot, so each is computed once per
+//! layer and effect, before any object runs the layer, from the objects' states as they are
+//! then; no copy of the board is taken (REQ-CORE-001).
+//!
+//! **Cost** (REQ-LAYER-005; the figures and the profile are in the cache module documentation,
+//! [`super::LayerCache`]). With `E` effects, `N` objects and `k` steps for one object in one
+//! layer, a pass lists each layer's effects once (`O(E)`), runs at most `E` single-object layer
+//! runs for the foreign views, and orders the `k` steps of each object in each layer with
+//! `O(k)` trial applications per selection when an independent step exists (the dependency
+//! relation is evaluated lazily, [`super::ordering`]), `O(k^2)` per selection otherwise. The
+//! states are moved, not copied, into the layer-7a view. [`super::LayerCache::evaluate_all`]
+//! fills the whole board from one pass ([`universe_known`]).
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{EffectId, ObjectId, Timestamp};
 use fineprint_dsl::ability::Layer;
-use fineprint_dsl::card::ValueExpressionAST;
+use fineprint_dsl::card::{ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
@@ -41,9 +52,10 @@ use super::lockin::LockRecord;
 use super::ordering::{Keyed, OrderStep, Scratch, run_layer};
 use super::pipeline::{
     Evaluated, LayerEnvironment, MatchContext, ObjectBase, Step, keyword_counter_keyword,
-    pt_counter_delta, start_layer_7,
+    layer_7_start_values, pt_counter_delta, write_layer_7_start,
 };
-use super::registry::{ContinuousEffects, ManaValueProvenance};
+use super::registry::{ContinuousEffects, EffectOrigin, ManaValueProvenance};
+use crate::objects::Characteristics;
 
 /// A read-only snapshot of every object of the evaluation's universe as evaluated so far
 /// (CR 613.5), handed to [`LayerEnvironment::eval_value_with_view`].
@@ -130,23 +142,51 @@ pub(super) fn universe_all(env: &dyn LayerEnvironment) -> Result<Universe, Layer
         .collect()
 }
 
-/// The steps of `layer` for object `id` (CR 613.7): every registered effect of the layer, except
-/// `skip`, at its timestamp, and the counters of the layer at their counter timestamp
-/// (CR 613.7c): keyword counters in layer 6 (CR 122.1b, 613.1f), P/T counters in layer 7c
-/// (CR 122.1a, 613.4c). Unordered; [`run_layer`] orders them.
+/// The universe of a whole-board cache fill ([`super::LayerCache::evaluate_all`]):
+/// `env.objects()` sorted and de-duplicated, keeping the objects that have a base; an object
+/// without a base is skipped. For every object of `env.objects()` that has a base this is
+/// exactly [`universe_for`] of that object, so one board pass over it gives, for each such
+/// object, what [`super::evaluate`] gives (REQ-LAYER-005).
+pub(super) fn universe_known(env: &dyn LayerEnvironment) -> Universe {
+    let mut ids = env.objects();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .filter_map(|id| env.base(id).map(|base| (id, base)))
+        .collect()
+}
+
+/// The registered effects of `layer` (CR 613.7), ascending [`EffectId`], each with its
+/// timestamp: the part of every object's step list that does not depend on the object, built
+/// once per layer of a board pass (REQ-LAYER-005).
+pub(super) fn layer_effects(effects: &ContinuousEffects, layer: Layer) -> Vec<Keyed<'_>> {
+    effects
+        .iter()
+        .filter(|&(_, e)| e.layer == layer)
+        .map(|(eid, e)| (e.timestamp, Step::Effect(eid, e)))
+        .collect()
+}
+
+/// The steps of `layer` for object `id` (CR 613.7): every effect of `layer_effects` (the
+/// layer's registered effects, [`layer_effects`]) except `skip`, at its timestamp, and the
+/// counters of the layer at their counter timestamp (CR 613.7c): keyword counters in layer 6
+/// (CR 122.1b, 613.1f), P/T counters in layer 7c (CR 122.1a, 613.4c). Unordered; [`run_layer`]
+/// orders them.
 pub(super) fn layer_steps<'a>(
-    effects: &'a ContinuousEffects,
+    layer_effects: &[Keyed<'a>],
     layer: Layer,
     counters: &'a BTreeMap<String, i64>,
     env: &dyn LayerEnvironment,
     id: ObjectId,
     skip: Option<EffectId>,
 ) -> Vec<Keyed<'a>> {
-    let mut steps: Vec<Keyed<'a>> = effects
-        .iter()
-        .filter(|&(eid, e)| e.layer == layer && Some(eid) != skip)
-        .map(|(eid, e)| (e.timestamp, Step::Effect(eid, e)))
-        .collect();
+    let mut steps: Vec<Keyed<'a>> = Vec::with_capacity(layer_effects.len() + counters.len());
+    steps.extend(
+        layer_effects
+            .iter()
+            .filter(|(_, step)| !matches!(step, Step::Effect(eid, _) if Some(*eid) == skip))
+            .map(|(ts, step)| (*ts, *step)),
+    );
     for (kind, &amount) in counters.iter().filter(|&(_, &n)| n >= 1) {
         let applies = match layer {
             // CR 122.1b, 613.1f: keyword counters in layer 6.
@@ -176,12 +216,21 @@ struct Slot<'e> {
     record: Vec<OrderStep>,
 }
 
+/// Every object's evaluation in progress, ascending [`ObjectId`]. Between two layers it is the
+/// start-of-layer snapshot of the next layer (CR 613.5).
+type Slots<'e> = BTreeMap<ObjectId, Slot<'e>>;
+
 /// The result of one board pass: per object of the universe, its state after the layers run and
 /// the order record of its steps.
 pub(super) type BoardResult = BTreeMap<ObjectId, (Evaluated, Vec<OrderStep>)>;
 
 /// Evaluates every object of `universe` through `layers` (in that order, a prefix of
 /// [`Layer::ALL`]), layer-major (REQ-LAYER-001, CR 613.1-613.5). See the module documentation.
+///
+/// Per layer (REQ-LAYER-005): the layer's effects are listed once ([`layer_effects`]); the
+/// foreign-source views of the layer's static effects are computed first, from the
+/// start-of-layer state of every object ([`foreign_views`]), so no copy of the board is taken;
+/// then every object runs the layer.
 pub(super) fn run_board(
     effects: &ContinuousEffects,
     env: &dyn LayerEnvironment,
@@ -192,7 +241,7 @@ pub(super) fn run_board(
         .iter()
         .map(|(id, _)| (*id, env.counters(*id)))
         .collect();
-    let mut slots: BTreeMap<ObjectId, Slot<'_>> = universe
+    let mut slots: Slots<'_> = universe
         .into_iter()
         .map(|(id, base)| {
             // CR 613.1: start with the actual object; CR 202.3b, 202.3c, 713.5c: the base's own
@@ -216,30 +265,14 @@ pub(super) fn run_board(
         .collect();
     for &layer in layers {
         if layer == Layer::L7a {
-            // CR 613.4a, 613.5, 604.3: every object after layers 1-6, frozen before any CDA
-            // power or toughness is evaluated, so the order of objects never matters.
-            let states: BTreeMap<ObjectId, Evaluated> = slots
-                .iter()
-                .map(|(id, slot)| (*id, slot.scratch.state.clone()))
-                .collect();
-            let view = EvaluatedView::new(&states, Layer::L7a);
-            for (&id, slot) in &mut slots {
-                slot.scratch.pt =
-                    start_layer_7(&mut slot.scratch.state, env, id, slot.on_battlefield, &view);
-            }
+            start_layer_7_all(&mut slots, env);
         }
-        // CR 613.5: the start-of-layer snapshot every object reads the others from.
-        let start: BTreeMap<ObjectId, (Scratch, LockRecord<'_>)> = slots
-            .iter()
-            .map(|(id, slot)| (*id, (slot.scratch.clone(), slot.locks.clone())))
-            .collect();
+        let listed = layer_effects(effects, layer);
+        // CR 613.5: what every object reads of the others is the start-of-layer state; the
+        // views are computed before any object of the layer runs.
         let board_env = BoardEnv {
             inner: env,
-            effects,
-            layer,
-            counters: &counters,
-            start: &start,
-            memo: RefCell::new(BTreeMap::new()),
+            views: foreign_views(&listed, env, layer, &counters, &slots),
         };
         for (&id, slot) in &mut slots {
             let Slot {
@@ -248,7 +281,7 @@ pub(super) fn run_board(
                 record,
                 ..
             } = slot;
-            let steps = layer_steps(effects, layer, &counters[&id], env, id, None);
+            let steps = layer_steps(&listed, layer, &counters[&id], env, id, None);
             // CR 613.2, 613.3, 613.4, 613.7, 613.8: the order within the layer or sublayer.
             run_layer(layer, steps, &board_env, id, scratch, locks, record);
         }
@@ -259,51 +292,99 @@ pub(super) fn run_board(
         .collect()
 }
 
-/// The environment one layer of a board pass runs with: the caller's, except that the existence
-/// of a static effect whose source is another object of the universe is asked with that
-/// source's state through the end of this layer without the effect (CR 613.8a, 611.3, 113.6;
-/// [`BoardEnv::foreign_view`]).
-struct BoardEnv<'b, 'e> {
-    /// The caller's environment.
-    inner: &'b dyn LayerEnvironment,
-    /// The registry being evaluated.
-    effects: &'e ContinuousEffects,
-    /// The layer being run.
-    layer: Layer,
-    /// Every object's counters.
-    counters: &'b BTreeMap<ObjectId, BTreeMap<String, i64>>,
-    /// Every object's state and lock-in record at the start of this layer.
-    start: &'b BTreeMap<ObjectId, (Scratch, LockRecord<'e>)>,
-    /// The foreign-source views computed so far, by effect: a pure function of `start`, so the
-    /// memo never changes a result (REQ-CORE-001).
-    memo: RefCell<BTreeMap<EffectId, Option<Evaluated>>>,
+/// The start of layer 7 for every object (CR 613.4a, 613.5, 604.3): every object after layers
+/// 1-6 is frozen into the view before any CDA power or toughness is evaluated, so the order of
+/// objects never matters. The states are moved into the view and back, never copied
+/// (REQ-LAYER-005).
+fn start_layer_7_all(slots: &mut Slots<'_>, env: &dyn LayerEnvironment) {
+    let states: BTreeMap<ObjectId, Evaluated> = slots
+        .iter_mut()
+        .map(|(&id, slot)| {
+            (
+                id,
+                std::mem::replace(&mut slot.scratch.state, placeholder()),
+            )
+        })
+        .collect();
+    let view = EvaluatedView::new(&states, Layer::L7a);
+    let starts: Vec<Option<(i64, i64)>> = slots
+        .iter()
+        .zip(&states)
+        .map(|((&id, slot), (_, state))| {
+            layer_7_start_values(state, env, id, slot.on_battlefield, &view)
+        })
+        .collect();
+    for ((slot, (_, mut state)), pt) in slots.values_mut().zip(states).zip(starts) {
+        write_layer_7_start(&mut state, pt);
+        slot.scratch.state = state;
+        slot.scratch.pt = pt;
+    }
 }
 
-impl BoardEnv<'_, '_> {
-    /// The source of `effect` evaluated through the end of this layer without `effect`, one
-    /// level deep (CR 613.8a: an effect never depends on itself): from the source's
-    /// start-of-layer state and lock-in record, the layer's other steps for the source in the
-    /// REQ-LAYER-002 order, with the existence of yet other sources' effects judged on their
-    /// start-of-layer state ([`NestedEnv`]). `None` when the source is not in the universe.
-    fn foreign_view(&self, effect: EffectId, source: ObjectId) -> Option<Evaluated> {
-        let (scratch, locks) = self.start.get(&source)?;
-        let mut scratch = scratch.clone();
-        let mut locks = locks.clone();
-        let counters = self.counters.get(&source)?;
-        let steps = layer_steps(
-            self.effects,
-            self.layer,
-            counters,
-            self.inner,
-            source,
-            Some(effect),
-        );
-        let nested = NestedEnv {
-            inner: self.inner,
-            start: self.start,
+/// An empty state, held by a slot only while its real state is in the layer-7a view
+/// ([`start_layer_7_all`]); never read.
+fn placeholder() -> Evaluated {
+    Evaluated {
+        characteristics: Characteristics {
+            names: BTreeSet::new(),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: BTreeSet::new(),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream(Vec::new()),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        },
+        controller: None,
+        mana_value_provenance: ManaValueProvenance::plain(),
+    }
+}
+
+/// The views a board pass's existence question uses for `layer` ([`BoardEnv`]): for every static
+/// effect of the layer (`listed`) with a source in the universe, that source evaluated through
+/// the end of the layer without the effect, one level deep (CR 613.8a: an effect never depends
+/// on itself): from the source's start-of-layer state and lock-in record (`slots`, before any
+/// object runs the layer), the layer's other steps for the source in the REQ-LAYER-002 order,
+/// with the existence of yet other sources' effects judged on their start-of-layer state
+/// ([`NestedEnv`]).
+///
+/// Every view is a pure function of the start-of-layer snapshot, so computing each one once,
+/// before the layer runs, gives exactly what asking for it when an object first needs it gives
+/// (REQ-CORE-001, REQ-LAYER-005). An effect whose source is not in the universe has no entry:
+/// its source is asked without a view.
+fn foreign_views(
+    listed: &[Keyed<'_>],
+    env: &dyn LayerEnvironment,
+    layer: Layer,
+    counters: &BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    slots: &Slots<'_>,
+) -> BTreeMap<EffectId, Evaluated> {
+    let nested = NestedEnv { inner: env, slots };
+    let mut views = BTreeMap::new();
+    for (_, step) in listed {
+        let Step::Effect(effect, e) = step else {
+            continue;
         };
+        // CR 613.8a, 611.3: only a static effect with a source is asked about its existence.
+        let (EffectOrigin::Static { .. }, Some(source)) = (&e.origin, e.source) else {
+            continue;
+        };
+        let (Some(slot), Some(source_counters)) = (slots.get(&source), counters.get(&source))
+        else {
+            continue;
+        };
+        let mut scratch = slot.scratch.clone();
+        let mut locks = slot.locks.clone();
+        let steps = layer_steps(listed, layer, source_counters, env, source, Some(*effect));
         run_layer(
-            self.layer,
+            layer,
             steps,
             &nested,
             source,
@@ -311,18 +392,30 @@ impl BoardEnv<'_, '_> {
             &mut locks,
             &mut Vec::new(),
         );
-        Some(scratch.state)
+        views.insert(*effect, scratch.state);
     }
+    views
 }
 
-/// The environment of a nested source evaluation ([`BoardEnv::foreign_view`]): the caller's,
-/// except that the existence of an effect whose source is yet another object is asked with that
-/// object's start-of-layer state, so the evaluation is one level deep and terminates.
+/// The environment one layer of a board pass runs with: the caller's, except that the existence
+/// of a static effect whose source is another object of the universe is asked with that
+/// source's state through the end of this layer without the effect (CR 613.8a, 611.3, 113.6;
+/// [`foreign_views`]).
+struct BoardEnv<'b> {
+    /// The caller's environment.
+    inner: &'b dyn LayerEnvironment,
+    /// The foreign-source views of this layer, by effect ([`foreign_views`]).
+    views: BTreeMap<EffectId, Evaluated>,
+}
+
+/// The environment of a nested source evaluation ([`foreign_views`]): the caller's, except that
+/// the existence of an effect whose source is yet another object is asked with that object's
+/// start-of-layer state, so the evaluation is one level deep and terminates.
 struct NestedEnv<'b, 'e> {
     /// The caller's environment.
     inner: &'b dyn LayerEnvironment,
     /// Every object's state and lock-in record at the start of this layer.
-    start: &'b BTreeMap<ObjectId, (Scratch, LockRecord<'e>)>,
+    slots: &'b Slots<'e>,
 }
 
 /// Forwards every [`LayerEnvironment`] method except `generating_ability_exists` to `inner`.
@@ -371,29 +464,18 @@ macro_rules! forward_environment {
     };
 }
 
-impl LayerEnvironment for BoardEnv<'_, '_> {
+impl LayerEnvironment for BoardEnv<'_> {
     forward_environment!();
 
     /// CR 613.8a, 611.3, 113.6: the object under evaluation is asked with its state so far, as
-    /// given; another source of the universe with [`BoardEnv::foreign_view`].
+    /// given; another source of the universe with its view from [`foreign_views`].
     fn generating_ability_exists(
         &self,
         effect: EffectId,
         source: ObjectId,
         source_view: Option<&Evaluated>,
     ) -> bool {
-        if source_view.is_some() {
-            return self
-                .inner
-                .generating_ability_exists(effect, source, source_view);
-        }
-        let known = self.memo.borrow().contains_key(&effect);
-        if !known {
-            let view = self.foreign_view(effect, source);
-            self.memo.borrow_mut().insert(effect, view);
-        }
-        let memo = self.memo.borrow();
-        let view = memo.get(&effect).and_then(Option::as_ref);
+        let view = source_view.or_else(|| self.views.get(&effect));
         self.inner.generating_ability_exists(effect, source, view)
     }
 }
@@ -409,7 +491,7 @@ impl LayerEnvironment for NestedEnv<'_, '_> {
         source: ObjectId,
         source_view: Option<&Evaluated>,
     ) -> bool {
-        let view = source_view.or_else(|| self.start.get(&source).map(|(s, _)| &s.state));
+        let view = source_view.or_else(|| self.slots.get(&source).map(|s| &s.scratch.state));
         self.inner.generating_ability_exists(effect, source, view)
     }
 }
@@ -428,19 +510,15 @@ pub(super) fn forwarded_answers(
     selector: &ObjectSelectorAST,
     candidate_view: &Evaluated,
 ) -> Vec<String> {
-    let start = BTreeMap::new();
-    let counters = BTreeMap::new();
+    let _ = effects;
+    let slots = BTreeMap::new();
     let board_env = BoardEnv {
         inner: env,
-        effects,
-        layer: Layer::L1a,
-        counters: &counters,
-        start: &start,
-        memo: RefCell::new(BTreeMap::new()),
+        views: BTreeMap::new(),
     };
     let nested = NestedEnv {
         inner: env,
-        start: &start,
+        slots: &slots,
     };
     let states = BTreeMap::new();
     let view = EvaluatedView::new(&states, Layer::L7a);

@@ -1940,3 +1940,147 @@ fn req_layer_002_two_switches_independent_both_orders() {
         assert_eq!(steps_in(&rec, Layer::L7d), want, "{t1} {t2}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Lazy dependency relation and comparison shortcuts (#190 FP-147)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-LAYER-005, REQ-LAYER-002, REQ-CORE-001; CR 613.8a, 613.8b: on random single-layer step
+/// sets (selector and locked effects, CDAs, static effects whose existence depends on the
+/// object's own abilities, counters), the lazy dependency relation equals the eager relation
+/// computed before #190 FP-147 cell for cell, whatever order its cells are asked in, and the
+/// earliest independent step it finds is the reference's.
+#[test]
+fn req_layer_005_lazy_relation_equals_eager_reference() {
+    use super::board::{layer_effects, layer_steps};
+    use super::ordering::{Scratch, relation_probe};
+    let mut rng = Lcg(0x0190_0147);
+    let words = ["Alphakin", "Betakin", "Testkin"];
+    let mut dependent = 0;
+    let mut no_candidate = 0;
+    for seed in 0..400 {
+        let mut env = Env::default();
+        let mut list: Vec<(u64, ContinuousEffect)> = Vec::new();
+        let layer = loop {
+            let probe = random_effect(&mut rng, only(o(1)));
+            if probe.layer != Layer::L1a && probe.layer != Layer::L1b {
+                break probe.layer;
+            }
+        };
+        let n = 2 + rng.below(6);
+        let mut k = 0;
+        while (list.len() as u64) < n {
+            k += 1;
+            let affected = match rng.below(5) {
+                0 => filter(has_subtype(&rng.pick(&words))),
+                1 => filter(not(has_subtype(&rng.pick(&words)))),
+                2 => filter(PredicateAST::IsCreature),
+                3 => filter(has_flying()),
+                _ => only(o(1)),
+            };
+            let mut x = random_effect(&mut rng, affected);
+            if x.layer != layer {
+                continue;
+            }
+            x.is_cda = rng.below(4) == 0;
+            if rng.below(3) == 0 {
+                // A static effect of the object itself, existing while it has flying.
+                x.source = Some(o(1));
+                x.origin = EffectOrigin::Static { granted_at: None };
+                env = env.generator(e(k), "flying");
+            }
+            list.push((k, x));
+        }
+        let abilities = if rng.below(2) == 0 {
+            vec![kw("flying")]
+        } else {
+            Vec::new()
+        };
+        let base = creature(2, 3, abilities);
+        env = env.with(o(1), base.clone());
+        for kind in ["+1/+1", "flying"] {
+            if rng.below(2) == 0 {
+                env = env.counter(o(1), kind, 1, rng.below(6));
+            }
+        }
+        let r = registry(&list);
+        let counters = env.counters(o(1));
+        let listed = layer_effects(&r, layer);
+        let steps = layer_steps(&listed, layer, &counters, &env, o(1), None);
+        let scratch = Scratch {
+            state: Evaluated {
+                characteristics: base,
+                controller: Some(p(1)),
+                mana_value_provenance: ManaValueProvenance::plain(),
+            },
+            pt: Some((2, 3)),
+        };
+        let locks = super::lockin::LockRecord::new(&r);
+        let probe = relation_probe(steps, &env, o(1), &scratch, &locks);
+        assert_eq!(probe.forward, probe.reference, "seed {seed}");
+        assert_eq!(probe.backward, probe.reference, "seed {seed}");
+        assert_eq!(probe.candidate, probe.reference_candidate, "seed {seed}");
+        if probe.reference.iter().flatten().any(|&d| d) {
+            dependent += 1;
+        }
+        if probe.candidate.is_none() {
+            no_candidate += 1;
+        }
+    }
+    // The generator reaches dependencies and loops: the comparison is not vacuous.
+    assert!(dependent > 20, "{dependent}");
+    assert!(no_candidate > 0, "{no_candidate}");
+}
+
+/// REQ-LAYER-005, CR 613.8a (b): the shortcuts of the set and ability-list comparisons give
+/// exactly the answer of their definitions ([`super::ordering::set_by_element`],
+/// [`super::ordering::list_by_count`]) on random small inputs, including lists where B appends
+/// items (the prefix shortcut) and states where B changes nothing.
+#[test]
+fn req_layer_005_comparison_shortcuts_equal_definitions() {
+    use super::ordering::{list, list_by_count, set, set_by_element};
+    let mut rng = Lcg(0x5e7_0147);
+    let pool = ["a", "b", "c"];
+    let random_list = |rng: &mut Lcg| -> Vec<&str> {
+        (0..rng.below(4))
+            .map(|_| pool[usize::try_from(rng.below(3)).unwrap()])
+            .collect()
+    };
+    let mut shortcut_true = 0;
+    for _ in 0..4000 {
+        let b0 = random_list(&mut rng);
+        let b1 = random_list(&mut rng);
+        let (a0, a1) = match rng.below(4) {
+            // B appends the same items in both states, or different ones.
+            0 => {
+                let added = random_list(&mut rng);
+                let other = if rng.below(2) == 0 {
+                    added.clone()
+                } else {
+                    random_list(&mut rng)
+                };
+                ([b0.clone(), added].concat(), [b1.clone(), other].concat())
+            }
+            // B changes nothing in one or both states.
+            1 => (b0.clone(), random_list(&mut rng)),
+            2 => (b0.clone(), b1.clone()),
+            _ => (random_list(&mut rng), random_list(&mut rng)),
+        };
+        let fast = list(&b0, &a0, &b1, &a1);
+        assert_eq!(
+            fast,
+            list_by_count(&b0, &a0, &b1, &a1),
+            "{b0:?} {a0:?} {b1:?} {a1:?}"
+        );
+        shortcut_true += usize::from(fast);
+        let to_set =
+            |v: &[&str]| -> BTreeSet<String> { v.iter().map(|s| (*s).to_owned()).collect() };
+        let (sb0, sa0, sb1, sa1) = (to_set(&b0), to_set(&a0), to_set(&b1), to_set(&a1));
+        assert_eq!(
+            set(&sb0, &sa0, &sb1, &sa1),
+            set_by_element(&sb0, &sa0, &sb1, &sa1),
+            "{sb0:?} {sa0:?} {sb1:?} {sa1:?}"
+        );
+    }
+    assert!(shortcut_true > 100, "{shortcut_true}");
+}
