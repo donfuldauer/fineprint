@@ -605,6 +605,13 @@ fn last_copy<'a>(ctx: &EtbContext<'a>, applied: &EtbApplied) -> Option<&'a EtbEf
 /// `effect` bound to the entrant `object` entering under `controller`: its source, and a
 /// locked object set, become the entrant, and its controller the entrant's (CR 707.5: the
 /// copy's static abilities are the entrant's).
+///
+/// The stored `controller` is only the fallback: a bound static has the entrant as its source,
+/// so the layer evaluator reads its controller from the entrant's evaluated state, after the
+/// existing layer-2 effects that apply to the entrant (CR 614.12: continuous effects that
+/// already exist and would apply to the permanent; CR 110.2, 110.2a: the controller it enters
+/// under; CR 613.1b; docs/DECISIONS.md "#203 FP-152 — Controller of a sourced static effect").
+/// The stored value is used only when the entrant has no evaluated controller.
 fn bind_to(object: ObjectId, controller: PlayerId, effect: &ContinuousEffect) -> ContinuousEffect {
     let mut bound = effect.clone();
     bound.source = Some(object);
@@ -712,7 +719,10 @@ pub fn project(
         copy: copy.map(|(_, c)| c),
     };
     // CR 614.12 (second input): the own statics, or once a copy replaced the permanent's
-    // abilities, the statics the last copy declares, bound to the entrant (CR 707.5).
+    // abilities, the statics the last copy declares, bound to the entrant (CR 707.5). Their
+    // "you" is the entrant's controller after the existing layer-2 effects (CR 614.12 third
+    // input, CR 110.2, 613.1b): the evaluator resolves it from the entrant's evaluated state,
+    // so a layer-2 effect already in force that changes the entrant's controller is seen.
     let statics: Vec<(EffectId, ContinuousEffect)> = match copy {
         None => entry.own_statics.clone(),
         Some((id, _)) => ctx
@@ -1474,3 +1484,179 @@ fn choose_option<'o>(
 #[cfg(test)]
 #[path = "etb_tests.rs"]
 mod tests;
+
+/// Unit tests of the controller of the projection's copied statics (REQ-LAYER-001,
+/// REQ-LAYER-002; CR 614.12, 110.2, 613.1b, 707.5). Synthetic ids and characteristics only (R5).
+#[cfg(test)]
+mod static_controller_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
+    use fineprint_dsl::ability::Layer;
+    use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
+    use fineprint_dsl::expr::{ObjectSelectorAST, SelectorFilter};
+
+    use super::{
+        CopyAbilities, EtbAction, EtbApplied, EtbContext, EtbEffect, EtbEffects, EtbEntry, project,
+    };
+    use crate::layers::{
+        Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerEnvironment,
+        LayerModification, MatchContext, ObjectBase,
+    };
+    use crate::objects::Characteristics;
+
+    const P1: PlayerId = PlayerId::new(1);
+    const P2: PlayerId = PlayerId::new(2);
+    /// The entrant, entering under P1.
+    const ENTRANT: ObjectId = ObjectId::new(5);
+    const COPY: EffectId = EffectId::new(30);
+    const COPIED_STATIC: EffectId = EffectId::new(40);
+    const STEAL: EffectId = EffectId::new(50);
+
+    fn artifact(name: &str) -> Characteristics {
+        Characteristics {
+            names: [format!("test.{name}")].into_iter().collect(),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: ["Artifact".to_owned()].into_iter().collect(),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream(Vec::new()),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        }
+    }
+
+    /// The entrant (an artifact, P1) alone. Every selector reads "artifacts you control".
+    struct Env;
+
+    impl LayerEnvironment for Env {
+        fn objects(&self) -> Vec<ObjectId> {
+            vec![ENTRANT]
+        }
+
+        fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+            (id == ENTRANT).then(|| ObjectBase {
+                characteristics: artifact("entrant"),
+                controller: Some(P1),
+                on_battlefield: false,
+            })
+        }
+
+        fn matches(&self, _selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+            ctx.candidate_view
+                .characteristics
+                .card_types
+                .contains("Artifact")
+                && ctx.candidate_view.controller == Some(ctx.effect_controller)
+        }
+    }
+
+    /// The copy's declared static "artifacts you control are creatures" (layer 4).
+    fn copied_static() -> ContinuousEffect {
+        ContinuousEffect {
+            source: None,
+            controller: P2,
+            timestamp: Timestamp::new(5),
+            layer: Layer::L4,
+            is_cda: false,
+            origin: EffectOrigin::Static { granted_at: None },
+            affected: Affected::Selector(ObjectSelectorAST::Filter(SelectorFilter {
+                zones: None,
+                count: None,
+                ordering: None,
+                predicate: None,
+            })),
+            modification: LayerModification::AddTypes {
+                supertypes: BTreeSet::new(),
+                card_types: ["Creature".to_owned()].into_iter().collect(),
+                subtypes: BTreeSet::new(),
+            },
+        }
+    }
+
+    /// An existing resolved layer-2 effect giving P2 control of the entrant (CR 613.1b).
+    fn steal_entrant(t: u64) -> ContinuousEffect {
+        ContinuousEffect {
+            source: None,
+            controller: P2,
+            timestamp: Timestamp::new(t),
+            layer: Layer::L2,
+            is_cda: false,
+            origin: EffectOrigin::Resolved,
+            affected: Affected::Objects([ENTRANT].into_iter().collect()),
+            modification: LayerModification::SetController(P2),
+        }
+    }
+
+    /// The entrant projected as a copy declaring [`copied_static`], with the layer-2 effect
+    /// at `steal_at` in force if any: (controller, is a creature).
+    fn projected(steal_at: Option<u64>) -> (Option<PlayerId>, bool) {
+        let mut continuous = ContinuousEffects::new();
+        if let Some(t) = steal_at {
+            continuous
+                .register(STEAL, steal_entrant(t))
+                .expect("register steal");
+        }
+        let mut effects = EtbEffects::new();
+        effects
+            .add(EtbEffect::new(
+                COPY,
+                EtbAction::EntersAsCopyOf(Box::new(artifact("copy_model"))),
+            ))
+            .expect("add copy");
+        effects
+            .set_copy_abilities(
+                COPY,
+                CopyAbilities {
+                    statics: vec![(COPIED_STATIC, copied_static())],
+                    etb: Vec::new(),
+                },
+            )
+            .expect("copy abilities");
+        let ctx = EtbContext {
+            env: &Env,
+            continuous: &continuous,
+            effects: &effects,
+        };
+        let entry = EtbEntry {
+            object: ENTRANT,
+            controller: P1,
+            own_statics: Vec::new(),
+        };
+        let applied = EtbApplied {
+            effects: [COPY].into_iter().collect(),
+            chosen: BTreeMap::new(),
+            order: vec![COPY],
+        };
+        let p = project(&ctx, &entry, &applied).expect("project");
+        (
+            p.evaluated.controller,
+            p.evaluated.characteristics.card_types.contains("Creature"),
+        )
+    }
+
+    // REQ-LAYER-002; CR 614.12, 110.2, 707.5: with no layer-2 effect, the copied static bound to
+    // the entrant applies for the controller it enters under (P1): the entrant is a creature.
+    #[test]
+    fn req_layer_002_copied_static_without_control_change_unchanged() {
+        assert_eq!(projected(None), (Some(P1), true));
+    }
+
+    // REQ-LAYER-001, REQ-LAYER-002; CR 614.12 (continuous effects that already exist and would
+    // apply), 613.1b, 613.7: an existing layer-2 effect gives P2 control of the entrant, at a
+    // timestamp earlier and later than the copied static: the static's "you" is P2, so the
+    // entrant (an artifact P2 controls) is a creature.
+    #[test]
+    fn req_layer_002_copied_static_follows_entrant_layer_2_controller() {
+        for steal_at in [3, 7] {
+            assert_eq!(projected(Some(steal_at)), (Some(P2), true), "{steal_at}");
+        }
+    }
+}
