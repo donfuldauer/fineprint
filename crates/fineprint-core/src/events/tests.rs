@@ -22,6 +22,8 @@ use crate::permanent::{AttachTarget, PermanentError, Permanents};
 use crate::state::{GameState, StateError};
 use crate::zones::{MoveRequest, Moved, Position, ZoneError, ZoneId, ZoneKind, Zones, ZonesConfig};
 
+// LKI with layer-evaluated characteristics (#184 FP-145, CR 608.2h).
+mod lki_layers;
 // Lost attachment links in executed outcomes (#180 FP-143, CR 701.3d).
 mod unattach;
 

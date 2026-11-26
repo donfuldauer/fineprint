@@ -1265,6 +1265,12 @@ fn cease_reasons(entry_id: &str, object: ObjectId, env: &dyn SbaEnvironment) -> 
 /// The LKI provider of a ceasing object: characteristics from the context's provider, counters
 /// from the object markers (CR 122.1) and attachments from the permanent container
 /// (CR 701.3a), the same three answers the event executor gives on a zone change.
+///
+/// The context's provider must answer with the characteristics evaluated through layers 1a-7d
+/// (REQ-LAYER-001, REQ-CORE-003; CR 613.1-613.4, CR 608.2h), e.g. a
+/// [`LayeredProvider`](crate::layers::LayeredProvider) over a snapshot of the state taken
+/// before the pass (see [`EventContext`]); layers do not change counter amounts, so the
+/// markers' counters are the evaluated ones.
 struct CeasingLki<'a> {
     inner: &'a dyn CharacteristicsProvider,
     markers: &'a ObjectMarkers,
@@ -1286,10 +1292,11 @@ impl CharacteristicsProvider for CeasingLki<'_> {
 }
 
 /// Captures the last known information of `id` before it ceases to exist (REQ-CORE-003,
-/// CR 608.2h, CR 704.8), reading the permanent state and counters from the given snapshot. The request names exile as a pseudo-destination: for exile
-/// `capture_lki_on_move` always treats the object as leaving its zone, so a record is stored
-/// from any zone (a token already in a graveyard included). An object the provider does not
-/// know gets no record (it still ceases).
+/// CR 608.2h, CR 704.8), reading the permanent state and counters from the given snapshot and
+/// the evaluated characteristics from the context's provider (REQ-LAYER-001). The request
+/// names exile as a pseudo-destination: for exile `capture_lki_on_move` always treats the
+/// object as leaving its zone, so a record is stored from any zone (a token already in a
+/// graveyard included). An object the provider does not know gets no record (it still ceases).
 fn capture_ceasing_lki(
     ctx: &mut EventContext<'_>,
     id: ObjectId,

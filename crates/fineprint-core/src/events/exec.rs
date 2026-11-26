@@ -27,6 +27,26 @@ use crate::zones::{MoveRequest, Moved, Position, ZoneId, ZoneKind, Zones};
 /// `ids` is the object-id generator the [`Zones`] container uses (the game state's own object
 /// generator is not reachable from here; the integration unit joins them). `provider` supplies
 /// the evaluated characteristics that last-known-information capture snapshots.
+///
+/// **The provider must be the evaluated one** (REQ-LAYER-001, REQ-CORE-003; CR 613.1-613.4,
+/// CR 608.2h). `provider` MUST answer with the characteristics evaluated through layers 1a-7d,
+/// for example a [`LayeredProvider`](crate::layers::LayeredProvider); a base-characteristic
+/// provider is for unit fakes only. The context holds `game` mutably, so the provider cannot
+/// borrow the live game state; build it over a snapshot taken before the context (and so
+/// before the batch runs, CR 603.10a, CR 704.8):
+///
+/// ```text
+/// let snap = game.clone();
+/// let env = GameEnvironment::new(&snap, &world);
+/// let provider = LayeredProvider::new(snap.effects(), &env);
+/// let mut ctx = EventContext { game: &mut game, /* ... */ provider: &provider };
+/// ```
+///
+/// An object created by an earlier event of the same batch is unknown to the snapshot, as to
+/// any injected provider, so its capture fails with
+/// [`MemoryError::NoCharacteristics`](crate::memory::MemoryError::NoCharacteristics). Only the
+/// provider's characteristics are read: LKI counters come from the object markers and
+/// attachments from `permanents` (see `LkiProvider`).
 pub struct EventContext<'a> {
     /// The game state: players, life, player counters, turn number, timestamps.
     pub game: &'a mut GameState,
@@ -42,7 +62,9 @@ pub struct EventContext<'a> {
     pub lki: &'a mut LkiStore,
     /// The events-owned state: markers, log, history, phase/step, flags.
     pub events: &'a mut EventState,
-    /// The characteristics source for LKI capture.
+    /// The characteristics source for LKI capture: the layer-evaluated characteristics (layers
+    /// 1a-7d, e.g. [`LayeredProvider`](crate::layers::LayeredProvider) over a snapshot of the
+    /// state); see the type documentation for the recipe.
     pub provider: &'a dyn CharacteristicsProvider,
 }
 
@@ -68,11 +90,13 @@ enum LkiMode<'s> {
 }
 
 /// The provider LKI capture uses (CR 603.10, CR 608.2h): characteristics from the caller's
-/// provider; counters only from [`ObjectMarkers`], the single source of counters on objects
+/// provider, which must be the layer-evaluated one (REQ-LAYER-001, CR 613.1-613.4; see
+/// [`EventContext`]); counters only from [`ObjectMarkers`], the single source of counters on objects
 /// (CR 122.1), which `AddCounters` and `RemoveCounters` also read and write; the objects
 /// attached here only from the permanent container, which `Attach` and `Unattach` write
 /// (CR 701.3a, CR 701.3d). The caller's provider's `counters` and `attached_here` are not
-/// consulted, so LKI always matches what the events themselves did (see DECISIONS).
+/// consulted, so LKI always matches what the events themselves did (see DECISIONS). Layers do
+/// not change counter amounts, so these raw counters are also the evaluated ones.
 struct LkiProvider<'a> {
     inner: &'a dyn CharacteristicsProvider,
     markers: &'a ObjectMarkers,
@@ -207,7 +231,8 @@ impl EventContext<'_> {
         self.run(batch, &LkiMode::On(&captured), copies)
     }
 
-    /// Captures the LKI of `id` before `req` moves it (CR 603.10, CR 608.2h).
+    /// Captures the LKI of `id` before `req` moves it (CR 603.10, CR 608.2h), with the
+    /// evaluated characteristics of the context's provider (REQ-LAYER-001).
     fn capture(&mut self, id: ObjectId, req: &MoveRequest) -> Result<bool, EventError> {
         let provider = LkiProvider {
             inner: self.provider,

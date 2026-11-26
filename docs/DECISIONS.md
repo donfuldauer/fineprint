@@ -9251,3 +9251,75 @@ The brief wins (R10).
 **Alternatives:** Changing the ordering pipeline to record the existence dependency now (rejected:
 outside this unit, rules question open, tracked in #242); dropping the test (rejected: the order
 record still deserves the brief's assertions).
+
+## #184 FP-145 — Audit of characteristic and counter consumers
+
+**Decision:** No rules consumer on the LKI, trigger, replacement-bus or SBA ceasing path reads base
+characteristics; nothing in code changed, only the contract was made explicit and guarded. Audit
+at `bf8c676` (non-test code of `events/`, `memory/`, `triggers/`, `replacement/`,
+`sba/perform.rs`; searched for `CharacteristicsProvider`, `capture_lki_on_move`, `ObjectBase`,
+`.base(`, `ObjectMarkers::counters`/`counter(` and `Characteristics` reads):
+
+- `events/exec.rs` `EventContext::capture` → `LkiProvider`: characteristics from the injected
+  `EventContext::provider` (**evaluated**, per the documented contract); counters from
+  `ObjectMarkers` and attachments from `Permanents` (**raw by design**, existing events decision).
+- `events/exec.rs` `held_counters` / `add_counters` / `remove_counters`: `ObjectMarkers` and player
+  counters (**raw by design**: the event writes these amounts).
+- `events/state.rs` `ObjectMarkers::counters` / `counter`: the single store of counters
+  (**raw by design**).
+- `sba/perform.rs` `capture_ceasing_lki` → `CeasingLki`: same shape as `LkiProvider`
+  (**evaluated** characteristics from `ctx.provider`; counters and attachments raw by design). The
+  SBA predicates already read `layers::evaluate` through the caller's effects and
+  `LayerEnvironment`.
+- `memory/lki.rs` `capture_lki_on_move`: takes the injected provider (**evaluated** when the
+  caller follows the contract); its only non-test callers are the two above.
+- `triggers/` (`detect.rs`, `event.rs`, `lookback.rs`, `state.rs`, the rest): read no
+  characteristics. Selector matching is delegated to `TriggerEnv::object_matches`; `event.rs`
+  reads only the LKI record's controller (CR 701.21a sacrifice subject). `ability.base` there is
+  the DSL `AbilityBase` field, not an object base.
+- `replacement/bus.rs`: reads no characteristics; its only counter read is the
+  `requires_counter` gate on `ObjectMarkers::counter` (**raw by design**, CR 122.1d/122.1h-style
+  counter conditions count counters, which layers do not change).
+- `replacement/etb.rs`: reads `LayerEnvironment::base` only inside the `Projected` adaptor and
+  `project`, which feed `layers::evaluate` (CR 614.12) (**evaluated**; exempt from the guard).
+- No non-test code builds a provider from base characteristics; the only non-test
+  `CharacteristicsProvider` implementations are `LayeredProvider`, `LkiProvider` and `CeasingLki`.
+
+Interpretation of the issue's deliverables: "`capture_lki_on_move` callers pass the layered
+provider" is met by the documented, tested contract on `EventContext::provider`,
+`CharacteristicsProvider`, `LkiProvider` and `CeasingLki` plus the snapshot recipe, because no
+in-repo non-test caller builds a provider and `EventContext` cannot borrow the state it mutates.
+"Counter reads use evaluated characteristics": `ObjectMarkers` stays the single raw source, and
+layers (CR 613.1-613.4) never change counter amounts, so evaluated and raw counters coincide.
+
+Snapshot recipe (documented on `EventContext` and in `memory`): `let snap = game.clone(); let env =
+GameEnvironment::new(&snap, &world); let provider = LayeredProvider::new(snap.effects(), &env);`
+built before the context, so before the batch (CR 603.10a, CR 704.8 pre-event capture). An object
+created inside the batch is unknown to the snapshot, as to any injected provider (event capture
+fails with `MemoryError::NoCharacteristics`; the ceasing capture skips it).
+
+Guard: `memory/consumer_guard_tests.rs` reads the consumer files with `include_str!` (compile
+time, no runtime I/O) and asserts their code before `#[cfg(test)]`, with `//` comments stripped,
+contains none of `ObjectBase`, `.base(`, `LayerEnvironment::base`; `replacement/etb.rs` is
+asserted to call `evaluate(` instead. The same file holds the shared synthetic scene
+(`test.lki_granted_type_2_2`) used by the regression tests in `events/tests/lki_layers.rs`
+(event execution, batch, SBA ceasing token through the public `sba::perform_all`),
+`replacement/tests.rs` and `triggers/tests.rs`; it is declared `pub(crate)` under `#[cfg(test)]`
+so those modules can share it. The SBA ceasing test lives in `events/tests/` because
+`sba/perform.rs` has no test module inside the region this unit may edit.
+
+Controller: exposing the evaluated (layer 2) controller through `LayeredProvider` and using it in
+LKI and the replacement chooser is not done here. Decision "#32 FP-031" item 13 named #184, but
+#216 FP-160 owns the evaluated controller in LKI and the chooser; LKI keeps the zone record's
+rules-level controller.
+
+**Rationale:** The audit found no defect, so a code change would only add risk; the contract was
+implicit ("the layer system plugs in there later") and is now explicit, with a test that fails if
+a consumer starts reading bases and regression tests that fail if the injected view is not the
+evaluated one (each with a base-only control). Keeping counters raw preserves the existing events
+decision that LKI matches what the events did.
+
+**Alternatives:** Building the layered provider inside `EventContext` (rejected: needs new fields
+or a borrow of `game` the context already holds mutably; the field set is frozen); routing LKI
+counters through `LayeredProvider::counters` (rejected: same amounts, and it would break the
+single-source decision); a runtime file-reading guard (rejected: R3).
