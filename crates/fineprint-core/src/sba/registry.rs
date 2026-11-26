@@ -114,7 +114,7 @@ pub(super) struct SbaView<'a> {
 /// The vocabulary id of the start your engines! keyword ability (CR 702.179).
 const START_YOUR_ENGINES: &str = "START_YOUR_ENGINES";
 
-/// The vocabulary id of the indestructible keyword ability (CR 702.12).
+/// The vocabulary id of the indestructible keyword ability (read for the CR 702.12b check below).
 const INDESTRUCTIBLE: &str = "INDESTRUCTIBLE";
 
 /// Whether `abilities` hold the keyword ability `keyword` (a `KEYWORD` ability whose keyword
