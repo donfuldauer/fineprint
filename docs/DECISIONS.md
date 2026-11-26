@@ -9697,3 +9697,98 @@ warning count at one. (3) The no-card-data test matches quoted member names so t
 `oracleTextHash` does not match `oracleText`. (4) `load(id)` finds the file by stem across families.
 **Rationale.** Each is the simplest choice consistent with the lints as implemented.
 **Alternatives.** Declaring land identity 0 (rejected: wrong under CR 903.4).
+
+## #190 FP-147 — Equivalence spec tests: per-object checks on the 200-object board use a sample
+
+**Decision:** In `tests/spec_layers_perf_equiv.rs`, the per-object checks on board a (200
+permanents) — `evaluate(id)` equal to the `evaluate_all` entry, `evaluate_with_order` and the
+pinned `OrderRecord` steps, `LayerCache::evaluate(id)` — run on a fixed sample of 14 objects
+(CDA, plain creatures, artifacts, lands, counters, locked sets); the small boards check every
+object. The cache equivalence (requirement 4) and the `evaluate_all` bookkeeping (requirement 5)
+on board a share one cache sequence (cold, warm, invalidation, registry change) so board a pays
+as few cold fills as possible, and the order-independence test fills a cache per listing only on
+board b (board a's listings are checked uncached against the golden digest). Board a's "fixed
+shuffle" is the literal permutation formula `i -> 1 + (77 i mod 200)` rather than 200 written-out
+ids (board b's shuffle is written out). Goldens were recorded at 1360900.
+**Rationale:** On the base (1360900) one whole-board pass of board a takes about 0.9 s in a debug
+test build, and each `evaluate(id)` and each cold cache miss is one such pass (an O(n) fill of n
+passes), so checking all 200 objects per step would take tens of minutes; the brief asks for a
+fast run (requirement 10) and the whole-board digests already cover every object.
+**Alternatives:** Every object of board a in every check (rejected: far too slow on the base);
+a smaller "bench-like" board (rejected: the brief fixes 200 permanents).
+
+## #190 FP-147 — Equivalence spec tests: board c changes the counted set in layers 2 and 4
+
+**Decision:** Board c ("CDA and view") changes the set counted by its characteristic-defining P/T
+with a layer-2 control change and layer-4 type changes, and puts layer-7b and 7c effects on the
+counting objects and on the animated artifacts in an order that depends on the timestamps (both
+orders tested).
+**Rationale:** The brief asks for "a layer-7b/7c effect that changes the counted set", but under
+the documented contract the CDA reads a snapshot of all objects after layers 1a-6, and 7b/7c
+effects change neither control nor types, so they cannot change the counted set; layers 2 and 4
+are the documented way the counted set changes, and the 7b/7c effects still interact with the CDA
+values (7a before 7b/7c, timestamp order within 7b).
+**Alternatives:** A 7b/7c effect alone (rejected: it cannot change what is counted, so the board
+would not test the view).
+
+## #190 FP-147 - Whole-board cache fill: baseless ids, misses and what is stored
+
+**Decision:** `LayerCache::evaluate_all` keeps its lookup loop (ids of `env.objects()` sorted, not
+de-duplicated; a hit or a miss per lookup, as in "#186 FP-146 - LayerCache::evaluate_all visits
+objects by ascending id"), but every miss of one call is answered from one board pass, run
+lazily at the first miss, over `env.objects()` sorted, de-duplicated and restricted to the ids
+that have a base (`board::universe_known`, the universe `evaluate(id)` uses for every listed id
+with a base, contract A). An id without a base is not in that pass: its lookup is a miss and
+returns `UnknownObject(id)`, which, by ascending order, is the first error of the uncached
+`evaluate_all`. Each result is stored when its lookup is visited, so the entries of ids visited
+before the error stay stored and the results of ids after it are discarded (not stored), exactly
+as when each miss was its own `evaluate(id)`. A listed duplicate is a second lookup: a hit in
+cached mode, a miss in full-recompute mode answered with the same result (no second pass). In
+full-recompute mode the call runs the same single pass and stores nothing; every lookup is a
+miss. `LayerCache::evaluate(id)` is unchanged and stores only its own object.
+**Rationale:** Contract A of the brief makes the pass result for every listed id with a base equal
+to `evaluate(id)`, so values, errors, hit/miss counts and `len()` stay exactly as at 1360900 while
+a cold fill costs one pass instead of N. Storing only visited ids keeps `len()` after an error
+equal to the old behaviour (`evaluate_all_first_error_rule` and the spec tests assert it).
+**Alternatives:** Store every object of the pass even after an error (rejected: changes `len()`
+and which later lookups hit after an error, a visible change of the cache's bookkeeping); run the
+pass eagerly on every call (rejected: a fully warm call would pay a pass for nothing); keep N
+passes in full-recompute mode (rejected: the brief allows one pass, results are identical and the
+differential job compares the values, not the number of passes).
+
+## #190 FP-147 - Foreign-source views computed before the layer runs
+
+**Decision:** In a board pass, the view of each static effect of the layer whose source is on the
+board (its source evaluated through the end of the layer without the effect, one level deep,
+CR 613.8a) is computed for every such effect before any object runs the layer, from the objects'
+states at that moment, instead of lazily (memoised in a `RefCell`) from a copy of every object's
+state and lock-in record taken at the start of each layer. The nested run reads other sources'
+start-of-layer states from the same, still unmodified, slots.
+**Rationale:** The view is a pure function of the start-of-layer snapshot (the binding semantics
+of "#186 FP-146 - Board pass, universe and view semantics"), so computing it eagerly gives the
+same value as computing it on first use, while removing the per-layer copy of the whole board.
+It may compute a view no object asks for (for example when the effect applies only to its own
+source); that is one single-object layer run per such effect, at most `E` per pass.
+**Alternatives:** Keep the lazy memo and the per-layer snapshot (rejected: the copy costs every
+object's state and lock record in every layer); lazy views read from slots not yet run (rejected:
+needs a snapshot anyway for sources that already ran the layer).
+
+## #190 FP-147 - Lazy dependency relation and comparison shortcuts
+
+**Decision:** Within a layer the dependency relation (CR 613.8a) is evaluated lazily, cell by cell
+in row order, until the earliest step that depends on no other unapplied step is found; trial
+applications are cached for the relation's lifetime (one selection); the whole relation is
+computed only when no step is independent (a loop, CR 613.8b). The set and ability-list
+comparisons of "what B does" return early in cases where the definition's answer is already
+certain: the same value after B in both states, B left the field untouched in both, or (ability
+lists) B appended the same items in both. The relation is still recomputed after every
+application (CR 613.8c).
+**Rationale:** Every cell is a pure function of the steps, the current state and the lock-in
+record, so the order in which cells are evaluated cannot change a cell, the earliest independent
+step or the loop chosen; the shortcuts are implied by the definitions. Unit tests compare the lazy
+relation with the eager pre-change relation (kept under `cfg(test)`) in every cell order and the
+shortcuts with the definitions, and golden fingerprints recorded at 1360900 pin the results.
+**Alternatives:** Memoise trials across selections (rejected: the state changes after every
+application and the lock-in record grows, so reuse would need a proof per case for little gain);
+restrict which fields a modification can touch (rejected: a second description of every
+modification that could drift from `apply_effect`).
