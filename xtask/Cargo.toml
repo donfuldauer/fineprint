@@ -9,3 +9,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The `.pzl` runner (`cargo xtask pzl`) runs scenarios on the engine (docs/DECISIONS.md
+# "#51 FP-049 — The runner command lives in xtask").
+fineprint-core.workspace = true
