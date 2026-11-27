@@ -51,6 +51,9 @@ struct Script {
     library_touching: bool,
     /// Added to `library_mills` when it resolves.
     mills: u64,
+    /// The cost includes {T}: once activated, the source is tapped, so the host no longer reports
+    /// the ability as available and a second activation fails (CR 118.3).
+    taps: bool,
 }
 
 /// How a non-mana cost item behaves when paid.
@@ -211,7 +214,11 @@ impl PayState for FakeState {
     }
 
     fn available_mana_abilities(&self, _player: PlayerId) -> Vec<(ObjectId, String)> {
-        self.abilities.keys().cloned().collect()
+        self.abilities
+            .iter()
+            .filter(|(k, script)| !(script.taps && self.activations.contains_key(*k)))
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     fn activate_mana_ability(
@@ -224,6 +231,9 @@ impl PayState for FakeState {
         let Some(script) = self.abilities.get(&key).cloned() else {
             return Err(PayError::Illegal("test: unknown mana ability".to_owned()));
         };
+        if script.taps && self.activations.contains_key(&key) {
+            return Err(PayError::Unpayable);
+        }
         if let Some(t) = script.costs
             && !remove_one(self.pools.entry(player).or_default(), t)
         {
@@ -822,6 +832,7 @@ fn req_cast_001_dependent_activation_keeps_library_effect() {
                 costs: Some(ManaType::Red),
                 library_touching: true,
                 mills: 1,
+                taps: false,
             },
         );
     let s = drive(
@@ -1074,12 +1085,12 @@ fn req_cast_001_decline_is_refused() {
 // D11. Re-activation guard
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-CAST-001: a response listing the same mana ability twice is refused without a double
-/// activation; no state is left half-applied (CR 605.3c).
+/// REQ-CAST-001: a mana ability resolves immediately (CR 605.3b), so a response listing a
+/// repeatable ability (no {T}, no other limit) twice activates it twice and pays {R}{R}
+/// (CR 605.3c bars only re-entrancy; CR 118.3c).
 #[test]
-fn req_cast_001_duplicate_activation_refused() {
-    // CR 605.3c "Once a player begins to activate a mana ability, that ability can't be
-    // activated again until it has resolved."
+fn req_cast_001_repeated_mana_ability_listing() {
+    // CR 605.3b, CR 605.3c, CR 118.3c
     let st = FakeState::new().with_ability(
         3,
         "test.ability_a",
@@ -1089,27 +1100,60 @@ fn req_cast_001_duplicate_activation_refused() {
         },
     );
     let lc = locked("{R}{R}");
+    let s = drive(
+        st,
+        &lc,
+        &[pay_with(&[(3, "test.ability_a"), (3, "test.ability_a")])],
+    );
+    let (state, run) = done(&s);
+    let Ok(PayOutcome::Committed { spent, .. }) = &run.result else {
+        panic!("expected Committed");
+    };
+    assert_eq!(state.activation_count(3, "test.ability_a"), 2);
+    assert_eq!(spent, &vec![red(3), red(3)]);
+    assert!(state.pool().units().is_empty(), "nothing left over");
+}
+
+/// REQ-CAST-001: an ability whose cost includes {T} cannot be activated a second time (CR 118.3);
+/// listing it twice never double-applies the effect and leaves nothing half-applied
+/// (CR 605.3c). Whether a refused repeat aborts or is skipped is not pinned by the CR.
+#[test]
+fn req_cast_001_repeated_tap_ability_listing() {
+    // CR 605.3c, CR 118.3
+    let tap_ability = || {
+        FakeState::new().with_ability(
+            3,
+            "test.ability_a",
+            Script {
+                adds: vec![red(3)],
+                taps: true,
+                ..Script::default()
+            },
+        )
+    };
+    let twice = pay_with(&[(3, "test.ability_a"), (3, "test.ability_a")]);
+
+    // {R}{R}: one R can never pay it.
+    let st = tap_ability();
+    let lc = locked("{R}{R}");
     let mut s = start(st.clone(), &lc);
     let id = s.pending().expect("asks").request_id;
-    let dup = pay_with(&[(3, "test.ability_a"), (3, "test.ability_a")]);
-    match s.submit(id, dup) {
-        // Refused before the procedure ran on it.
+    match s.submit(id, twice.clone()) {
         Err(_) => assert!(s.pending().is_some()),
         Ok(()) => {
             let (state, run) = done(&s);
-            assert!(
-                !matches!(run.result, Ok(PayOutcome::Committed { .. })),
-                "a double activation paid the cost"
-            );
             assert!(state.activation_count(3, "test.ability_a") <= 1);
             match &run.result {
-                Ok(_) => {
-                    assert_eq!(state.state_hash(), st.state_hash());
+                Ok(PayOutcome::RolledBack(rb)) => {
+                    assert!(
+                        matches!(rb.reason, PayStopReason::UnpayableMana),
+                        "{:?}",
+                        rb.reason
+                    );
+                    assert_eq!(rb.state_hash, run.pre_hash);
                     assert_restored(state, run);
                 }
                 Err(Interrupt::Error(_)) => {
-                    // Nothing half-applied: the cast checkpoint is closed and the state is the
-                    // pre-cast one, or it is still open for the caller to roll back.
                     assert!(run.depth <= 1);
                     if run.depth == 0 {
                         assert_eq!(state.state_hash(), st.state_hash());
@@ -1117,8 +1161,31 @@ fn req_cast_001_duplicate_activation_refused() {
                     assert!(state.waiting_triggers.is_empty());
                     assert!(state.history.is_none());
                 }
-                Err(Interrupt::Pending(_)) => unreachable!("propagated"),
+                other => panic!("unexpected outcome {:?}", other.as_ref().err()),
             }
+        }
+    }
+
+    // {R}: one activation suffices; the repeat is refused or skipped.
+    let st = tap_ability();
+    let lc = locked("{R}");
+    let mut s = start(st.clone(), &lc);
+    let id = s.pending().expect("asks").request_id;
+    if s.submit(id, twice).is_ok() {
+        let (state, run) = done(&s);
+        assert!(state.activation_count(3, "test.ability_a") <= 1);
+        match &run.result {
+            Ok(PayOutcome::Committed { .. }) => {
+                assert_eq!(state.activation_count(3, "test.ability_a"), 1);
+                assert!(state.pool().units().is_empty(), "no extra R in the pool");
+            }
+            Ok(PayOutcome::RolledBack(_)) => assert_restored(state, run),
+            Err(Interrupt::Error(_)) => {
+                assert!(run.depth <= 1);
+                assert!(state.waiting_triggers.is_empty());
+                assert!(state.history.is_none());
+            }
+            other => panic!("unexpected outcome {:?}", other.as_ref().err()),
         }
     }
 }

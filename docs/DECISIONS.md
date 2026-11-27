@@ -11616,3 +11616,19 @@ defined in `fineprint_core::mana` (the brief's default module) and re-exported f
 **Alternatives.** Rolling back on any refused activation (contradicts CR 118.3c); asking for
 `{0}` (no mana payment to make, CR 601.2g); rejecting an overshooting method (clamping is
 equivalent for a correct host and never adds mana).
+
+## #54 FP-052 — Stop reasons and refusal by a payment method
+
+**Decision.** `pay_total_cost` reports `PayStopReason::UnpayableCost` only when the locked cost's mana part is `ManaPart::Unpayable` (CR 118.6, no ask). Every other failure to pay the cost in full at step 8 reports `PayStopReason::UnpayableMana`: the pool cannot pay the mana part (CR 601.2h, 118.3), `PayState::pay_life` fails (CR 118.3b), `PayState::pay_cost_item` fails in either pass (CR 601.2h), or `PayState::apply_payment_method` fails. In all of them the whole cast checkpoint is rolled back (CR 734.1); library-touching items already paid survive as durable sub-transactions. An `Err` from `apply_payment_method` rolls the cast back with `UnpayableMana`; the method is not skipped and `Interrupt::Error` is not returned.
+
+**Rationale.** The chosen way of paying cannot be completed, partial payment is not allowed (CR 601.2h) and the action is reversed (CR 734.1). Only the unpayable mana part is an unpayable cost in the sense of CR 118.6; every other failure is a lack of resources to pay in full (CR 118.3).
+
+**Alternatives.** Skipping the refused method and paying without it (rejected: silently changes what the player chose, and could pay a different cost than chosen); returning `Interrupt::Error` (rejected: a refused method is a legal-but-failed attempt, not a protocol error); keeping `UnpayableCost` for life, item and method failures (rejected: contradicts the specification).
+
+## #54 FP-052 — Correction of test D11: repeated mana-ability listing
+
+**Decision.** A repeated listing of a mana ability is legal when the second activation's cost can be paid (CR 605.3b, 605.3c, 118.3). It fails only because of resource limits such as {T} (CR 118.3); only true re-entrancy before resolution is barred (CR 605.3c). The test `req_cast_001_duplicate_activation_refused` is replaced by `req_cast_001_repeated_mana_ability_listing` (repeatable ability listed twice pays {R}{R}) and `req_cast_001_repeated_tap_ability_listing` ({T} ability: at most one activation, no half-applied state). The true re-entrancy scenario is dropped: the guard lives inside `pay_total_cost`, which a test host cannot reach through the public API.
+
+**Rationale.** The earlier brief (clause D11) read 605.3c as a per-window cap. The rules-researcher answer shows a mana ability resolves immediately (605.3b), so only starting it again before it has resolved is barred.
+
+**Alternatives.** Keep the stricter test: rejected, it asserts something the CR does not say. This is an R10 correction toward the brief and the CR, with brief clause D11 as the evidence of the correction.
