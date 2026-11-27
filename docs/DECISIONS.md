@@ -12515,3 +12515,66 @@ inputs inside the exact range only.
 **Rationale.** Inside the exact range, the result is the reference list truncated to
 `min(n, 32)` (requirement 10), so a short list must already be complete.
 **Alternatives.** Asserting the prefix relation alone.
+
+## gate 06-turn round 7 - Mode legality probes X (CR 700.2a, 601.2b, 601.2c, 107.3a)
+
+Supersedes "gate 06-turn round 6 - Mode legality probes every additional-cost subset within a
+4096-call budget (CR 700.2a, 601.2c)" and "gate 06-turn round 5 - Mode legality probes cost
+choices (CR 700.2a, 601.2c)" on the point "`x` = low end of the X range" (CodeRabbit threads
+4720021411 and 4718412705).
+
+**Decision.** The rule of CR-014. `casting::announce::mode_legal` probes `target_slots(req,
+&[m], &probe)` over the product of {normal cost, each alternative cost} (outermost), every
+additional-cost subset in ascending bit-mask order (middle) and every X of `lo..=hi` ascending
+(innermost); `x: None` without an X range and the single value `lo` when `lo > hi`; empty
+`symbol_options` and `harmonize: None`. It stops at the first probe that gives every slot at
+least `min` legal candidates. The product `(alternatives + 1) * 2^additional * x_count` is
+computed with checked arithmetic (`x_count = (hi - lo).checked_add(1)` converted with
+`usize::try_from`, so `0..=u64::MAX` is over budget) and the probe is exhaustive only when it
+is at most 4096; otherwise the mode is offered with no `target_slots` call and step 3 checks the
+real choices.
+**Rationale.** X is announced at 601.2b, before targets (601.2c), and a target restriction can
+depend on X, so a mode legal at some permitted X is not illegal under 700.2a. The 4096 budget
+now covers the full product. Over budget (or with an X range too wide to enumerate) the mode is
+offered and step 3 rolls an illegal choice back (601.2, 734.1).
+**Alternatives.** Probing only the ends of the range (rejected: unsound, a legal middle X would
+be omitted); probing symbol options and the harmonize creature (rejected: they do not change
+the required targets, 601.2c, 601.2h); a host legality hook (rejected, as in round 6).
+
+## gate 06-turn round 7 - Mana-ability window re-asked; removal provenance (CR 601.2g, 605.3a, 734.1)
+
+Work item gate7-implp, threads 4720021419 and 4720021426 (and CodeRabbit comment 4720082538).
+Supersedes two statements of "#54 FP-052" (the `casting::pay` module doc and "SRS 2.5 category
+(b) vs CR 605.1a and 734.1"): "one ask, before anything changes" and "a removed unit is matched
+to the earliest equal unit". Now: the step-7 window may ask several times; which units an
+activation removed is host-reported provenance (`PayState::last_activation_removed`), with the
+earliest-equal inference only as the documented fallback. The scratch window keeps the rule that
+nothing in the real state changes before the window has ended, and keeps the rejection of nested
+open checkpoints.
+
+**Decision.** CR-015 and CR-016. `casting::pay_total_cost` asks PAY_MANA_AND_COSTS on a scratch
+copy of the state, at most 256 times (the 256th request lists no ability); an answer in which at
+least one listed ability is activated (available, not in progress, accepted by the host, in
+listed order) is followed by a new request and its methods and auto-pay are discarded; the
+window ends on auto-pay, an answer that lists no ability, an answer none of whose abilities ran,
+or a cancel. Then the concatenation of every listed ability is activated for real by the
+unchanged `activate_all` (availability checked per activation; the CR 734.1 dependent-activation
+probe covers the concatenation) and the payment-method offers are recomputed on the real state.
+`PayState` gets the provided method `last_activation_removed` (default `None`); `follow_units`
+uses a valid report (strictly ascending, every index below the pool length before,
+`before - removed <= after`) and otherwise infers: per distinct unit value, the
+`count_before - count_after` earliest equal units are removed.
+**Rationale.** CR 601.2g gives a chance (a window) to activate mana abilities, and CR 605.3a-c
+let the player activate whenever a payment is asked; one snapshot offer made an ability that
+becomes available only after an earlier activation unselectable. Equal units hide production
+history and SRS 2.5(a) is mandatory, so the producer of a removed unit must come from the removal
+itself. A scratch simulation keeps the durable-commit rule (only the innermost checkpoint can be
+committed, a normally committed activation cannot become durable later: the earlier rejection of
+nested open checkpoints), because the real activations happen once, after the window, with the
+probe over the whole list.
+**Alternatives.** Option 2 "offerable_mana_abilities" (rejected: the client cannot tell legal
+from potential); a conditional payload field (rejected: breaking); inference only (rejected by
+CodeRabbit comment 4720082538: relies on an unstated host invariant); a `consumed` field on
+`ManaActivation` (rejected: breaking). Note: the finding's literal example (B spends the red A
+produces) reproduces only on hosts that leave out abilities they cannot pay for yet; the untap
+case reproduces on any host.

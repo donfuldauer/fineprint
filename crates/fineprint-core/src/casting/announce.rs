@@ -161,11 +161,11 @@ pub trait CastState: Transactional {
     ///
     /// Besides the call with the player's real choices, the procedure probes this method before
     /// the costs are chosen, with a one-mode list and a probe [`CostChoice`] (an alternative cost,
-    /// an ascending additional-cost subset, X at the low end of its range, no symbol options, no
-    /// harmonize creature), to decide which modes can be chosen (CR 700.2a, 601.2c; CR-013): every
-    /// alternative-cost choice times every additional-cost subset, at most 4096 calls per mode,
-    /// and no probe call at all for a mode whose product exceeds that budget. It must stay pure
-    /// (R3).
+    /// an ascending additional-cost subset, an X value of its range, no symbol options, no
+    /// harmonize creature), to decide which modes can be chosen (CR 700.2a, 601.2b, 601.2c;
+    /// CR-013, CR-014): every alternative-cost choice times every additional-cost subset times
+    /// every X value, at most 4096 calls per mode, and no probe call at all for a mode whose
+    /// product exceeds that budget. It must stay pure (R3).
     fn target_slots(
         &self,
         req: &CastRequest,
@@ -730,14 +730,29 @@ fn request(
 }
 
 /// The most [`CastState::target_slots`] calls the legality check of one mode may make before the
-/// costs are chosen (CR-013, R12: untrusted card data cannot force more).
+/// costs are chosen, over the full product of alternative cost, additional-cost subset and X
+/// (CR-013, CR-014; R12: untrusted card data cannot force more).
 const PROBE_BUDGET: usize = 4096;
 
-/// The number of probes of the exhaustive product for `alternatives` alternative costs and
-/// `additional` additional costs, `(alternatives + 1) * 2^additional`, when it fits the
-/// [`PROBE_BUDGET`] (CR-013); `None` when it exceeds it. Computed without overflow: a shift by
-/// `usize::BITS - 1` or more, or an overflowing product, is over budget.
-fn probe_count(alternatives: usize, additional: usize) -> Option<usize> {
+/// The number of X values the mode probe tries for `x_range` (CR 601.2b, 107.3a; CR-014):
+/// `hi - lo + 1` for `Some((lo, hi))` with `lo <= hi`, and 1 for `None` (the probe has no X) or
+/// for `lo > hi` (the single value `lo`). `None` when the count does not fit a `usize` (for
+/// example `0..=u64::MAX`, 2^64 values): over any budget. Computed without overflow.
+fn x_count(x_range: Option<(u64, u64)>) -> Option<usize> {
+    match x_range {
+        Some((lo, hi)) if lo <= hi => (hi - lo)
+            .checked_add(1)
+            .and_then(|n| usize::try_from(n).ok()),
+        _ => Some(1),
+    }
+}
+
+/// The number of probes of the exhaustive product for `alternatives` alternative costs,
+/// `additional` additional costs and `x_values` X values ([`x_count`]),
+/// `(alternatives + 1) * 2^additional * x_values`, when it fits the [`PROBE_BUDGET`] (CR-013,
+/// CR-014); `None` when it exceeds it. Computed without overflow: a shift by `usize::BITS - 1`
+/// or more, or an overflowing product, is over budget.
+fn probe_count(alternatives: usize, additional: usize, x_values: usize) -> Option<usize> {
     let bits = usize::try_from(usize::BITS).unwrap_or(usize::MAX);
     if additional >= bits.saturating_sub(1) {
         return None;
@@ -745,6 +760,7 @@ fn probe_count(alternatives: usize, additional: usize) -> Option<usize> {
     alternatives
         .checked_add(1)
         .and_then(|a| a.checked_mul(1usize << additional))
+        .and_then(|p| p.checked_mul(x_values))
         .filter(|&p| p <= PROBE_BUDGET)
 }
 
@@ -760,20 +776,24 @@ fn subset_from_mask(n: usize, mask: usize) -> Vec<u32> {
 /// Whether mode `mode` (original index) can be chosen (CR 700.2a: a mode that would be illegal
 /// can't be chosen): some cost configuration gives every target slot of the mode alone at least
 /// its minimum of legal candidates (CR 601.2c: a spell may require targets, or alternative
-/// targets, only when an alternative or additional cost was chosen; CR-013, amending CR-012).
+/// targets, only when an alternative or additional cost was chosen; CR 601.2b, 107.3a: X is
+/// announced before targets, so a target restriction can depend on it; CR-014, amending CR-012
+/// and CR-013).
 ///
 /// When the exhaustive product fits the [`PROBE_BUDGET`] ([`probe_count`]), it probes, in order
 /// and stopping at the first success: the normal cost then each alternative cost of
-/// `cost_spec(req, &[mode])` (outer), each combined with EVERY additional-cost subset in
-/// ascending bit-mask order (inner, the empty subset first, [`subset_from_mask`]), X at the low
-/// end of its range, no symbol options and no harmonize creature. That is at most
-/// [`PROBE_BUDGET`] calls of [`CastState::target_slots`]; a spell with no alternative or
-/// additional cost makes exactly one.
+/// `cost_spec(req, &[mode])` (outermost), each combined with EVERY additional-cost subset in
+/// ascending bit-mask order (middle, the empty subset first, [`subset_from_mask`]), each combined
+/// with EVERY X value of the range in ascending order (innermost; `x: None` without an X range,
+/// the single value `lo` for a range with `lo > hi`), no symbol options and no harmonize
+/// creature. That is at most [`PROBE_BUDGET`] calls of [`CastState::target_slots`]; a spell with
+/// no alternative cost, no additional cost and at most one X value makes exactly one.
 ///
-/// Over the budget no legality claim can be proved either way within it, so the mode is offered
-/// without any call: the CR 601.2c check of step 3 with the costs the player actually chose
-/// rolls the cast back (CR 601.2, 734.1) with [`StopReason::MissingTarget`] if that choice leaves
-/// a slot without enough legal candidates. No legal mode is ever omitted.
+/// Over the budget (including an X range too wide to enumerate) no legality claim can be proved
+/// either way within it, so the mode is offered without any call: the CR 601.2c check of step 3
+/// with the costs and X the player actually chose rolls the cast back (CR 601.2, 734.1) with
+/// [`StopReason::MissingTarget`] if that choice leaves a slot without enough legal candidates.
+/// No legal mode is ever omitted.
 fn mode_legal<S: CastState>(
     state: &S,
     req: &CastRequest,
@@ -782,28 +802,41 @@ fn mode_legal<S: CastState>(
 ) -> bool {
     let spec = state.cost_spec(req, &[mode]);
     let n = spec.additional_costs.len();
-    if probe_count(spec.alternative_costs.len(), n).is_none() {
-        // CR-013: over the budget, offered; step 3 decides (CR 601.2c, 734.1).
+    let within_budget =
+        x_count(spec.x_range).and_then(|xs| probe_count(spec.alternative_costs.len(), n, xs));
+    if within_budget.is_none() {
+        // CR-013, CR-014: over the budget, offered; step 3 decides (CR 601.2c, 734.1).
         return true;
     }
+    // CR 601.2b, 107.3a: the X values the player could announce, ascending (CR-014): X = lo +
+    // step for step in 0..=x_steps (`lo` alone for lo > hi; `None` without an X range). The range
+    // was bounded by `x_count` above, so this enumerates at most PROBE_BUDGET values, and
+    // `lo + step <= hi` cannot overflow.
+    let x_steps = match spec.x_range {
+        Some((lo, hi)) if lo <= hi => hi - lo,
+        _ => 0,
+    };
+    let x_at = |step: u64| spec.x_range.map(|(lo, _)| lo.saturating_add(step));
     let alternatives = core::iter::once(None)
         .chain((0..spec.alternative_costs.len()).filter_map(|i| u32::try_from(i).ok().map(Some)));
-    let x = spec.x_range.map(|(lo, _)| lo);
     for alternative in alternatives {
         // `n < usize::BITS - 1` was checked by `probe_count`.
         for mask in 0..1usize << n {
-            let probe = CostChoice {
-                alternative,
-                additional: subset_from_mask(n, mask),
-                x,
-                symbol_options: Vec::new(),
-                harmonize: None,
-            };
-            let legal = state.target_slots(req, &[mode], &probe).iter().all(|s| {
-                usize_to_u64(legal_candidates(state, req, stack_object, s).len()) >= s.min
-            });
-            if legal {
-                return true;
+            let additional = subset_from_mask(n, mask);
+            for step in 0..=x_steps {
+                let probe = CostChoice {
+                    alternative,
+                    additional: additional.clone(),
+                    x: x_at(step),
+                    symbol_options: Vec::new(),
+                    harmonize: None,
+                };
+                let legal = state.target_slots(req, &[mode], &probe).iter().all(|s| {
+                    usize_to_u64(legal_candidates(state, req, stack_object, s).len()) >= s.min
+                });
+                if legal {
+                    return true;
+                }
             }
         }
     }
@@ -811,8 +844,8 @@ fn mode_legal<S: CastState>(
 }
 
 /// CR 601.2b, 700.2a, 700.2d: asks the modes among the legal ones ([`mode_legal`]: legal under
-/// at least one cost configuration of the exhaustive probe, or offered because the probe would
-/// exceed the [`PROBE_BUDGET`]; CR-013) and returns the chosen ORIGINAL indices, ascending; `None`
+/// at least one cost configuration and X value of the exhaustive probe, or offered because the
+/// probe would exceed the [`PROBE_BUDGET`]; CR-013, CR-014) and returns the chosen ORIGINAL indices, ascending; `None`
 /// when too few modes can be chosen.
 fn ask_modes<S: CastState>(
     state: &S,
@@ -1310,9 +1343,18 @@ pub(super) mod tests_support {
     /// The per-mode probe budget (CR-013).
     pub(crate) const PROBE_BUDGET: usize = super::PROBE_BUDGET;
 
-    /// The exhaustive probe count when within the budget, else `None` (CR-013).
-    pub(crate) fn probe_count(alternatives: usize, additional: usize) -> Option<usize> {
-        super::probe_count(alternatives, additional)
+    /// The exhaustive probe count when within the budget, else `None` (CR-013, CR-014).
+    pub(crate) fn probe_count(
+        alternatives: usize,
+        additional: usize,
+        x_values: usize,
+    ) -> Option<usize> {
+        super::probe_count(alternatives, additional, x_values)
+    }
+
+    /// The number of X values the mode probe tries, `None` when it does not fit (CR-014).
+    pub(crate) fn x_count(x_range: Option<(u64, u64)>) -> Option<usize> {
+        super::x_count(x_range)
     }
 
     /// The additional-cost subset of a bit mask, ascending (CR-013).
