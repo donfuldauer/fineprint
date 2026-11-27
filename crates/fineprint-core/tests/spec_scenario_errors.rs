@@ -183,15 +183,11 @@ fn req_test_001_err_missing_fields() {
     assert!(e.message.contains("title"), "{e}");
 }
 
-/// REQ-TEST-001.1: `pzlVersion` 2 is rejected at `/pzlVersion` (the contract does not name the
-/// kind; `Unsupported` or `OutOfRange` are accepted).
+/// REQ-TEST-001.1: `pzlVersion` 2 is `Unsupported` at `/pzlVersion` (DEVELOPMENT.md: "a
+/// `pzlVersion` other than 1 (`Unsupported`)").
 #[test]
 fn req_test_001_err_pzl_version_2() {
-    check_file(
-        "pzl_version_2",
-        &[K::Unsupported, K::OutOfRange],
-        P::Exact("/pzlVersion"),
-    );
+    check_file("pzl_version_2", &[K::Unsupported], P::Exact("/pzlVersion"));
 }
 
 /// REQ-TEST-001.1, R11: a top-level `supportStatus` is an unknown field: a scenario can never
@@ -263,25 +259,17 @@ fn req_test_001_err_wrong_type_life() {
     );
 }
 
-/// REQ-TEST-001.1, R3: floats are rejected anywhere (`life: 20.5`, `prngSeed: 1.0`).
+/// REQ-TEST-001.1, R3: floats are `WrongType` anywhere (`life: 20.5`, `prngSeed: 1.0`).
 #[test]
 fn req_test_001_err_floats() {
-    check_file(
-        "float_life",
-        &[K::WrongType, K::OutOfRange],
-        P::Exact("/players/0/life"),
-    );
-    check_file(
-        "float_prng_seed",
-        &[K::WrongType, K::OutOfRange],
-        P::Exact("/prngSeed"),
-    );
+    check_file("float_life", &[K::WrongType], P::Exact("/players/0/life"));
+    check_file("float_prng_seed", &[K::WrongType], P::Exact("/prngSeed"));
     let mut v = base_json();
     v["assertions"] = json!([{"kind": "events", "mode": "subsequence",
         "events": [{"type": "LifeChange", "fields": {"delta": 1.5}}]}]);
     let input = serde_json::to_vec(&v).unwrap();
     let e = expect_err(&input);
-    assert!(matches!(e.kind, K::WrongType | K::OutOfRange), "{e}");
+    assert_eq!(e.kind, K::WrongType, "{e}");
     assert_eq!(e.path, "/assertions/0/events/0/fields/delta", "{e}");
 }
 
@@ -408,13 +396,14 @@ fn req_test_001_err_unresolved_references() {
 }
 
 /// REQ-TEST-001.1: a malformed definition hash (63 chars, uppercase, non-hex) is rejected at
-/// the hash (OutOfRange or WrongType: the contract accepts either for hash format).
+/// the hash: `OutOfRange` (DEVELOPMENT.md: a `definitionHash` that is not 64 lowercase hex
+/// characters is `OutOfRange`).
 #[test]
 fn req_test_001_err_malformed_hash() {
     for name in ["hash_63_chars", "hash_uppercase", "hash_non_hex"] {
         check_file(
             name,
-            &[K::OutOfRange, K::WrongType],
+            &[K::OutOfRange],
             P::Exact("/cardDatabase/definitionHashes/test.vanilla_green_2_2"),
         );
     }

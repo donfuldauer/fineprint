@@ -75,8 +75,9 @@ impl fmt::Display for ScenarioErrorKind {
 /// One located loader error (REQ-TEST-001, R12).
 ///
 /// `path` is a JSON-pointer-style location (`/players/1/zones/hand/0`; `""` is the document
-/// root). Path segments taken from the input are sanitised (control characters become `?`) and
-/// cut to 64 characters, so a hostile key cannot flood a log. `line` and `column` are 1-based
+/// root), complete and escaped (`~0`, `~1`), so it always round-trips through
+/// [`pointer_position`](super::pointer_position). `Display` (only) prints each segment cut to
+/// 64 characters and with control characters as `?`, so a hostile key cannot flood a log. `line` and `column` are 1-based
 /// (the column counts Unicode scalar values) and are present for syntax errors and wherever the
 /// offending value's position is known. `message` never quotes more than 80 characters of input
 /// text.
@@ -110,17 +111,30 @@ impl ScenarioError {
             message: message.into(),
         }
     }
+
+    /// The `path` for printing: control characters as `?`, each segment cut to 64 characters
+    /// (then `...`). The same text `Display` shows; the stored `path` is untouched (R12).
+    #[must_use]
+    pub fn display_path(&self) -> String {
+        display_path(&self.path)
+    }
 }
 
 impl fmt::Display for ScenarioError {
-    /// `path:line:col: message`, the path exactly as stored (empty for the root); an unknown
-    /// line or column is printed as `?`.
+    /// `path:line:col: message`, the path sanitised for display (control characters as `?`,
+    /// each segment cut to 64 characters; empty for the root); an unknown line or column is
+    /// printed as `?`. The stored `path` is untouched.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let line = self.line.map_or_else(|| "?".to_owned(), |l| l.to_string());
         let column = self
             .column
             .map_or_else(|| "?".to_owned(), |c| c.to_string());
-        write!(f, "{}:{line}:{column}: {}", self.path, self.message)
+        write!(
+            f,
+            "{}:{line}:{column}: {}",
+            display_path(&self.path),
+            self.message
+        )
     }
 }
 
@@ -151,20 +165,35 @@ pub(crate) fn quote(text: &str) -> String {
     out
 }
 
-/// One JSON-pointer segment from `key`: `~` as `~0`, `/` as `~1`, control characters as `?`,
-/// cut to [`MAX_SEGMENT_CHARS`] characters (then `...`).
+/// One complete JSON-pointer segment from `key`: `~` as `~0`, `/` as `~1`, nothing else
+/// changed (no truncation, no replacement), so a stored path always finds its member again
+/// (`pointer_position`). Only [`ScenarioError`]'s `Display` shortens and sanitises it.
 pub(crate) fn segment(key: &str) -> String {
-    let mut out = String::new();
-    for (count, c) in key.chars().enumerate() {
-        if count == MAX_SEGMENT_CHARS {
-            out.push_str("...");
-            break;
-        }
+    let mut out = String::with_capacity(key.len());
+    for c in key.chars() {
         match c {
             '~' => out.push_str("~0"),
             '/' => out.push_str("~1"),
-            c if c.is_control() => out.push('?'),
             c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `path` for display: every segment cut to [`MAX_SEGMENT_CHARS`] characters (then `...`),
+/// control characters shown as `?`. The result is bounded per segment and one line.
+fn display_path(path: &str) -> String {
+    let mut out = String::new();
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        for (count, c) in seg.chars().enumerate() {
+            if count == MAX_SEGMENT_CHARS {
+                out.push_str("...");
+                break;
+            }
+            out.push(if c.is_control() { '?' } else { c });
         }
     }
     out

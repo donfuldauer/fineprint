@@ -18,10 +18,11 @@
 //! parse, 2 usage or I/O error (no path, an unreadable path, a path holding no `.pzl` file, an
 //! unreadable or invalid card library).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use fineprint_core::scenario::{
-    ScenarioError, StateHost, parse_scenario, pointer_position, run_scenario,
+    MAX_SCENARIO_BYTES, ScenarioError, StateHost, parse_scenario, pointer_position, run_scenario,
 };
 
 const USAGE: &str = "usage: cargo xtask pzl [--cards <dir>] <path.pzl|dir>...";
@@ -68,7 +69,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mut failed = 0usize;
     for file in &files {
-        let bytes = match std::fs::read(file) {
+        let bytes = match read_bounded(file) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("pzl: cannot read {}: {e}", file.display());
@@ -99,6 +100,16 @@ pub fn run(args: &[String]) -> u8 {
         eprintln!("pzl: {failed} of {} scenarios failed", files.len());
         1
     }
+}
+
+/// Reads `file`, at most `MAX_SCENARIO_BYTES + 1` bytes: the extra byte lets the parser reject an
+/// oversized file with `TooLarge` without the whole file ever being held in memory (R12).
+fn read_bounded(file: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)?
+        .take(MAX_SCENARIO_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The success summary line.
@@ -201,7 +212,12 @@ fn host_for(library: &[(PathBuf, Vec<u8>)]) -> Result<StateHost, String> {
 
 /// The position of a loader error, `1:1` when unknown.
 fn error_line(e: &ScenarioError) -> (u32, u32, String) {
-    let pointer = if e.path.is_empty() { "/" } else { &e.path };
+    let shown = e.display_path();
+    let pointer = if shown.is_empty() {
+        "/"
+    } else {
+        shown.as_str()
+    };
     (
         e.line.unwrap_or(1),
         e.column.unwrap_or(1),
@@ -282,6 +298,44 @@ mod tests {
 }}
 "#
         )
+    }
+
+    /// REQ-TEST-001, R12 (F82): a file over the parser limit is read only up to the limit plus
+    /// one byte and fails with the parser's `TooLarge` message; a valid file reads unchanged.
+    #[test]
+    fn req_test_001_pzl_over_limit_file_is_too_large() {
+        let dir = scratch("too-large");
+        let big = dir.join("big.pzl");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_SCENARIO_BYTES as u64 * 4).unwrap();
+        drop(f);
+        let bytes = read_bounded(&big).unwrap();
+        assert_eq!(bytes.len(), MAX_SCENARIO_BYTES + 1);
+        let problems = check_file(&bytes, &[]).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].2.contains("too-large"), "{problems:?}");
+        assert_eq!(run(&args(&[big.to_str().unwrap()])), 1);
+        let ok = dir.join("ok.pzl");
+        std::fs::write(&ok, scenario(20)).unwrap();
+        assert_eq!(read_bounded(&ok).unwrap(), scenario(20).into_bytes());
+        assert!(read_bounded(&dir.join("missing.pzl")).is_err());
+    }
+
+    /// REQ-TEST-001, R12 (F74): a diagnostic never prints a hostile key raw: control characters
+    /// become `?`, a long segment is cut to 64 characters, and the line stays one line.
+    #[test]
+    fn req_test_001_pzl_diagnostic_path_is_sanitised() {
+        let key = format!("{}\\u0001{}", "k".repeat(70), "z".repeat(10));
+        let text = scenario(20).replace(
+            "\"definitionHashes\": {",
+            &format!("\"definitionHashes\": {{\"{key}\": \"bad\", "),
+        );
+        let problems = check_file(text.as_bytes(), &[]).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let msg = &problems[0].2;
+        assert!(!msg.chars().any(char::is_control), "{msg:?}");
+        assert!(msg.contains(&format!("{}...", "k".repeat(64))), "{msg}");
+        assert!(!msg.contains(&"k".repeat(65)), "{msg}");
     }
 
     /// REQ-TEST-001: `pzl` without a path, with a bad option and with an unreadable or empty

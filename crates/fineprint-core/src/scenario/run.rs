@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::error::quote;
 use super::model::{
     AbsentWhat, Assertion, CharacteristicsExpect, DesignationSpec, EventPattern, EventsMode,
     OptionsMode, OrderMode, Scenario, Setup, ZoneName,
@@ -54,9 +55,12 @@ pub struct AssertionOutcome {
     pub path: String,
     /// Whether it held.
     pub passed: bool,
-    /// What was expected, as compact JSON.
+    /// What was expected, as compact JSON: a preview of at most `MAX_PREVIEW_CHARS` characters
+    /// (cut text ends in `...`), or `REPORT_BUDGET_EXHAUSTED` once the
+    /// `MAX_REPORT_PREVIEW_BYTES` budget of one [`evaluate_assertions`] call is spent. The
+    /// comparison itself is exact.
     pub expected: String,
-    /// What was observed, as compact JSON.
+    /// What was observed, as compact JSON: bounded exactly like `expected`.
     pub actual: String,
 }
 
@@ -121,7 +125,7 @@ impl ScenarioReport {
         let mut out = format!(
             "{} {}\n",
             if self.passed { "PASS" } else { "FAIL" },
-            self.title
+            one_line(&self.title)
         );
         for (pointer, message) in self.problems() {
             out.push_str(&format!("{pointer}: {message}\n"));
@@ -170,8 +174,9 @@ fn play(scenario: &Scenario, host: &mut dyn ScenarioHost) -> Result<(), ScriptFa
                 && *c != pending.chooser
             {
                 return Err(fail(format!(
-                    "expected a choice of {c}, but the pending choice is {}'s",
-                    pending.chooser
+                    "expected a choice of {}, but the pending choice is {}'s",
+                    quote(c),
+                    quote(&pending.chooser)
                 )));
             }
             if let Some(t) = &expect.choice_type
@@ -189,11 +194,26 @@ fn play(scenario: &Scenario, host: &mut dyn ScenarioHost) -> Result<(), ScriptFa
     Ok(())
 }
 
+/// The longest `expected` or `actual` text of an [`AssertionOutcome`], in characters; a longer
+/// one is cut on a character boundary and ends in `...` (R12, CWE-400).
+pub(crate) const MAX_PREVIEW_CHARS: usize = 256;
+
+/// The most bytes of `expected` and `actual` text one [`evaluate_assertions`] call keeps (256
+/// KiB); later previews are `REPORT_BUDGET_EXHAUSTED`.
+pub(crate) const MAX_REPORT_PREVIEW_BYTES: usize = 256 * 1024;
+
+/// The text that replaces a preview once the `MAX_REPORT_PREVIEW_BYTES` budget is spent.
+pub(crate) const REPORT_BUDGET_EXHAUSTED: &str = "(omitted: report budget exhausted)";
+
 /// Evaluates every assertion of `scenario` against `observed`, in file order (REQ-TEST-001).
 /// Pure: the same logic [`run_scenario`] uses. Every assertion is evaluated, whatever the
-/// earlier ones gave.
+/// earlier ones gave. Pass/fail is computed on the full values; only the stored `expected` and
+/// `actual` text is bounded: each is a preview of at most `MAX_PREVIEW_CHARS` characters, and
+/// all previews together take at most `MAX_REPORT_PREVIEW_BYTES` bytes, after which a preview
+/// is `REPORT_BUDGET_EXHAUSTED` (R12).
 #[must_use]
 pub fn evaluate_assertions(scenario: &Scenario, observed: &Observed) -> Vec<AssertionOutcome> {
+    let mut budget = MAX_REPORT_PREVIEW_BYTES;
     scenario
         .assertions
         .iter()
@@ -205,15 +225,76 @@ pub fn evaluate_assertions(scenario: &Scenario, observed: &Observed) -> Vec<Asse
                 kind: a.kind().to_owned(),
                 path: format!("/assertions/{index}"),
                 passed,
-                expected: compact(&expected),
-                actual: compact(&actual),
+                expected: bounded(&expected, &mut budget),
+                actual: bounded(&actual, &mut budget),
             }
         })
         .collect()
 }
 
-fn compact(v: &Value) -> String {
-    serde_json::to_string(v).unwrap_or_default()
+/// A writer that keeps at most `cap` bytes and then fails, so serialising a huge value stops
+/// early instead of building the whole text.
+struct CappedWriter {
+    buf: Vec<u8>,
+    cap: usize,
+    overflowed: bool,
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.cap - self.buf.len();
+        if data.len() > room {
+            self.buf.extend_from_slice(&data[..room]);
+            self.overflowed = true;
+            return Err(std::io::Error::other("preview full"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compact JSON of `v` as a preview of at most `MAX_PREVIEW_CHARS` characters, charged
+/// against `budget` (bytes left); `REPORT_BUDGET_EXHAUSTED` when it does not fit.
+fn bounded(v: &Value, budget: &mut usize) -> String {
+    // Four bytes per character is the most UTF-8 needs, so this holds every kept character.
+    let mut w = CappedWriter {
+        buf: Vec::new(),
+        cap: MAX_PREVIEW_CHARS * 4,
+        overflowed: false,
+    };
+    let _ = serde_json::to_writer(&mut w, v);
+    let text = match std::str::from_utf8(&w.buf) {
+        Ok(t) => t,
+        Err(e) => std::str::from_utf8(&w.buf[..e.valid_up_to()]).unwrap_or_default(),
+    };
+    let mut preview: String = text.chars().take(MAX_PREVIEW_CHARS).collect();
+    if w.overflowed || text.chars().nth(MAX_PREVIEW_CHARS).is_some() {
+        preview.push_str("...");
+    }
+    if preview.len() > *budget {
+        return REPORT_BUDGET_EXHAUSTED.to_owned();
+    }
+    *budget -= preview.len();
+    preview
+}
+
+/// `text` on one line: line breaks and other control characters escaped.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A color name in its one-letter form (`WHITE`, `white` and `W` all give `W`); anything else

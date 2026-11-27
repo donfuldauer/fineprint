@@ -278,7 +278,19 @@ fn is_date(s: &str) -> bool {
     let (Some(_), Some(m), Some(d)) = (digits(0..4), digits(5..7), digits(8..10)) else {
         return false;
     };
-    (1..=12).contains(&m) && (1..=31).contains(&d)
+    let Some(year) = digits(0..4) else {
+        return false;
+    };
+    // The Gregorian leap rule: divisible by 4, except centuries not divisible by 400.
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&d)
 }
 
 /// Decodes and checks a whole scenario.
@@ -295,7 +307,10 @@ pub(crate) fn decode(root: &Node) -> Result<Scenario> {
             "missing field \"pzlVersion\"".to_owned(),
         ));
     };
-    let v = int_u64(&version.node, "/pzlVersion")?;
+    // Compared as the reader's integer, without narrowing: -1 and 0 are as unsupported as 2.
+    let Value::Int(v) = version.node.value else {
+        return Err(wrong_type("/pzlVersion", &version.node, "an integer"));
+    };
     if v != 1 {
         return Err(err(
             ScenarioErrorKind::Unsupported,
@@ -735,6 +750,19 @@ fn choice_type(node: &Node, path: &str) -> Result<String> {
     Ok(s)
 }
 
+/// The answer types that carry no payload: the unit variants of `ChoiceResponse` (REQ-TEST-001).
+/// Such an answer is exactly `{"type": <name>}`; any other member is `UnknownField`. Keep in step
+/// with `ANSWER_TYPES`.
+pub(super) const FIELDLESS_ANSWER_TYPES: [&str; 7] = [
+    "PASS_PRIORITY",
+    "DECLINE_OPTIONAL_PAYMENT",
+    "CANCEL_AND_ROLLBACK",
+    "YES",
+    "NO",
+    "ACCEPT",
+    "TAKE_MULLIGAN",
+];
+
 fn decode_step(node: &Node, path: &str) -> Result<ScriptStep> {
     let o = Obj::new(node, path, &["expect", "answer"])?;
     let expect = match o.opt("expect") {
@@ -771,6 +799,10 @@ fn decode_step(node: &Node, path: &str) -> Result<ScriptStep> {
             tn,
             format!("unknown answer type {}", quote(&t)),
         ));
+    }
+    // An answer that carries no payload takes no member besides its `type`.
+    if FIELDLESS_ANSWER_TYPES.contains(&t.as_str()) {
+        Obj::new(n, &p, &["type"])?;
     }
     Ok(ScriptStep {
         expect,

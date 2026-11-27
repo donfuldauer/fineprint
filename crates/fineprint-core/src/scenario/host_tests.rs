@@ -10,6 +10,7 @@
 
 use super::tests::{FLIER_2_2, edit, sample};
 use super::*;
+use std::collections::BTreeMap;
 
 const WHITE_1_1_JSON: &[u8] =
     include_bytes!("../../../../tests/fixtures/cards/creatures/vanilla_white_1_1.json");
@@ -340,4 +341,156 @@ fn req_test_001_shared_exile_command_stack_and_attachments() {
     assert_eq!(o.characteristics["s2"].controller.as_deref(), Some("p2"));
     assert_eq!(o.characteristics["l1"].abilities, ["ACTIVATED"]);
     assert_eq!(o.characteristics["l1"].power, None);
+}
+
+/// The typed setup of `sample()`.
+fn sample_setup() -> Setup {
+    parse_scenario(sample().as_bytes()).unwrap().setup
+}
+
+/// The build error of `setup` on the library host.
+fn build_err(setup: &Setup) -> String {
+    host().build(setup).expect_err("the build must fail")
+}
+
+#[test]
+fn req_test_001_r11_typed_setup_needs_a_hash_for_every_used_card() {
+    // R11: `StateHost::build` takes a public typed `Setup`; a used card without a required
+    // definitionHash is refused even though the card is loaded (Gate 06-turn F32).
+    let mut setup = sample_setup();
+    setup
+        .card_database
+        .definition_hashes
+        .remove("test.vanilla_green_2_2");
+    let e = build_err(&setup);
+    assert!(e.contains("\"test.vanilla_green_2_2\""), "{e}");
+    assert!(e.contains("definitionHashes"), "{e}");
+    // The same setup with the hash builds.
+    let mut ok = setup.clone();
+    ok.card_database.definition_hashes.insert(
+        "test.vanilla_green_2_2".to_owned(),
+        sample_setup().card_database.definition_hashes["test.vanilla_green_2_2"].clone(),
+    );
+    host().build(&ok).unwrap();
+    // A mismatching hash still fails.
+    let mut wrong = ok;
+    wrong
+        .card_database
+        .definition_hashes
+        .insert("test.vanilla_green_2_2".to_owned(), "0".repeat(64));
+    let e = build_err(&wrong);
+    assert!(e.contains("differs from the required"), "{e}");
+    // A card used only in a player zone (no battlefield object) is checked as well.
+    let mut zone_only = sample_setup();
+    zone_only
+        .card_database
+        .definition_hashes
+        .remove("test.vanilla_white_1_1");
+    let e = build_err(&zone_only);
+    assert!(e.contains("\"test.vanilla_white_1_1\""), "{e}");
+}
+
+#[test]
+fn req_test_001_r12_typed_setup_ids_are_declared_once() {
+    // R12: every id (players and objects together) is declared once, also at the typed
+    // boundary (Gate 06-turn F33).
+    // A hand card and a battlefield permanent with one id.
+    let mut setup = sample_setup();
+    setup.battlefield[0].id = "o3".to_owned();
+    let e = build_err(&setup);
+    assert!(e.contains("\"o3\"") && e.contains("more than once"), "{e}");
+    // A player id equal to an object id.
+    let mut setup = sample_setup();
+    setup.battlefield[1].id = "p2".to_owned();
+    let e = build_err(&setup);
+    assert!(e.contains("\"p2\"") && e.contains("more than once"), "{e}");
+    // A declared id equal to a generated `<player>.<zone>.<index>` id.
+    let mut setup = sample_setup();
+    setup.battlefield[0].id = "p1.library.0".to_owned();
+    let e = build_err(&setup);
+    assert!(e.contains("\"p1.library.0\""), "{e}");
+    // Two players with one id.
+    let mut setup = sample_setup();
+    setup.players[1].id = "p1".to_owned();
+    let e = build_err(&setup);
+    assert!(e.contains("\"p1\"") && e.contains("more than once"), "{e}");
+    // Distinct ids build, with the observation keys as before.
+    let mut h = host();
+    h.build(&sample_setup()).unwrap();
+    let o = h.observe();
+    assert_eq!(o.zones["p1/library"], ["p1.library.0", "o2"]);
+    assert_eq!(o.zones["p1/hand"], ["o3"]);
+    assert_eq!(o.zones["battlefield"], ["o1", "o5"]);
+    assert_eq!(o.counters["o1"]["+1/+1"], 1);
+}
+
+#[test]
+fn req_test_001_shared_exile_permanent_fields_are_refused() {
+    // REQ-TEST-001: a shared-exile object has no permanent status; such a field is refused,
+    // never silently dropped (Gate 06-turn F34).
+    let exiled = || ObjectSetup {
+        id: "x1".to_owned(),
+        card: "test.flier_2_2".to_owned(),
+        owner: "p2".to_owned(),
+        controller: None,
+        tapped: false,
+        flipped: false,
+        face_down: false,
+        phased_out: false,
+        counters: BTreeMap::new(),
+        designations: BTreeMap::new(),
+        attached_to: None,
+        timestamp: None,
+        controlled_since_turn: None,
+    };
+    let with = |o: ObjectSetup| {
+        let mut s = sample_setup();
+        s.shared_exile.push(o);
+        s
+    };
+    let refused = |o: ObjectSetup, field: &str| {
+        let e = build_err(&with(o));
+        assert!(e.starts_with(UNSUPPORTED), "{e}");
+        assert!(e.contains(field) && e.contains("\"x1\""), "{e}");
+    };
+    let mut o = exiled();
+    o.designations
+        .insert("test.mark".to_owned(), DesignationSpec::Bool(true));
+    refused(o, "designations");
+    let mut o = exiled();
+    o.tapped = true;
+    refused(o, "tapped");
+    let mut o = exiled();
+    o.flipped = true;
+    refused(o, "flipped");
+    let mut o = exiled();
+    o.phased_out = true;
+    refused(o, "phasedOut");
+    let mut o = exiled();
+    o.controller = Some("p1".to_owned());
+    refused(o, "controller");
+    let mut o = exiled();
+    o.attached_to = Some("o1".to_owned());
+    refused(o, "attachedTo");
+    let mut o = exiled();
+    o.timestamp = Some(1);
+    refused(o, "timestamp");
+    let mut o = exiled();
+    o.controlled_since_turn = Some(1);
+    refused(o, "controlledSinceTurn");
+    // A plain entry, one with counters, one whose controller is its owner and one with a
+    // `false` designation (absent) build.
+    let mut h = host();
+    h.build(&with(exiled())).unwrap();
+    assert_eq!(h.observe().zones["sharedExile"], ["x1"]);
+    let mut o = exiled();
+    o.counters.insert("test.charge".to_owned(), 2);
+    o.controller = Some("p2".to_owned());
+    o.designations
+        .insert("x".to_owned(), DesignationSpec::Bool(false));
+    let mut h = host();
+    h.build(&with(o)).unwrap();
+    let observed = h.observe();
+    assert_eq!(observed.zones["sharedExile"], ["x1"]);
+    assert_eq!(observed.counters["x1"]["test.charge"], 2);
 }

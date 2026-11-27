@@ -895,3 +895,208 @@ fn req_test_001_r12_fuzz_random_and_mutated_inputs() {
     }
     assert!(cases >= 5_000, "{cases}");
 }
+
+// ---- Gate 06-turn findings F36, F37, F74-F77 (REQ-TEST-001, R12) ----
+
+/// REQ-TEST-001 (F36): a field-less answer takes no member besides `type`; a structured answer
+/// keeps its payload.
+#[test]
+fn req_test_001_fieldless_answers_reject_extra_members() {
+    for t in [
+        "PASS_PRIORITY",
+        "DECLINE_OPTIONAL_PAYMENT",
+        "CANCEL_AND_ROLLBACK",
+        "YES",
+        "NO",
+        "ACCEPT",
+        "TAKE_MULLIGAN",
+    ] {
+        let from =
+            "\"choiceType\": \"PRIORITY_ACTION\"}, \"answer\": {\"type\": \"PASS_PRIORITY\"}}";
+        let text = edit(
+            from,
+            &format!(
+                "\"choiceType\": \"PRIORITY_ACTION\"}}, \"answer\": {{\"type\": \"{t}\", \"extra\": true}}}}"
+            ),
+        );
+        let e = parse_err(&text);
+        assert_eq!(e.kind, ScenarioErrorKind::UnknownField, "{t}: {e}");
+        assert_eq!(e.path, "/script/0/answer", "{t}");
+        assert_eq!(
+            (e.line, e.column),
+            {
+                let (l, c) = locate(&text, "\"extra\"");
+                (Some(l), Some(c))
+            },
+            "{t}"
+        );
+        // Without the extra member it parses.
+        let ok = edit(
+            from,
+            &format!("\"choiceType\": \"PRIORITY_ACTION\"}}, \"answer\": {{\"type\": \"{t}\"}}}}"),
+        );
+        assert!(parse_scenario(ok.as_bytes()).is_ok(), "{t}");
+    }
+    let ok = edit(
+        "\"choiceType\": \"PRIORITY_ACTION\"}, \"answer\": {\"type\": \"PASS_PRIORITY\"}}",
+        "\"choiceType\": \"PRIORITY_ACTION\"}, \"answer\": {\"type\": \"PLAY_LAND\", \"object\": \"o3\"}}",
+    );
+    assert!(parse_scenario(ok.as_bytes()).is_ok());
+}
+
+/// REQ-TEST-001, R12 (F37): an object with about 100,000 distinct keys reads (linear-time
+/// duplicate detection), and a duplicate placed last is `DuplicateKey` at the second key.
+#[test]
+fn req_test_001_wide_object_reads_and_reports_a_last_duplicate() {
+    let mut text = String::from("{\"pzlVersion\": 1");
+    for i in 0..100_000u32 {
+        text.push_str(&format!(",\"{i:x}\":0"));
+    }
+    assert!(text.len() < MAX_SCENARIO_BYTES, "{}", text.len());
+    // Every key is distinct: the reader finishes and the schema rejects the first extra key.
+    assert!(super::json::parse(format!("{text}}}").as_bytes()).is_ok());
+    let e = parse_err(&format!("{text}}}"));
+    assert_eq!(e.kind, ScenarioErrorKind::UnknownField, "{e}");
+    // A duplicate of the first key, last: at the second key's own position.
+    let dup = format!("{text},\"1\":0}}");
+    let e = parse_err(&dup);
+    assert_eq!(e.kind, ScenarioErrorKind::DuplicateKey, "{e}");
+    assert_eq!(e.path, "");
+    let column = u32::try_from(text.chars().count()).unwrap() + 2;
+    assert_eq!((e.line, e.column), (Some(1), Some(column)), "{e}");
+}
+
+/// REQ-TEST-001 (F74): `path` is the complete JSON pointer, so `pointer_position` finds the
+/// member for a 65-character key and for a key with a control character; `Display` is bounded
+/// and has no control characters.
+#[test]
+fn req_test_001_error_path_is_complete_and_display_is_sanitised() {
+    let long = "k".repeat(65);
+    for (key_text, key) in [
+        (long.clone(), long.clone()),
+        ("k\\u0001x".to_owned(), "k\u{1}x".to_owned()),
+    ] {
+        let text = edit(
+            &format!("\"test.flier_2_2\": \"{FLIER_2_2}\""),
+            &format!("\"{key_text}\": \"{}\"", "z".repeat(64)),
+        );
+        let e = parse_err(&text);
+        assert_eq!(e.kind, ScenarioErrorKind::OutOfRange, "{e}");
+        assert_eq!(e.path, format!("/cardDatabase/definitionHashes/{key}"));
+        let pos = pointer_position(text.as_bytes(), &e.path).expect("member found");
+        assert_eq!(Some(pos), e.line.zip(e.column));
+        let shown = e.to_string();
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        if key.len() == 65 {
+            assert!(shown.contains(&format!("{}...", "k".repeat(64))), "{shown}");
+            assert!(!shown.contains(&long), "{shown}");
+        } else {
+            assert!(shown.contains("k?x"), "{shown}");
+        }
+    }
+    // `~` and `/` are escaped as in RFC 6901 and still round-trip.
+    let text = edit(
+        &format!("\"test.flier_2_2\": \"{FLIER_2_2}\""),
+        &format!("\"a~/b\": \"{}\"", "z".repeat(64)),
+    );
+    let e = parse_err(&text);
+    assert_eq!(e.path, "/cardDatabase/definitionHashes/a~0~1b");
+    assert!(pointer_position(text.as_bytes(), &e.path).is_some());
+}
+
+/// REQ-TEST-001 (F75): the ruling date is checked against its month and year.
+#[test]
+fn req_test_001_ruling_dates_are_real_dates() {
+    let with = |d: &str| {
+        edit(
+            "\"cr\": [],",
+            &format!("\"cr\": [], \"ruling\": {{\"date\": \"{d}\", \"ref\": \"r\"}},"),
+        )
+    };
+    for bad in [
+        "2025-02-29",
+        "2024-04-31",
+        "2023-02-29",
+        "1900-02-29",
+        "2024-00-10",
+    ] {
+        let e = parse_err(&with(bad));
+        assert_eq!(e.kind, ScenarioErrorKind::Invalid, "{bad}: {e}");
+        assert_eq!(e.path, "/ruling/date");
+    }
+    for good in [
+        "2024-02-29",
+        "2000-02-29",
+        "2023-02-28",
+        "2024-12-31",
+        "2024-04-30",
+    ] {
+        assert!(parse_scenario(with(good).as_bytes()).is_ok(), "{good}");
+    }
+}
+
+/// REQ-TEST-001 (F76): every `pzlVersion` integer other than 1 is `Unsupported`; a
+/// non-integer is `WrongType`.
+#[test]
+fn req_test_001_pzl_version_kinds() {
+    for v in [
+        "-1",
+        "0",
+        "2",
+        "18446744073709551615",
+        "-9223372036854775808",
+    ] {
+        let e = parse_err(&edit("\"pzlVersion\": 1", &format!("\"pzlVersion\": {v}")));
+        assert_eq!(e.kind, ScenarioErrorKind::Unsupported, "{v}: {e}");
+        assert_eq!(e.path, "/pzlVersion");
+    }
+    for v in ["\"1\"", "true", "null"] {
+        let e = parse_err(&edit("\"pzlVersion\": 1", &format!("\"pzlVersion\": {v}")));
+        assert_eq!(e.kind, ScenarioErrorKind::WrongType, "{v}: {e}");
+        assert_eq!(e.path, "/pzlVersion");
+    }
+}
+
+/// REQ-TEST-001 (F77): a malformed fraction or exponent is a syntax error at the number; a
+/// well-formed float token is `WrongType`.
+#[test]
+fn req_test_001_number_grammar() {
+    for (tok, kind) in [
+        ("1e", ScenarioErrorKind::Syntax),
+        ("1.", ScenarioErrorKind::Syntax),
+        ("1e+", ScenarioErrorKind::Syntax),
+        ("1.e5", ScenarioErrorKind::Syntax),
+        ("-0.", ScenarioErrorKind::Syntax),
+        ("1.5e", ScenarioErrorKind::Syntax),
+        ("1.5", ScenarioErrorKind::WrongType),
+        ("1e2", ScenarioErrorKind::WrongType),
+        ("-0.5E-3", ScenarioErrorKind::WrongType),
+        ("1E+2", ScenarioErrorKind::WrongType),
+    ] {
+        let text = edit("\"prngSeed\": 7,", &format!("\"prngSeed\": {tok},"));
+        let e = parse_err(&text);
+        assert_eq!(e.kind, kind, "{tok}: {e}");
+        let (l, c) = locate(&text, &format!("\"prngSeed\": {tok}"));
+        assert_eq!((e.line, e.column), (Some(l), Some(c + 12)), "{tok}");
+        assert!(e.message.len() <= 120, "{}", e.message);
+    }
+}
+
+/// REQ-TEST-001 (F36): the field-less list is a subset of `ANSWER_TYPES` and each such type
+/// parses with only `type` (the full set is checked by `req_test_001_fieldless_answers_reject_extra_members`).
+#[test]
+fn req_test_001_fieldless_list_matches_answer_types() {
+    let fieldless: Vec<&str> = ANSWER_TYPES
+        .iter()
+        .copied()
+        .filter(|t| super::decode::FIELDLESS_ANSWER_TYPES.contains(t))
+        .collect();
+    assert_eq!(fieldless.len(), super::decode::FIELDLESS_ANSWER_TYPES.len());
+    for t in fieldless {
+        let ok = edit(
+            "\"choiceType\": \"PRIORITY_ACTION\"}, \"answer\": {\"type\": \"PASS_PRIORITY\"}}",
+            &format!("\"choiceType\": \"PRIORITY_ACTION\"}}, \"answer\": {{\"type\": \"{t}\"}}}}"),
+        );
+        assert!(parse_scenario(ok.as_bytes()).is_ok(), "{t}");
+    }
+}
