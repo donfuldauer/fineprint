@@ -203,6 +203,14 @@ pub trait ActionHost {
     /// The activated abilities `player` could activate.
     fn ability_candidates(&self, player: PlayerId) -> Vec<AbilityCandidate>;
     /// The face-down objects `player` could turn face up.
+    ///
+    /// A host MUST emit one [`TurnFaceUpCandidate`] per available turn-face-up procedure (for
+    /// example the morph or disguise cost route and the manifest or cloak route), each with its
+    /// own `origin`, for every face-down object. CR 701.40c, 701.40d, 701.58c and 701.58d: a card
+    /// with morph or disguise that is manifested or cloaked may be turned face up using either
+    /// the morph or disguise procedure or the manifest or cloak procedure (CR 701.40b, 701.58b:
+    /// the latter needs a creature card with a mana cost). The generator merges candidates for
+    /// the same response and keeps a legal one over an illegal one.
     fn turn_face_up_candidates(&self, player: PlayerId) -> Vec<TurnFaceUpCandidate>;
     /// The other special actions `player` could take.
     fn special_candidates(&self, player: PlayerId) -> Vec<SpecialCandidate>;

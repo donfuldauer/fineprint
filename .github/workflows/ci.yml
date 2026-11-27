@@ -336,6 +336,10 @@ jobs:
       - name: cargo test (full-recompute mode)
         if: needs.changes.outputs.code == 'true'
         run: cargo test --workspace --locked --features fineprint-core/full-recompute
+      - name: Clear restored differential outputs
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: rm -rf target/differential
       - name: Scenario digests and state hashes (cached mode)
         if: needs.changes.outputs.code == 'true'
         env:

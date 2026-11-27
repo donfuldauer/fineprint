@@ -1049,3 +1049,82 @@ fn req_event_001_ten_runs_identical() {
         assert_eq!(bytes(&r.output), bytes(&r0.output));
     }
 }
+
+// =============================================================================================
+// Gate 06-turn F7: the preflight captures last known information
+// =============================================================================================
+
+/// A provider that cannot evaluate one object and otherwise answers as the world's provider.
+struct MissingOne<'a> {
+    inner: &'a TestProvider,
+    missing: ObjectId,
+}
+
+impl fineprint_core::memory::CharacteristicsProvider for MissingOne<'_> {
+    fn characteristics(&self, id: ObjectId) -> Option<fineprint_core::objects::Characteristics> {
+        if id == self.missing {
+            None
+        } else {
+            self.inner.characteristics(id)
+        }
+    }
+}
+
+/// `EventContext::graveyard_order_groups` over `w` with a provider that cannot evaluate
+/// `missing`.
+fn groups_missing(
+    w: &mut World,
+    batch: &EventBatch,
+    missing: ObjectId,
+) -> Result<Vec<GraveyardOrderGroup>, EventError> {
+    let inner = w.provider.clone();
+    let provider = MissingOne {
+        inner: &inner,
+        missing,
+    };
+    let mut ctx = fineprint_core::events::EventContext {
+        game: &mut w.game,
+        zones: &mut w.zones,
+        ids: &mut w.ids,
+        permanents: &mut w.permanents,
+        memories: &mut w.memories,
+        lki: &mut w.lki,
+        events: &mut w.events,
+        provider: &provider,
+    };
+    ctx.graveyard_order_groups(batch)
+}
+
+// REQ-ZONE-001, REQ-EVENT-001, REQ-CORE-003, CR 404.3, CR 704.8, CR 603.10a (Gate 06-turn F7):
+// two nontoken cards of one owner die together, but the provider cannot evaluate one of them,
+// so the batch's LKI capture fails. `graveyard_order_groups` returns that error
+// (`NoCharacteristics`) instead of offering a group that every answer to `execute_batch_ordered`
+// would fail, and leaves every component unchanged; the same batch with a provider that can
+// evaluate both still yields its group, with the same cards and default order.
+#[test]
+fn req_zone_001_preflight_lki_failure_offers_no_group() {
+    let mut base = World::new();
+    let ab = base.creatures(P1, 2);
+    let batch = all_die(&ab);
+    for &missing in &ab {
+        let mut w = base.clone();
+        let before = w.snap();
+        assert_eq!(
+            groups_missing(&mut w, &batch, missing),
+            Err(EventError::Memory(
+                fineprint_core::memory::MemoryError::NoCharacteristics(missing)
+            )),
+            "no group for a batch whose LKI capture fails"
+        );
+        assert_eq!(w.snap(), before, "every component unchanged");
+    }
+    // Control: the evaluable batch keeps its group exactly.
+    let mut w = base.clone();
+    let before = w.snap();
+    let groups = w.groups(&batch);
+    let group = only(&groups);
+    assert_eq!(group.owner, P1);
+    assert_eq!(group.cards, sorted(&ab));
+    assert_eq!(group.default_order, vec![ab[1], ab[0]]);
+    assert_eq!(w.snap(), before, "every component unchanged");
+}

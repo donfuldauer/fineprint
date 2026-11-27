@@ -80,8 +80,9 @@ const STANDARD: [SpecialActionKind; 11] = [
         "CR 116.2j",
         SpecialTiming::AnyPriority,
     ),
-    // CR 116.2k: plot, own turn while the stack is empty.
-    kind("PLOT", "CR 116.2k", SpecialTiming::OwnTurnStackEmpty),
+    // CR 116.2k, 702.170a: plot, main phase of own turn, empty stack (the keyword rule is the
+    // narrower of the two; see DECISIONS.md, Gate 06-turn F3).
+    kind("PLOT", "CR 116.2k", SpecialTiming::SorceryTiming),
     // CR 116.2m: paying an unlock cost, main phase of own turn, empty stack.
     kind("UNLOCK", "CR 116.2m", SpecialTiming::SorceryTiming),
 ];

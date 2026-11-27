@@ -797,15 +797,30 @@ fn req_dsl_013_activation_timing_variants() {
     }
 }
 
-/// REQ-DSL-013; CR 117.1d, 605.3a: a mana ability ignores its timing; still bound by CR 602.5a.
+/// REQ-DSL-013; CR 117.1d, 605.3a, 605.1, 602.5d: an unrestricted mana ability is legal whenever
+/// the player has priority; an explicit timing restriction still binds it; CR 602.5a still
+/// applies.
 #[test]
 fn req_dsl_013_mana_ability_ignores_timing() {
     let mut c = ability(10, "m");
     c.is_mana_ability = true;
+    // No stated timing: legal in combat on another player's turn.
+    let h = Host::new()
+        .ability(c.clone())
+        .timing(timing(2, Phase::Combat, false));
+    check(&h, &act(10, "m"), &legal(vec![rule("CR 605.3a")]));
+    // CR 602.5d: "Activate only as a sorcery" still binds the mana ability.
     c.timing = Some(ActivationTiming::Sorcery);
     let h = Host::new()
         .ability(c.clone())
         .timing(timing(2, Phase::Combat, false));
+    check(
+        &h,
+        &act(10, "m"),
+        &illegal(vec![Reason::Timing(TimingRequirement::SorceryTiming)]),
+    );
+    // The same ability at sorcery timing is legal.
+    let h = Host::new().ability(c.clone()).timing(main1());
     check(&h, &act(10, "m"), &legal(vec![rule("CR 605.3a")]));
     c.requires_tap_symbol = true;
     c.summoning_sick = true;
@@ -814,6 +829,56 @@ fn req_dsl_013_mana_ability_ignores_timing() {
         &act(10, "m"),
         &illegal(vec![Reason::SummoningSick]),
     );
+}
+
+/// REQ-DSL-013; CR 800.4j: OpponentTurn needs an active player other than the acting player;
+/// with no active player it is illegal, on a real opponent's turn it is legal.
+#[test]
+fn req_dsl_013_opponent_turn_needs_active_player() {
+    let mut c = ability(10, "a");
+    c.timing = Some(ActivationTiming::OpponentTurn);
+    let mut none = main1();
+    none.active_player = None;
+    let h = Host::new().ability(c.clone()).timing(none);
+    check(
+        &h,
+        &act(10, "a"),
+        &illegal(vec![Reason::Timing(TimingRequirement::OpponentTurn)]),
+    );
+    let h = Host::new()
+        .ability(c)
+        .timing(timing(2, Phase::PrecombatMain, true));
+    check(&h, &act(10, "a"), &legal(vec![rule("CR 117.1b")]));
+}
+
+/// REQ-DSL-013; CR 305.2: an additional land play with `"count": 0` is not part of the basis of
+/// a second land play; the effect with a positive count is.
+#[test]
+fn req_dsl_013_land_basis_excludes_zero_count() {
+    let one = Fx::bare(5, 1, RuleKind::AdditionalLandPlay).with("count", 1);
+    let zero = Fx::bare(6, 2, RuleKind::AdditionalLandPlay).with("count", 0);
+    let h = Host::new()
+        .land(land(10, Zone::Hand))
+        .rules(&[one, zero])
+        .played(1);
+    check(&h, &play(10), &legal(vec![rule("CR 305.1"), eff(5)]));
+}
+
+/// REQ-DSL-013; CR 701.40b, 701.40c: for one face-down object a legal candidate (the morph
+/// route) plus an illegal manifest candidate with no mana cost yields a legal response.
+#[test]
+fn req_dsl_013_turn_face_up_candidates_merge() {
+    let legal_c = face_down(40, FaceDownOrigin::Morph { has_cost: true });
+    let bad = face_down(
+        40,
+        FaceDownOrigin::Manifest {
+            creature_card: true,
+            has_mana_cost: false,
+            instant_or_sorcery: false,
+        },
+    );
+    let h = Host::new().face_up(bad).face_up(legal_c);
+    check(&h, &sa("TURN_FACE_UP", 40), &legal(vec![rule("CR 116.2b")]));
 }
 
 /// REQ-DSL-013; CR 602.5b: per-turn and per-game limits.
@@ -952,7 +1017,7 @@ fn req_dsl_013_registry_table() {
                 "CR 116.2j",
                 SpecialTiming::AnyPriority
             ),
-            ("PLOT", "CR 116.2k", SpecialTiming::OwnTurnStackEmpty),
+            ("PLOT", "CR 116.2k", SpecialTiming::SorceryTiming),
             ("UNLOCK", "CR 116.2m", SpecialTiming::SorceryTiming),
         ]
     );
@@ -1008,11 +1073,9 @@ fn req_dsl_013_special_kinds_timing() {
         .special(special("COMPANION", 3))
         .special(special("END_EFFECT", 4));
     assert_eq!(actions(&h), vec![sa("END_EFFECT", 4), sa("FORETELL", 1)]);
+    // CR 702.170a: PLOT needs the main phase, so the end step does not offer it.
     let h = h.timing(timing(1, Phase::Ending, true));
-    assert_eq!(
-        actions(&h),
-        vec![sa("END_EFFECT", 4), sa("FORETELL", 1), sa("PLOT", 2)]
-    );
+    assert_eq!(actions(&h), vec![sa("END_EFFECT", 4), sa("FORETELL", 1)]);
     let h = h.timing(main1());
     assert_eq!(
         actions(&h),

@@ -86,8 +86,10 @@ fn rich_host() -> FakeHost {
         timed(51, "test.a", ActivationTiming::CombatOnly),
         ability(52, "test.a"),
         AbilityCandidate {
+            // Gate 06-turn F4 (CR 605.3a, 605.1, 602.5d): an explicit timing binds a mana
+            // ability, so the one that must stay offered on the own turn carries no timing.
             is_mana_ability: true,
-            ..timed(53, "test.m", ActivationTiming::OpponentTurn)
+            ..ability(53, "test.m")
         },
         ability(50, "test.b"),
     ];

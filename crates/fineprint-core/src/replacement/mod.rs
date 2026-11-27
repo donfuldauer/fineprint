@@ -81,7 +81,8 @@ mod types;
 mod tests;
 
 pub use bus::{
-    BusReport, MAX_BUS_EVENTS, MAX_CHILD_DEPTH, MAX_REPEATS, process_batch, process_event,
+    BusReport, MAX_BUS_EVENTS, MAX_CHILD_DEPTH, MAX_REPEATS, ProviderRefresh, process_batch,
+    process_batch_refreshing, process_event, process_event_refreshing,
 };
 pub use etb::{
     CopyAbilities, EtbAction, EtbApplied, EtbChoiceKind, EtbCondition, EtbContext, EtbEffect,
