@@ -20,6 +20,12 @@
 //! shuffles (CR 103.3), starting life (CR 103.4), opening hands and the London mulligan
 //! (CR 103.5) and the pregame actions (CR 103.6). It is written against the [`GameStartHost`]
 //! seam and records the starting player that `TurnHost::starting_player` reports.
+//!
+//! [`control`] is turn control (REQ-TURN-003, SRS 5.3): the [`TurnScheduler`] of extra and
+//! skipped turns, phases and steps (CR 500.7-500.11, CR 614.10), ending the turn (CR 725.1)
+//! and the combat phase (CR 725.2), the [`PlayerControl`] model of controlling another player
+//! (CR 724), restarting the game (CR 728.1) and [`run_planned_turn`], which runs a planned turn
+//! through [`run_segment`].
 
 #![deny(missing_docs)]
 
@@ -51,3 +57,14 @@ pub mod start;
 mod start_tests;
 
 pub use start::{GameStartHost, StartOptions, StartReport, mulligan_to_bottom, run_game_start};
+
+pub mod control;
+
+#[cfg(test)]
+mod control_tests;
+
+pub use control::{
+    ControlError, EndTurnHost, EndTurnReport, FollowUpId, InfoScope, PlanItem, PlannedTurn,
+    PlayerControl, RestartHost, RestartReport, RoutedRequest, SkippedTurn, TurnScheduler,
+    end_the_combat_phase, end_the_turn, restart_game, run_planned_turn,
+};

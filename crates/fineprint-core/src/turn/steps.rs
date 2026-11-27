@@ -475,6 +475,12 @@ impl TurnState {
     pub fn previous_active_player(&self) -> Option<PlayerId> {
         self.previous_active
     }
+
+    /// Records the active player of a turn that finished; the next turn's CR 502.2 day/night
+    /// check reads it (REQ-TURN-002, REQ-TURN-003).
+    pub(crate) fn record_turn_taken(&mut self, active: PlayerId) {
+        self.previous_active = Some(active);
+    }
 }
 
 /// What one segment did (REQ-TURN-002).
