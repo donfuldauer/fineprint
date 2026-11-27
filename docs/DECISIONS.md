@@ -9113,6 +9113,13 @@ only on merged `issue/` branches, so a separate contract branch would also stall
 plan-scheduled change, an extra unauthorised branch, and it would leave the contract on `main`
 without its implementation).
 
+**Amendment (gate 06-turn F107).** This entry records a historical deviation from R2
+(`docs/PROCESS.md` P2), not an allowed workflow. R2 requires a contract change to go through
+`contracts/CHANGE_REQUESTS.md` as a separate contract-only PR; landing the entry as the first
+commit of the issue branch, touching only that file, and timing it at a phase boundary do not
+satisfy that requirement. The facts above stand as the record of what happened for CR-004.
+Later contract changes use a separate contract-only PR.
+
 ## #183 FP-144 — Ability identity by value
 
 **Decision:** A static (or ETB) effect is linked to its generating ability as a
@@ -11274,3 +11281,553 @@ deterministic and use ordered containers only (R3).
 would not be "the first main phase of the turn"). Reporting follow-ups in consumption order
 (rejected: the brief asks for creation order). LIFO for "before" anchors (rejected: CR 500.9
 states LIFO only for steps created after the same step).
+
+## Gate 06-turn F30 — CR-005 recorded as merged
+
+**Decision.** CR-005 is marked `Status: merged (#243)` with a process note; no code or digest changes are made.
+
+**Rationale.** R2 requires a separate contract-only PR for later contract changes and a breaking change merges only between phases. #183 merged its own contract entry with its implementation inside phase 04, so the entry is ratified retroactively at the gate, the same remedy the phase 02 gate used for CR-002 and CR-003 (commit 8e35167).
+
+**Alternatives.** Reverting and re-landing the change as a contract-only PR (rejected: the code, goldens and later units already depend on state format version 2). Leaving the entry open (rejected: a contract mismatch cannot be deferred past the gate).
+
+## Gate 06-turn F2 — one layer pass per SBA snapshot
+
+**Decision.** `SbaView::new` runs `layers::evaluate_all` once per SBA snapshot and reads each phased-in battlefield object's `Evaluated` from that map. If `evaluate_all` fails (it errors for the whole pass when any listed object has no base), or lacks an entry, it falls back to the per-object `evaluate` and keeps skipping an object that errors. Observable SBA results (CR 613.1, 613.4) do not change.
+
+**Rationale.** `evaluate` already evaluates the whole object universe, so one call per permanent made a check quadratic in board size. One shared pass is linear and equal to the per-object results (REQ-LAYER-001: `evaluate(id) == evaluate_all()[id]`).
+
+**Alternatives.** Evaluating every object individually as before (rejected: quadratic). Failing the whole snapshot when one object is unknown (rejected: changes the existing skip behaviour).
+
+## Gate 06-turn F3 — PLOT is sorcery-timed
+
+**Decision.** The `PLOT` special action uses `SpecialTiming::SorceryTiming` (own turn, main phase, empty stack). `FORETELL` stays `OwnTurn`.
+
+**Rationale.** The CR is internally inconsistent. CR 116.2k: "A player can take this action any time they have priority during their own turn while the stack is empty." CR 702.170a: "Plot [cost]" means "Any time you have priority during your main phase while the stack is empty, you may exile this card from your hand and pay [cost]." CR 702.170d likewise says "during their main phase while the stack is empty". The keyword's own rule (702.170a) is the narrower and is consistent with 702.170d, so it is followed.
+
+**Alternatives.** Keeping `OwnTurnStackEmpty` per 116.2k (rejected: offers plot in non-main steps against the keyword definition).
+
+## Gate 06-turn F4 — explicit timing binds mana abilities
+
+**Decision.** `check_activate` evaluates an explicit `timing` for mana abilities too. A mana ability with no stated timing stays legal whenever the player has priority; non-mana abilities still default to Instant. The CR 602.5a summoning-sick check is kept.
+
+**Rationale.** CR 605.1: mana abilities are such "regardless of what other effects they may generate or what timing restrictions (such as "Activate only as an instant") they may have". CR 605.3: activating one "follows the rules for activating any other activated ability (see rule 602.2), with the following exceptions", and 605.3a widens only the general permission ("whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment"). CR 602.5d defines "Activate only as a sorcery". No exception waives a stated restriction, so it still applies (an inference from 605.3 and 602.5d; the CR has no sentence that says so).
+
+**Alternatives.** Ignoring all timing for mana abilities (rejected: offers a sorcery-restricted ability in combat).
+
+## Gate 06-turn F32 — Host requires a hash for every used card
+
+**Decision.** `StateHost::build` (`build_world`) refuses a typed `Setup` in which a card used by any object (every zone, generated ids included) has no entry in `cardDatabase.definitionHashes`; the error quotes the card and the object. The existing checks stay: every listed hash must match the loaded definition, and every listed or used card must be loaded.
+
+**Rationale.** R11: the engine never runs a definition that the scenario has not pinned. `parse_scenario` already rejects such files, but `StateHost::build(&Setup)` is public, so the host enforces the same rule independently.
+
+**Alternatives.** Trusting the parser (rejected: direct callers bypass it). Deriving the missing hash from the loaded card (rejected: the scenario would no longer pin its definitions).
+
+## Gate 06-turn F33 — Duplicate ids rejected in the host
+
+**Decision.** Before any object is created, `build_world` checks that every player id and every object id (declared ids and the generated `<player>.<zone>.<index>` ids, in `Setup::objects()` order) is declared once across players and objects together. A duplicate is a build error quoting the id. Distinct ids, the declaration order and the observation keys are unchanged.
+
+**Rationale.** The scenario contract says "every id (players and objects together) is declared once". Without the check a second object with the same id replaced the first one in the name map, and observation could not tell the two apart (R12: the typed setup is an input like the file).
+
+**Alternatives.** Renaming the later duplicate (rejected: assertions would silently target a different object). Checking only object ids (rejected: an object named like a player is ambiguous for `attachedTo` and counter targets).
+
+## Gate 06-turn F34 — Shared-exile fields are rejected, not dropped
+
+**Decision.** A `sharedExile` entry with a non-default `tapped`, `flipped`, `phasedOut`, `designations` (any value other than `false`), `controller` (other than the owner), `attachedTo`, `timestamp` or `controlledSinceTurn` fails the build with an `UNSUPPORTED`-prefixed error naming the field and the object. Plain entries, counters, `controller` equal to the owner and `false` designations (which mean absent) keep working. `attachedTo` is included because the contract defines shared-exile entries as entries without it and the host would otherwise drop it as well. `StackSetup` carries none of these fields, so the stack is unchanged.
+
+**Rationale.** These fields describe a permanent; only battlefield objects get a `Permanents` entry, so the host had no place to apply them and silently reported them as absent. Refusing loudly matches the existing `faceDown` rejection.
+
+**Alternatives.** Applying the designations to the exiled object (impossible: object designations live in the `Permanents` entry, which exists only for battlefield objects). Ignoring them (rejected: the observed state would contradict the setup).
+
+## Gate 06-turn F35 — Setup keeps authored timestamp order across attach
+
+**Decision.** After the setup events (the step, counters and attachments) have executed, `build_world` stamps every battlefield object again with `GameState::stamp_object(id, StampReason::EntersZone)`, in the same ascending `(timestamp.unwrap_or(0), declaration index)` order as the first pass. Every battlefield object then has a timestamp later than every timestamp a setup attach issued (CR 701.3c), and the battlefield's relative order is exactly the authored one, attachments included. Objects outside the battlefield keep their first stamps and stay older than every battlefield object.
+
+**Rationale.** `timestamp` is the authored setup order. `stamp_object` only writes the object's ledger entry (and re-stamps stickers, of which a setup has none) from the state's timestamp generator; re-stamping is explicitly allowed. It changes nothing but timestamps and the generator position, so the build stays deterministic (R3: the order comes from a sorted `Vec`). Setup `AddCounters` events do not stamp counters today, so no counter timestamp is reordered relative to its object. The ledger did not yet record the attach timestamp, but the attach outcome in the event log did, so the attachment's latest issued timestamp was newer than its host's. After the second pass the authored order also holds if attach later writes the ledger.
+
+**Alternatives.** Rejecting any setup whose declared timestamps an attach would reorder (rejected: it would forbid the common case of an attachment authored before its host, and re-stamping is possible without side effects). Executing the attachments before the only stamping pass (rejected: the brief keeps the first pass, and the second pass is independent of event order).
+
+## Gate 06-turn F57 — UnattachFrom of a vanished attachment is a no-op
+
+- **Decision:** `UnattachFrom { attachment, host }` looks up the live link before the
+  unknown-object check. If the attachment is in no zone but its id was issued by the context's
+  object-id generator (it was moved away, for example by an earlier event of the same final
+  batch), or it is unattached, or attached to another host, the event is a no-op (`Ok(None)`: no
+  executed event, no `UnattachRecord`, no rollback of the earlier events). An id the generator
+  never issued (above `last_issued`) stays `EventError::UnknownObject`. Plain `Unattach` keeps
+  `UnknownObject` for any object that is in no zone.
+- **Rationale:** `UnattachFrom` names one link (CR 701.3d); once that link is gone, whatever ended
+  it, there is nothing to do, and failing would roll back an otherwise legal batch. Keeping the
+  error for never-issued ids preserves the existing black-box contract
+  (`req_event_001_unattach_unknown_object_errors`) for malformed events while still treating a
+  departed object as a no-op.
+- **Alternatives:** treat every unknown id as a no-op for `UnattachFrom` (rejected: it would
+  silently accept malformed events and contradict an existing spec test); keep the error
+  (rejected: CodeRabbit F57, rolls back earlier moves).
+
+## Gate 06-turn F12 — UnattachFrom replaceable only for its exact host
+
+- **Decision:** the replacement bus's `would_happen` (CR 614.7) treats `UnattachFrom { attachment,
+  host }` as happening only when `permanents.attached_to(attachment) == Some(host)`, and plain
+  `Unattach { attachment }` only when the attachment is attached at all. Otherwise no effect is
+  offered and the event reaches the executor unchanged (a no-op there).
+- **Rationale:** an effect that would replace an event that does not happen does nothing
+  (CR 614.7); the executor already treats both cases as no event, so the bus must not let an
+  `Instead` replacement change the game for them. No existing test replaced an `Unattach` of an
+  unattached permanent, so the plain-`Unattach` arm changes no tested behaviour.
+- **Alternatives:** check only `UnattachFrom` and leave plain `Unattach` always replaceable
+  (rejected: the same CR 614.7 gap for an unattached permanent).
+
+## Gate 06-turn F7 — graveyard-order preflight captures LKI
+
+- **Decision:** `graveyard_order_groups` computes the groups from the LKI-off planning run, then
+  restores the snapshot and runs the real path (`run_captured`, LKI capture included, CR 704.8,
+  CR 603.10a) inside the same rollback-only preflight; any error (for example
+  `MemoryError::NoCharacteristics`) is returned and no group is offered. The context is restored
+  in every case. The groups returned are those of the planning run, so batches whose LKI can be
+  captured give exactly the same groups and defaults as before.
+- **Rationale:** `execute_batch_ordered` runs the same capture; offering a group that every
+  answer then fails leaves the `ORDER_CARDS` request pending forever. Running the identical code
+  path guarantees the preflight fails exactly when the execution would.
+- **Alternatives:** a separate capture-only check of each planned departure (rejected: duplicates
+  `run_captured` and could drift from it); computing groups from the captured run (equivalent
+  but changes which run defines the groups for no gain).
+
+## Gate 06-turn F36 — Field-less answers validated at parse time
+
+**Decision:** `decode_step` rejects any member other than `type` on an answer whose type carries
+no payload (`PASS_PRIORITY`, `DECLINE_OPTIONAL_PAYMENT`, `CANCEL_AND_ROLLBACK`, `YES`, `NO`,
+`ACCEPT`, `TAKE_MULLIGAN`: the unit variants of `ChoiceResponse`) with `UnknownField`, path
+`/script/<i>/answer`, positioned at the offending key. The list is one constant
+(`FIELDLESS_ANSWER_TYPES`) in `scenario/decode.rs`.
+**Rationale:** "every object rejects unknown members" must hold when the file is parsed, not only
+when `StateHost` runs it; a custom host otherwise receives unchecked members. `KEEP_HAND` and
+`SHORTEN` carry fields, so they are not in the list.
+**Alternatives:** derive the list from `ChoiceResponse` at run time (no such reflection exists;
+a constant plus the existing `ANSWER_TYPES` length test is simpler); validate in each host
+(duplicates the rule and leaves custom hosts unprotected).
+
+## Gate 06-turn F38 — Bounded assertion diagnostics
+
+**Decision:** assertion comparisons stay exact on the full values. The stored `expected` and
+`actual` of an `AssertionOutcome` are previews of at most 256 characters (cut on a character
+boundary, then `...`), and one `evaluate_assertions` call keeps at most 256 KiB (262,144 bytes)
+of previews in total; later previews are the fixed text `(omitted: report budget exhausted)`.
+Serialisation stops at the cap through a small capped writer.
+**Rationale:** a `.pzl` file can make thousands of assertions over one large zone, and the
+report retained a full copy of the zone per assertion (CWE-400, R12). Pass/fail must not depend
+on the bound, so only the diagnostic text is bounded.
+**Alternatives:** compare on the previews (wrong results for long values); cap the number of
+assertions (changes the file contract); keep the full text and cap only the report (still holds
+every copy in memory first).
+
+## Gate 06-turn F74 — ScenarioError.path is the complete pointer; Display sanitizes
+
+**Decision:** `segment` returns the complete JSON-pointer segment (`~` as `~0`, `/` as `~1`,
+nothing else), so `ScenarioError.path` always round-trips through `pointer_position`. Only
+`Display` shortens each path segment to 64 characters (then `...`) and prints control characters
+as `?`; the stored `path` is untouched. `message` keeps quoting at most 40 characters of input.
+**Rationale:** DEVELOPMENT.md defines `path` as a JSON pointer; a truncated or `?`-rewritten
+segment names no member, so tools (`cargo xtask pzl`) lost the position. The R12 concern is a
+log flood, which the display layer bounds.
+**Alternatives:** keep the lossy stored path and add a second field (API change); truncate only
+over a larger limit (still not a pointer for long keys). No test asserted the truncated stored path; the one existing assertion that matched an
+unquoted chooser name (F79) now matches the quoted name.
+
+## Gate 06-turn F86 — Last-mulligan bottom order
+
+**Decision:** When the counted mulligans reach the starting hand size (or the hand size), the
+game start no longer bottoms the whole hand silently in ascending order. It issues one
+`MULLIGAN_DECISION` with `to_bottom` = the hand size (min = max = `to_bottom`, `ValidatorRule::Payload`),
+`default_on_timeout` = `KeepHand` with the hand in ascending id order. The answer's order is the
+order passed to `put_on_library_bottom`. A `TakeMulligan` answer is rejected with a procedure
+error in the procedure (R12). An empty hand issues no request.
+
+**Rationale:** CR 103.5 (rules-researcher answer A-Q8): the cards go on the bottom "in any order"
+and the CR has no special case for the whole hand, so the owner chooses the order. The protocol
+payload has no can-mulligan flag and is a contract, so the rule is enforced in the procedure
+rather than by changing the payload.
+
+**Alternatives:** keep the silent ascending bottom (rejects the owner's choice); add a
+can-mulligan flag to the payload (contract change, R2); offer `TakeMulligan` and ignore it (hides
+an invalid answer).
+
+## Gate 06-turn F97 — In-memory integral floats in AST params
+
+**Decision:** No production change. An in-memory typed AST holding a JSON float in an opaque
+position, for example a hand-built `KeywordInstanceAST.params` value `1.0`, `-0.0` or `1e0`, is
+refused by the ability serializer exactly like a fraction (`2.5`): `compute_hash`,
+`to_canonical_json` and `seal` return `CanonicalError::Serialize`, never a panic. Only the wire
+path normalises: `CardDefinitionDSL::from_json` canonicalises the document first, so `1.0` in the
+document text loads as the integer `1` and seals, hashes and exports exactly like `1`. This is
+the builder contract since #232 FP-164 (typed AST positions) and is a breaking change against the
+merge-base behaviour, where the opaque AST wrappers let `seal` normalise such a value. Migration
+path for code that builds definitions in memory: build integers (`Value::from(1)`,
+`serde_json::json!(1)`), or produce the document text and load it with
+`CardDefinitionDSL::from_json`, which normalises on load. Plain `serde_json::from_str` into a
+typed AST does not normalise (the typed decoders refuse any non-integer spelling), so it is not a
+migration path. `card::tests::req_dsl_001_seal_normalises_numbers` covers both paths: the wire
+case per spelling, the explicit in-memory rejection per spelling, and the integer migration,
+which seals to the wire case's value, hash and bytes.
+
+**Rationale:** The ability wire contract (`#13 FP-012 — Wire catalogue as implemented`, the
+module docs of `ability` and `effect`) has integers only in every position and guarantees
+`decode(encode(x)) == x` for every value its serializer accepts (REQ-NFR-006, REQ-CORE-006: no
+floating point in rules data). Accepting an integral float in memory would let the serializer
+emit `1` for a value holding `1.0`, so the decoded value would differ from the encoded one and
+the guarantee would break; it would also need a float-integrality test in the serializer, and the
+same opaque check exists separately in `effect/util.rs` (outside this fix's paths), so only
+keyword parameters would change and native-effect parameters would not. Keeping the strictest
+behaviour leaves every wire and contract format as it is.
+
+**Alternatives:** Normalise integral floats in the ability serializer and in `seal` (rejected:
+breaks the encode/decode identity of the FP-012 contract and makes ability and effect opaque
+values disagree); normalise in `seal` only by rewriting the in-memory tree before serializing
+(rejected: `compute_hash` and `to_canonical_json` would still refuse the same value, so the three
+entry points would disagree).
+
+## Gate 06-turn F53 — Look-back scan skips native-effect params
+
+**Decision:** `FPL-LOOK-BACK` (`lint/walk.rs` `scan`) does not report a look-back-like key found
+anywhere under the `params` member of an object whose `op` is `NATIVE_EFFECT`. Nothing else
+changes: look-back keys in trigger matchers, filters, bindings, keyword `params` and every other
+position are still reported, and the other facts of the walk (`CREATE_TOKEN` token ids, `LINKED`
+references, mana strings, `REPEAT_WHILE` checks) are still collected inside native-effect
+`params`. Only a member named `params` of a `NATIVE_EFFECT` object is opaque; a `params` member of
+any other object is not.
+
+**Rationale:** SRS §14.8 and REQ-DSL-015 make a native effect opaque data registered by
+`id@version`: its `params` are read only by the registered Rust implementation, so a member name
+inside them carries no DSL meaning and cannot set the engine's look-back derivation (CR 603.10).
+Reporting it was a false positive the definition author cannot fix without renaming a native
+effect's parameter. Keyword `params` stay in scope because a keyword macro expands into DSL
+abilities, so a look-back key there can reach a trigger; the brief keeps that case
+(`req_ing_009_look_back`).
+
+**Alternatives:** Skip every `params` member (rejected: hides keyword-macro parameters, which do
+expand into DSL); skip the whole native-effect object (rejected: token and link references in it
+would no longer be checked); keep reporting (rejected: the finding is not about a look-back flag).
+Consequence: the spec tests `tests/spec_dsl_lint.rs` (`req_ing_009_look_back_fail`,
+`req_ing_009_every_lint_has_pass_and_fail_case`, `req_ing_009_ability_reorder_invariance`) and
+`tests/spec_dsl_lint_robust.rs` (`req_ing_009_deep_nesting`,
+`req_ing_009_random_definitions_total_and_ordered`) used native-effect `params` as the typed
+look-back fixture; they are outside the fix's paths and need their fixtures moved to keyword
+`params`.
+
+## Gate 06-turn F98 — Room mana value in the lint
+
+**Decision:** `FPL-MANA-VALUE` computes each half of a `ROOM` definition (`LEFT_HALF`,
+`RIGHT_HALF`) as the combined mana value of both halves, exactly as for `SPLIT`. The lint has no
+zone, so it checks only this value; the stack value (the cast half) and the battlefield value
+(locked halves have no mana cost) are not modelled in the lint.
+
+**Rationale:** CR 202.3d: "The mana value of a split card not on the stack ... is determined from
+the combined mana costs of its halves"; CR 709.4b: "A split card’s colors and mana value are
+determined from its combined mana cost"; CR 709.5 makes a Room a split card with a shared type
+line. Source data gives one value per card face outside any game, i.e. the off-stack, off-battle
+field value, which is what `fineprint-core` `layouts/room.rs` returns for every zone other than
+the stack and battlefield. The battlefield reading (locked halves) is an inference the CR does not
+state in one sentence (rules-researcher D-Q3), and the lint does not distinguish zones.
+
+**Alternatives:** Per-half values (rejected: wrong for every zone other than the stack); a
+zone-aware value (rejected: the lint has no zone input and the source data has none either).
+
+## Gate 06-turn F104 — Span of an ability that does not encode
+
+**Decision:** When a typed ability does not encode, its facts take the span from the typed base
+`text_span`: `Some((start, end))` with `start <= end` is a valid span (used for the finding
+location and for text coverage), `None` is absent, and an unordered span is malformed (no span in
+the location, and the usual `FPL-TEXT-COVERAGE` "textSpan is not [start, end]" Error, as for the
+same span in JSON). The failed JSON (`null`) is not scanned.
+
+**Rationale:** The location contract (`LintLocation::ability`) carries the ability's own
+well-formed span; the typed value still holds it even when another member breaks an invariant.
+Treating an unordered span as malformed is what the raw reader does for the same JSON, so a
+definition gives the same coverage findings whether its span is read from JSON or from the type.
+
+**Alternatives:** Treat an unordered typed span as absent (rejected: it would silently become a
+coverage gap with no finding naming the bad span).
+
+## Gate 06-turn F26 — Resolved selectors are rejected by GameState::register_effect
+
+**Decision:** `GameState::register_effect` refuses an effect with `origin: EffectOrigin::Resolved`
+and `affected: Affected::Selector(_)` with the new `StateError::UnlockedResolvedSelector` (its
+Display text names `register_effect_group`, which locks selectors, and `Affected::Objects`). Static
+effects keep live selectors (CR 611.3a) and a resolved effect with `Affected::Objects` is accepted.
+`register_effect_group` is unchanged: it locks a resolved part's selector against the registry as
+it is before the call (CR 611.2c). Test call sites in the layer and state suites that registered a
+resolved selector singly are migrated to the locked set the test expects or to
+`register_effect_group`, without weakening an assertion. No encoded byte, Merkle layout, wire
+schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry (R2) is needed.
+
+**Rationale:** CR 611.2c fixes a resolved effect's affected set when the effect begins. The
+single-effect path stored the selector unchanged, so an object that started matching later was
+affected too; the group path already implemented the rule. Refusing at the boundary keeps one
+locking path and makes the error visible to callers.
+
+**Alternatives:** An environment parameter on `register_effect` so it can lock (rejected: about 86
+call sites change and the group path already locks with an environment); silently locking to an
+empty set (rejected: a behaviour change nobody asked for, and it would hide the caller's mistake).
+
+## Gate 06-turn F25 F27 — Unissued timestamps are rejected at the state boundary
+
+**Decision:** New `StateError::TimestampNotIssued(Timestamp)`. `GameState::register_effect` and
+`GameState::register_effect_group` refuse an effect whose `timestamp`, or the `granted_at` of an
+`EffectOrigin::Static`, is 0 or above the state's last issued timestamp (for a group, the range
+before the call), before anything commits; parts may share an issued timestamp.
+`GameState::restamp_static_effects` refuses such a `new_object_ts` before touching anything. The
+predicate is the decoder's (`Issued::has_timestamp`, used by `Issued::timestamp`). No encoded byte,
+Merkle layout, wire schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry
+(R2) is needed.
+
+**Rationale:** The version-2 decoder already refuses unissued timestamps (REQ-CORE-002: every
+timestamp comes from the state's single generator), so a state that accepted one serialized into
+an unrestorable snapshot. Checking at the boundary keeps every validated state restorable.
+
+**Alternatives:** Checking only on decode (rejected: the snapshot is then unrestorable and the
+fault surfaces far from its cause).
+
+## Gate 06-turn F31 — serialize refuses states deserialize refuses
+
+**Decision:** `GameState::serialize` returns `StateError::Encode(<decoder message>)` for a state
+whose layer components `deserialize` would refuse: an unissued effect id or timestamp (of an
+effect, its granting effect, an object, counters or a sticker), a non-CDA layer-7a effect, a
+static effect with a source without its generating-ability link, or a link for an unissued id, for
+any other registered effect or on another source. The checks are the decoder's own functions
+(`check_effects` / `check_effect_fields`, `check_ledger_wire`, `check_generators` in
+`state/effects_wire.rs`), called by both. The registry keeps accepting raw writes through
+`GameState::effects_mut`; `merkle_tree` and `state_hash` stay infallible and unchanged.
+
+**Rationale:** A state that serializes must decode to an equal state with the same hash
+(REQ-CORE-001, REQ-NFR-006). Only raw writes can make an inconsistent state, and the encoder is
+the one place every snapshot passes through.
+
+**Alternatives:** Making `effects_mut` validate (rejected: it is documented as raw, unvalidated
+access, and validating it would need the whole state); running the full decoder on every
+serialize (rejected: it re-registers every effect; the shared checks cover what raw writes can
+break).
+
+## Gate 06-turn F29 — Generator links need no cache invalidation through the validated API
+
+**Decision:** The layer cache keeps comparing only the `ContinuousEffects` snapshot. The
+invalidation table in `state/environment.rs` states the invariant that makes this sound and
+requires `Invalidation::EffectRegistration` for raw writes that change which ability generates an
+effect. Documentation only.
+
+**Rationale:** Through the validated API a link is written only together with its effect, effect
+ids are never reused, `link_effect_generator` rejects registered effects and `remove_effect`
+removes an effect and its link together, so equal registries imply equal links. Only raw
+`effects_mut` writes (which never touch links), or moving a generated effect between states, can
+break that.
+
+**Alternatives:** Snapshotting the links in the cache too (rejected: extra cost on every hit for a
+case only raw writes reach).
+
+## Gate 06-turn F39 — Plan identity of a PlannedTurn
+
+**Decision:** `TurnScheduler` keeps a plan serial, incremented by every installed plan, and
+`PlannedTurn` carries it as the public field `plan_serial`. `run_planned_turn` rejects a turn whose
+serial or player is not the installed plan's, or whose plan is already over, with
+`ChoiceError::Procedure` before any host call. A plan whose items were partly pulled by the caller
+is still accepted (changes between items are part of the driver contract).
+
+**Rationale:** Two successive turns can belong to the same player, so only plan identity separates
+a stale handle from the current one; checking before `begin_turn` keeps the host and the plan
+untouched. A public field keeps `PlannedTurn` constructible in tests like its other fields.
+
+**Alternatives:** A private field with an accessor (rejected: breaks struct-literal comparisons
+for no gain, the serial is not a security boundary); rejecting partly pulled plans (rejected: an
+existing driver test pulls items before handing the plan over).
+
+## Gate 06-turn F40 — Follow-up dispatch
+
+**Decision:** New `TurnHost::perform_follow_up(follow_up, choices)`, called by `run_planned_turn`
+for each entry of `PlannedTurn::follow_ups`, in order (the creation order of the skip effects),
+after `begin_turn` and before the first plan item. It is a required method: no implementor of
+`TurnHost` exists outside the turn module's own tests and spec support (the scenario `World`
+implements only `HeartbeatHost`), so the Orchestrator's default rule does not apply; a host that
+never creates follow-ups implements it as `Ok(())`.
+
+**Rationale:** CR 614.10b: "That action is considered to be the first thing that happens during
+the next step, phase, or turn to actually occur." The CR does not order the follow-up against
+turn-based actions or "beginning of" triggers (rules answer A-Q4, unsettled), so the brief's
+placement stands: the turn has begun (so the action happens during it) and no phase has begun yet.
+
+**Alternatives:** A defaulted no-op method (rejected while every implementor is in owned code: a
+forgotten override would silently drop follow-ups); dispatching inside the first phase (rejected:
+other work of that phase could happen first).
+
+## Gate 06-turn F44 — Rolled-back cast keeps priority
+
+**Decision:** `pub enum ActionOutcome { Taken, RolledBack }` and a defaulted
+`HeartbeatHost::try_take_action` (default: `take_action`, then `Taken`). The heartbeat calls
+`try_take_action`. On `RolledBack` the same player is asked again at once: no settle, the pass set
+is neither cleared nor extended, and no pass is recorded. An `Err` still propagates unchanged.
+
+**Rationale:** CR 734.2: "the player who had priority retains it and may take another action or
+pass"; CR 601.2 and CR 734.1 return the game to the moment before the action was proposed, with
+no abilities triggering, so there is nothing to settle. Whether an undone action counts as
+"taking actions in between passing" (CR 117.4) is not stated (rules answer A-Q6, inference); with
+the state restored, the undone action is treated as never taken, so earlier passes stand.
+
+**Alternatives:** Reporting the rollback as a distinct `Err` kind (rejected: errors abort the
+procedure; the heartbeat would need to match error variants); clearing the pass set (rejected: it
+would count a non-action as an action).
+
+## Gate 06-turn F45 — Departure and the pass log
+
+**Decision:** When the player who would be asked has left (before the request is published, after
+the answer, or between passes), the heartbeat forgets the departed passers and applies the CR 117.4
+test to the players still in the game. If all of them have passed in succession, the top object
+resolves (then the active player, or the next player still in the game, receives priority) or the
+step ends; nobody is asked. No `PassRecord` is written for the departure. Passes of the players
+still in the game stand (`forget_departed`).
+
+**Rationale:** CR 800.4a passes priority on; CR 800.4j: "the top object on the stack resolves, or
+the phase or step ends, whichever is appropriate". Nobody passed, so a pass record would be false.
+Whether earlier passes still count after a departure is not stated (rules answer A-Q7); the
+current behaviour (survivor passes stand) is kept as the brief directs.
+
+**Alternatives:** A synthetic pass record for the departure (rejected: the log records explicit
+passes only, SRS 5.1); a fresh round of passes after every departure (rejected: changes the
+existing pass counting of #44 FP-043).
+
+## Gate 06-turn F46 — No attackers skips to end of combat
+
+**Decision:** Defaulted `TurnHost::attackers_declared(&self) -> bool { true }`. `run_phase` and
+`run_planned_turn` read it once per combat phase, after the declare attackers step has ended
+(after its priority); `false` drops the not-yet-started declare blockers, first-strike combat
+damage and combat damage steps (extra ones too; `TurnScheduler::skip_blockers_and_damage` for the
+planned turn), so they have no boundary events, expiry, combat action or priority. End of combat
+and `EndPhase(Combat)` still run.
+
+**Rationale:** CR 508.8 and CR 506.1 skip the declare blockers and combat damage steps; CR 508.8
+names creatures "put onto the battlefield attacking", which can happen during declare-attackers
+priority, so the decision waits for that priority to end (rules answer A-Q2: the evaluation
+instant is an inference from step order). The default keeps every existing host on the normal
+path.
+
+**Alternatives:** Deciding when attackers are declared (rejected: misses creatures put onto the
+battlefield attacking during priority); keeping extra combat damage steps (rejected: CR 508.8
+skips "the combat damage steps").
+
+## Gate 06-turn F48 — The first draw step is skipped before it begins
+
+**Decision:** `run_segment` tests `first_turn_draw_skipped` before `begin_step`; a skipped draw step
+returns `SegmentReport { heartbeat_ran: false, cleanup_steps: 0 }` with no host call (no
+begin-step, expiry, registry entry, draw, priority, end-step expiry or mana emptying). The
+beginning phase's own boundary work is unchanged. The segment still appears in the turn report.
+
+**Rationale:** CR 103.8a skips "the draw step", not only the draw; CR 500.11: "To skip a step ... is
+to proceed past it as though it didn't exist" (rules answer A-Q3). Reporting the segment keeps the
+report's segment list stable and says through `heartbeat_ran` that nothing ran.
+
+**Alternatives:** Dropping the segment from the report (rejected: callers index the report by
+segment order).
+
+## Gate 06-turn F49 — First-strike decision at the damage boundary
+
+**Decision:** `run_phase` builds the combat phase without the first-strike step and calls
+`TurnHost::first_strike_damage_step()` once, when the declare blockers step has ended; `true`
+inserts `FirstStrikeDamage` before `CombatDamage`, and the decision holds for the rest of the phase.
+`run_planned_turn` does the same through the new `TurnScheduler::set_first_strike_damage_step`
+(insert before the first not-yet-started combat damage step, or remove the not-yet-started
+first-strike steps), for normal and added combat phases alike. The `first_strike_damage_step`
+argument of `TurnScheduler::next_turn` is kept (public API) and only shapes the provisional plan
+(normal and added combat phases), which the driver corrects at each damage boundary. If a step
+skip removes the declare blockers step of a planned turn, no decision is made and the provisional
+plan stands.
+
+**Rationale:** CR 510.4: "as the combat damage step begins"; the second combat damage step then
+follows without a new check (rules answer A-Q1). Declare-blockers priority is the last point at
+which first strike can change before damage.
+
+**Alternatives:** Removing the `next_turn` argument (rejected: public API); deciding as the damage
+step would be yielded by the scheduler (rejected: the scheduler has no host).
+
+## Gate 06-turn F47 — Cleanup with nobody in the game
+
+**Decision:** The sequencer's heartbeat adapter returns the `HeartbeatOutcome`. When the cleanup
+step's heartbeat ends with `NoPlayerInGame`, the cleanup step completes (end-step expiry, mana
+emptying) and no further cleanup step begins. `StepEnds` keeps the CR 514.3a repetition.
+
+**Rationale:** CR 514.3a repeats cleanup "once the stack is empty and all players pass in
+succession"; with nobody in the game no pass cycle can complete, so a repetition would loop on the
+same state until `MAX_CLEANUP_STEPS`.
+
+**Alternatives:** Treating `NoPlayerInGame` as a pass cycle (the old behaviour, rejected by the
+finding).
+
+## Gate 06-turn F95 — Cleanup guard test
+
+**Decision:** After F47 the `MAX_CLEANUP_STEPS` guard can be reached only by a live endless cycle,
+which needs one answered pass cycle per cleanup step. A `ChoiceSession` re-runs the procedure
+from its base after every answer, so driving 10 000 cleanup steps through a session is quadratic
+(measured: 400 answers take about 1 s). The guard is therefore driven through one additive
+test hook, `ChoiceContext::auto_default()` in `choice/session.rs`: `#[cfg(test)]` and
+`pub(crate)`, it builds a context with no recorded answers that answers every unrecorded ask with
+the request's `default_on_timeout` instead of suspending (asks are still checked for id,
+well-formedness and a valid default). The unit test
+`turn::steps_tests::req_turn_002_cleanup_live_endless_cycle_hits_the_guard` runs a live endless
+cleanup cycle in one run and asserts exactly `MAX_CLEANUP_STEPS` `BeginStep(Cleanup)` calls and
+`ChoiceError::Procedure`. The session tests keep (a) with every player gone the cleanup ends after
+one step with no error (F47) and (b) a live endless cycle begins exactly one more cleanup step per
+completed pass cycle (25 to 30 cycles).
+
+**Rationale:** Keeps the guard's error branch tested (R10, coverage) at linear cost. The hook is
+compiled only in the crate's own tests: no public API change and no change to session semantics
+(`ChoiceSession` never builds such a context). The Orchestrator authorised `choice/session.rs` for
+this one hook.
+
+**Alternatives:** A configurable guard (rejected: public constant, contract change); leaving the
+guard untested (rejected by the Orchestrator: R10/coverage); keeping the everyone-left loop
+(rejected: F47 removes it).
+
+## Gate 06-turn F6/F13 — per-child-batch evaluated provider refresh
+
+**Decision:** The replacement bus gets an opt-in refreshing entry point. `replacement::ProviderRefresh`
+(`fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_>`) builds an
+evaluated provider over the live state; `process_batch_refreshing(ctx, registry, batch, sba,
+choices, refresh)` and `process_event_refreshing(ctx, registry, event, choices, refresh)` resolve
+and execute the submitted batch with `ctx.provider`, then call `refresh` once before each
+`Prevent` follow-up batch (depth > 0) and use the result for both that batch's choosers
+(CR 613.1b, CR 616.1) and its LKI capture (CR 603.10a, CR 608.2h). The provider is never rebuilt
+between events of one batch (CR 603.10a, CR 704.8). Plain `process_batch` / `process_event` keep
+their signatures and behaviour: every batch of the call, follow-ups included, uses the pre-call
+snapshot (documented on `process_batch` and `EventContext`). The test
+`req_event_001_f6_plain_process_batch_keeps_pre_call_snapshot` asserts that stale 2/2 on purpose:
+it pins the documented limit so the adoption of the refreshing entry point is a visible change.
+
+**Rationale:** `EventContext` is built with struct literals in about 20 files owned by other
+units (turn, scenario, sba, interp, triggers, memory, spec tests); a new field or a new
+`provider` type would break all of them. The factory is a pure function of the state (R3), so a
+`ChoiceSession` replay re-derives identical providers. #264 FP-175 (forwarding the evaluated
+controller through the event and SBA LKI wrappers) is untouched: `LkiProvider` and
+`CharacteristicsProvider` are unchanged. Callers still on the non-refreshing entry point, to be
+adopted by their owning units: production `sba/perform.rs:810`; tests
+`events/tests/state_based_destroy.rs:99`, `sba/tests.rs:4033`,
+`tests/spec_events_graveyard_order.rs:561`, `tests/spec_replacement_support.rs:515-516`,
+`tests/spec_sba_destroyed_cause.rs:206`, `tests/spec_layers_consumers_support.rs:585`,
+`tests/spec_evaluated_controller_support.rs:580`.
+
+**SBA adoption:** `sba/perform.rs` now submits the SBA batch through `process_batch_refreshing`
+when the pass has post-batch layer inputs, that is from `perform_all_relayered` and
+`perform_all_post_batch` (the heartbeat and scenario-host production path). Its
+`ProviderRefresh` (`PostBatchRefresh`) calls the caller's existing post-batch provider with the
+live context before each follow-up batch and builds an owned `EvaluatedSnapshot` from the inputs
+it supplies: one `evaluate_all` board pass over `layer_env.objects()`, plus a lone `evaluate` for
+any zone object outside it, by ascending id, answering what a `LayeredProvider` over the same
+inputs answers (characteristics, layer-2 controller, counters, attachments). The snapshot is
+owned because the provider's inputs never leave its call. Public signatures are unchanged; the
+post-batch provider's documentation now says it is also called once per follow-up batch, which
+an ordinary pass never has. `perform_all` keeps plain `process_batch`: its only post-batch inputs
+are the pre-batch `effects`/`layer_env`, which describe no later state, and switching away from
+the caller's own `ctx.provider` would change results without making them fresher. Test:
+`sba::tests::sba_f13_follow_up_chooser_is_controller_after_sba_batch` (P1 through
+`perform_all_relayered`, P2 through `perform_all`).
+
+**Alternatives:** A new `EventContext` field (rejected: breaks every literal site outside the
+owned paths); a mutable provider cell behind `provider` (rejected: interior mutability in a
+shared trait object, and still changes the field's type); rebuilding the provider inside
+`EventContext` (rejected: the events layer cannot evaluate layers itself and its own batch
+execution must keep one provider per call); refreshing on the plain entry point (rejected: it
+has no way to build a provider).
