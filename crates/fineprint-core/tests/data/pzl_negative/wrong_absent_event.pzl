@@ -1,0 +1,64 @@
+{
+  "pzlVersion": 1,
+  "title": "Deliberately wrong expectation (must fail): No life change and no draw happen when nothing is done",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {
+      "test.flier_2_2": "fd2d5eeeeb17df2cfc75df291119a8c5aeeabc8fc565a711c8f8d7dbf1b1c24e"
+    }
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20,
+      "zones": {
+        "hand": [
+          {
+            "id": "o1",
+            "card": "test.flier_2_2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "p2",
+      "life": 20
+    }
+  ],
+  "battlefield": [],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "absent",
+      "what": "event",
+      "event": {
+        "type": "LifeChange",
+        "fields": {
+          "player": "p1"
+        }
+      }
+    },
+    {
+      "kind": "absent",
+      "what": "zoneMember",
+      "owner": "p1",
+      "zone": "hand",
+      "object": "o1"
+    }
+  ]
+}

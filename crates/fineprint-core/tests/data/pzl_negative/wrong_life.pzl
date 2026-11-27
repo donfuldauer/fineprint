@@ -1,0 +1,47 @@
+{
+  "pzlVersion": 1,
+  "title": "Deliberately wrong expectation (must fail): Life assertions read each player's starting life total",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {}
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20
+    },
+    {
+      "id": "p2",
+      "life": 17
+    }
+  ],
+  "battlefield": [],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "life",
+      "player": "p1",
+      "equals": 20
+    },
+    {
+      "kind": "life",
+      "player": "p2",
+      "equals": 18
+    }
+  ]
+}
