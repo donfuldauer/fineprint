@@ -770,6 +770,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "fineprint-core",
+]
 
 [[package]]
 name = "zerocopy"

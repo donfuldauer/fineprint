@@ -11037,3 +11037,143 @@ first; rejection is tested through `validate` and `submit`). The CR 103.5c "firs
 **Alternatives.** Exposing `ChoiceContext::new` to reach the defensive branches (rejected:
 `src/choice` is outside #48's owned paths and the branches are unreachable through the public
 protocol).
+
+## #51 FP-049 — Spec-test judgement calls (Independent Tester)
+
+**Decision.** The black-box spec tests (`crates/fineprint-core/tests/spec_scenario_*.rs`) and the
+samples (`tests/scenarios/format/`) read the binding contract as follows where it is silent:
+(1) `pzlVersion` 2 is accepted as `Unsupported` or `OutOfRange` at `/pzlVersion`; a top-level
+array as `WrongType` at `""`; empty `requirements` without `ruling` as `MissingField` at the
+parent `""` or any other kind at `/requirements`. (2) Duplicate ids are accepted at the second element or below it
+(`/players/1` or `/players/1/id`). (3) Nesting depth counts containers including the root
+object: 65 nested containers is `TooDeep`, 64 is not. (4) Player `counters`, `designations` and
+`zones` (and each zone) are optional; `battlefield`, `stack`, `script`, `assertions` and
+`priority` are written explicitly in every sample. `pendingChoice` `choiceType`, `options` and
+`optionsMode` are optional; the samples always give `optionsMode`. (5) Characteristics arrays
+compare by set equality (a proper subset fails). (6) A failing outcome's `expected`/`actual`
+must contain the differing value, except where that value is an absence (empty zone or stream,
+`null`), whose spelling is left open. (7) The serialised `Scenario` keeps every value written in
+the file, except that it may omit a `null`, `{}` or `[]`, and an unnamed card reference may come
+back as an object with that `card`. (8) The samples assert only what the setup states, plus one
+scripted `PASS_PRIORITY` in `full_header.pzl`: the event samples use empty lists (any stream
+contains the empty subsequence; building a state is assumed to emit no events), the priority
+choice type is `PRIORITY_ACTION` (SRS 15.3), card characteristics are asserted only through
+integers and the controller. (9) `wrong_absent_event.pzl` changes its second assertion to an
+absent/zoneMember on a card in hand, because no absent/event can fail against the hand-built
+(empty) event stream. `minimal.pzl` has no wrong twin (it has no assertion to change).
+**Decision (continued).** (10) A syntax error inside a
+nested value (truncated input) may carry that value's pointer as `path` (the contract fixes `""`
+only for a document-level syntax error); line and column are still required. (11) Colour
+strings in characteristics may be spelled as a name or its letter (the contract fixes neither),
+so a failing colour outcome must mention either spelling of the differing colour.
+**Rationale.** Each choice is the reading most consistent with the binding schema and the
+"accept either" clauses of the brief, and keeps the samples inside the reference host's minimum
+subset (build plus `PASS_PRIORITY`). Precedent: "#48 FP-046 — Spec-test judgement calls".
+**Alternatives.** Asserting one exact kind where the contract allows two (rejected: the brief
+says accept either); asserting event types the reference host would emit (rejected: the event
+names a host emits are not in the contract); subset semantics for characteristics arrays
+(rejected: "arrays compare as sets").
+
+## #51 FP-049 — .pzl file syntax
+
+**Decision.** A `.pzl` file is one JSON object, UTF-8, extension `.pzl` (a leading byte-order
+mark is tolerated). It is read by an in-house defensive reader (`scenario/json.rs`) that keeps
+every value's line and column and enforces the limits while it reads (1 MiB, nesting depth 64,
+10,000 array elements in total, duplicate keys, integers only within `i64`/`u64`), then decoded
+by hand into the typed `Scenario`, so every error carries a JSON-pointer path and a position.
+`Scenario` derives serde through a flat wire form (`serde(from/into)`), so `parse(to_json(s)) ==
+s` and the derive needs no untyped buffering (no float type anywhere, R3).
+**Rationale.** `serde_json` is already a pinned workspace dependency and TOML is not; the
+synthetic card library is JSON; JSON has one obvious canonical form for re-serialising; an
+own reader is needed anyway because `serde_json` neither rejects duplicate keys nor reports the
+path of a typed error, and the limits must hold before any allocation grows with the input.
+**Alternatives.** TOML (a new dependency, a second data syntax next to the JSON card library,
+no canonical form); a custom DSL (a grammar to specify, fuzz and document, with no tooling);
+`serde_json::from_slice` with `deny_unknown_fields` (no duplicate-key rejection, no error paths,
+float acceptance).
+
+## #51 FP-049 — Schema judgement calls
+
+**Decision.** (1) Required top-level members: `pzlVersion`, `title`, `requirements`, `cr`,
+`format`, `rulesBaseline`, `cardDatabase`, `prngSeed`, `players`, `turn`, `priority` (may be
+`null`), `assertions`; optional: `ruling`, `battlefield`, `stack`, `sharedExile`, `script`
+(default empty). In a player, `counters`, `designations`, `zones` and each zone list are
+optional; in a stack entry `controller` is optional (default the owner). (2) `pzlVersion` is
+checked before every other member (a file of another version is `Unsupported` whatever it
+holds). (3) Empty `requirements` without `ruling` is `MissingField` at the root `""`. Member-level
+errors take the path of the object concerned: `MissingField` the object that lacks the member,
+`UnknownField` and `DuplicateKey` the object holding it (line and column point at the key). (4) One kind
+was added to `ScenarioErrorKind`: `Invalid`, for well-typed but malformed values (a date that is not `YYYY-MM-DD`, a requirement id not starting `REQ-`, an
+empty id or name, a step outside its phase). A float anywhere is `WrongType`; a `definitionHash` that is not 64 lowercase hex characters, a title of 0 or
+over 200 characters, a player count outside 1..=8, turn number 0 and a counter amount below 1
+are `OutOfRange`; empty or whitespace-only input is `Syntax` at 1:1; a file over 1 MiB is
+`TooLarge` with no position. (5) An unnamed cardRef gets the id `<player>.<zone>.<index>`. (6) A
+`zone` or `absent` assertion on a shared zone (`battlefield`, `stack`, `sharedExile`) ignores
+`owner` (the observed key is the zone name, as the binding `Observed` contract gives it). (7) Optional extensions: `controlledSinceTurn` on
+battlefield objects (default 0). (8) Script answers: any string `object`/`objectId` member must
+name a declared object, `player`/`playerId` a declared player. (9) `Display` prints the stored
+path unchanged and `?` for an unknown line or column; input-derived path segments are cut to 64
+characters with control characters replaced, and messages quote at most 40 characters of input.
+**Rationale.** The binding schema marks only `ruling` and `sharedExile` as optional at the top
+level, but rejecting a file for leaving out an empty list helps no one; every member the pzl-test
+conventions require a scenario to state explicitly (turn, step, active player, priority, seed,
+hashes) stays required. `Invalid` keeps every other kind meaning exactly what its name says.
+**Alternatives.** Every member required (verbose files for no gain); `OutOfRange` or
+`UnknownTag` for malformed strings (misleading kinds).
+
+## #51 FP-049 — The runner command lives in xtask
+
+**Decision.** `cargo xtask pzl [--cards <dir>] <path>...` in `xtask/src/pzl.rs`; xtask gains a
+path dependency on `fineprint-core` (no other new dependency). The card library defaults to
+`tests/fixtures/cards` under the workspace root.
+**Rationale.** xtask already owns repository automation with the documented exit-code
+convention, and CI runs it; the runner itself lives in core (the engine runs client-supplied
+tests to grant VERIFIED), so the command is a thin I/O shell around `parse_scenario` and
+`run_scenario`.
+**Alternatives.** A core example binary (`cargo run -p fineprint-core --example pzl`: examples
+are not a command surface and are not covered by the xtask conventions); the CLI client
+(`fineprint-cli` is a stub and depends on ingest and bot).
+
+## #51 FP-049 — Reference host scope
+
+**Decision.** `StateHost` builds the state on the existing components (GameState, Zones,
+Permanents, EventState, the layer system) and drives `PRIORITY_ACTION` / `PASS_PRIORITY` through a
+`ChoiceSession` over `run_heartbeat` with the real state-based-action pass, inside the current
+step only. Object counters, attachments and the phase and step are set by executing
+`AddCounters`, `Attach` and `StepBegins`/`PhaseBegins` events at build time (the events module
+owns them); those build events are not part of the observed stream. Battlefield objects are
+stamped in ascending setup `timestamp`, ties in declaration order, after every other object.
+Everything the host cannot do fails with a message starting `unsupported by the reference host:`:
+face-down objects, battlefield objects with STATIC, TRIGGERED or REPLACEMENT abilities (their
+effects and triggers are not wired, so running them would silently be wrong), unsupported
+layouts, priority held at setup by a player other than the active player (`run_heartbeat`
+always starts with the active player), resolving the stack, every action, and answers other than
+the field-less ones. While a choice is pending the host observes the live state of the
+suspended run (captured when the procedure suspends), not the session's base state. Observed
+host events: `PLAYER_LOST`, `PRIORITY_PASSED`, `STEP_ENDS`, next to the executed `GameEvent`s
+named in upper snake case. Colors are observed as `W U B R G`; an ability key is a keyword id or,
+for other abilities, the ability kind.
+**Rationale.** The brief asks for the current seams "as far as they exist today" and loud
+failure for the rest; the live-state capture is what a scenario author means by "the state after
+p1 passed". `actions/` (#49) is not merged and is not used.
+**Alternatives.** Running the turn sequencer (`run_turn`) with a full `TurnHost` (most of its
+methods would be unsupported stubs today); skipping state-based actions (silently wrong).
+
+## #51 FP-049 — Reference host result
+
+**Decision.** The observed result is provisional: the players with the lost-the-game
+designation are the losers; with at least one loser, exactly one player left is `WON` (that
+player the winner), none left is `DRAWN`; otherwise `IN_PROGRESS`.
+**Rationale.** Nothing in core computes a game result yet; this reading is reported as a rules
+question for the rules-researcher (which CR rules end the game and when it is a draw) and will be
+replaced by the game-result unit.
+**Alternatives.** Always `IN_PROGRESS` (makes the `result` assertion useless today).
+**Rules-researcher ruling (CR-2026-11-06).** Consistent for two-player and free-for-all games:
+a player still in the game wins once all opponents have left (CR 104.2a), a loser leaves the game
+(CR 104.5), and the game is a draw when all remaining players lose simultaneously (CR 104.4a);
+state-based actions are one simultaneous event (CR 704.3), so `DRAWN` is reached only when the
+last players lose in the same event, and the host must evaluate the result after the whole event.
+Not covered by the provisional host (reported as `IN_PROGRESS`): draws by a mandatory loop
+(CR 104.4b) or by an effect (CR 104.4c), and a win by an effect (CR 104.2b). Not valid for team
+games (CR 104.2c), Emperor (CR 104.2d) or limited range of influence (CR 104.3h); the reference
+host is two-player / free-for-all only, and the game-result unit replaces this reading.

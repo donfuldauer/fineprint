@@ -1,0 +1,27 @@
+{
+  "pzlVersion": 1,
+  "title": "Malformed scenario fixture",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {}
+  },
+  "prngSeed": 7,
+  "players": [],
+  "battlefield": [],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": null,
+  "script": [],
+  "assertions": []
+}
