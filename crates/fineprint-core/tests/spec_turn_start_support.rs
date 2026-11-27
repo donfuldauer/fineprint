@@ -293,7 +293,9 @@ impl Policy {
                 mulligans_taken,
                 to_bottom,
             } => {
-                if self.take(req.chooser.get(), *mulligans_taken) {
+                // CR 103.5 (last mulligan): the whole hand goes to the bottom, no mulligan offered.
+                let forced = *to_bottom as usize >= hand.len();
+                if !forced && self.take(req.chooser.get(), *mulligans_taken) {
                     ChoiceResponse::TakeMulligan
                 } else {
                     ChoiceResponse::KeepHand {
@@ -447,13 +449,14 @@ pub fn model(m: &Mock, seed: u64, opts: &StartOptions, policy: &Policy) -> Model
                 n,
                 m.format.mulligan.free_first_mulligan_multiplayer,
             );
-            if c as usize >= size(p) {
-                let h = std::mem::take(hands.get_mut(p).expect("hand"));
-                libs.get_mut(p).expect("lib").extend(h);
+            // CR 103.5: at the last mulligan the player orders the whole hand onto the bottom.
+            let forced = c as usize >= size(p);
+            if forced && hands[p].is_empty() {
                 continue;
             }
+            let c = if forced { hands[p].len() as u64 } else { c };
             asks.push((*p, taken[p], c));
-            if policy.take(p.get(), taken[p]) {
+            if !forced && policy.take(p.get(), taken[p]) {
                 took.push(*p);
                 still.push(*p);
             } else {

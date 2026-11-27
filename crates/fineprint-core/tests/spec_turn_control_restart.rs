@@ -158,6 +158,12 @@ fn exempt_cards() {
 fn cards_return_to_owners() {
     let (h, rep) = restart(mid_game(), P2).expect("restart");
     let deck = h.deck_cards();
+    // Each card occurs exactly once: the raw entry count (before the map deduplicates) equals
+    // the number of distinct cards of the game.
+    let raw: usize = h.m.libs.values().map(Vec::len).sum::<usize>()
+        + h.m.hands.values().map(Vec::len).sum::<usize>();
+    assert_eq!(raw, all_cards().len());
+    assert_eq!(deck.len(), raw);
     assert_eq!(deck, all_cards());
     for (p, hand) in &rep.start.opening_hands {
         for c in hand {

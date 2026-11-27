@@ -38,8 +38,8 @@ use crate::events::{Phase, Step};
 use crate::turn::heartbeat::{HeartbeatHost, MAX_SETTLE_ITERATIONS};
 use crate::turn::start::{GameStartHost, StartOptions, StartReport, run_game_start};
 use crate::turn::steps::{
-    ExpiryPoint, Segment, TurnBasedRegistry, TurnHost, TurnReport, TurnState, run_segment,
-    segments_of,
+    ExpiryPoint, Segment, TurnBasedRegistry, TurnHost, TurnReport, TurnState,
+    is_blockers_or_damage, run_segment, segments_of,
 };
 
 /// The normal phases of a turn, in order.
@@ -85,7 +85,13 @@ pub struct PlannedTurn {
     pub skipped: Vec<SkippedTurn>,
     /// The follow-up actions of the skip effects consumed on the way, in the order those skip
     /// effects were created (CR 614.10b: they are the first thing that happens in this turn).
+    /// [`run_planned_turn`] performs them through [`TurnHost::perform_follow_up`].
     pub follow_ups: Vec<FollowUpId>,
+    /// The serial number of the plan [`TurnScheduler::next_turn`] installed for this turn
+    /// (1 for the first turn, then counting up). [`run_planned_turn`] rejects a turn whose
+    /// serial is not the scheduler's current plan, so a saved earlier turn cannot run on a
+    /// later plan, even one of the same player (F39).
+    pub plan_serial: u64,
 }
 
 /// One item of the current turn's plan, in the order [`TurnScheduler::next_item`] yields them.
@@ -194,6 +200,9 @@ pub struct TurnScheduler {
     turn_over: bool,
     /// Whether a main phase of the current turn has begun or been skipped (CR 505.1a).
     main_seen: bool,
+    /// The serial number of the installed plan: 0 before the first, incremented by every plan
+    /// installed (see [`PlannedTurn::plan_serial`]).
+    plan_serial: u64,
 }
 
 /// Whether `phase` is a main phase.
@@ -219,6 +228,7 @@ impl TurnScheduler {
             last_item: None,
             turn_over: false,
             main_seen: false,
+            plan_serial: 0,
         }
     }
 
@@ -329,6 +339,12 @@ impl TurnScheduler {
     /// consumed) and its follow-up waits for the next turn that occurs (CR 614.10a,
     /// CR 614.10b). CR 500.12: "No game events can occur between steps, phases, or turns": this
     /// only decides. Returns `None` if no player of `seat_order` is in the game.
+    ///
+    /// `first_strike_damage_step` only shapes the provisional plan of the turn's combat phases
+    /// (what [`TurnScheduler::next_item`] yields if nobody corrects it); it is no longer
+    /// decisive: [`run_planned_turn`] decides at each combat phase's damage boundary through
+    /// [`TurnScheduler::set_first_strike_damage_step`] (CR 510.4; docs/DECISIONS.md "Gate
+    /// 06-turn F49 — First-strike decision at the damage boundary").
     pub fn next_turn(
         &mut self,
         seat_order: &[PlayerId],
@@ -373,6 +389,7 @@ impl TurnScheduler {
                 extra,
                 skipped,
                 follow_ups: follow_ups.into_iter().map(|(_, f)| f).collect(),
+                plan_serial: self.plan_serial,
             });
         }
     }
@@ -388,6 +405,14 @@ impl TurnScheduler {
         self.last_item = None;
         self.turn_over = false;
         self.main_seen = false;
+        self.plan_serial = self.plan_serial.wrapping_add(1);
+    }
+
+    /// The serial number of the installed plan (0 before the first turn is planned), the value
+    /// [`PlannedTurn::plan_serial`] carries.
+    #[must_use]
+    pub fn plan_serial(&self) -> u64 {
+        self.plan_serial
     }
 
     /// CR 505.1a: "Only the first main phase of the turn is a precombat main phase. All other
@@ -738,6 +763,66 @@ impl TurnScheduler {
         }
     }
 
+    /// The in-progress combat phase's not-yet-started segments, if a combat phase of the
+    /// current turn is in progress.
+    fn combat_segments_mut(&mut self) -> Option<&mut Vec<PlanSegment>> {
+        if self.turn_over || self.phase_in_progress() != Some(Phase::Combat) {
+            return None;
+        }
+        self.plan.first_mut().map(|p| &mut p.segments)
+    }
+
+    /// CR 508.8: "If no creatures are declared as attackers or put onto the battlefield
+    /// attacking, skip the declare blockers and combat damage steps." Discards the in-progress
+    /// combat phase's not-yet-started declare blockers, first-strike combat damage and combat
+    /// damage steps (extra ones included); the end of combat step and `EndPhase(Combat)` stay
+    /// (CR 506.1). Returns whether a combat phase was in progress (false: nothing changed).
+    pub fn skip_blockers_and_damage(&mut self) -> bool {
+        match self.combat_segments_mut() {
+            Some(segments) => {
+                segments.retain(|s| !is_blockers_or_damage(s.segment));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// CR 510.4: sets, for the in-progress combat phase's not-yet-started steps, whether the
+    /// combat damage step about to begin is preceded by a first-strike combat damage step.
+    /// `true` inserts a first-strike step directly before the first not-yet-started combat
+    /// damage step if none is planned before it; `false` removes the not-yet-started
+    /// first-strike steps. Returns whether the plan changed. Outside a combat phase, or with no
+    /// combat damage step left, nothing changes.
+    pub fn set_first_strike_damage_step(&mut self, first_strike: bool) -> bool {
+        let Some(segments) = self.combat_segments_mut() else {
+            return false;
+        };
+        let first_strike_seg = Segment::Step(Step::FirstStrikeDamage);
+        let damage = segments
+            .iter()
+            .position(|s| s.segment == Segment::Step(Step::CombatDamage));
+        if first_strike {
+            let Some(at) = damage else {
+                return false;
+            };
+            if segments[..at].iter().any(|s| s.segment == first_strike_seg) {
+                return false;
+            }
+            segments.insert(
+                at,
+                PlanSegment {
+                    segment: first_strike_seg,
+                    skippable: true,
+                },
+            );
+            true
+        } else {
+            let before = segments.len();
+            segments.retain(|s| s.segment != first_strike_seg);
+            segments.len() != before
+        }
+    }
+
     /// CR 725.2d: "The current combat phase ends. ... The game skips straight to the next
     /// phase". Only while a combat phase is in progress: its remaining steps are discarded and
     /// its `EndPhase(Combat)` is kept; returns true. CR 725.2g: "If an effect attempts to end
@@ -808,19 +893,7 @@ pub fn end_the_turn<H: EndTurnHost + ?Sized>(
     // CR 725.1b.
     host.exile_stack()?;
     // CR 725.1c: no priority, no trigger placement.
-    let mut passes = 0usize;
-    loop {
-        if passes >= MAX_SETTLE_ITERATIONS {
-            return Err(procedure_error(
-                "the state-based-action check of ending the turn does not settle",
-            ));
-        }
-        passes += 1;
-        let outcome = host.sba_pass(choices).map_err(Interrupt::from)?;
-        if !outcome.performed {
-            break;
-        }
-    }
+    check_sba_without_priority(host, choices, "ending the turn")?;
     // CR 725.1d.
     if phase_ended == Some(Phase::Combat) {
         host.remove_all_from_combat()?;
@@ -829,21 +902,62 @@ pub fn end_the_turn<H: EndTurnHost + ?Sized>(
     Ok(EndTurnReport { phase_ended })
 }
 
-/// Ends the combat phase (REQ-TURN-003; CR 725.2d): if a combat phase is in progress, its
-/// remaining steps are skipped and everything is removed from combat ("until end of combat"
-/// effects expire at its `EndPhase(Combat)` through the sequencer); returns true. CR 725.2g:
-/// outside a combat phase nothing happens and nothing is called (false).
+/// CR 725.1c, CR 725.2c: "Check state-based actions. No player gets priority, and no triggered
+/// abilities are put onto the stack." [`HeartbeatHost::sba_pass`] repeats while it performs
+/// something; [`HeartbeatHost::place_triggers`] is never called.
+fn check_sba_without_priority<H: EndTurnHost + ?Sized>(
+    host: &mut H,
+    choices: &mut ChoiceContext<'_>,
+    what: &str,
+) -> Result<(), Interrupt> {
+    let mut passes = 0usize;
+    loop {
+        if passes >= MAX_SETTLE_ITERATIONS {
+            return Err(procedure_error(&format!(
+                "the state-based-action check of {what} does not settle"
+            )));
+        }
+        passes += 1;
+        let outcome = host.sba_pass(choices).map_err(Interrupt::from)?;
+        if !outcome.performed {
+            return Ok(());
+        }
+    }
+}
+
+/// Ends the combat phase (REQ-TURN-003; CR 725.2: "follow these steps in order").
+///
+/// CR 725.2g: "If an effect attempts to end the combat phase at any time that's not a combat
+/// phase, nothing happens": outside a combat phase nothing is called and the result is false.
+/// Otherwise: CR 725.2a [`EndTurnHost::cease_pending_triggers`]; CR 725.2b
+/// [`EndTurnHost::exile_stack`]; CR 725.2c the state-based-action check with no priority and
+/// no trigger placement (as [`end_the_turn`]; triggers that trigger now wait for the next
+/// phase, CR 725.2f); CR 725.2d [`EndTurnHost::remove_all_from_combat`], then
+/// [`TurnScheduler::end_combat_phase_now`] discards the remaining combat steps, so the end of
+/// combat step never begins (CR 725.2e) and "until end of combat" effects expire at the kept
+/// `EndPhase(Combat)` through the sequencer. Returns true.
 ///
 /// # Errors
-/// Whatever [`EndTurnHost::remove_all_from_combat`] returns.
+/// Any host interrupt; [`ChoiceError::Procedure`] if the state-based-action check does not
+/// settle within [`MAX_SETTLE_ITERATIONS`] passes.
 pub fn end_the_combat_phase<H: EndTurnHost + ?Sized>(
     host: &mut H,
     scheduler: &mut TurnScheduler,
+    choices: &mut ChoiceContext<'_>,
 ) -> Result<bool, Interrupt> {
-    if !scheduler.end_combat_phase_now() {
+    // CR 725.2g.
+    if scheduler.turn_over || scheduler.phase_in_progress() != Some(Phase::Combat) {
         return Ok(false);
     }
+    // CR 725.2a.
+    host.cease_pending_triggers()?;
+    // CR 725.2b.
+    host.exile_stack()?;
+    // CR 725.2c.
+    check_sba_without_priority(host, choices, "ending the combat phase")?;
+    // CR 725.2d.
     host.remove_all_from_combat()?;
+    scheduler.end_combat_phase_now();
     Ok(true)
 }
 
@@ -1148,16 +1262,24 @@ pub fn restart_game<H: RestartHost + ?Sized>(
 // ---------------------------------------------------------------------------------------------
 
 /// Runs `turn`, planned by [`TurnScheduler::next_turn`], through the sequencer (REQ-TURN-003):
-/// [`TurnHost::begin_turn`], then one [`TurnScheduler::next_item`] at a time until the turn is
-/// over. `BeginPhase(p)`: [`TurnHost::begin_phase`] and the [`ExpiryPoint::BeginPhase`] expiry;
+/// [`TurnHost::begin_turn`], then [`TurnHost::perform_follow_up`] for each of
+/// [`PlannedTurn::follow_ups`] in order (CR 614.10b), then one [`TurnScheduler::next_item`] at a
+/// time until the turn is over. `BeginPhase(p)`: [`TurnHost::begin_phase`] and the [`ExpiryPoint::BeginPhase`] expiry;
 /// `Segment(s)`: [`run_segment`]; `EndPhase(p)`: the [`ExpiryPoint::EndPhase`] expiry and
 /// [`TurnHost::empty_mana_pools`] (as `run_phase`). Skips are applied as each phase or step
 /// would begin (CR 614.10), and changes made to `scheduler` between items take effect at the
 /// next item. On success it records the turn's active player as the previous active player in
 /// `state`, as `run_turn` does (CR 502.2 day/night check of the next turn).
 ///
+/// In a combat phase, as `run_phase` does: once a declare attackers step has ended,
+/// [`TurnHost::attackers_declared`] `false` calls [`TurnScheduler::skip_blockers_and_damage`]
+/// (CR 508.8); once a declare blockers step has ended, [`TurnHost::first_strike_damage_step`]
+/// is passed to [`TurnScheduler::set_first_strike_damage_step`] (CR 510.4).
+///
 /// # Errors
-/// As `run_turn`.
+/// As `run_turn`; [`ChoiceError::Procedure`] before any host call if `turn` is not the turn of
+/// the scheduler's installed plan (its [`PlannedTurn::plan_serial`] or player differs, or that
+/// plan is already over).
 pub fn run_planned_turn<H: TurnHost + ?Sized>(
     host: &mut H,
     state: &mut TurnState,
@@ -1166,7 +1288,22 @@ pub fn run_planned_turn<H: TurnHost + ?Sized>(
     turn: &PlannedTurn,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<TurnReport, Interrupt> {
+    // F39: the handle must own the installed plan (plan identity, not only the player: two
+    // successive turns can belong to the same player), and that plan must not be over.
+    if turn.plan_serial != scheduler.plan_serial
+        || scheduler.active != Some(turn.player)
+        || scheduler.turn_over
+    {
+        return Err(procedure_error(
+            "the planned turn is not the scheduler's installed plan",
+        ));
+    }
     host.begin_turn(turn.player)?;
+    // CR 614.10b: "That action is considered to be the first thing that happens during the
+    // next step, phase, or turn to actually occur."
+    for &follow_up in &turn.follow_ups {
+        host.perform_follow_up(follow_up, choices)?;
+    }
     let mut segments = Vec::new();
     while let Some(item) = scheduler.next_item() {
         match item {
@@ -1176,6 +1313,17 @@ pub fn run_planned_turn<H: TurnHost + ?Sized>(
             }
             PlanItem::Segment(s) => {
                 segments.push(run_segment(host, state, registry, s, choices)?);
+                match s {
+                    // CR 508.8.
+                    Segment::Step(Step::DeclareAttackers) if !host.attackers_declared() => {
+                        scheduler.skip_blockers_and_damage();
+                    }
+                    // CR 510.4: "as the combat damage step begins".
+                    Segment::Step(Step::DeclareBlockers) => {
+                        scheduler.set_first_strike_damage_step(host.first_strike_damage_step());
+                    }
+                    _ => {}
+                }
             }
             PlanItem::EndPhase(p) => {
                 host.expire_effects(ExpiryPoint::EndPhase(p))?;

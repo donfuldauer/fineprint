@@ -57,12 +57,25 @@ fn drive_with(
 }
 
 fn same(a: &Mock, b: &Mock) -> bool {
-    a.libs == b.libs
+    a.game == b.game
+        && a.libs == b.libs
         && a.hands == b.hands
         && a.log == b.log
         && a.raw() == b.raw()
         && a.performed == b.performed
         && a.starting == b.starting
+}
+
+/// R3 (F92): `same` compares the game state too, so a difference in only the life total is seen.
+#[test]
+fn same_detects_a_game_state_only_difference() {
+    let a = run_keep(base(5, 2)).host;
+    let mut b = a.clone();
+    assert!(same(&a, &b));
+    let p = b.game.turn_order()[1];
+    b.game.player_mut(p).expect("player").set_life(40);
+    assert_eq!(a.life(2), 20);
+    assert!(!same(&a, &b));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -126,7 +139,7 @@ fn unknown_start_player_is_an_error_not_a_panic() {
 // Shuffles, life, hand sizes, keep-all.
 // ---------------------------------------------------------------------------------------------
 
-/// CR 103.3, CR 103.5: shuffles happen per player in stored order, after the single
+/// REQ-FMT-001, CR 103.3, CR 103.5: shuffles happen per player in stored order, after the single
 /// starting-player draw; keep-all leaves each library as the shuffled order minus the opening
 /// hand (the top 7), and the opening hand is the top 7, all mulligans 0, `to_bottom` 0.
 #[test]
@@ -347,7 +360,7 @@ fn mulligan_sequence_c_both_in_same_round() {
 // Multiplayer free first mulligan, zero-hand limit.
 // ---------------------------------------------------------------------------------------------
 
-/// CR 103.5c: the free first mulligan in a 3-player game with the flag on.
+/// REQ-FMT-001, CR 103.5c: the free first mulligan in a 3-player game with the flag on.
 #[test]
 fn free_first_mulligan_three_players_flag_on() {
     let policy = Policy::script(&[(1, 0, true), (1, 1, true)]);
@@ -369,7 +382,7 @@ fn free_first_mulligan_three_players_flag_on() {
     assert_eq!(run.report.mulligans[0], (pid(1), 2));
 }
 
-/// CR 103.5c: flag off in 3 players, and 2 players with the flag on, count normally.
+/// REQ-FMT-001, CR 103.5c: flag off in 3 players, and 2 players with the flag on, count normally.
 #[test]
 fn free_first_mulligan_off_or_two_players_counts_normally() {
     let policy = Policy::script(&[(1, 0, true), (1, 1, true)]);
@@ -388,7 +401,7 @@ fn free_first_mulligan_off_or_two_players_counts_normally() {
     }
 }
 
-/// CR 103.5c: the `mulligan_to_bottom` table.
+/// REQ-FMT-001, CR 103.5c: the `mulligan_to_bottom` table.
 #[test]
 fn mulligan_to_bottom_table() {
     for taken in 0..=4u64 {
@@ -409,8 +422,9 @@ fn mulligan_to_bottom_table() {
     assert_eq!(mulligan_to_bottom(3, 3, false), 3);
 }
 
-/// CR 103.5: when the count to bottom reaches the hand size there is no ask, the whole hand
-/// goes to the bottom (ascending ids), the opening hand is empty and the run completes.
+/// REQ-FMT-001, REQ-NET-003, CR 103.5: when the count to bottom reaches the hand size no
+/// further mulligan is offered; the player orders the whole hand onto the bottom (one request
+/// with `to_bottom` = hand size), the opening hand is empty and the run completes.
 #[test]
 fn zero_hand_limit_stops_asking_and_empties_hand() {
     // Hand size 3 from the format, two players.
@@ -420,18 +434,25 @@ fn zero_hand_limit_stops_asking_and_empties_hand() {
         .into_iter()
         .filter(|a| a.0 == pid(1))
         .collect();
-    assert_eq!(p1, vec![(pid(1), 0, 0), (pid(1), 1, 1), (pid(1), 2, 2)]);
+    assert_eq!(
+        p1,
+        vec![
+            (pid(1), 0, 0),
+            (pid(1), 1, 1),
+            (pid(1), 2, 2),
+            (pid(1), 3, 3)
+        ]
+    );
     assert_eq!(run.report.mulligans[0], (pid(1), 3));
     assert!(run.host.hand_of(1).is_empty());
     assert_eq!(run.report.opening_hands[0], (pid(1), vec![]));
     let lib = run.host.lib(1);
     assert_eq!(lib.len(), LIB as usize);
+    // The answer's order is the bottom order (the policy answers hand reversed).
     let tail = lib[lib.len() - 3..].to_vec();
-    assert_eq!(
-        tail,
-        sorted(&tail),
-        "whole hand bottomed in ascending order"
-    );
+    let mut desc = sorted(&tail);
+    desc.reverse();
+    assert_eq!(tail, desc, "whole hand bottomed in the answered order");
     assert_eq!(run.host.hand_of(2).len(), 3);
 
     // Per-player override with the free first mulligan: counted reaches 3 at 4 taken.
@@ -449,10 +470,11 @@ fn zero_hand_limit_stops_asking_and_empties_hand() {
             (pid(1), 0, 0),
             (pid(1), 1, 0),
             (pid(1), 2, 1),
-            (pid(1), 3, 2)
+            (pid(1), 3, 2),
+            (pid(1), 4, 3)
         ]
     );
-    // taken 4 is not asked as counted 3 >= 3; the 4th answer taken at taken==3 made it 4.
+    // taken 4: counted 3 >= 3, so the last request orders the whole hand; no mulligan offered.
     assert_eq!(run.report.mulligans[0], (pid(1), 4));
     assert!(run.host.hand_of(1).is_empty());
     assert_eq!(run.host.hand_of(2).len(), 7);
@@ -777,6 +799,7 @@ fn property_random_runs_conserve_cards_and_match_model() {
                 .find(|x| x.0 == id)
                 .expect("p")
                 .1;
+            assert_eq!(taken, want.mulls[&id], "{ctx} player {p} mulligans taken");
             let counted = expect_bottom(taken, n, free);
             assert_eq!(
                 run.host.hand_of(p).len() as u64,

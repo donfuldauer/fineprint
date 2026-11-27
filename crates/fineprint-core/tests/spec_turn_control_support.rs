@@ -43,8 +43,8 @@ use fineprint_core::state::GameState;
 use fineprint_core::triggers::TriggerPlacement;
 use fineprint_core::turn::heartbeat::HeartbeatHost;
 use fineprint_core::turn::{
-    EndTurnHost, ExpiryPoint, GameStartHost, PlanItem, PlannedTurn, RestartHost, Segment, TurnHost,
-    TurnScheduler, TurnState, UntapOptions, segments_of,
+    EndTurnHost, ExpiryPoint, FollowUpId, GameStartHost, PlanItem, PlannedTurn, RestartHost,
+    Segment, TurnHost, TurnScheduler, TurnState, UntapOptions,
 };
 use fineprint_core::txn::Transactional;
 
@@ -82,10 +82,37 @@ pub fn seg(s: Segment) -> PlanItem {
     PlanItem::Segment(s)
 }
 
-/// The items of one whole phase: `BeginPhase`, its segments, `EndPhase`.
+/// The items of one whole phase: `BeginPhase`, its segments, `EndPhase`. The segments are
+/// listed here literally (CR 500.1, CR 505.2, CR 510.4), independently of the implementation's
+/// `segments_of` (F19).
 pub fn phase_items(p: Phase, first_strike: bool) -> Vec<PlanItem> {
+    let segments: Vec<Segment> = match p {
+        Phase::Beginning => vec![
+            Segment::Step(Step::Untap),
+            Segment::Step(Step::Upkeep),
+            Segment::Step(Step::Draw),
+        ],
+        Phase::PrecombatMain => vec![Segment::PrecombatMain],
+        Phase::Combat if first_strike => vec![
+            Segment::Step(Step::BeginningOfCombat),
+            Segment::Step(Step::DeclareAttackers),
+            Segment::Step(Step::DeclareBlockers),
+            Segment::Step(Step::FirstStrikeDamage),
+            Segment::Step(Step::CombatDamage),
+            Segment::Step(Step::EndOfCombat),
+        ],
+        Phase::Combat => vec![
+            Segment::Step(Step::BeginningOfCombat),
+            Segment::Step(Step::DeclareAttackers),
+            Segment::Step(Step::DeclareBlockers),
+            Segment::Step(Step::CombatDamage),
+            Segment::Step(Step::EndOfCombat),
+        ],
+        Phase::PostcombatMain => vec![Segment::PostcombatMain],
+        Phase::Ending => vec![Segment::Step(Step::End), Segment::Step(Step::Cleanup)],
+    };
     let mut v = vec![bp(p)];
-    v.extend(segments_of(p, first_strike).into_iter().map(seg));
+    v.extend(segments.into_iter().map(seg));
     v.push(ep(p));
     v
 }
@@ -415,6 +442,16 @@ impl TurnHost for Ctl {
     }
     fn first_strike_damage_step(&self) -> bool {
         self.t.first_strike_damage_step()
+    }
+    fn attackers_declared(&self) -> bool {
+        self.t.attackers_declared()
+    }
+    fn perform_follow_up(
+        &mut self,
+        follow_up: FollowUpId,
+        choices: &mut ChoiceContext<'_>,
+    ) -> Result<(), Interrupt> {
+        self.t.perform_follow_up(follow_up, choices)
     }
     fn combat_step_actions(
         &mut self,

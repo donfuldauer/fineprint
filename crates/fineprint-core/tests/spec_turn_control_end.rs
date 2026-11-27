@@ -417,11 +417,20 @@ fn trigger_during_end_the_turn_waits_for_cleanup() {
         0,
         &TC::BeginStep(Step::Cleanup),
     );
-    assert!(first_cleanup.contains(&TC::Place(vec![P1, P2])));
+    let place = first_cleanup
+        .iter()
+        .position(|c| *c == TC::Place(vec![P1, P2]))
+        .expect("the trigger is placed in the first cleanup step");
     let first_prio = first_cleanup
         .iter()
         .position(|c| matches!(c, TC::Prio(_)))
         .expect("priority in the first cleanup step");
+    // CR 514.3a, CR 725.1f: the waiting trigger is put on the stack before the active player
+    // gets priority (F88).
+    assert!(
+        place < first_prio,
+        "placement {place} after priority {first_prio}"
+    );
     assert_eq!(first_cleanup[first_prio], TC::Prio(P1));
     let second_cleanup = steps::between(
         &rest,
@@ -484,19 +493,32 @@ fn no_trigger_no_priority_in_cleanup() {
 // end_the_combat_phase
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-TURN-003, CR 725.2d: during combat it ends the combat phase and removes everything from
-/// combat.
+/// REQ-TURN-003, CR 725.2a-725.2d: during combat, with the resolving object and another one
+/// below it on the stack, the waiting triggers cease to exist, the stack is exiled, state-based
+/// actions are checked (repeated while performed) with no priority and no trigger placement,
+/// then everything is removed from combat and the combat phase ends (F41).
 #[test]
 fn end_the_combat_phase_in_combat() {
-    let w = world_at(
+    let mut w = world_at(
         st(Step::DeclareAttackers),
         Phase::Combat,
         Some(Step::DeclareAttackers),
     );
+    w.host.t.depth = 2;
+    w.host.sba_script = [true, false].into_iter().collect();
     let (w, ended) =
-        run_cw(w, |w, _c| end_the_combat_phase(&mut w.host, &mut w.sched)).expect("run");
+        run_cw(w, |w, c| end_the_combat_phase(&mut w.host, &mut w.sched, c)).expect("run");
     assert!(ended);
-    assert_eq!(w.host.calls(), vec![C::RemoveCombat]);
+    assert_eq!(
+        w.host.calls(),
+        vec![
+            C::Cease,
+            C::ExileStack,
+            C::Base(TC::Sba),
+            C::Base(TC::Sba),
+            C::RemoveCombat
+        ]
+    );
     let mut s = w.sched.clone();
     assert_eq!(
         drain(&mut s),
@@ -508,7 +530,8 @@ fn end_the_combat_phase_in_combat() {
     );
 }
 
-/// REQ-TURN-003, CR 725.2g: outside a combat phase nothing happens and nothing is called.
+/// REQ-TURN-003, CR 725.2g: "If an effect attempts to end the combat phase at any time that's
+/// not a combat phase, nothing happens": no host method is called (F41).
 #[test]
 fn end_the_combat_phase_outside_combat() {
     for (item, phase, step) in [
@@ -517,12 +540,14 @@ fn end_the_combat_phase_outside_combat() {
         (seg(Segment::PostcombatMain), Phase::PostcombatMain, None),
         (st(Step::End), Phase::Ending, Some(Step::End)),
     ] {
-        let w = world_at(item, phase, step);
+        let mut w = world_at(item, phase, step);
+        w.host.t.depth = 1;
         let before = w.sched.clone();
         let (w, ended) =
-            run_cw(w, |w, _c| end_the_combat_phase(&mut w.host, &mut w.sched)).expect("run");
+            run_cw(w, |w, c| end_the_combat_phase(&mut w.host, &mut w.sched, c)).expect("run");
         assert!(!ended, "at {item:?}");
         assert!(w.host.calls().is_empty(), "at {item:?}");
+        assert_eq!(w.host.t.depth, 1, "the stack is untouched at {item:?}");
         let (mut a, mut b) = (before, w.sched.clone());
         assert_eq!(drain(&mut a), drain(&mut b));
     }

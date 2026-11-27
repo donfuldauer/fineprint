@@ -912,6 +912,7 @@ enum Ev {
     Cease,
     Exile,
     RemoveCombat,
+    FollowUp(FollowUpId),
 }
 
 #[derive(Clone, Debug)]
@@ -924,6 +925,18 @@ struct Fake {
     sba_performs: u32,
     /// The next SBA pass makes a trigger wait.
     sba_triggers: bool,
+    /// The current step (set by `begin_step`, cleared by `begin_phase`).
+    step: Option<Step>,
+    /// What `attackers_declared` reports (CR 508.8).
+    attackers: bool,
+    /// What `first_strike_damage_step` reports (CR 510.4).
+    first_strike: bool,
+    /// The steps whose beginning puts one object on the stack.
+    stack_in: Vec<Step>,
+    /// Resolving during declare attackers puts a creature onto the battlefield attacking.
+    resolve_adds_attacker: bool,
+    /// Resolving during declare blockers flips `first_strike`.
+    resolve_flips_first_strike: bool,
 }
 
 impl Fake {
@@ -935,6 +948,12 @@ impl Fake {
             waiting: Vec::new(),
             sba_performs: 0,
             sba_triggers: false,
+            step: None,
+            attackers: true,
+            first_strike: false,
+            stack_in: Vec::new(),
+            resolve_adds_attacker: false,
+            resolve_flips_first_strike: false,
         }
     }
 
@@ -1023,6 +1042,12 @@ impl HeartbeatHost for Fake {
     fn resolve_top(&mut self, _choices: &mut ChoiceContext<'_>) -> Result<(), Interrupt> {
         self.log.push(Ev::Resolve);
         self.stack.pop();
+        if self.resolve_adds_attacker && self.step == Some(Step::DeclareAttackers) {
+            self.attackers = true;
+        }
+        if self.resolve_flips_first_strike && self.step == Some(Step::DeclareBlockers) {
+            self.first_strike = !self.first_strike;
+        }
         Ok(())
     }
     fn priority_actions(&self, _player: PlayerId) -> Vec<ChoiceResponse> {
@@ -1049,10 +1074,15 @@ impl TurnHost for Fake {
     }
     fn begin_phase(&mut self, phase: Phase) -> Result<(), Interrupt> {
         self.log.push(Ev::Phase(phase));
+        self.step = None;
         Ok(())
     }
     fn begin_step(&mut self, step: Step) -> Result<(), Interrupt> {
         self.log.push(Ev::Step(step));
+        self.step = Some(step);
+        if self.stack_in.contains(&step) {
+            self.stack.push(format!("test.object_{step:?}"));
+        }
         Ok(())
     }
     fn expire_effects(&mut self, at: ExpiryPoint) -> Result<(), Interrupt> {
@@ -1120,6 +1150,20 @@ impl TurnHost for Fake {
         _sagas: &[ObjectId],
         _choices: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt> {
+        Ok(())
+    }
+    fn first_strike_damage_step(&self) -> bool {
+        self.first_strike
+    }
+    fn attackers_declared(&self) -> bool {
+        self.attackers
+    }
+    fn perform_follow_up(
+        &mut self,
+        follow_up: FollowUpId,
+        _choices: &mut ChoiceContext<'_>,
+    ) -> Result<(), Interrupt> {
+        self.log.push(Ev::FollowUp(follow_up));
         Ok(())
     }
 }
@@ -1342,13 +1386,23 @@ fn req_turn_003_cr_725_1c_sba_check_is_bounded() {
 
 #[test]
 fn req_turn_003_cr_725_2_end_the_combat_phase() {
-    // REQ-TURN-003, CR 725.2d in combat; CR 725.2g outside combat nothing happens.
+    // REQ-TURN-003, CR 725.2a-d in order in combat (cease the waiting triggers, exile the
+    // stack, check state-based actions without priority or trigger placement, remove from
+    // combat); CR 725.2g outside combat nothing happens and no host method is called (F41).
     let (w, ended, _) = run(world(2), |w, c| {
         let mut reports = Vec::new();
         run_until(w, seg(Step::BeginningOfCombat), c, &mut reports)?;
         w.host.log.clear();
-        let ended = end_the_combat_phase(&mut w.host, &mut w.sched)?;
-        assert_eq!(w.host.log, vec![Ev::RemoveCombat]);
+        w.host.sba_performs = 1;
+        w.host.waiting.push(trig(w.host.p(0), "test.before"));
+        w.host.stack.push("test.below".to_owned());
+        w.host.stack.push("test.resolving".to_owned());
+        let ended = end_the_combat_phase(&mut w.host, &mut w.sched, c)?;
+        assert_eq!(
+            w.host.log,
+            vec![Ev::Cease, Ev::Exile, Ev::Sba, Ev::Sba, Ev::RemoveCombat]
+        );
+        assert!(w.host.waiting.is_empty() && w.host.stack.is_empty());
         while let Some(item) = w.sched.next_item() {
             dispatch(w, item, c, &mut reports)?;
         }
@@ -1365,10 +1419,12 @@ fn req_turn_003_cr_725_2_end_the_combat_phase() {
         let mut reports = Vec::new();
         run_until(w, seg(Step::Upkeep), c, &mut reports)?;
         w.host.log.clear();
-        end_the_combat_phase(&mut w.host, &mut w.sched)
+        w.host.stack.push("test.untouched".to_owned());
+        end_the_combat_phase(&mut w.host, &mut w.sched, c)
     });
     assert!(!ended);
     assert!(w.host.log.is_empty());
+    assert_eq!(w.host.stack, vec!["test.untouched".to_owned()]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1945,4 +2001,279 @@ fn req_turn_003_property_extra_turns_and_skips_are_accounted_for() {
         }
         assert_eq!(added, consumed + s.pending_extra_turns().len());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn: plan identity, follow-ups and the combat decisions of planned turns
+// ---------------------------------------------------------------------------------------------
+
+/// Runs `turn` through `run_planned_turn` with the world's own state.
+fn planned(
+    w: &mut World,
+    turn: &PlannedTurn,
+    c: &mut ChoiceContext<'_>,
+) -> Result<TurnReport, Interrupt> {
+    run_planned_turn(
+        &mut w.host,
+        &mut w.ts,
+        &TurnBasedRegistry::standard(),
+        &mut w.sched,
+        turn,
+        c,
+    )
+}
+
+#[test]
+fn req_turn_003_stale_planned_turn_is_rejected_before_any_host_call() {
+    // REQ-TURN-003, CR 614.10: a saved earlier `PlannedTurn` does not own the installed plan,
+    // whether it names the same player (two successive turns of one player) or another one; it
+    // is rejected before `begin_turn`, no host method is called and the current plan (with a
+    // pending draw-step skip of its player) is untouched (F39).
+    let order = seats(2);
+    // Another player: P1's turn is saved, then P2's plan is installed.
+    let mut s = TurnScheduler::new(order[0]);
+    let stale_other = take(&mut s, &order);
+    drain(&mut s);
+    let current = take(&mut s, &order);
+    assert_eq!(current.player, order[1]);
+    assert_ne!(stale_other.plan_serial, current.plan_serial);
+    // The same player: P2 takes an extra turn after this one.
+    let mut s2 = s.clone();
+    s2.add_extra_turn(order[1]);
+    drain(&mut s2);
+    let next_same = take(&mut s2, &order);
+    assert_eq!(next_same.player, order[1]);
+    let cases = [
+        (s.clone(), stale_other.clone()),
+        (s2.clone(), current.clone()),
+    ];
+    for (sched, stale) in cases {
+        let mut w = world(2);
+        w.sched = sched;
+        let active = w.sched.active_player().unwrap();
+        w.sched.add_step_skip(active, Step::Draw);
+        let before = w.sched.clone();
+        // The procedure reports the rejection and what it touched (a session error would
+        // discard the state).
+        let (_, (err, log, after), asked) = run(w, move |w, c| {
+            let err = planned(w, &stale, c).err();
+            Ok((err, w.host.log.clone(), w.sched.clone()))
+        });
+        assert!(
+            matches!(err, Some(Interrupt::Error(ChoiceError::Procedure(_)))),
+            "{err:?}"
+        );
+        assert_eq!(asked, 0);
+        assert!(log.is_empty(), "no host method is called: {log:?}");
+        assert_eq!(after, before, "the current plan is unaffected");
+        assert_eq!(after.pending_step_skips(active, Step::Draw), 1);
+    }
+    // The current turn still runs normally afterwards, with its draw skip applied.
+    let mut w = world(2);
+    w.sched = s;
+    w.sched.add_step_skip(order[1], Step::Draw);
+    let (w, report, _) = run(w, move |w, c| planned(w, &current, c));
+    assert_eq!(report.active_player, order[1]);
+    assert!(!w.host.log.contains(&Ev::Step(Step::Draw)));
+}
+
+#[test]
+fn req_turn_003_follow_ups_are_performed_first_in_creation_order() {
+    // REQ-TURN-003, CR 614.10b: "That action is considered to be the first thing that happens
+    // during the next step, phase, or turn to actually occur": after `begin_turn`, before the
+    // first phase begins, in the order the skip effects were created (F40).
+    let (w, _, _) = run(world(3), |w, c| {
+        let order = w.host.game().turn_order().to_vec();
+        // P1's turn is skipped twice (follow-ups 7 then 3), P2's once (follow-up 5).
+        w.sched.add_turn_skip(order[0], Some(FollowUpId(7)));
+        w.sched.add_turn_skip(order[1], Some(FollowUpId(5)));
+        w.sched.add_turn_skip(order[0], Some(FollowUpId(3)));
+        let t = w.sched.next_turn(&order, &all_in, false).unwrap();
+        assert_eq!(t.player, order[2]);
+        assert_eq!(
+            t.follow_ups,
+            vec![FollowUpId(7), FollowUpId(5)],
+            "the second skip of P1 waits for P1's next turn"
+        );
+        planned(w, &t, c)
+    });
+    let order = w.host.game().turn_order().to_vec();
+    assert_eq!(
+        w.host.log[..4],
+        [
+            Ev::Turn(order[2]),
+            Ev::FollowUp(FollowUpId(7)),
+            Ev::FollowUp(FollowUpId(5)),
+            Ev::Phase(Phase::Beginning)
+        ]
+    );
+    let follow_ups = w
+        .host
+        .log
+        .iter()
+        .filter(|e| matches!(e, Ev::FollowUp(_)))
+        .count();
+    assert_eq!(follow_ups, 2);
+}
+
+/// The combat steps a log went through, in order.
+fn combat_steps(log: &[Ev]) -> Vec<Step> {
+    log.iter()
+        .filter_map(|e| match e {
+            Ev::Step(s) if s.phase() == Phase::Combat => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn req_turn_003_planned_turn_without_attackers_skips_blockers_and_damage() {
+    // REQ-TURN-002, REQ-TURN-003, CR 508.8: in a planned turn too, no attackers after
+    // declare-attackers priority skips declare blockers and combat damage (the end of combat
+    // step and `EndPhase(Combat)` stay); an attacker put onto the battlefield during that
+    // priority keeps them (F46).
+    for (attackers, added, expected) in [
+        (
+            false,
+            false,
+            vec![
+                Step::BeginningOfCombat,
+                Step::DeclareAttackers,
+                Step::EndOfCombat,
+            ],
+        ),
+        (
+            false,
+            true,
+            vec![
+                Step::BeginningOfCombat,
+                Step::DeclareAttackers,
+                Step::DeclareBlockers,
+                Step::CombatDamage,
+                Step::EndOfCombat,
+            ],
+        ),
+    ] {
+        let mut w = world(2);
+        w.host.attackers = attackers;
+        w.host.resolve_adds_attacker = added;
+        w.host.stack_in = vec![Step::DeclareAttackers];
+        let (w, _, _) = run(w, |w, c| {
+            let order = w.host.game().turn_order().to_vec();
+            let t = w.sched.next_turn(&order, &all_in, true).unwrap();
+            planned(w, &t, c)
+        });
+        assert_eq!(combat_steps(&w.host.log), expected, "added: {added}");
+        assert!(
+            w.host
+                .log
+                .contains(&Ev::Expire(ExpiryPoint::EndPhase(Phase::Combat)))
+        );
+    }
+}
+
+#[test]
+fn req_turn_003_planned_turn_decides_first_strike_at_the_damage_boundary() {
+    // REQ-TURN-002, REQ-TURN-003, CR 510.4: the planned turn decides the first-strike step when
+    // the declare blockers step has ended, whatever `next_turn` was told: a creature that gains
+    // first strike during declare-blockers priority adds the step, one that loses it removes
+    // it; without a change the host's flag decides (F49, F18). An extra combat phase is decided
+    // the same way at its own damage boundary.
+    let cases = [
+        // (flag, flips, next_turn argument, first-strike step expected)
+        (false, true, false, true),
+        (true, true, true, false),
+        (false, false, true, false),
+        (true, false, false, true),
+    ];
+    for (flag, flips, provisional, expected) in cases {
+        let mut w = world(2);
+        w.host.first_strike = flag;
+        w.host.resolve_flips_first_strike = flips;
+        w.host.stack_in = vec![Step::DeclareBlockers];
+        let (w, report, _) = run(w, move |w, c| {
+            let order = w.host.game().turn_order().to_vec();
+            let t = w.sched.next_turn(&order, &all_in, provisional).unwrap();
+            planned(w, &t, c)
+        });
+        let mut steps = vec![
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::DeclareBlockers,
+        ];
+        if expected {
+            steps.push(Step::FirstStrikeDamage);
+        }
+        steps.extend([Step::CombatDamage, Step::EndOfCombat]);
+        let label = format!("flag {flag}, flips {flips}, provisional {provisional}");
+        assert_eq!(combat_steps(&w.host.log), steps, "{label}");
+        let reported: Vec<Step> = report
+            .segments
+            .iter()
+            .filter_map(|r| match r.segment {
+                Segment::Step(s) if s.phase() == Phase::Combat => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, steps, "{label}");
+    }
+    // An extra combat phase: provisional plan without the step, flag set: it gets one.
+    let mut w = world(2);
+    w.host.first_strike = true;
+    let (w, _, _) = run(w, |w, c| {
+        let order = w.host.game().turn_order().to_vec();
+        let t = w.sched.next_turn(&order, &all_in, false).unwrap();
+        assert!(
+            w.sched
+                .add_extra_phase(Phase::PostcombatMain, Phase::Combat, None)
+        );
+        planned(w, &t, c)
+    });
+    let fs = combat_steps(&w.host.log)
+        .iter()
+        .filter(|s| **s == Step::FirstStrikeDamage)
+        .count();
+    assert_eq!(fs, 2, "both combat phases decide at their damage boundary");
+}
+
+#[test]
+fn req_turn_003_scheduler_combat_adjustments_only_in_combat() {
+    // REQ-TURN-003, CR 508.8, CR 510.4: the scheduler methods change only the in-progress
+    // combat phase's not-yet-started steps; outside combat they change nothing.
+    let order = seats(2);
+    let mut s = TurnScheduler::new(order[0]);
+    take(&mut s, &order);
+    assert!(!s.skip_blockers_and_damage());
+    assert!(!s.set_first_strike_damage_step(true));
+    advance_to(&mut s, seg(Step::DeclareBlockers));
+    let mut gained = s.clone();
+    assert!(gained.set_first_strike_damage_step(true));
+    assert!(
+        !gained.set_first_strike_damage_step(true),
+        "kept, not doubled"
+    );
+    let rest = drain(&mut gained);
+    assert_eq!(
+        rest[..3],
+        [
+            seg(Step::FirstStrikeDamage),
+            seg(Step::CombatDamage),
+            seg(Step::EndOfCombat)
+        ]
+    );
+    let mut lost = s.clone();
+    assert!(lost.set_first_strike_damage_step(true));
+    assert!(lost.set_first_strike_damage_step(false));
+    assert_eq!(
+        drain(&mut lost)[..2],
+        [seg(Step::CombatDamage), seg(Step::EndOfCombat)]
+    );
+    let mut s = TurnScheduler::new(order[0]);
+    s.next_turn(&order, &all_in, true).unwrap();
+    advance_to(&mut s, seg(Step::DeclareAttackers));
+    assert!(s.skip_blockers_and_damage());
+    assert_eq!(
+        drain(&mut s)[..2],
+        [seg(Step::EndOfCombat), PlanItem::EndPhase(Phase::Combat)]
+    );
 }

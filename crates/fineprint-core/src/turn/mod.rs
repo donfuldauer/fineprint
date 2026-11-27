@@ -35,9 +35,9 @@ pub mod heartbeat;
 mod heartbeat_tests;
 
 pub use heartbeat::{
-    HeartbeatHost, HeartbeatOutcome, HeartbeatState, MAX_SETTLE_ITERATIONS, PassRecord, PassResult,
-    SbaStage, SettleReport, next_player_in_turn_order, players_in_game, run_heartbeat,
-    sba_pass_post_batch, settle_before_priority,
+    ActionOutcome, HeartbeatHost, HeartbeatOutcome, HeartbeatState, MAX_SETTLE_ITERATIONS,
+    PassRecord, PassResult, SbaStage, SettleReport, next_player_in_turn_order, players_in_game,
+    run_heartbeat, sba_pass_post_batch, settle_before_priority,
 };
 
 pub mod steps;

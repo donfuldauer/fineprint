@@ -45,7 +45,7 @@ fn run(seed: u64) -> RunOut {
     let mut pushed: BTreeMap<PlayerId, usize> = BTreeMap::new();
     let mut accounted: BTreeMap<PlayerId, usize> = BTreeMap::new();
     let mut turns_taken = 0usize;
-    let mut normal_seen: Vec<PlayerId> = Vec::new();
+    let mut normal_seen: Vec<(PlayerId, Vec<PlayerId>)> = Vec::new();
     for _ in 0..60 {
         let p = seats[rng.below(n as u64) as usize];
         match rng.below(12) {
@@ -103,13 +103,13 @@ fn run(seed: u64) -> RunOut {
                     if *extra {
                         *accounted.entry(*q).or_default() += 1;
                     } else {
-                        normal_seen.push(*q);
+                        normal_seen.push((*q, left.clone()));
                     }
                 }
                 if got.extra {
                     *accounted.entry(got.player).or_default() += 1;
                 } else {
-                    normal_seen.push(got.player);
+                    normal_seen.push((got.player, left.clone()));
                 }
                 for q in &want.dropped {
                     *accounted.entry(*q).or_default() += 1;
@@ -138,23 +138,25 @@ fn run(seed: u64) -> RunOut {
     }
     // The normal turns (taken or skipped) follow the seat order cyclically, passing over only
     // players who had left.
+    // Each observation carries the departure set as it was when that turn was taken or
+    // skipped, so a player who left only later cannot excuse an earlier jump (CR 800.4k).
     for w in normal_seen.windows(2) {
-        let i = seats.iter().position(|x| *x == w[0]).expect("seated");
-        let j = seats.iter().position(|x| *x == w[1]).expect("seated");
+        let i = seats.iter().position(|x| *x == w[0].0).expect("seated");
+        let j = seats.iter().position(|x| *x == w[1].0).expect("seated");
         let gap = (j + n - i) % n;
         let gap = if gap == 0 { n } else { gap };
         for k in 1..gap {
             let between = seats[(i + k) % n];
             assert!(
-                left.contains(&between),
+                w[1].1.contains(&between),
                 "seed {seed}: normal order jumped over {between:?} ({normal_seen:?})"
             );
         }
     }
-    // The starting player's turn is the first normal turn (unless they left before it, after
-    // some extra turns: CR 800.4k).
-    if let Some(first) = normal_seen.first()
-        && !left.contains(&start)
+    // The starting player's turn is the first normal turn (unless they had left before it, after
+    // some extra turns: CR 800.4k; judged by the departures at the time of that turn).
+    if let Some((first, left_then)) = normal_seen.first()
+        && !left_then.contains(&start)
     {
         assert_eq!(*first, start, "seed {seed}: the starting player is first");
     }

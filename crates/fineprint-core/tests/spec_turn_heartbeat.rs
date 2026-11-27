@@ -54,7 +54,7 @@ use fineprint_core::zones::ZoneKind;
 use support::*;
 
 /// The passes of a run's final heartbeat state.
-fn records<O>(run: &Run<FakeHost, O>) -> Vec<PassRecord> {
+fn records<H: Fake, O>(run: &Run<H, O>) -> Vec<PassRecord> {
     run.last.hb.passes().to_vec()
 }
 
@@ -1143,6 +1143,58 @@ fn req_turn_001_departure_keeps_remaining_passes() {
     );
 }
 
+/// REQ-TURN-001, CR 800.4a (F43): the player about to be asked leaves while their actions are
+/// collected, before the request is published: nobody asks them; the next player in turn
+/// order still in the game is the first chooser.
+#[test]
+fn req_turn_001_player_leaving_before_publication_is_not_asked() {
+    let run = drive(
+        conceding(FakeHost::new(3, Some(P1)), P1, P1),
+        script(vec![pass(); 2]),
+    );
+    let choosers: Vec<PlayerId> = run.requests.iter().map(|r| r.chooser).collect();
+    assert_eq!(choosers, vec![P2, P3]);
+    assert_eq!(run.out, Some(Ok(Out::StepEnds)));
+    assert!(records(&run).iter().all(|r| r.player != P1));
+}
+
+/// REQ-TURN-001, CR 117.4, CR 800.4a, CR 800.4j (F45): P1 and P2 pass, P3 leaves while deciding.
+/// Every player still in the game has passed in succession: with an empty stack the step ends,
+/// with an object on the stack it resolves and the active player receives priority; no request
+/// goes to anyone in between and no pass is recorded for the departure.
+#[test]
+fn req_turn_001_departure_after_the_others_passed_completes_the_round() {
+    let run = drive(
+        conceding(FakeHost::new(3, Some(P1)), P3, P3),
+        script(vec![pass(); 4]),
+    );
+    assert_eq!(
+        trace(&run),
+        evs(&[&quiet_settle(&[P1, P2, P3]), &[Ev::Ask(P1), Ev::Ask(P2)]])
+    );
+    assert_eq!(run.out, Some(Ok(Out::StepEnds)));
+    assert_eq!(records(&run).len(), 2);
+
+    let run = drive(
+        conceding(FakeHost::new(3, Some(P1)).with_depth(1), P3, P3),
+        script(vec![pass(); 4]),
+    );
+    assert_eq!(
+        trace(&run),
+        evs(&[
+            &quiet_settle(&[P1, P2, P3]),
+            &[Ev::Ask(P1), Ev::Ask(P2), Ev::Resolve],
+            &quiet_settle(&[P1, P2]),
+            &[Ev::Ask(P1), Ev::Ask(P2)],
+        ])
+    );
+    assert_eq!(run.out, Some(Ok(Out::StepEnds)));
+    let recs = records(&run);
+    assert_eq!(recs.len(), 4);
+    assert_eq!(recs[1].result, PassResult::PriorityMoved { to: P3 });
+    assert_eq!(recs[3].result, PassResult::StepEnds);
+}
+
 // =============================================================================================
 // 12. settle guard
 // =============================================================================================
@@ -1356,14 +1408,35 @@ enum Via {
     Direct,
 }
 
+/// A post-batch eligibility gate: while `blocker` is on the battlefield, `player` may not
+/// protect `battle`; the provider's post-batch view lifts the restriction once `blocker` has
+/// left (in the same batch).
+#[derive(Clone, Copy, Debug)]
+struct Gate {
+    blocker: ObjectId,
+    battle: ObjectId,
+    player: PlayerId,
+}
+
 /// One SBA pass over `s` with the standard registry, through `sba_pass_post_batch` or
 /// `sba::perform_all_post_batch` with the same arguments; the provider hands back the pass's own
-/// layer inputs and environment and counts its calls in `calls`.
+/// layer inputs and environment (adjusted by `gate`, if any, to the state after the batch) and
+/// counts its calls in `calls`.
 fn one_pass(
     s: &mut Sim,
     c: &mut ChoiceContext<'_>,
     via: Via,
     calls: &Cell<usize>,
+) -> Result<SbaOutcome, BusInterrupt> {
+    one_pass_gated(s, c, via, calls, None)
+}
+
+fn one_pass_gated(
+    s: &mut Sim,
+    c: &mut ChoiceContext<'_>,
+    via: Via,
+    calls: &Cell<usize>,
+    gate: Option<Gate>,
 ) -> Result<SbaOutcome, BusInterrupt> {
     let registry = SbaRegistry::standard();
     let view_env = s.env.clone();
@@ -1393,14 +1466,24 @@ fn one_pass(
         provider,
     };
     let (effects, layer): (&ContinuousEffects, &dyn LayerEnvironment) = (effects, layer);
-    let mut post_batch = |_: &EventContext<'_>,
+    let mut post_batch = |after: &EventContext<'_>,
                           view: &mut dyn FnMut(
         &ContinuousEffects,
         &dyn LayerEnvironment,
         &dyn SbaEnvironment,
     )| {
         calls.set(calls.get() + 1);
-        view(effects, layer, &view_env);
+        let mut post = view_env.clone();
+        if let Some(g) = gate {
+            let blocker_left = !after
+                .zones
+                .object(g.blocker)
+                .is_some_and(|r| r.zone.kind() == ZoneKind::Battlefield);
+            if blocker_left {
+                post.illegal_protectors.remove(&(g.battle, g.player));
+            }
+        }
+        view(effects, layer, &post);
     };
     match via {
         Via::Stage => sba_pass_post_batch(
@@ -1437,13 +1520,23 @@ fn stage_session(
     passes: usize,
     answers: &[ChoiceResponse],
 ) -> (Vec<SbaOutcome>, fineprint_base::hash::Digest, Sim, usize) {
+    stage_session_gated(base, via, passes, answers, None)
+}
+
+fn stage_session_gated(
+    base: &Sim,
+    via: Via,
+    passes: usize,
+    answers: &[ChoiceResponse],
+    gate: Option<Gate>,
+) -> (Vec<SbaOutcome>, fineprint_base::hash::Digest, Sim, usize) {
     let calls = Rc::new(Cell::new(0usize));
     let counter = Rc::clone(&calls);
     let procedure = move |s: &mut Sim, c: &mut ChoiceContext<'_>| {
         counter.set(0);
         let mut outs = Vec::new();
         for _ in 0..passes {
-            match one_pass(s, c, via, &counter) {
+            match one_pass_gated(s, c, via, &counter, gate) {
                 Ok(o) => {
                     s.sync_after(&o);
                     outs.push(o);
@@ -1520,6 +1613,58 @@ fn req_turn_001_sba_stage_retained_battle_uses_post_batch_provider() {
     assert_eq!(outs, d_outs);
     assert_eq!(hash, d_hash);
     assert_eq!(d_calls, 1);
+}
+
+/// REQ-TURN-001, REQ-SBA-001, CR 704.5x, CR 704.3 (F20): the protector request of a retained
+/// battle lists the candidates of the state AFTER the batch. P3 may not protect the Siege while
+/// a creature is on the battlefield; that creature has lethal damage and leaves in the same
+/// batch, and the provider's post-batch view lifts the restriction, so the request lists P2 and
+/// P3 (a stage that used the pre-batch view would list only P2). Both paths agree.
+#[test]
+fn req_turn_001_sba_stage_protector_candidates_are_post_batch() {
+    let mut s = Sim::with_players(3);
+    let b = s.siege(sba_support::P1, sba_support::P1, 0, None);
+    s.add_replacement(ReplacementEffect::new(eid(1), sba_move_of(b), Action::Skip));
+    let blocker = s.creature(sba_support::P2, "test.vanilla_1_1", 1, 1);
+    s.damage(blocker, 1);
+    let p3 = PlayerId::new(3);
+    s.env.illegal_protectors.insert((b, p3));
+    let gate = Some(Gate {
+        blocker,
+        battle: b,
+        player: p3,
+    });
+    for via in [Via::Stage, Via::Direct] {
+        // The first run suspends on the protector request: read its candidates.
+        let calls = Rc::new(Cell::new(0usize));
+        let counter = Rc::clone(&calls);
+        let procedure = move |sim: &mut Sim, c: &mut ChoiceContext<'_>| match one_pass_gated(
+            sim, c, via, &counter, gate,
+        ) {
+            Ok(o) => Ok(o),
+            Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+            Err(BusInterrupt::Error(e)) => panic!("bus error {e:?}"),
+        };
+        let session = ChoiceSession::start(s.clone(), procedure).expect("session runs");
+        let request = session.pending().cloned().expect("the protector request");
+        assert_eq!(request.choice_type, ChoiceType::ChoosePlayer, "{via:?}");
+        assert_eq!(request.chooser, sba_support::P1, "{via:?}");
+        match &request.payload {
+            ChoicePayload::ChoosePlayer { players } => {
+                assert_eq!(
+                    players,
+                    &vec![sba_support::P2, p3],
+                    "{via:?}: post-batch candidates"
+                );
+            }
+            other => panic!("{via:?}: unexpected payload {other:?}"),
+        }
+        assert_eq!(calls.get(), 1, "{via:?}");
+    }
+    // Answering with the candidate only the post-batch view allows is accepted.
+    let (outs, _, after, _) = stage_session_gated(&s, Via::Stage, 1, &[submit_player(p3)], gate);
+    assert_eq!(outs[0].protectors_chosen, vec![(b, p3)]);
+    assert!(!after.on_battlefield(blocker));
 }
 
 /// A heartbeat host over a real SBA world: `sba_pass` is the standard stage.

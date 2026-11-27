@@ -20,8 +20,10 @@
 //!   [`settle_before_priority`] is steps 1 and 2.
 //! - **Step 3** (CR 117.3): the priority player is asked one `PRIORITY_ACTION` request.
 //!   - An action (cast, activate, play a land, special action, mana ability) goes to
-//!     [`HeartbeatHost::take_action`]; the actor keeps priority (CR 117.3c, CR 116.3), the pass
-//!     sequence restarts, and the heartbeat returns to step 1 (T5).
+//!     [`HeartbeatHost::try_take_action`]; the actor keeps priority (CR 117.3c, CR 116.3), the
+//!     pass sequence restarts, and the heartbeat returns to step 1 (T5). An action the host
+//!     reverses ([`ActionOutcome::RolledBack`], CR 734.1) leaves the game and the pass sequence
+//!     unchanged, and the same player is asked again (CR 734.2).
 //!   - A pass (CR 117.3d) is recorded as a [`PassRecord`]. If not every player still in the game
 //!     has passed in succession, priority moves to the next player in turn order who is still in
 //!     the game and step 3 repeats WITHOUT a settle (T6). Otherwise (CR 117.4) the top object of a
@@ -45,7 +47,11 @@
 //! A player who left the game ([`HeartbeatHost::has_left_game`]) is never granted priority,
 //! never asked and never counted (CR 800.4j, CR 800.4a). When the active player would receive
 //! priority but has left, the next player in turn order who is still in the game receives it
-//! (CR 800.4j); APNAP order then starts at that player too.
+//! (CR 800.4j); APNAP order then starts at that player too. A player who leaves while their
+//! actions are collected is not asked (the request is never published). After a departure of
+//! the player who would have priority, the CR 117.4 test is applied to the players still in the
+//! game before anybody else is asked: if all of them have passed in succession, the top object
+//! resolves or the step ends (CR 800.4a, CR 800.4j).
 //!
 //! # Seams
 //!
@@ -171,6 +177,42 @@ pub trait HeartbeatHost {
         action: &ChoiceResponse,
         choices: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt>;
+
+    /// Takes `action` like [`HeartbeatHost::take_action`], and reports whether it was taken or
+    /// reversed (REQ-TURN-001, REQ-CORE-005). CR 734.1: "If a player takes an illegal action or
+    /// starts to take an action but can't legally complete it, the entire action is reversed";
+    /// a host whose transaction pipeline rolls the action back returns
+    /// [`ActionOutcome::RolledBack`] with the game state as it was before the action was
+    /// proposed (CR 601.2). The heartbeat then gives priority back to the same player
+    /// (CR 734.2: "the player who had priority retains it and may take another action or
+    /// pass"). An `Err` is still propagated unchanged.
+    ///
+    /// Default: [`HeartbeatHost::take_action`], then [`ActionOutcome::Taken`].
+    ///
+    /// # Errors
+    /// Whatever the action returns (a pending choice or a failure).
+    fn try_take_action(
+        &mut self,
+        player: PlayerId,
+        action: &ChoiceResponse,
+        choices: &mut ChoiceContext<'_>,
+    ) -> Result<ActionOutcome, Interrupt> {
+        self.take_action(player, action, choices)?;
+        Ok(ActionOutcome::Taken)
+    }
+}
+
+/// What became of one priority action (REQ-TURN-001, REQ-CORE-005; CR 734.1, CR 734.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionOutcome {
+    /// The action was taken: the actor keeps priority and the pass sequence restarts
+    /// (CR 117.3c, CR 117.4).
+    Taken,
+    /// The action could not be completed and was reversed with the game state unchanged
+    /// (CR 734.1, CR 601.2): the player who had priority retains it (CR 734.2) and the pass
+    /// sequence is unchanged (docs/DECISIONS.md "Gate 06-turn F44 — Rolled-back cast keeps
+    /// priority").
+    RolledBack,
 }
 
 /// How one pass ended (REQ-TURN-001, CR 117.3d, CR 117.4).
@@ -479,13 +521,27 @@ fn set_priority<H: HeartbeatHost + ?Sized>(
         .map_err(|e| procedure_error(format!("heartbeat: cannot set the priority player: {e}")))
 }
 
+/// What one priority request produced.
+enum Asked {
+    /// The player answered.
+    Answer(ChoiceResponse),
+    /// The player left the game while their actions were collected, before the request was
+    /// published: nobody was asked (CR 800.4a).
+    Left,
+}
+
 /// Step 3 (CR 117.3): one `PRIORITY_ACTION` request of `player`.
 fn ask_priority<H: HeartbeatHost + ?Sized>(
     host: &H,
     player: PlayerId,
     choices: &mut ChoiceContext<'_>,
-) -> Result<ChoiceResponse, Interrupt> {
+) -> Result<Asked, Interrupt> {
     let actions = host.priority_actions(player);
+    // CR 800.4a: a player who left the game while their actions were collected is not asked;
+    // "priority passes to the next player in turn order who's still in the game".
+    if host.has_left_game(player) {
+        return Ok(Asked::Left);
+    }
     let request = PendingChoiceRequest {
         request_id: choices.next_request_id(),
         chooser: player,
@@ -520,7 +576,28 @@ fn ask_priority<H: HeartbeatHost + ?Sized>(
             response.wire_name()
         )));
     }
-    Ok(response)
+    Ok(Asked::Answer(response))
+}
+
+/// CR 117.4: the top object resolves, the pass sequence restarts, and the player who receives
+/// priority next is returned (CR 117.3b: the active player; CR 800.4j: or the next player in
+/// turn order still in the game). `None` if no player is in the game (the priority player is
+/// then cleared).
+fn resolve_and_restart<H: HeartbeatHost + ?Sized>(
+    host: &mut H,
+    state: &mut HeartbeatState,
+    choices: &mut ChoiceContext<'_>,
+) -> Result<Option<PlayerId>, Interrupt> {
+    // T7, CR 117.4: "the spell or ability on top of the stack resolves".
+    host.resolve_top(choices)?;
+    state.passed.clear();
+    // CR 117.3b: "The active player receives priority after a spell or ability (other than a
+    // mana ability) resolves." CR 800.4j: or the next player.
+    let next = active_or_next(host);
+    if next.is_none() {
+        set_priority(host, None)?;
+    }
+    Ok(next)
 }
 
 /// Runs the priority heartbeat for one step (REQ-TURN-001, SRS 5.1; CR 117.3-117.5, CR 704.3,
@@ -558,10 +635,33 @@ pub fn run_heartbeat<H: HeartbeatHost + ?Sized>(
         state.forget_departed(host);
         let mut player = intended;
         // Step 3, repeated without a settle while passes move priority on (T6).
-        loop {
+        'grant: loop {
             // CR 800.4a: "If the player who left the game had priority at the time they left,
             // priority passes to the next player in turn order who's still in the game."
             if host.has_left_game(player) {
+                state.forget_departed(host);
+                let in_game = players_in_game(host);
+                if in_game == 0 {
+                    set_priority(host, None)?;
+                    return Ok(HeartbeatOutcome::NoPlayerInGame);
+                }
+                // CR 117.4 applied to the players still in the game (CR 800.4j: "the top object
+                // on the stack resolves, or the phase or step ends, whichever is appropriate"):
+                // if every one of them has passed in succession, nobody is asked again and no
+                // pass is recorded (docs/DECISIONS.md "Gate 06-turn F45 — Departure and the
+                // pass log").
+                if state.pass_count() >= in_game {
+                    if host.stack_is_empty() {
+                        // T8, CR 117.4.
+                        set_priority(host, None)?;
+                        return Ok(HeartbeatOutcome::StepEnds);
+                    }
+                    match resolve_and_restart(host, state, choices)? {
+                        Some(next) => intended = next,
+                        None => return Ok(HeartbeatOutcome::NoPlayerInGame),
+                    }
+                    break 'grant;
+                }
                 match next_player_in_turn_order(host, player) {
                     Some(next) => player = next,
                     None => {
@@ -571,21 +671,34 @@ pub fn run_heartbeat<H: HeartbeatHost + ?Sized>(
                 }
             }
             set_priority(host, Some(player))?;
-            let response = ask_priority(host, player, choices)?;
+            let response = match ask_priority(host, player, choices)? {
+                Asked::Answer(response) => response,
+                // CR 800.4a: the player left before the request was published (F43).
+                Asked::Left => continue 'grant,
+            };
             if host.has_left_game(player) {
                 // CR 800.4a: the player left while deciding (a host that models leaving at any
                 // time); their answer is moot and priority passes on at the top of the loop.
-                continue;
+                continue 'grant;
             }
             if response != ChoiceResponse::PassPriority {
                 // T5, CR 117.3c: "If a player has priority when they cast a spell, activate an
                 // ability, or take a special action, that player receives priority afterward."
                 // CR 116.3, CR 605.3b: special actions and mana abilities too; any action ends
                 // the pass sequence (CR 117.4: "without taking any actions in between").
-                host.take_action(player, &response, choices)?;
-                state.passed.clear();
-                intended = player;
-                break;
+                match host.try_take_action(player, &response, choices)? {
+                    ActionOutcome::Taken => {
+                        state.passed.clear();
+                        intended = player;
+                        break 'grant;
+                    }
+                    // CR 734.2: "the player who had priority retains it and may take another
+                    // action or pass". CR 734.1, CR 601.2: the game is as it was before the
+                    // action was proposed, so there is nothing to settle and the pass sequence
+                    // is unchanged (docs/DECISIONS.md "Gate 06-turn F44 — Rolled-back cast keeps
+                    // priority").
+                    ActionOutcome::RolledBack => continue 'grant,
+                }
             }
             // CR 117.3d: "If a player has priority and chooses not to take any actions, that
             // player passes."
@@ -624,19 +737,12 @@ pub fn run_heartbeat<H: HeartbeatHost + ?Sized>(
             match result {
                 PassResult::PriorityMoved { to } => player = to,
                 PassResult::TopResolved => {
-                    // T7, CR 117.4: "the spell or ability on top of the stack resolves".
-                    host.resolve_top(choices)?;
-                    state.passed.clear();
-                    // CR 117.3b: "The active player receives priority after a spell or ability
-                    // (other than a mana ability) resolves." CR 800.4j: or the next player.
-                    match active_or_next(host) {
+                    // T7, CR 117.4, CR 117.3b.
+                    match resolve_and_restart(host, state, choices)? {
                         Some(next) => intended = next,
-                        None => {
-                            set_priority(host, None)?;
-                            return Ok(HeartbeatOutcome::NoPlayerInGame);
-                        }
+                        None => return Ok(HeartbeatOutcome::NoPlayerInGame),
                     }
-                    break;
+                    break 'grant;
                 }
                 PassResult::StepEnds => {
                     // T8, CR 117.4: "if the stack is empty, the phase or step ends." CR 500.5

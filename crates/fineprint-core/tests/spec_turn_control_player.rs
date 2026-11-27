@@ -298,23 +298,36 @@ fn viewing_players_and_can_view() {
     assert!(!c.can_view(P2, P1, InfoScope::InGame));
 }
 
-/// The control configurations of the exhaustive redaction test.
-fn configurations() -> Vec<(String, PlayerControl)> {
-    let mut v = vec![("none".to_string(), PlayerControl::new())];
+/// One control configuration with its expected active (controller, controlled) pair, written as
+/// a literal and never derived from `controller_of` (`None`: nobody is controlled).
+type Configuration = (String, PlayerControl, Option<(PlayerId, PlayerId)>);
+
+/// The control configurations of the exhaustive redaction test: before activation (pending),
+/// during control and after expiry, each with the literal expected active pair. A player
+/// controlling themselves is no control at all.
+fn configurations() -> Vec<Configuration> {
+    let mut v: Vec<Configuration> = vec![("none".to_string(), PlayerControl::new(), None)];
     for controlled in ALL {
         for controller in ALL {
+            let active = (controller != controlled).then_some((controller, controlled));
             let mut c = PlayerControl::new();
             c.add_control_effect(controlled, controller);
             v.push((
                 format!("{controller:?} pending over {controlled:?}"),
                 c.clone(),
+                None,
             ));
             c.begin_turn(controlled);
-            v.push((format!("{controller:?} controls {controlled:?}"), c.clone()));
+            v.push((
+                format!("{controller:?} controls {controlled:?}"),
+                c.clone(),
+                active,
+            ));
             c.begin_turn(controlled);
             v.push((
                 format!("{controller:?} controlled {controlled:?}, ended"),
                 c,
+                None,
             ));
         }
     }
@@ -324,10 +337,11 @@ fn configurations() -> Vec<(String, PlayerControl)> {
 /// REQ-TURN-003, REQ-CORE-004 (R12 security test), CR 724.4: over every control
 /// configuration of three players and every viewer/subject pair: outside-the-game
 /// information is visible only to the subject; in-game information to the subject and the
-/// subject's controller only; `viewing_players` agrees.
+/// subject's controller only (the expected pair is stored with the configuration);
+/// `viewing_players` agrees.
 #[test]
 fn redaction_exhaustive_three_players() {
-    for (name, c) in configurations() {
+    for (name, c, active) in configurations() {
         for v in ALL {
             for s in ALL {
                 assert_eq!(
@@ -335,16 +349,17 @@ fn redaction_exhaustive_three_players() {
                     v == s,
                     "{name}: OutsideGame {v:?} -> {s:?}"
                 );
+                let expect = v == s || active == Some((v, s));
                 assert_eq!(
                     c.can_view(v, s, InfoScope::InGame),
-                    v == s || v == c.controller_of(s),
+                    expect,
                     "{name}: InGame {v:?} -> {s:?}"
                 );
                 let views = c.viewing_players(v);
                 assert!(views.contains(&v));
                 assert_eq!(
                     views.contains(&s),
-                    c.can_view(v, s, InfoScope::InGame),
+                    expect,
                     "{name}: viewing_players({v:?}) vs {s:?}"
                 );
             }

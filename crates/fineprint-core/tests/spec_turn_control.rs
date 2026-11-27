@@ -45,7 +45,9 @@ fn normal_turn_order_and_plan() {
             player: P2,
             extra: false,
             skipped: vec![],
-            follow_ups: vec![]
+            follow_ups: vec![],
+            // F39: the plan serial (1 for the first turn planned, then counting up).
+            plan_serial: 1,
         }
     );
     assert_eq!(s.current_phase(), None);
@@ -253,7 +255,8 @@ fn extra_turn_of_departed_player_is_dropped() {
             player: P2,
             extra: false,
             skipped: vec![],
-            follow_ups: vec![]
+            follow_ups: vec![],
+            plan_serial: 2,
         }
     );
     assert!(s.pending_extra_turns().is_empty());
@@ -316,7 +319,8 @@ fn one_turn_skip() {
                 player: P2,
                 extra: false
             }],
-            follow_ups: vec![]
+            follow_ups: vec![],
+            plan_serial: 2,
         }
     );
     assert_eq!(s.pending_turn_skips(P2), 0);
@@ -368,7 +372,8 @@ fn skip_takes_the_pending_extra_turn() {
                 player: P2,
                 extra: true
             }],
-            follow_ups: vec![]
+            follow_ups: vec![],
+            plan_serial: 2,
         }
     );
     assert!(s.pending_extra_turns().is_empty());

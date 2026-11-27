@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::rc::Rc;
 
@@ -214,6 +214,14 @@ pub struct FakeHost {
     pub triggers_stacked: u64,
     pub action_pushes: u64,
     pub resolutions: u64,
+    /// One entry per `priority_actions` call (the heartbeat collecting the actions of the
+    /// player about to be asked): `Some(p)` makes `p` leave the game (concede) at that moment,
+    /// possibly the player being asked (CR 800.4a). Consumed in call order within a run.
+    pub concede_on_ask: RefCell<VecDeque<Option<PlayerId>>>,
+    /// The players who conceded through `concede_on_ask`.
+    pub conceded: RefCell<BTreeSet<PlayerId>>,
+    /// The players still in the game as each `resolve_top` call began, in call order.
+    pub live_at_resolve: Vec<BTreeSet<PlayerId>>,
 }
 
 impl FakeHost {
@@ -241,6 +249,9 @@ impl FakeHost {
             triggers_stacked: 0,
             action_pushes: 0,
             resolutions: 0,
+            concede_on_ask: RefCell::new(VecDeque::new()),
+            conceded: RefCell::new(BTreeSet::new()),
+            live_at_resolve: Vec::new(),
         }
     }
 
@@ -288,12 +299,39 @@ impl FakeHost {
         self.log.push((choices.next_request_id().get(), call));
     }
 
-    /// The player a host request goes to: the active player, else the first player.
-    fn host_chooser(&self) -> PlayerId {
+    /// The players still in the game, in turn order.
+    pub fn live(&self) -> Vec<PlayerId> {
         self.game
-            .turn()
-            .active_player()
-            .unwrap_or(self.game.turn_order()[0])
+            .turn_order()
+            .iter()
+            .copied()
+            .filter(|&p| !HeartbeatHost::has_left_game(self, p))
+            .collect()
+    }
+
+    /// The player a host request goes to (F21): the active player if still in the game, else
+    /// the next player in turn order after the active player's seat who is (CR 800.4j), else
+    /// the first player still in the game; with nobody left, the active or first player.
+    fn host_chooser(&self) -> PlayerId {
+        let order = self.game.turn_order();
+        let fallback = self.game.turn().active_player().unwrap_or(order[0]);
+        let live = |p: PlayerId| !HeartbeatHost::has_left_game(self, p);
+        match self.game.turn().active_player() {
+            Some(a) if live(a) => a,
+            Some(a) => {
+                let seat = order.iter().position(|&p| p == a).unwrap_or(0);
+                (1..=order.len())
+                    .map(|i| order[(seat + i) % order.len()])
+                    .find(|&p| live(p))
+                    .unwrap_or(fallback)
+            }
+            None => order.iter().copied().find(|&p| live(p)).unwrap_or(fallback),
+        }
+    }
+
+    /// The static legal actions of `player` (no side effect).
+    fn actions_of(&self, player: PlayerId) -> Vec<ChoiceResponse> {
+        self.actions.get(&player).cloned().unwrap_or_default()
     }
 
     fn lose_all(&mut self, players: &[PlayerId]) {
@@ -403,6 +441,16 @@ impl HeartbeatHost for FakeHost {
         self.phase
     }
 
+    /// The LOST_THE_GAME designation (the trait default) or a concession through
+    /// `concede_on_ask`.
+    fn has_left_game(&self, player: PlayerId) -> bool {
+        self.conceded.borrow().contains(&player)
+            || self
+                .game
+                .player(player)
+                .is_none_or(|p| p.designation(LOST_THE_GAME).is_some())
+    }
+
     fn sba_pass(&mut self, choices: &mut ChoiceContext<'_>) -> Result<SbaOutcome, BusInterrupt> {
         self.log_call(choices, Call::Sba);
         self.sba_calls += 1;
@@ -475,6 +523,8 @@ impl HeartbeatHost for FakeHost {
 
     fn resolve_top(&mut self, choices: &mut ChoiceContext<'_>) -> Result<(), Interrupt> {
         self.log_call(choices, Call::Resolve);
+        let live = self.live().into_iter().collect();
+        self.live_at_resolve.push(live);
         match self.resolve_steps.pop_front().unwrap_or(HookStep::Plain) {
             HookStep::Plain => {}
             HookStep::Lose(players) => self.lose_all(&players),
@@ -495,7 +545,10 @@ impl HeartbeatHost for FakeHost {
     }
 
     fn priority_actions(&self, player: PlayerId) -> Vec<ChoiceResponse> {
-        self.actions.get(&player).cloned().unwrap_or_default()
+        if let Some(Some(leaver)) = self.concede_on_ask.borrow_mut().pop_front() {
+            self.conceded.borrow_mut().insert(leaver);
+        }
+        self.actions_of(player)
     }
 
     fn take_action(
@@ -505,7 +558,7 @@ impl HeartbeatHost for FakeHost {
         choices: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt> {
         self.log_call(choices, Call::Act(player, action.clone()));
-        if !self.priority_actions(player).contains(action) {
+        if !self.actions_of(player).contains(action) {
             self.anomalies
                 .push(format!("take_action with an unlisted action {action:?}"));
         }

@@ -69,6 +69,7 @@ enum Call {
     Place(Vec<PlayerId>),
     Resolve,
     Action(PlayerId, ChoiceResponse),
+    RolledBack(PlayerId, ChoiceResponse),
 }
 
 /// One object on the fake stack.
@@ -122,6 +123,9 @@ struct Fake {
     concede_at: BTreeMap<usize, PlayerId>,
     conceded: RefCell<BTreeSet<PlayerId>>,
     next_label: u64,
+    /// The next `n` actions are reversed by the host (CR 734.1): `try_take_action` reports
+    /// `RolledBack` and changes nothing but the call log.
+    rollbacks: usize,
 }
 
 fn trig(controller: PlayerId, id: &str) -> PendingTrigger {
@@ -259,6 +263,7 @@ impl Fake {
             concede_at: BTreeMap::new(),
             conceded: RefCell::new(BTreeSet::new()),
             next_label: 0,
+            rollbacks: 0,
         }
     }
 
@@ -420,6 +425,21 @@ impl HeartbeatHost for Fake {
             self.stack.push(obj(&label));
         }
         Ok(())
+    }
+
+    fn try_take_action(
+        &mut self,
+        player: PlayerId,
+        action: &ChoiceResponse,
+        choices: &mut ChoiceContext<'_>,
+    ) -> Result<ActionOutcome, Interrupt> {
+        if self.rollbacks > 0 {
+            self.rollbacks -= 1;
+            self.log.push(Call::RolledBack(player, action.clone()));
+            return Ok(ActionOutcome::RolledBack);
+        }
+        self.take_action(player, action, choices)?;
+        Ok(ActionOutcome::Taken)
     }
 }
 
@@ -1154,18 +1174,113 @@ fn req_turn_001_departure_between_passes_skips_departed_next_player() {
 
 #[test]
 fn req_turn_001_player_who_left_while_deciding_is_not_recorded() {
-    // CR 800.4a: the player with priority left while deciding; priority passes to the next
-    // player still in the game and the departed player's answer records no pass.
+    // REQ-TURN-001, CR 800.4a: the player with priority left while their actions were being
+    // collected, before the request was published: they are not asked (F43), priority passes
+    // to the next player still in the game and no pass is recorded for the departed player.
     let mut h = Fake::new(2);
     let (a, b) = (h.p(0), h.p(1));
     h.concede_at.insert(0, a);
     let d = run(h, &[PASS, PASS]);
-    assert_eq!(choosers(&d), vec![a, b]);
+    assert_eq!(choosers(&d), vec![b]);
     let (w, out) = done(&d);
     assert_eq!(out, HeartbeatOutcome::StepEnds);
     assert_eq!(w.hb.passes().len(), 1);
     assert_eq!(w.hb.passes()[0].player, b);
     assert_eq!(w.hb.passes()[0].players_in_game, 1);
+}
+
+#[test]
+fn req_turn_001_departure_while_deciding_after_all_others_passed_ends_the_step() {
+    // REQ-TURN-001, CR 117.4, CR 800.4a, CR 800.4j: a and b pass, c leaves while deciding
+    // (before the request is published). Every player still in the game has passed in
+    // succession, so with an empty stack the step ends: nobody is asked again and no pass is
+    // recorded for the departure (F45).
+    let mut h = Fake::new(3);
+    let (a, b, c) = (h.p(0), h.p(1), h.p(2));
+    h.concede_at.insert(2, c);
+    let d = run(h, &[PASS, PASS, PASS]);
+    assert_eq!(choosers(&d), vec![a, b]);
+    let (w, out) = done(&d);
+    assert_eq!(out, HeartbeatOutcome::StepEnds);
+    assert_eq!(w.hb.passes().len(), 2);
+    assert_eq!(w.hb.passes()[1].result, PassResult::PriorityMoved { to: c });
+    assert_eq!(w.host.game.turn().priority_player(), None);
+    assert_eq!(w.host.resolves(), 0);
+}
+
+#[test]
+fn req_turn_001_departure_while_deciding_after_all_others_passed_resolves_the_top() {
+    // REQ-TURN-001, CR 117.4, CR 117.3b, CR 800.4j: as above with an object on the stack: it
+    // resolves without another request, then the active player receives priority (F45).
+    let mut h = Fake::new(3);
+    let (a, b, c) = (h.p(0), h.p(1), h.p(2));
+    h.stack.push(obj("test.spell"));
+    h.concede_at.insert(2, c);
+    let d = run(h, &[PASS, PASS, PASS, PASS]);
+    assert_eq!(choosers(&d), vec![a, b, a, b]);
+    let (w, out) = done(&d);
+    assert_eq!(out, HeartbeatOutcome::StepEnds);
+    assert_eq!(w.host.resolves(), 1);
+    // The resolution comes before the next settle and the active player's request.
+    let resolve = w.host.log.iter().position(|e| *e == Call::Resolve).unwrap();
+    assert_eq!(w.host.log[resolve + 1], Call::Sba);
+    let results: Vec<PassResult> = w.hb.passes().iter().map(|r| r.result).collect();
+    assert_eq!(
+        results,
+        vec![
+            PassResult::PriorityMoved { to: b },
+            PassResult::PriorityMoved { to: c },
+            PassResult::PriorityMoved { to: b },
+            PassResult::StepEnds,
+        ]
+    );
+}
+
+#[test]
+fn req_turn_001_rolled_back_action_keeps_priority() {
+    // REQ-TURN-001, REQ-CORE-005, CR 734.2: "the player who had priority retains it and may
+    // take another action or pass": a cast the host reverses (CR 734.1, CR 601.2) gives the
+    // same player a second PRIORITY_ACTION request; nothing is settled in between, the pass
+    // sequence is unchanged and the heartbeat then completes (F44).
+    let mut h = Fake::new(2);
+    let (a, b) = (h.p(0), h.p(1));
+    h.actions.insert(b, vec![cast(5)]);
+    h.rollbacks = 1;
+    let d = run(h, &[PASS, cast(5), PASS]);
+    assert_eq!(choosers(&d), vec![a, b, b]);
+    for r in &d.asked {
+        assert_eq!(r.choice_type, ChoiceType::PriorityAction);
+    }
+    let (w, out) = done(&d);
+    // a's pass stood through the rollback: b's pass completes the round.
+    assert_eq!(out, HeartbeatOutcome::StepEnds);
+    assert_eq!(
+        w.host.log,
+        vec![
+            Call::Sba,
+            Call::Place(vec![a, b]),
+            Call::RolledBack(b, cast(5)),
+        ]
+    );
+    assert!(w.host.stack.is_empty());
+    assert_eq!(counts(w), vec![1, 2]);
+    assert_eq!(w.hb.passes()[1].player, b);
+}
+
+#[test]
+fn req_turn_001_default_try_take_action_takes_the_action() {
+    // REQ-TURN-001, CR 117.3c: the default `try_take_action` takes the action through
+    // `take_action` and reports it taken.
+    let base = Bare::new(GameState::new(3, 2, 20).unwrap());
+    let a = base.game.turn_order()[0];
+    let session = ChoiceSession::start(base, move |b: &mut Bare, c: &mut ChoiceContext<'_>| {
+        b.try_take_action(a, &cast(1), c)
+    })
+    .unwrap();
+    match session.status() {
+        Status::Done { output, .. } => assert_eq!(*output, ActionOutcome::Taken),
+        Status::Pending(r) => panic!("unexpected request {r:?}"),
+    }
 }
 
 #[test]
@@ -1751,9 +1866,20 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                     match output {
                         HeartbeatOutcome::StepEnds => {
                             let last = w.hb.passes().last().expect("a pass ends the step");
-                            assert_eq!(last.result, PassResult::StepEnds);
-                            assert!(last.stack_empty);
-                            assert_eq!(last.pass_count, last.players_in_game);
+                            assert!(w.host.stack.is_empty(), "case {case}");
+                            if last.result == PassResult::StepEnds {
+                                assert!(last.stack_empty);
+                                assert_eq!(last.pass_count, last.players_in_game);
+                            } else {
+                                // F45, CR 117.4, CR 800.4j: a departure after every player
+                                // still in the game had passed ends the step with no new pass.
+                                assert!(players_in_game(&w.host) > 0, "case {case}");
+                                assert_eq!(
+                                    w.hb.pass_count(),
+                                    players_in_game(&w.host),
+                                    "case {case}"
+                                );
+                            }
                         }
                         HeartbeatOutcome::NoPlayerInGame => {
                             assert_eq!(players_in_game(&w.host), 0, "case {case}");
