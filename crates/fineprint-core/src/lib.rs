@@ -8,6 +8,8 @@
 
 /// Legal-action generation for the priority player: land plays, casts, activations and special actions, prohibitions evaluated last (REQ-DSL-013, REQ-ARCH-002).
 pub mod actions;
+/// Casting a spell and activating an ability, steps 0-5: checkpoint, announce, modes, costs, targets, division and the legality check, with rollback (REQ-CAST-001).
+pub mod casting;
 /// The choice protocol: pending choice requests, responses, generation from choice specs, validation and deterministic suspend/resume (REQ-NET-003, REQ-DSL-011).
 pub mod choice;
 /// Game events, execution primitives, the executed-event log and the history ledger (REQ-EVENT-001, REQ-DSL-003).
