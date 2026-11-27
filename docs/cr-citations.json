@@ -326,12 +326,98 @@
         "docs/SRS.md:133"
       ]
     },
+    "103.1": {
+      "sha256": "9e5035b326ecd61d60a457f64916712fb0800784d7ea06ea895d1f7f71528caf",
+      "locations": [
+        "crates/fineprint-core/src/turn/mod.rs:19",
+        "crates/fineprint-core/src/turn/start.rs:263",
+        "crates/fineprint-core/src/turn/start.rs:282",
+        "crates/fineprint-core/src/turn/start.rs:30",
+        "crates/fineprint-core/src/turn/start.rs:37",
+        "crates/fineprint-core/src/turn/start.rs:6",
+        "crates/fineprint-core/src/turn/start_tests.rs:242",
+        "crates/fineprint-core/src/turn/start_tests.rs:267",
+        "crates/fineprint-core/src/turn/start_tests.rs:282",
+        "crates/fineprint-core/src/turn/start_tests.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start.rs:116",
+        "crates/fineprint-core/tests/spec_turn_start.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start.rs:72",
+        "crates/fineprint-core/tests/spec_turn_start.rs:91",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7"
+      ]
+    },
+    "103.3": {
+      "sha256": "98481d727d7712c395f0a3eb69ac03bcb541c12ec5378a4e48f6cfa51a88a130",
+      "locations": [
+        "crates/fineprint-core/src/turn/mod.rs:20",
+        "crates/fineprint-core/src/turn/start.rs:146",
+        "crates/fineprint-core/src/turn/start.rs:263",
+        "crates/fineprint-core/src/turn/start.rs:302",
+        "crates/fineprint-core/src/turn/start.rs:6",
+        "crates/fineprint-core/src/turn/start_tests.rs:242",
+        "crates/fineprint-core/src/turn/start_tests.rs:293",
+        "crates/fineprint-core/src/turn/start_tests.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start.rs:129",
+        "crates/fineprint-core/tests/spec_turn_start.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7"
+      ]
+    },
+    "103.4": {
+      "sha256": "57b2455516c85a30ba8efe4d0a2042a7b5342c22bd80f628cc1929d57816cec4",
+      "locations": [
+        "crates/fineprint-core/src/turn/mod.rs:20",
+        "crates/fineprint-core/src/turn/start.rs:264",
+        "crates/fineprint-core/src/turn/start.rs:307",
+        "crates/fineprint-core/src/turn/start_tests.rs:311",
+        "crates/fineprint-core/src/turn/start_tests.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start.rs:172",
+        "crates/fineprint-core/tests/spec_turn_start.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7"
+      ]
+    },
     "103.5": {
       "sha256": "5aae524062fd8643532753730d59086491360f0b0792eb24f43b9b47f9acb51f",
       "locations": [
         "crates/fineprint-core/src/choice/mod.rs:192",
         "crates/fineprint-core/src/choice/request.rs:426",
+        "crates/fineprint-core/src/turn/mod.rs:21",
+        "crates/fineprint-core/src/turn/start.rs:156",
+        "crates/fineprint-core/src/turn/start.rs:264",
+        "crates/fineprint-core/src/turn/start.rs:313",
+        "crates/fineprint-core/src/turn/start.rs:323",
+        "crates/fineprint-core/src/turn/start.rs:337",
+        "crates/fineprint-core/src/turn/start.rs:350",
+        "crates/fineprint-core/src/turn/start.rs:53",
+        "crates/fineprint-core/src/turn/start_tests.rs:311",
+        "crates/fineprint-core/src/turn/start_tests.rs:329",
+        "crates/fineprint-core/src/turn/start_tests.rs:406",
+        "crates/fineprint-core/src/turn/start_tests.rs:444",
+        "crates/fineprint-core/src/turn/start_tests.rs:514",
+        "crates/fineprint-core/src/turn/start_tests.rs:6",
+        "crates/fineprint-core/tests/spec_turn_start.rs:129",
+        "crates/fineprint-core/tests/spec_turn_start.rs:172",
+        "crates/fineprint-core/tests/spec_turn_start.rs:238",
+        "crates/fineprint-core/tests/spec_turn_start.rs:269",
+        "crates/fineprint-core/tests/spec_turn_start.rs:306",
+        "crates/fineprint-core/tests/spec_turn_start.rs:412",
+        "crates/fineprint-core/tests/spec_turn_start.rs:465",
+        "crates/fineprint-core/tests/spec_turn_start.rs:726",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7",
         "docs/SRS.md:1147"
+      ]
+    },
+    "103.5c": {
+      "sha256": "bafc7ea7c05f27e27b7be2d6eaca54394f71d265790053cac5be2059f30745f2",
+      "locations": [
+        "crates/fineprint-core/src/turn/start.rs:117",
+        "crates/fineprint-core/src/turn/start_tests.rs:467",
+        "crates/fineprint-core/src/turn/start_tests.rs:491",
+        "crates/fineprint-core/src/turn/start_tests.rs:7",
+        "crates/fineprint-core/tests/spec_turn_start.rs:350",
+        "crates/fineprint-core/tests/spec_turn_start.rs:372",
+        "crates/fineprint-core/tests/spec_turn_start.rs:391",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:375",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7"
       ]
     },
     "103.6": {
@@ -339,7 +425,30 @@
       "locations": [
         "crates/fineprint-core/src/choice/mod.rs:194",
         "crates/fineprint-core/src/choice/request.rs:435",
+        "crates/fineprint-core/src/turn/mod.rs:21",
+        "crates/fineprint-core/src/turn/start.rs:102",
+        "crates/fineprint-core/src/turn/start.rs:215",
+        "crates/fineprint-core/src/turn/start.rs:363",
+        "crates/fineprint-core/src/turn/start.rs:6",
+        "crates/fineprint-core/src/turn/start_tests.rs:588",
+        "crates/fineprint-core/src/turn/start_tests.rs:7",
+        "crates/fineprint-core/tests/spec_turn_start.rs:574",
+        "crates/fineprint-core/tests/spec_turn_start.rs:635",
+        "crates/fineprint-core/tests/spec_turn_start.rs:647",
+        "crates/fineprint-core/tests/spec_turn_start_support.rs:7",
         "docs/SRS.md:1148"
+      ]
+    },
+    "103.6a": {
+      "sha256": "b2bddfea6138edb9df983bb7dc50c00dbae70c19c6d53013860a72007ec89920",
+      "locations": [
+        "crates/fineprint-core/src/turn/start.rs:104"
+      ]
+    },
+    "103.6b": {
+      "sha256": "e4eaa9d18553e95755211e48384a42e73d6647e21c7af42ee309bf700432b089",
+      "locations": [
+        "crates/fineprint-core/src/turn/start.rs:105"
       ]
     },
     "103.8": {
