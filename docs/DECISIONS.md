@@ -11367,3 +11367,31 @@ and CR 709.3, 712.8b-c, 716.3a, 719.3a, 721.3a, 708.4. Step 3 omits CR 115.2, 11
 `docs/HUMAN_QUEUE.md`.
 **Rationale.** CR wins over the SRS (PROCESS.md).
 **Alternatives.** Editing the SRS here (a P8 item for a person).
+
+## #52 FP-050 — Division recipients when one object fills two "target" instances (CR 601.2d, 115.3)
+
+**Decision.** A divided effect's recipients are the distinct chosen objects or players, in slot
+order; each receives at least 1 (CR 601.2d), and the division is impossible (rollback) when the
+total is below the number of distinct recipients. An object chosen for two different instances of
+"target" is one recipient.
+**Rationale.** The rules-researcher found the CR silent (CR 601.2d "each of these targets", CR 115.3,
+115.7f, glossary "Target"; no example covers a dividing spell with one object in several target
+instances) and both readings satisfy CR 601.2d as written. The `DIVIDE_VALUE` protocol (#28) takes
+distinct recipients, so the per-object reading needs no contract change. Real dividing templates
+use one "target" instance with a variable count, where CR 115.3 already forces distinct objects and
+the readings coincide.
+**Alternatives.** One share per target instance (the researcher's slight preference, for
+consistency with CR 115.3's per-instance counting); it would need a `DIVIDE_VALUE` contract change
+under R2 and is left for a change request if a template ever needs it.
+
+## #52 FP-050 — Repeated modes may reach the minimum (CR 700.2a, 700.2d)
+
+**Decision.** When a modal spell allows choosing the same mode more than once, the minimum mode
+count may be met by repeating legal modes; the cast rolls back with `NoLegalMode` only when no mode
+is legal, or when repeats are not allowed and fewer modes are legal than the minimum.
+**Rationale.** The rules-researcher confirmed this follows from CR 700.2a (an illegal mode "can’t be
+chosen") and CR 700.2d (a mode may be chosen more than once when the spell says so, and is treated as
+appearing that many times in sequence); the CR has no explicit rule or example for this case. CR
+700.2i ("worth of modes") is a separate rule not covered here.
+**Alternatives.** Requiring distinct legal modes regardless of the repeat instruction (contradicts
+CR 700.2d).
