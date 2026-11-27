@@ -38,15 +38,14 @@
 use std::collections::BTreeSet;
 
 use fineprint_base::ids::{ObjectId, PlayerId, Timestamp};
-use fineprint_dsl::ability::Layer;
+use fineprint_dsl::ability::{Layer, StaticEffect, TypePart};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, LayoutBehavior, ValueExpressionAST};
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
 
+use super::board::{run_board, universe_for};
 use super::error::LayerError;
-use super::lockin::LockRecord;
-use super::ordering::{Keyed, Scratch, run_layer};
-use super::pipeline::{Evaluated, LayerEnvironment, Step};
+use super::pipeline::{Evaluated, LayerEnvironment};
 pub use super::registry::ValueSource;
 use super::registry::{
     Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerModification,
@@ -83,6 +82,9 @@ pub struct CopiableValues {
 }
 
 /// One "except ..." clause of a copy effect, applied in slice order (CR 707.9).
+// The typed `AbilityAST` payload is large; it stays unboxed so the public variants keep the
+// shape callers build (docs/DECISIONS.md "#232 FP-164 — Typed card AST positions").
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CopyException {
     /// CR 707.9a: the copy gains the ability (appended to the abilities); it is part of the
@@ -162,11 +164,17 @@ pub enum CopiedCharacteristic {
     LifeModifier,
 }
 
-/// A characteristic a characteristic-defining ability can define, for CR 707.9d.
+/// A characteristic a characteristic-defining ability can define, for CR 707.9d. Supertype,
+/// card type and subtype are separate characteristics (CR 109.3, 205.1b), so each is its own
+/// target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CdaTarget {
-    /// The type line (layer 4).
-    Types,
+    /// The supertypes (layer 4).
+    Supertypes,
+    /// The card types (layer 4).
+    CardTypes,
+    /// The subtypes (layer 4).
+    Subtypes,
     /// The colors (layer 5).
     Colors,
     /// Power and toughness (layer 7a).
@@ -175,27 +183,23 @@ enum CdaTarget {
 
 impl CopyException {
     /// The characteristic whose copied CDA this exception stops from being copied (CR 707.9d):
-    /// a set value or a value not copied. `Add*` types keep their CDAs (707.9d last sentence).
-    ///
-    /// Any type-line exception drops any layer-4 CDA: the placeholder ability data does not say
-    /// which part of the type line a layer-4 CDA defines; per-part targets are tracked in #198.
+    /// a set value or a value not copied, one type-line part at a time (CR 109.3, 205.1b).
+    /// `Add*` types ("in addition to its other types") keep their CDAs (707.9d last sentence).
     fn cda_target(&self) -> Option<CdaTarget> {
         match self {
             CopyException::SetColors(_)
             | CopyException::NotCopied(CopiedCharacteristic::Colors) => Some(CdaTarget::Colors),
+            // CR 707.9d, 109.3, 205.1b: each type-line part is a characteristic of its own.
             CopyException::SetSupertypes(_)
-            | CopyException::SetCardTypes(_)
-            | CopyException::SetSubtypes(_)
-            | CopyException::NotCopied(
-                CopiedCharacteristic::Supertypes
-                | CopiedCharacteristic::CardTypes
-                | CopiedCharacteristic::Subtypes,
-            ) => {
-                // Any type-line exception drops any layer-4 CDA: the placeholder ability data
-                // does not say which part of the type line a layer-4 CDA defines; per-part
-                // targets are tracked in #198.
-                Some(CdaTarget::Types)
+            | CopyException::NotCopied(CopiedCharacteristic::Supertypes) => {
+                Some(CdaTarget::Supertypes)
             }
+            CopyException::SetCardTypes(_)
+            | CopyException::NotCopied(CopiedCharacteristic::CardTypes) => {
+                Some(CdaTarget::CardTypes)
+            }
+            CopyException::SetSubtypes(_)
+            | CopyException::NotCopied(CopiedCharacteristic::Subtypes) => Some(CdaTarget::Subtypes),
             CopyException::SetPower(_)
             | CopyException::SetToughness(_)
             | CopyException::NotCopied(
@@ -206,33 +210,49 @@ impl CopyException {
     }
 }
 
-/// The characteristics a characteristic-defining ability defines, read from the placeholder
-/// ability JSON: a `"STATIC"` ability with a `"CHAR"` effect marked `"isCDA": true` defines the
-/// characteristic of its layer (4: types, 5: colors, 7a: power and toughness). Reads ability
-/// data only, never card identity (R4).
+/// The CDA target of a type-line part (CR 707.9d; CR 109.3, 205.1b: each part is a
+/// characteristic of its own).
+fn type_part_target(part: TypePart) -> CdaTarget {
+    match part {
+        TypePart::Supertypes => CdaTarget::Supertypes,
+        TypePart::CardTypes => CdaTarget::CardTypes,
+        TypePart::Subtypes => CdaTarget::Subtypes,
+    }
+}
+
+/// The characteristics a characteristic-defining ability defines: a `STATIC` ability with a
+/// `CHAR` effect marked `isCDA: true` defines the characteristic of its layer (4: the
+/// type-line parts of
+/// [`fineprint_dsl::ability::CharacteristicEffect::defined_type_parts`], all three for an
+/// absent or malformed `defines`; 5: colors, 7a: power and toughness). Reads ability data only,
+/// never card identity (R4).
 fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
     let mut out = BTreeSet::new();
-    let Some(object) = ability.0.as_object() else {
+    let AbilityAST::Static(ability) = ability else {
         return out;
     };
-    if object.get("kind").and_then(|k| k.as_str()) != Some("STATIC") {
-        return out;
-    }
-    let Some(effects) = object.get("effects").and_then(|e| e.as_array()) else {
-        return out;
-    };
-    for effect in effects {
-        let is_cda_char = effect.get("type").and_then(|t| t.as_str()) == Some("CHAR")
-            && effect.get("isCDA").and_then(|b| b.as_bool()) == Some(true);
-        if !is_cda_char {
+    for effect in &ability.effects {
+        let StaticEffect::Char(effect) = effect else {
+            continue;
+        };
+        if effect.is_cda != Some(true) {
             continue;
         }
-        match effect.get("layer").and_then(|l| l.as_str()) {
-            Some("4") => out.insert(CdaTarget::Types),
-            Some("5") => out.insert(CdaTarget::Colors),
-            Some("7a") => out.insert(CdaTarget::PowerToughness),
-            _ => false,
-        };
+        match effect.layer {
+            // CR 707.9d: per type-line part (CR 109.3, 205.1b).
+            Layer::L4 => {
+                if let Some(parts) = effect.defined_type_parts() {
+                    out.extend(parts.into_iter().map(type_part_target));
+                }
+            }
+            Layer::L5 => {
+                out.insert(CdaTarget::Colors);
+            }
+            Layer::L7a => {
+                out.insert(CdaTarget::PowerToughness);
+            }
+            _ => {}
+        }
     }
     out
 }
@@ -457,10 +477,13 @@ impl CopiableValues {
     /// [`CopyException::NotCopied`], CR 707.9c).
     ///
     /// Only the characteristics are copied: no status, counter or non-copy effect (CR 707.2).
-    /// When an exception sets, keeps or does not copy the types, the colors or power and
-    /// toughness, a copied characteristic-defining ability that defines it is not copied
-    /// (CR 707.9d; recognised from the ability data, see `cda_targets`); `Add*` type exceptions
-    /// keep those abilities. Gained abilities are never dropped.
+    /// When an exception sets, keeps or does not copy the supertypes, the card types, the
+    /// subtypes, the colors or power and toughness, a copied characteristic-defining ability
+    /// that defines that characteristic is not copied (CR 707.9d; recognised from the ability
+    /// data, see `cda_targets`). A layer-4 CDA defines the type-line parts its `defines` param
+    /// lists (all three when absent); one that defines several parts is dropped whole as soon
+    /// as any of them is touched. `Add*` type exceptions ("in addition to its other types")
+    /// keep every type CDA. Gained abilities are never dropped.
     ///
     /// The result's source is [`ValueSource::CopyOfBackFaceOrMelded`] if this one is
     /// `CopyOfBackFaceOrMelded` or a `Fixed` from a nonmodal back face or melded permanent
@@ -473,7 +496,7 @@ impl CopiableValues {
         // CR 707.2: the copiable values only.
         let mut c = self.characteristics.clone();
         // CR 707.9d: a CDA defining a characteristic the effect sets, keeps or does not copy
-        // is not copied.
+        // is not copied, as a whole (no partial copy of a multi-part CDA).
         let dropped: BTreeSet<CdaTarget> = exceptions
             .iter()
             .filter_map(CopyException::cda_target)
@@ -583,35 +606,21 @@ pub fn copiable_values(
     ))
 }
 
-/// `id` after layers 1a and 1b only (CR 613.2, 613.2c).
+/// `id` after layers 1a and 1b only (CR 613.2, 613.2c): the layer-1 prefix of the layer-major
+/// board pass of [`super::evaluate`] (the same universe, so the existence of an effect generated
+/// by another object is judged the same way, CR 613.8a).
 fn layer_one(
     effects: &ContinuousEffects,
     env: &dyn LayerEnvironment,
     id: ObjectId,
 ) -> Result<Evaluated, LayerError> {
-    // CR 613.1: start with the actual object.
-    let base = env.base(id).ok_or(LayerError::UnknownObject(id))?;
-    let mut scratch = Scratch {
-        state: Evaluated {
-            characteristics: base.characteristics,
-            controller: base.controller,
-            // CR 202.3b, 202.3c, 713.5c: the base's own mana-value provenance (plain by default).
-            mana_value_provenance: env.base_mana_value_provenance(id),
-        },
-        pt: None,
-    };
-    let mut locks = LockRecord::new(effects);
-    let mut record = Vec::new();
-    // CR 613.2, 613.2c: layer 1 only; its result is the copiable values.
-    for layer in [Layer::L1a, Layer::L1b] {
-        let steps: Vec<Keyed<'_>> = effects
-            .iter()
-            .filter(|(_, e)| e.layer == layer)
-            .map(|(eid, e)| (e.timestamp, Step::Effect(eid, e)))
-            .collect();
-        run_layer(layer, steps, env, id, &mut scratch, &mut locks, &mut record);
-    }
-    Ok(scratch.state)
+    // CR 613.1: start with the actual object; CR 613.2, 613.2c: layer 1 only, whose result is
+    // the copiable values.
+    let universe = universe_for(env, id)?;
+    run_board(effects, env, universe, &[Layer::L1a, Layer::L1b])
+        .remove(&id)
+        .map(|(state, _)| state)
+        .ok_or(LayerError::UnknownObject(id))
 }
 
 /// A layer-1a continuous effect (CR 613.2a) carrying these copiable values, with the given

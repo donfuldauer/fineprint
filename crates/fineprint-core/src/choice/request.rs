@@ -1144,6 +1144,17 @@ impl PendingChoiceRequest {
                     check_count(bottom.len(), *to_bottom, *to_bottom, "cards to the bottom")?;
                     check_distinct_subset(bottom, hand, object, "cards in hand")
                 }
+                // CR 103.5: the last mulligan puts the whole hand on the bottom and no further
+                // mulligan may be taken (gate 06-turn R8, CR-010).
+                ChoiceResponse::TakeMulligan
+                    if !hand.is_empty()
+                        && usize::try_from(*to_bottom).is_ok_and(|n| n >= hand.len()) =>
+                {
+                    Err(
+                        "no further mulligan is allowed: the whole hand goes on the bottom"
+                            .to_string(),
+                    )
+                }
                 _ => Ok(()),
             },
             (

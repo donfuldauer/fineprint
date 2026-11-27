@@ -4,8 +4,10 @@
 
 //! Spec tests for the pure text-token helpers of `fineprint_core::layers` (REQ-DSL-012; CR
 //! 612.1, 612.2, 201.5): `rewrite_text_words`, `resolve_word_ref`, `text_token_matches`,
-//! `resolve_predicate_words`, `resolve_selector_words`, `decode_rules_text`,
-//! `encode_rules_text` and `TextWordError`.
+//! `resolve_predicate_words`, `resolve_selector_words` and `TextWordError`. #232 FP-164:
+//! `decode_rules_text`/`encode_rules_text` were removed with the placeholder rules text (the
+//! rules text of `Characteristics` is the typed stream itself); their tests now check the typed
+//! stream's wire form and its refusal of invalid placeholders.
 //!
 //! Black-box: written from the FP-036 brief only. Every token value is rules vocabulary or a
 //! neutral `test.*` string (R5).
@@ -16,8 +18,8 @@ mod support;
 use std::collections::BTreeMap;
 
 use fineprint_core::layers::{
-    TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
-    resolve_selector_words, resolve_word_ref, rewrite_text_words, text_token_matches,
+    TextWordError, resolve_predicate_words, resolve_selector_words, resolve_word_ref,
+    rewrite_text_words, text_token_matches,
 };
 use fineprint_dsl::card;
 use fineprint_dsl::expr::{
@@ -82,8 +84,8 @@ fn every_kind() -> Stream {
     ])
 }
 
-/// The FP-011 wire form of one token as a string map, built independently of
-/// `encode_rules_text`.
+/// The FP-011 wire form of one token as a string map, built independently of the typed
+/// stream's serialiser.
 fn wire_token(t: &TextToken) -> BTreeMap<&'static str, String> {
     let mut m = BTreeMap::new();
     match t {
@@ -128,10 +130,16 @@ fn wire_token(t: &TextToken) -> BTreeMap<&'static str, String> {
     m
 }
 
-/// The placeholder rules text in the wire form, through the MessagePack bridge.
+/// The rules text in the wire form, through the MessagePack bridge, decoded as the typed
+/// `card::TextTokenStream` (#232 FP-164).
 fn wire(tokens: &[TextToken]) -> card::TextTokenStream {
     let maps: Vec<BTreeMap<&'static str, String>> = tokens.iter().map(wire_token).collect();
     via_msgpack(&maps)
+}
+
+/// The JSON of independently built token maps, decoded as the typed `card::TextTokenStream`.
+fn try_json_stream(maps: &[BTreeMap<&'static str, String>]) -> Option<card::TextTokenStream> {
+    serde_json::from_value(serde_json::to_value(maps).unwrap()).ok()
 }
 
 fn tt(id: &str) -> WordRef {
@@ -607,79 +615,74 @@ fn resolve_selector_count_expression() {
 // decode / encode
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-DSL-012: decode(encode(s)) == s for a stream with every token kind and every category;
-/// the empty stream and the empty placeholder correspond.
+/// REQ-DSL-012 (#232 FP-164, replaces the `decode_rules_text`/`encode_rules_text` round trip):
+/// the rules-text position is the typed stream itself (`card::TextTokenStream` is
+/// `text::TextTokenStream`), its serde round trip is exact for a stream with every token kind and
+/// every category, and the empty stream is the default.
 #[test]
 fn encode_decode_round_trip() {
-    let s = every_kind();
-    assert_eq!(decode_rules_text(&encode_rules_text(&s)), Ok(s));
-    assert_eq!(
-        encode_rules_text(&Stream::default()),
-        card::TextTokenStream(Vec::new())
-    );
-    assert_eq!(
-        decode_rules_text(&card::TextTokenStream(Vec::new())),
-        Ok(Stream::default())
-    );
+    let s: card::TextTokenStream = every_kind();
+    let back: card::TextTokenStream =
+        serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+    assert_eq!(back, s);
+    let empty: Stream = card::TextTokenStream::default();
+    assert_eq!(empty, Stream::default());
+    assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!([]));
 }
 
-/// REQ-DSL-012: `decode_rules_text` reads the FP-011 wire form built independently through the
-/// MessagePack bridge, and `encode_rules_text` produces exactly that wire form.
+/// REQ-DSL-012: the typed stream reads the FP-011 wire form built independently through the
+/// MessagePack bridge, and serialises to exactly that wire form.
 #[test]
 fn decode_reads_the_wire_form() {
     let s = every_kind();
     let w = wire(s.tokens());
-    assert_eq!(decode_rules_text(&w), Ok(s.clone()));
-    assert_eq!(encode_rules_text(&s), w);
+    assert_eq!(w, s.clone());
+    let maps: Vec<BTreeMap<&'static str, String>> = s.tokens().iter().map(wire_token).collect();
+    assert_eq!(
+        serde_json::to_value(&s).unwrap(),
+        serde_json::to_value(&maps).unwrap()
+    );
+    assert_eq!(try_json_stream(&maps), Some(s));
 }
 
-/// REQ-DSL-012: placeholders that are not a valid stream are InvalidRulesText.
+/// REQ-DSL-012 (#232 FP-164, replaces "placeholders that are not a valid stream are
+/// InvalidRulesText"): the same invalid placeholders cannot be decoded as the typed stream, so
+/// they can no longer reach a text effect.
 #[test]
 fn decode_invalid_placeholders() {
-    let cases: Vec<card::TextTokenStream> = vec![
-        // a JSON string
-        card::TextTokenStream(vec!["test.word".into()]),
-        // duplicate ids
-        {
-            let a = wire_token(&lit_t("a", "x"));
-            via_msgpack(&vec![a.clone(), a])
-        },
-        // empty value
-        {
-            let mut m = BTreeMap::new();
-            m.insert("id", "a".to_string());
-            m.insert("kind", "WORD".to_string());
-            m.insert("category", "COLOR_WORD".to_string());
-            m.insert("value", String::new());
-            via_msgpack(&vec![m])
-        },
-        // unknown category
-        {
-            let mut m = BTreeMap::new();
-            m.insert("id", "a".to_string());
-            m.insert("kind", "WORD".to_string());
-            m.insert("category", "test.category".to_string());
-            m.insert("value", "Red".to_string());
-            via_msgpack(&vec![m])
-        },
-        // SELF with a name
-        {
-            let mut m = BTreeMap::new();
-            m.insert("id", "a".to_string());
-            m.insert("kind", "NAME_REF".to_string());
-            m.insert("ref", "SELF".to_string());
-            m.insert("name", "test.x".to_string());
-            via_msgpack(&vec![m])
-        },
+    assert!(
+        serde_json::from_value::<card::TextTokenStream>(serde_json::json!(["test.word"])).is_err(),
+        "a JSON string"
+    );
+    let word_map = |value: &str, category: &str| {
+        let mut m = BTreeMap::new();
+        m.insert("id", "a".to_string());
+        m.insert("kind", "WORD".to_string());
+        m.insert("category", category.to_string());
+        m.insert("value", value.to_string());
+        m
+    };
+    let self_with_name = {
+        let mut m = BTreeMap::new();
+        m.insert("id", "a".to_string());
+        m.insert("kind", "NAME_REF".to_string());
+        m.insert("ref", "SELF".to_string());
+        m.insert("name", "test.x".to_string());
+        m
+    };
+    let a = wire_token(&lit_t("a", "x"));
+    let cases: Vec<(&str, Vec<BTreeMap<&'static str, String>>)> = vec![
+        ("duplicate ids", vec![a.clone(), a]),
+        ("empty value", vec![word_map("", "COLOR_WORD")]),
+        ("unknown category", vec![word_map("Red", "test.category")]),
+        ("SELF with a name", vec![self_with_name]),
     ];
-    for c in &cases {
+    for (what, maps) in &cases {
+        assert_eq!(try_json_stream(maps), None, "{what}: JSON decode accepted");
+        let bytes = rmp_serde::to_vec_named(maps).unwrap();
         assert!(
-            matches!(
-                decode_rules_text(c),
-                Err(TextWordError::InvalidRulesText(_))
-            ),
-            "{c:?}: expected InvalidRulesText, got {:?}",
-            decode_rules_text(c)
+            rmp_serde::from_slice::<card::TextTokenStream>(&bytes).is_err(),
+            "{what}: MessagePack decode accepted"
         );
     }
 }
@@ -690,7 +693,6 @@ fn error_display_non_empty() {
     let all = [
         TextWordError::UnknownToken("t1".into()),
         TextWordError::NotAWord("t1".into()),
-        TextWordError::InvalidRulesText("bad".into()),
         TextWordError::InvalidWord,
         TextWordError::UnsupportedCategory,
     ];

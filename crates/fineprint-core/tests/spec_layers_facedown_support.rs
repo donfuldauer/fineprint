@@ -44,7 +44,7 @@ pub fn expected_default() -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(lit(2)),
         toughness: Some(lit(2)),
@@ -55,22 +55,26 @@ pub fn expected_default() -> Characteristics {
     }
 }
 
-/// The pinned JSON fields of the ward {2} ability (CR 702.168a, 701.58a).
+/// The pinned JSON fields of the ward {2} ability (CR 702.168a, 701.58a). #232 FP-164: the
+/// ability is a typed KEYWORD ability, `{"abilityId":"facedown:ward","kind":"KEYWORD",
+/// "keyword":"WARD","params":{"cost":"{2}"}}` (formerly the free-form placeholder with a
+/// lower-case keyword and a flat `cost`); parameters are flattened as `params.<name>`.
 pub fn expected_ward_fields() -> BTreeMap<String, String> {
     [
         ("kind", "KEYWORD"),
         ("abilityId", "facedown:ward"),
-        ("keyword", "ward"),
-        ("cost", "{2}"),
+        ("keyword", "WARD"),
+        ("params.cost", "{2}"),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
     .collect()
 }
 
-/// The JSON fields of an ability, read as string values (panics when a value is not a string).
+/// The JSON fields of an ability, read as string values, with the members of `params` flattened
+/// as `params.<name>` (panics when a value is not a string).
 pub fn ability_fields(a: &AbilityAST) -> BTreeMap<String, String> {
-    via_msgpack(a)
+    ability_fields_opt(a).expect("ability fields are strings")
 }
 
 /// Whether `a` is exactly the pinned ward {2} ability.
@@ -79,8 +83,24 @@ pub fn is_ward_2(a: &AbilityAST) -> bool {
 }
 
 fn ability_fields_opt(a: &AbilityAST) -> Option<BTreeMap<String, String>> {
-    let bytes = rmp_serde::to_vec_named(a).ok()?;
-    rmp_serde::from_slice(&bytes).ok()
+    let serde_json::Value::Object(top) = serde_json::to_value(a).ok()? else {
+        return None;
+    };
+    let mut out = BTreeMap::new();
+    for (k, v) in top {
+        match v {
+            serde_json::Value::String(s) => {
+                out.insert(k, s);
+            }
+            serde_json::Value::Object(params) if k == "params" => {
+                for (pk, pv) in params {
+                    out.insert(format!("params.{pk}"), pv.as_str()?.to_string());
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// CR 702.168a, 701.58a: the default plus exactly the ward {2} ability. The ability value is

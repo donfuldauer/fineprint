@@ -27,7 +27,7 @@ fn req_obj_003_708_2a_default_profile_field_by_field() {
     assert!(c.supertypes.is_empty(), "no supertypes");
     assert_eq!(c.card_types, set(&["Creature"]), "a creature");
     assert!(c.subtypes.is_empty(), "no subtypes");
-    assert!(c.rules_text.0.is_empty(), "no text");
+    assert!(c.rules_text.is_empty(), "no text");
     assert!(c.abilities.is_empty(), "no abilities");
     assert_eq!(c.power.as_ref().and_then(literal_of), Some(2), "power 2");
     assert_eq!(

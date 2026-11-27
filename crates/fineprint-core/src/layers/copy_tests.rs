@@ -62,32 +62,21 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 }
 
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
-}
-
-/// A JSON object built from `(member, value)` pairs (values carried in `AbilityAST` wrappers).
-fn obj(pairs: Vec<(&str, AbilityAST)>) -> AbilityAST {
-    AbilityAST(pairs.into_iter().map(|(k, v)| (k, v.0)).collect())
-}
-
-/// A JSON string.
-fn js(s: &str) -> AbilityAST {
-    AbilityAST(s.into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 /// A static ability with one `CHAR` effect in `layer`, characteristic-defining when `cda`.
 fn char_static(layer: &str, cda: bool) -> AbilityAST {
-    let effect = obj(vec![
-        ("type", js("CHAR")),
-        ("layer", js(layer)),
-        ("affected", obj(vec![("ref", js("SELF"))])),
-        ("modification", obj(vec![("op", js("TEST_OP"))])),
-        ("isCDA", AbilityAST(cda.into())),
-    ]);
-    obj(vec![
-        ("kind", js("STATIC")),
-        ("effects", AbilityAST(vec![effect.0].into())),
-    ])
+    char_static_defines(layer, cda, None)
+}
+
+/// A static ability `test.static.<tag>` with no effects (hand-built: the decoder requires at
+/// least one effect).
+fn empty_static(tag: &str) -> AbilityAST {
+    AbilityAST::Static(fineprint_dsl::ability::StaticAbilityAST {
+        base: fineprint_dsl::ability::AbilityBase::new(format!("test.static.{tag}")),
+        effects: Vec::new(),
+    })
 }
 
 /// A synthetic creature `name` with literal P/T, cost `{2}{G}`, green, one ability.
@@ -100,7 +89,7 @@ fn creature(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: set(&["Bear"]),
-        rules_text: TextTokenStream(vec![format!("test.text.{name}").into()]),
+        rules_text: literal_text(&format!("test.text.{name}")),
         abilities: vec![ability(name)],
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -121,7 +110,7 @@ fn other(name: &str) -> Characteristics {
         supertypes: set(&["Legendary"]),
         card_types: set(&["Artifact", "Creature"]),
         subtypes: set(&["Golem"]),
-        rules_text: TextTokenStream(vec![format!("test.text.{name}").into()]),
+        rules_text: literal_text(&format!("test.text.{name}")),
         abilities: vec![ability(name)],
         power: Some(literal(7)),
         toughness: Some(literal(8)),
@@ -142,7 +131,7 @@ fn face_down() -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(2)),
         toughness: Some(literal(2)),
@@ -281,13 +270,13 @@ fn face(kind: FaceKind, tag: &str, mana_cost: Option<&str>, pt: Option<(i64, i64
         supertypes: Vec::new(),
         card_types: vec!["Creature".to_owned()],
         subtypes: Vec::new(),
-        power: pt.map(|(p, _)| ValueExpressionAST(p.into())),
-        toughness: pt.map(|(_, t)| ValueExpressionAST(t.into())),
+        power: pt.map(|(p, _)| ValueExpressionAST::Literal(p)),
+        toughness: pt.map(|(_, t)| ValueExpressionAST::Literal(t)),
         loyalty: None,
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(vec![format!("test.text.{tag}").into()]),
+        text: literal_text(&format!("test.text.{tag}")),
         abilities: vec![ability(tag)],
     }
 }
@@ -640,7 +629,7 @@ fn exception_add_types_union() {
 #[test]
 fn exception_set_power_replaces_cda_expression() {
     let mut orig = creature("test.orig", 0, 0);
-    let cda = ValueExpressionAST(js("test.cda_count").0);
+    let cda = ValueExpressionAST::Memory("test.cda_count".to_owned());
     orig.power = Some(cda.clone());
     orig.toughness = Some(cda.clone());
     let c = CopiableValues::plain(orig)
@@ -854,17 +843,20 @@ fn exception_drops_matching_cda_abilities() {
         CopyException::GainAbility(colors_cda.clone()),
     ]);
     assert_eq!(got.last(), Some(&colors_cda));
-    // Abilities that are not STATIC, have no effects, or define another layer: never dropped.
+    // Abilities that are not STATIC, have no effects, have no CHAR effect, or define another
+    // layer: never dropped.
+    let triggered: AbilityAST = serde_json::from_value(serde_json::json!({
+        "abilityId": "test.odd.triggered",
+        "kind": "TRIGGERED",
+        "trigger": {"mode": "STATE", "state": {"pred": "IS_CREATURE"}},
+        "effect": [],
+    }))
+    .unwrap();
     let odd = vec![
-        obj(vec![("kind", js("TRIGGERED"))]),
-        obj(vec![("kind", js("STATIC"))]),
-        obj(vec![
-            ("kind", js("STATIC")),
-            (
-                "effects",
-                AbilityAST(vec![char_static("6", true).0, js("x").0].into()),
-            ),
-        ]),
+        triggered,
+        empty_static("odd"),
+        test_ability("test.odd.rule"),
+        char_static("6", true),
     ];
     let mut o2 = creature("test.orig", 3, 3);
     o2.abilities.clone_from(&odd);
@@ -882,6 +874,318 @@ fn exception_drops_matching_cda_abilities() {
     assert_eq!(got, odd);
 }
 
+/// A static ability `test.char.<layer>` with one `CHAR` effect in `layer` (its wire name),
+/// characteristic-defining when `cda`, whose modification carries `defines` when given
+/// (REQ-OBJ-002; SRS §14.4.3). Hand-built, so it can also hold a malformed `defines` that the
+/// decoder would refuse.
+fn char_static_defines(layer: &str, cda: bool, defines: Option<serde_json::Value>) -> AbilityAST {
+    let mut modification = fineprint_dsl::ability::Modification::new("TEST_OP");
+    if let Some(d) = defines {
+        modification.params.insert("defines".to_owned(), d);
+    }
+    let effect = fineprint_dsl::ability::CharacteristicEffect {
+        layer: Layer::from_wire(layer).unwrap(),
+        affected: fineprint_dsl::ability::Affected::Selector(ObjectSelectorAST::Ref(
+            fineprint_dsl::expr::ReferenceAST::SelfRef,
+        )),
+        modification,
+        is_cda: Some(cda),
+    };
+    AbilityAST::Static(fineprint_dsl::ability::StaticAbilityAST {
+        base: fineprint_dsl::ability::AbilityBase::new(format!("test.char.{layer}")),
+        effects: vec![fineprint_dsl::ability::StaticEffect::Char(effect)],
+    })
+}
+
+/// A layer-4 CDA whose `defines` lists `parts`.
+fn type_cda(parts: &[&str]) -> AbilityAST {
+    char_static_defines("4", true, Some(serde_json::json!(parts)))
+}
+
+/// The six type-line exceptions that set or do not copy one part, with the wire name of the
+/// part each touches (CR 707.9b, 707.9c, 707.9d).
+fn type_line_exceptions() -> Vec<(CopyException, &'static str)> {
+    vec![
+        (
+            CopyException::SetSupertypes(set(&["Legendary"])),
+            "SUPERTYPES",
+        ),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::Supertypes),
+            "SUPERTYPES",
+        ),
+        (
+            CopyException::SetCardTypes(set(&["Artifact"])),
+            "CARD_TYPES",
+        ),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::CardTypes),
+            "CARD_TYPES",
+        ),
+        (CopyException::SetSubtypes(set(&["Golem"])), "SUBTYPES"),
+        (
+            CopyException::NotCopied(CopiedCharacteristic::Subtypes),
+            "SUBTYPES",
+        ),
+    ]
+}
+
+/// The "in addition to its other types" exceptions and an unrelated one (CR 707.9d last
+/// sentence).
+fn keeping_exceptions() -> Vec<CopyException> {
+    vec![
+        CopyException::AddSupertypes(set(&["Legendary"])),
+        CopyException::AddCardTypes(set(&["Artifact"])),
+        CopyException::AddSubtypes(set(&["Golem"])),
+        CopyException::SetNames(set(&["test.n"])),
+        CopyException::GainAbility(ability("gained.other")),
+    ]
+}
+
+/// Whether `cda` is still among the abilities of a copy of a creature carrying it (after
+/// [`ability`]`("plain")`) under `exceptions`; the plain ability always stays.
+fn cda_kept(cda: &AbilityAST, exceptions: &[CopyException]) -> bool {
+    let mut orig = creature("test.orig", 3, 3);
+    orig.abilities = vec![ability("plain"), cda.clone()];
+    let got = CopiableValues::plain(orig)
+        .copy_with(&other("test.own"), exceptions)
+        .characteristics
+        .abilities;
+    assert_eq!(got.first(), Some(&ability("plain")), "{exceptions:?}");
+    got.iter().skip(1).any(|a| a == cda)
+}
+
+// REQ-OBJ-002, REQ-DSL-008; CR 707.9d, 109.3, 205.1b: a single-part layer-4 CDA is not copied
+// exactly when an exception sets or does not copy its own part; a subtype-only CDA survives
+// SetSupertypes, SetCardTypes, NotCopied(Supertypes) and NotCopied(CardTypes); likewise for
+// supertype-only and card-type-only CDAs.
+#[test]
+fn single_part_type_cda_dropped_only_by_its_part() {
+    for part in ["SUPERTYPES", "CARD_TYPES", "SUBTYPES"] {
+        let cda = type_cda(&[part]);
+        for (ex, touched) in type_line_exceptions() {
+            assert_eq!(
+                cda_kept(&cda, std::slice::from_ref(&ex)),
+                touched != part,
+                "{part} CDA under {ex:?}"
+            );
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: the acceptance criterion: a subtype-only layer-4 CDA survives a
+// SetSupertypes exception, and the supertypes are still set.
+#[test]
+fn subtype_only_cda_survives_set_supertypes() {
+    let cda = type_cda(&["SUBTYPES"]);
+    let mut orig = creature("test.orig", 3, 3);
+    orig.abilities = vec![cda.clone()];
+    let c = CopiableValues::plain(orig)
+        .copy_with(
+            &other("test.own"),
+            &[CopyException::SetSupertypes(set(&["Legendary"]))],
+        )
+        .characteristics;
+    assert_eq!(c.abilities, vec![cda]);
+    assert_eq!(c.supertypes, set(&["Legendary"]));
+}
+
+// REQ-OBJ-002; CR 707.9d (judgement call, docs/DECISIONS.md "#198 FP-151 — Per-part CDA targets
+// for copy exceptions"): a multi-part CDA is not copied as a whole as soon as any of its parts
+// is touched, and is copied when none is.
+#[test]
+fn multi_part_type_cda_dropped_whole_when_any_part_touched() {
+    let cda = type_cda(&["CARD_TYPES", "SUBTYPES"]);
+    for (ex, touched) in type_line_exceptions() {
+        assert_eq!(
+            cda_kept(&cda, std::slice::from_ref(&ex)),
+            touched == "SUPERTYPES",
+            "{ex:?}"
+        );
+    }
+    let two = type_cda(&["SUPERTYPES", "SUBTYPES"]);
+    for (ex, touched) in type_line_exceptions() {
+        assert_eq!(
+            cda_kept(&two, std::slice::from_ref(&ex)),
+            touched == "CARD_TYPES",
+            "{ex:?}"
+        );
+    }
+    // Two exceptions, neither touching the CDA's parts: kept.
+    assert!(cda_kept(
+        &type_cda(&["SUBTYPES"]),
+        &[
+            CopyException::SetSupertypes(set(&["Legendary"])),
+            CopyException::NotCopied(CopiedCharacteristic::CardTypes),
+        ]
+    ));
+}
+
+// REQ-OBJ-002; CR 707.9d: a layer-4 CDA without `defines`, or listing all three parts, defines
+// the whole type line and is dropped by any type-line exception (the #38 FP-037 behaviour).
+#[test]
+fn type_cda_without_defines_dropped_by_any_type_exception() {
+    for cda in [
+        char_static("4", true),
+        char_static_defines("4", true, None),
+        type_cda(&["SUBTYPES", "SUPERTYPES", "CARD_TYPES"]),
+    ] {
+        for (ex, _) in type_line_exceptions() {
+            assert!(!cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+        }
+    }
+}
+
+// REQ-OBJ-002, REQ-NFR-006; CR 707.9d: a malformed `defines` (which the DSL decode refuses)
+// never panics in core and counts as all three parts.
+#[test]
+fn malformed_defines_counts_as_all_parts() {
+    for bad in [
+        serde_json::json!([]),
+        serde_json::json!("SUBTYPES"),
+        serde_json::json!(["subtypes"]),
+        serde_json::json!(["SUBTYPE"]),
+        serde_json::json!([1]),
+        serde_json::json!([null]),
+        serde_json::json!(["SUBTYPES", "SUBTYPES"]),
+        serde_json::json!(["SUBTYPES", "x"]),
+        serde_json::json!({"SUBTYPES": true}),
+        serde_json::json!(null),
+    ] {
+        let cda = char_static_defines("4", true, Some(bad.clone()));
+        for (ex, _) in type_line_exceptions() {
+            assert!(!cda_kept(&cda, std::slice::from_ref(&ex)), "{bad} {ex:?}");
+        }
+        for ex in keeping_exceptions() {
+            assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{bad} {ex:?}");
+        }
+    }
+    // A modification that is not an object cannot be held by a typed ability any more (#232):
+    // the decoder refuses it. The fixture carries every other required member (`affected`), so
+    // the refusal is the numeric modification's; the same fixture with an object modification
+    // decodes (control).
+    let fixture = |modification: serde_json::Value| {
+        serde_json::json!({
+            "abilityId": "test.odd",
+            "kind": "STATIC",
+            "effects": [{
+                "type": "CHAR",
+                "layer": "4",
+                "affected": {"ref": "SELF"},
+                "modification": modification,
+                "isCDA": true,
+            }],
+        })
+    };
+    assert!(
+        serde_json::from_value::<AbilityAST>(fixture(serde_json::json!({"op": "TEST_OP"}))).is_ok(),
+        "control: the same fixture with an object modification decodes"
+    );
+    assert!(serde_json::from_value::<AbilityAST>(fixture(serde_json::json!(3))).is_err());
+}
+
+// REQ-OBJ-002; CR 707.9d last sentence: "in addition to its other types" exceptions (and
+// exceptions that define no CDA characteristic) keep every type CDA, whatever it defines.
+#[test]
+fn add_type_exceptions_keep_every_type_cda() {
+    for cda in [
+        char_static("4", true),
+        type_cda(&["SUPERTYPES"]),
+        type_cda(&["CARD_TYPES"]),
+        type_cda(&["SUBTYPES"]),
+        type_cda(&["CARD_TYPES", "SUBTYPES"]),
+    ] {
+        for ex in keeping_exceptions() {
+            assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+        }
+        assert!(cda_kept(&cda, &keeping_exceptions()), "{cda:?}");
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: color and power/toughness CDAs are unaffected by type-line
+// exceptions (a `defines` param there is opaque and ignored), and still dropped by their own.
+#[test]
+fn color_and_pt_cdas_ignore_type_exceptions_and_defines() {
+    for (layer, own) in [
+        ("5", CopyException::SetColors(ColorBitmask::WHITE)),
+        ("7a", CopyException::SetPower(literal(1))),
+    ] {
+        for cda in [
+            char_static(layer, true),
+            char_static_defines(layer, true, Some(serde_json::json!(["SUBTYPES"]))),
+        ] {
+            for (ex, _) in type_line_exceptions() {
+                assert!(cda_kept(&cda, std::slice::from_ref(&ex)), "{cda:?} {ex:?}");
+            }
+            assert!(!cda_kept(&cda, std::slice::from_ref(&own)), "{cda:?}");
+        }
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: a layer-4 CHAR effect that is not a CDA is never dropped, nor is a
+// gained type CDA (CR 707.9a: part of the copy's copiable values), nor does a modification
+// that is not a copy drop anything (CR 613.2a, 707.2).
+#[test]
+fn non_cda_and_gained_type_abilities_never_dropped() {
+    for not_cda in [
+        char_static_defines("4", false, Some(serde_json::json!(["SUBTYPES"]))),
+        char_static_defines("4", false, None),
+    ] {
+        for (ex, _) in type_line_exceptions() {
+            assert!(cda_kept(&not_cda, std::slice::from_ref(&ex)), "{ex:?}");
+        }
+    }
+    let cda = type_cda(&["SUBTYPES"]);
+    for (ex, _) in type_line_exceptions() {
+        let mut orig = creature("test.orig", 3, 3);
+        orig.abilities = vec![ability("plain")];
+        let got = CopiableValues::plain(orig)
+            .copy_with(
+                &other("test.own"),
+                &[ex.clone(), CopyException::GainAbility(cda.clone())],
+            )
+            .characteristics
+            .abilities;
+        assert_eq!(got, vec![ability("plain"), cda.clone()], "{ex:?}");
+        let mut orig = creature("test.orig", 3, 3);
+        orig.abilities = vec![cda.clone()];
+        let got = CopiableValues::plain(orig)
+            .modified(std::slice::from_ref(&ex))
+            .characteristics
+            .abilities;
+        assert_eq!(got, vec![cda.clone()], "modified {ex:?}");
+    }
+}
+
+// REQ-OBJ-002; CR 707.9d: an ability with a subtype-defining layer-4 CDA effect and a colors
+// CDA effect is dropped (whole) by an exception touching either, and kept by SetSupertypes.
+#[test]
+fn ability_with_several_cda_effects_uses_their_union() {
+    let both: AbilityAST = serde_json::from_value(serde_json::json!({
+        "abilityId": "test.both",
+        "kind": "STATIC",
+        "effects": [
+            {"type": "CHAR", "layer": "4", "affected": {"ref": "SELF"},
+             "modification": {"op": "TEST_OP", "defines": ["SUBTYPES"]}, "isCDA": true},
+            {"type": "CHAR", "layer": "5", "affected": {"ref": "SELF"},
+             "modification": {"op": "TEST_OP"}, "isCDA": true},
+        ],
+    }))
+    .unwrap();
+    assert!(cda_kept(
+        &both,
+        &[CopyException::SetSupertypes(set(&["Legendary"]))]
+    ));
+    assert!(!cda_kept(
+        &both,
+        &[CopyException::SetSubtypes(set(&["Golem"]))]
+    ));
+    assert!(!cda_kept(
+        &both,
+        &[CopyException::SetColors(ColorBitmask::WHITE)]
+    ));
+}
+
 // ---------------------------------------------------------------------------------------------
 // As-enters P/T (CR 613.2a, 707.2)
 // ---------------------------------------------------------------------------------------------
@@ -892,7 +1196,7 @@ fn exception_drops_matching_cda_abilities() {
 #[test]
 fn as_enters_power_toughness() {
     let mut base = creature("test.entering", 0, 0);
-    base.power = Some(ValueExpressionAST(js("test.star").0));
+    base.power = Some(ValueExpressionAST::Memory("test.star".to_owned()));
     for v in [
         CopiableValues::plain(base.clone()),
         CopiableValues::nonmodal_back_face(base.clone(), Some(cost("{3}{R}"))),
@@ -1240,7 +1544,7 @@ fn mana_value_merged() {
 fn copiable_characteristics_excludes_counters_and_later_layers() {
     let x = o(1);
     let mut base = creature("test.x", 2, 2);
-    base.power = Some(ValueExpressionAST(js("test.cda").0));
+    base.power = Some(ValueExpressionAST::Memory("test.cda".to_owned()));
     let env = Env::default()
         .with(x, base.clone())
         .counter(x, "+1/+1", 2)
@@ -3088,4 +3392,25 @@ fn round3_property_base_provenance() {
         assert_eq!(copiable_values(&r, &env, x).unwrap(), read);
         assert_eq!(evaluate(&r, &env, x).unwrap(), ev);
     }
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }

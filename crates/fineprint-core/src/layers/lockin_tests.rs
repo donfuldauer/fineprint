@@ -54,7 +54,7 @@ fn object(name: &str, card_types: &[&str], pt: Option<(i64, i64)>) -> Characteri
         supertypes: BTreeSet::new(),
         card_types: strings(card_types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: pt.map(|(p, _)| literal(p)),
         toughness: pt.map(|(_, t)| literal(t)),
@@ -67,7 +67,7 @@ fn object(name: &str, card_types: &[&str], pt: Option<(i64, i64)>) -> Characteri
 
 /// The marker ability that generates the static effects of the removal tests.
 fn generator() -> AbilityAST {
-    AbilityAST("test.ability.generator".into())
+    test_ability("test.ability.generator")
 }
 
 fn filter(pred: PredicateAST) -> ObjectSelectorAST {
@@ -1587,5 +1587,166 @@ fn bad_link_display() {
     assert_eq!(
         LayerError::BadLink(e(7)).to_string(),
         "effect 7 links to no part of an earlier layer of its group"
+    );
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// `env` with `objects()` listed in descending order, every id twice (REQ-LAYER-001).
+struct Descending<'a>(&'a Env);
+
+impl LayerEnvironment for Descending<'_> {
+    fn objects(&self) -> Vec<ObjectId> {
+        let mut ids = self.0.objects();
+        ids.reverse();
+        ids.iter().flat_map(|&id| [id, id]).collect()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.0.base(id)
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        self.0.matches(selector, ctx)
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        self.0
+            .generating_ability_exists(effect, source, source_view)
+    }
+}
+
+// REQ-LAYER-001, REQ-CORE-001, CR 611.2c: the single board pass of resolve_affected_set reports
+// the UnknownObject of the smallest id without a base, whatever the order and the duplicates of
+// `objects()`; register_group commits nothing on that error.
+#[test]
+fn locking_reports_smallest_unknown_object_in_any_listing_order() {
+    let mut env = creature_env();
+    env.phantom.extend([o(9), o(7), o(8)]);
+    let listed = Descending(&env);
+    assert_eq!(listed.objects().first(), Some(&o(9)));
+    let r0 = ContinuousEffects::new();
+    assert_eq!(
+        resolve_affected_set(&r0, &listed, None, p(1), &creatures()),
+        Err(LayerError::UnknownObject(o(7)))
+    );
+    let mut r = ContinuousEffects::new();
+    assert_eq!(
+        r.register_group(&listed, control_parts()),
+        Err(LayerError::UnknownObject(o(7)))
+    );
+    assert!(r.is_empty());
+}
+
+// REQ-LAYER-001, REQ-CORE-001, CR 611.2c: on a board with several effects, the set of the single
+// board pass equals the set a per-object `evaluate` gives, for several selectors, sources and
+// listing orders.
+#[test]
+fn resolve_affected_set_equals_per_object_evaluation() {
+    let env = artifacts_env().with(
+        o(4),
+        object("test.vanilla_3_3", &["Creature"], Some((3, 3))),
+    );
+    let mut r = ContinuousEffects::new();
+    // o3 becomes a creature (layer 4); o4 stops being one; o1 becomes an artifact creature 2/2.
+    r.register(
+        e(1),
+        res(
+            Layer::L4,
+            1,
+            objects(&[o(3)]),
+            add_types(&["Creature"], &[]),
+        ),
+    )
+    .unwrap();
+    r.register(
+        e(2),
+        res(
+            Layer::L4,
+            2,
+            objects(&[o(4)]),
+            LayerModification::SetTypes {
+                supertypes: None,
+                card_types: Some(strings(&["Land"])),
+                subtypes: None,
+            },
+        ),
+    )
+    .unwrap();
+    r.register(
+        e(3),
+        stat(
+            o(1),
+            Layer::L4,
+            3,
+            Affected::Selector(self_ref()),
+            add_types(&["Creature"], &[]),
+        ),
+    )
+    .unwrap();
+    r.register(
+        e(4),
+        stat(
+            o(2),
+            Layer::L7c,
+            4,
+            Affected::Selector(creatures()),
+            modify(1, 1),
+        ),
+    )
+    .unwrap();
+    let selectors = [
+        creatures(),
+        noncreature_artifacts(),
+        of_type("Land"),
+        of_type("Artifact"),
+        self_ref(),
+    ];
+    for selector in &selectors {
+        for source in [None, Some(o(1)), Some(o(3)), Some(o(4))] {
+            let expected: BTreeSet<ObjectId> = env
+                .objects()
+                .into_iter()
+                .filter(|&id| {
+                    let view = evaluate(&r, &env, id).unwrap();
+                    env.matches(
+                        selector,
+                        &MatchContext {
+                            source,
+                            effect_controller: p(1),
+                            candidate: id,
+                            candidate_view: &view,
+                        },
+                    )
+                })
+                .collect();
+            assert_eq!(
+                resolve_affected_set(&r, &env, source, p(1), selector),
+                Ok(expected.clone())
+            );
+            assert_eq!(
+                resolve_affected_set(&r, &Descending(&env), source, p(1), selector),
+                Ok(expected)
+            );
+        }
+    }
+    // The board-pass view is the evaluated one: o3 and o1 are creatures, o4 no longer is.
+    assert_eq!(
+        resolve_affected_set(&r, &env, None, p(1), &creatures()),
+        Ok([o(1), o(2), o(3)].into_iter().collect())
     );
 }

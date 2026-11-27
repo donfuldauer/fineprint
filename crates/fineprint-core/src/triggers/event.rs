@@ -119,7 +119,9 @@ fn zone_change_kinds(from: ZoneKind, to: ZoneKind, cause: ZoneChangeCause) -> Ve
     };
     let by_cause = match cause {
         ZoneChangeCause::Sacrifice => Some(EventKind::Sacrificed),
-        ZoneChangeCause::Destroy => Some(EventKind::Destroyed),
+        // CR 701.8b: destruction by an effect or by the CR 704.5g / CR 704.5h state-based
+        // actions.
+        ZoneChangeCause::Destroy | ZoneChangeCause::StateBasedDestroy => Some(EventKind::Destroyed),
         ZoneChangeCause::Discard => Some(EventKind::Discarded),
         ZoneChangeCause::Mill => Some(EventKind::Milled),
         // CR 701.6a, CR 603.10e
@@ -206,9 +208,33 @@ fn moved_event(kinds: Vec<EventKind>, m: &Moved) -> TriggerEvent {
         )
 }
 
-/// Appends the `TriggerEvent`s of one executed event to `out` (none if no trigger can match
-/// it). `lki` supplies the sacrificing controller (CR 701.21a).
+/// Appends the `TriggerEvent`s of one executed event to `out`: first the occurrences of the
+/// event itself ([`own_trigger_events`]), then one `UNATTACHED` occurrence per attachment link
+/// the event removed, in record order (CR 701.3d, CR 603.10c). An `Unattach` or
+/// `UnattachFrom` already is that occurrence, so its records add nothing.
 fn trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<TriggerEvent>) {
+    own_trigger_events(executed, lki, out);
+    if matches!(
+        executed.instance.event(),
+        GameEvent::Unattach { .. } | GameEvent::UnattachFrom { .. }
+    ) {
+        return;
+    }
+    for record in &executed.unattached {
+        // CR 701.3d, CR 603.10c
+        out.push(unattached_event(record.attachment));
+    }
+}
+
+/// The `UNATTACHED` occurrence of `attachment` (CR 701.3d, CR 603.10c).
+fn unattached_event(attachment: ObjectId) -> TriggerEvent {
+    TriggerEvent::new(vec![EventKind::Unattached]).with_same_object(attachment)
+}
+
+/// Appends the occurrences of one executed event itself to `out` (none if no trigger can
+/// match it), not counting the links it removed. `lki` supplies the sacrificing controller
+/// (CR 701.21a).
+fn own_trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<TriggerEvent>) {
     let event = match executed.instance.event() {
         GameEvent::ZoneChange { cause, .. } => {
             let Outcome::ZoneChange(m) = &executed.outcome else {
@@ -340,9 +366,9 @@ fn trigger_events(executed: &ExecutedEvent, lki: &LkiStore, out: &mut Vec<Trigge
         GameEvent::Attach { attachment, .. } => {
             TriggerEvent::new(vec![EventKind::Attached]).with_same_object(*attachment)
         }
-        // CR 603.10c
-        GameEvent::Unattach { attachment } => {
-            TriggerEvent::new(vec![EventKind::Unattached]).with_same_object(*attachment)
+        // CR 701.3d, CR 603.10c: one occurrence for the event itself, whatever its records.
+        GameEvent::Unattach { attachment } | GameEvent::UnattachFrom { attachment, .. } => {
+            unattached_event(*attachment)
         }
         // Turn structure, copy and face-down events have no event-matcher kind here.
         _ => return,
@@ -361,9 +387,19 @@ pub fn events_from_batch(batch: &ExecutedBatch) -> Vec<TriggerEvent> {
 /// Normalises one executed batch for trigger matching (REQ-EVENT-002, CR 603.2): zero, one or
 /// more [`TriggerEvent`]s per executed event, in batch order (the indices of the result are
 /// the `event_indices` of [`WaitingTrigger`](super::WaitingTrigger)). Events with no mapping
-/// (turn, phase and step beginnings, becoming a copy, turning face down, zero life change) and
-/// same-zone repositions that keep their id (CR 400.7) produce none; damage dealt to a player
-/// produces the damage occurrence followed by its life-loss occurrence (CR 120.3a). `lki` is
+/// of their own (turn, phase and step beginnings, becoming a copy, turning face down, zero
+/// life change) and same-zone repositions that keep their id (CR 400.7) produce none; damage
+/// dealt to a player produces the damage occurrence followed by its life-loss occurrence
+/// (CR 120.3a).
+///
+/// After an event's own occurrences come its lost attachment links
+/// ([`ExecutedEvent::unattached`]): one `UNATTACHED` occurrence per record, in record order,
+/// with the attachment as it was before the event as subject (CR 701.3d, CR 603.10c). So an
+/// attach to a different host yields `ATTACHED` then `UNATTACHED`; a first attach only
+/// `ATTACHED`; a permanent leaving the battlefield yields its zone-change occurrence, then
+/// `UNATTACHED` for its own link, then for each permanent attached to it, ascending id. An
+/// `Unattach` or `UnattachFrom` yields exactly one `UNATTACHED` occurrence from the event
+/// itself and ignores its records, so no link is reported twice. `lki` is
 /// the store the batch captured into: a sacrifice's subject player is the sacrificed object's
 /// last known controller (CR 701.21a); without a record it is `None`.
 ///

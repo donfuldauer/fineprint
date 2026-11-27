@@ -56,7 +56,7 @@ impl CharacteristicsProvider for TestProvider {
             supertypes: BTreeSet::new(),
             card_types: BTreeSet::from(["Creature".to_owned()]),
             subtypes: BTreeSet::new(),
-            rules_text: TextTokenStream(Vec::new()),
+            rules_text: TextTokenStream::default(),
             abilities: Vec::new(),
             power: None,
             toughness: None,
@@ -1229,6 +1229,69 @@ fn req_event_001_cr_122_1d_stun_counter() {
     let run = drive(&run.state, vec![GameEvent::Untap { object: x }], false, &[]);
     assert!(ok(&run).applications.is_empty());
     assert!(!run.state.permanents.get(x).unwrap().status().tapped);
+}
+
+/// REQ-EVENT-001 (Gate 06-turn F12): CR 614.7, CR 701.3d: with X attached to B,
+/// `UnattachFrom(X, A)` would not happen, so an `Instead([LifeChange])` replacement of unattach
+/// events is not offered, no life changes and X stays attached to B; `UnattachFrom(X, B)` (the
+/// exact host) stays replaceable. A plain `Unattach` of an unattached permanent offers nothing.
+#[test]
+fn req_event_001_cr_614_7_unattach_from_exact_host() {
+    use crate::permanent::AttachTarget;
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let a = w.create(1, ZoneKind::Battlefield);
+    let b = w.create(1, ZoneKind::Battlefield);
+    let loose = w.create(1, ZoneKind::Battlefield);
+    w.setup(GameEvent::Attach {
+        attachment: x,
+        target: AttachTarget::Permanent(b),
+    });
+    w.add(ReplacementEffect::new(
+        e(1),
+        EventMatcher::new(BusEventKind::Unattach),
+        Action::Instead(vec![life(1, 1)]),
+    ));
+    // Another host: a no-op, nothing offered, nothing replaced.
+    let wrong = GameEvent::UnattachFrom {
+        attachment: x,
+        host: AttachTarget::Permanent(a),
+    };
+    let run = drive(&w, vec![wrong], false, &[]);
+    let report = ok(&run);
+    assert!(run.asked.is_empty());
+    assert!(report.applications.is_empty());
+    assert!(report.executed.iter().all(|b| b.events.is_empty()));
+    assert_eq!(run.state.life(1), 20);
+    assert_eq!(
+        run.state.permanents.attached_to(x),
+        Some(AttachTarget::Permanent(b))
+    );
+    // Plain Unattach of an unattached permanent: no-op, nothing replaced.
+    let run = drive(
+        &w,
+        vec![GameEvent::Unattach { attachment: loose }],
+        false,
+        &[],
+    );
+    assert!(ok(&run).applications.is_empty());
+    assert_eq!(run.state.life(1), 20);
+    // The exact host: replaced (the life change happens instead, X stays attached).
+    let right = GameEvent::UnattachFrom {
+        attachment: x,
+        host: AttachTarget::Permanent(b),
+    };
+    let run = drive(&w, vec![right], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.life(1), 21);
+    assert_eq!(
+        run.state.permanents.attached_to(x),
+        Some(AttachTarget::Permanent(b))
+    );
+    // Plain Unattach of the attached X: replaced as well.
+    let run = drive(&w, vec![GameEvent::Unattach { attachment: x }], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.life(1), 21);
 }
 
 /// REQ-EVENT-001: CR 122.1h, from the battlefield to a graveyard goes to exile instead; from
@@ -5170,4 +5233,99 @@ fn req_event_001_r6_execution_order_follows_lineage_path() {
         assert_eq!(moved_objects(ok(&control)), expected);
         assert_eq!(moved_objects(ok(&run)), expected);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Layer-evaluated LKI through the bus (#184 FP-145)
+// ---------------------------------------------------------------------------------------------
+
+/// A battlefield creature with the scene's effects (order `a_older`) is destroyed through
+/// `process_event` while a replacement redirects the move to exile; the context's provider is
+/// a `LayeredProvider` over a snapshot taken before the context (`layered`) or the base-only
+/// control. Returns the object's LKI record, the scene's P/T and the bus report.
+fn redirected_departure(
+    a_older: bool,
+    layered: bool,
+) -> (crate::memory::LkiRecord, (i64, i64), BusReport) {
+    use crate::layers::LayeredProvider;
+    use crate::memory::consumer_guard_tests::{SceneWorld, register_scene};
+    use crate::state::GameEnvironment;
+
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let card = w.card_of(x);
+    let pt = register_scene(&mut w.game, x, a_older);
+    w.add(ReplacementEffect::new(
+        e(1),
+        EventMatcher {
+            to: Some(ZoneKind::Graveyard),
+            ..EventMatcher::new(BusEventKind::ZoneChange)
+        },
+        Action::Modify(Modification::SetDestination(ZoneKind::Exile)),
+    ));
+    let procedure = move |s: &mut World, ch: &mut ChoiceContext<'_>| -> Result<Out, Interrupt> {
+        let world = SceneWorld::of(&s.zones, s.events.markers());
+        let snap = s.game.clone();
+        let env = GameEnvironment::new(&snap, &world);
+        let layered_provider = LayeredProvider::new(snap.effects(), &env);
+        let provider: &dyn CharacteristicsProvider =
+            if layered { &layered_provider } else { &world };
+        let mut ctx = EventContext {
+            game: &mut s.game,
+            zones: &mut s.zones,
+            ids: &mut s.ids,
+            permanents: &mut s.permanents,
+            memories: &mut s.memories,
+            lki: &mut s.lki,
+            events: &mut s.events,
+            provider,
+        };
+        match process_event(
+            &mut ctx,
+            &mut s.registry,
+            zc(x, ZoneKind::Graveyard, ZoneChangeCause::Destroy),
+            ch,
+        ) {
+            Ok(r) => Ok(Ok(r)),
+            Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+            Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+        }
+    };
+    let session = ChoiceSession::start(w, procedure).unwrap();
+    let Status::Done { state, output } = session.status() else {
+        panic!("one applicable replacement: nothing is asked (CR 616.1)");
+    };
+    let report = output.clone().expect("bus failed");
+    // CR 614.6: the move happened as modified, to exile.
+    assert_eq!(state.zone_of_card(card), Some(ZoneId::Exile));
+    let record = state.lki.get(x).expect("LKI captured").clone();
+    (record, pt, report)
+}
+
+// REQ-LAYER-001, REQ-CORE-003, REQ-EVENT-001: CR 616.1, CR 614.12, CR 608.2h, CR 613.1d,
+// CR 613.4b, CR 613.7. A zone change that a replacement redirects through `process_event`
+// still captures the object's evaluated characteristics: the layer-4 granted type and the
+// layer-7b/7c P/T, in both timestamp orders of the two 7b effects (the later one wins, so the
+// LKI P/T differ per order). The base-only control captures the base 2/2 without the type.
+#[test]
+fn req_layer_001_req_core_003_cr_616_1_redirected_move_lki_is_evaluated() {
+    use crate::memory::consumer_guard_tests::{has_granted_type, pt_of, scene_base};
+
+    let mut seen = Vec::new();
+    for a_older in [true, false] {
+        let (record, pt, report) = redirected_departure(a_older, true);
+        assert_eq!(report.applications, vec![e(1)]);
+        assert!(
+            has_granted_type(record.characteristics()),
+            "a_older {a_older}"
+        );
+        assert_eq!(pt_of(record.characteristics()), Some(pt));
+        seen.push(pt);
+
+        let (control, _, report) = redirected_departure(a_older, false);
+        assert_eq!(report.applications, vec![e(1)]);
+        assert_eq!(control.characteristics(), &scene_base());
+        assert!(!has_granted_type(control.characteristics()));
+    }
+    assert_eq!(seen, [(7, 7), (5, 5)]);
 }

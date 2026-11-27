@@ -33,6 +33,7 @@
 
 use std::collections::BTreeSet;
 
+use fineprint_dsl::ability::{AbilityBase, KeywordInstanceAST};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 
 use crate::objects::Characteristics;
@@ -42,20 +43,17 @@ use crate::zones::ZoneId;
 const WARD_COST: &str = "{2}";
 
 /// The ward {2} keyword ability of the disguise and cloak profiles (CR 702.168a, 701.58a):
-/// kind `KEYWORD`, ability id `facedown:ward`, keyword `ward`, cost `{2}` (the keyword shape of
-/// [`crate::layers::keyword_counter_ability`] with a cost member).
+/// kind `KEYWORD`, ability id `facedown:ward`, keyword `WARD` and the keyword parameter `cost`
+/// `{2}` (the keyword shape of [`crate::layers::keyword_counter_ability`] with a cost
+/// parameter; docs/DECISIONS.md "#232 FP-164 — Golden hashes and replaced tests").
 fn ward_2_ability() -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD"),
-            ("abilityId", "facedown:ward"),
-            ("keyword", "ward"),
-            ("cost", WARD_COST),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect(),
-    )
+    let mut ward = KeywordInstanceAST::new(AbilityBase::new("facedown:ward"), "WARD");
+    ward.params = Some(
+        [("cost".to_owned(), WARD_COST.into())]
+            .into_iter()
+            .collect(),
+    );
+    AbilityAST::Keyword(ward)
 }
 
 /// What turned an object face down, for [`FaceDownProfile::for_cause`].
@@ -98,10 +96,10 @@ impl FaceDownProfile {
                 supertypes: BTreeSet::new(),
                 card_types: BTreeSet::from(["Creature".to_owned()]),
                 subtypes: BTreeSet::new(),
-                rules_text: TextTokenStream(Vec::new()),
+                rules_text: TextTokenStream::default(),
                 abilities: Vec::new(),
-                power: Some(ValueExpressionAST(2.into())),
-                toughness: Some(ValueExpressionAST(2.into())),
+                power: Some(ValueExpressionAST::Literal(2)),
+                toughness: Some(ValueExpressionAST::Literal(2)),
                 loyalty: None,
                 defense: None,
                 hand_modifier: None,
@@ -112,7 +110,7 @@ impl FaceDownProfile {
 
     /// The disguise and cloak profile (CR 702.168a, 702.168b, 701.58a): the default profile
     /// plus exactly one ability, ward {2}, as a keyword ability with kind `KEYWORD`, ability id
-    /// `facedown:ward`, keyword `ward` and cost `{2}`.
+    /// `facedown:ward`, keyword `WARD` and the keyword parameter `cost` `{2}`.
     #[must_use]
     pub fn with_ward_2() -> FaceDownProfile {
         let mut profile = FaceDownProfile::default_2_2();
@@ -183,17 +181,13 @@ mod tests {
     use fineprint_base::ids::PlayerId;
 
     fn ward_json() -> AbilityAST {
-        AbilityAST(
-            [
-                ("kind", "KEYWORD"),
-                ("abilityId", "facedown:ward"),
-                ("keyword", "ward"),
-                ("cost", "{2}"),
-            ]
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect(),
-        )
+        serde_json::from_value(serde_json::json!({
+            "kind": "KEYWORD",
+            "abilityId": "facedown:ward",
+            "keyword": "WARD",
+            "params": {"cost": "{2}"},
+        }))
+        .expect("valid ward ability")
     }
 
     // REQ-OBJ-003; CR 708.2a: the default profile, field by field.
@@ -207,10 +201,10 @@ mod tests {
         assert!(c.supertypes.is_empty());
         assert_eq!(c.card_types, BTreeSet::from(["Creature".to_owned()]));
         assert!(c.subtypes.is_empty());
-        assert!(c.rules_text.0.is_empty());
+        assert!(c.rules_text.is_empty());
         assert!(c.abilities.is_empty());
-        assert_eq!(c.power, Some(ValueExpressionAST(2.into())));
-        assert_eq!(c.toughness, Some(ValueExpressionAST(2.into())));
+        assert_eq!(c.power, Some(ValueExpressionAST::Literal(2)));
+        assert_eq!(c.toughness, Some(ValueExpressionAST::Literal(2)));
         assert_eq!(c.loyalty, None);
         assert_eq!(c.defense, None);
         assert_eq!(c.hand_modifier, None);
@@ -261,9 +255,12 @@ mod tests {
         assert!(FaceDownProfile::custom(c.clone()).has_ward_2());
         // A ward keyword with another cost is not ward {2}.
         let mut other = ward_json();
-        if let Some(m) = other.0.as_object_mut() {
-            m.insert("cost".to_owned(), "{3}".into());
+        if let AbilityAST::Keyword(k) = &mut other
+            && let Some(params) = k.params.as_mut()
+        {
+            params.insert("cost".to_owned(), "{3}".into());
         }
+        assert_ne!(other, ward_json());
         c.abilities = vec![other];
         assert!(!FaceDownProfile::custom(c).has_ward_2());
     }

@@ -53,7 +53,7 @@ fn creature(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: set(["Bear"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -75,7 +75,7 @@ fn noncreature(name: &str, card_type: &str) -> Characteristics {
 }
 
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 fn pt(c: &Characteristics) -> Option<(i64, i64)> {
@@ -85,24 +85,30 @@ fn pt(c: &Characteristics) -> Option<(i64, i64)> {
     ))
 }
 
+/// Whether `c` has a `KEYWORD` ability whose keyword name is [`keyword_id`] of `keyword`.
 fn has_keyword(c: &Characteristics, keyword: &str) -> bool {
-    c.abilities.iter().any(|a| {
-        a.0.get("kind").and_then(|k| k.as_str()) == Some("KEYWORD")
-            && a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword)
-    })
+    c.abilities
+        .iter()
+        .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == keyword_id(keyword)))
+}
+
+/// A synthetic keyword ability whose parameters mention `word` (a keyword ability of another
+/// keyword).
+fn mentions_keyword(word: &str) -> AbilityAST {
+    let mut k = fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new("test.mentions"),
+        "TEST_KEYWORD",
+    );
+    k.params = Some(BTreeMap::from([("keyword".to_owned(), word.into())]));
+    AbilityAST::Keyword(k)
 }
 
 /// A keyword ability granted by an effect or printed (not a counter).
 fn keyword(keyword: &str, id: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", id.to_owned()),
-            ("keyword", keyword.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(id),
+        keyword_id(keyword),
+    ))
 }
 
 fn filter(pred: PredicateAST) -> ObjectSelectorAST {
@@ -404,7 +410,7 @@ fn modification_layer_table() {
         (LayerModification::FaceDown(c), vec![Layer::L1b]),
         (LayerModification::SetController(p(1)), vec![Layer::L2]),
         (
-            LayerModification::SetText(TextTokenStream(Vec::new())),
+            LayerModification::SetText(TextTokenStream::default()),
             vec![Layer::L3],
         ),
         (
@@ -555,7 +561,7 @@ fn layer_2_control() {
 #[test]
 fn layer_3_text() {
     let env = Env::default().with(o(1), creature("test.bear", 2, 2));
-    let text = TextTokenStream(vec!["test.word".into()]);
+    let text = literal_text("test.word");
     let r = registry(vec![(
         1,
         eff(
@@ -741,7 +747,7 @@ fn layer_6_remove_keyword() {
         ability("flying"),
         keyword("reach", "a2"),
         keyword("flying", "a3"),
-        AbilityAST([("keyword", "flying")].into_iter().collect()),
+        mentions_keyword("flying"),
     ];
     let env = Env::default().with(o(1), c);
     let r = registry(vec![(
@@ -758,7 +764,7 @@ fn layer_6_remove_keyword() {
         vec![
             ability("flying"),
             keyword("reach", "a2"),
-            AbilityAST([("keyword", "flying")].into_iter().collect()),
+            mentions_keyword("flying"),
         ]
     );
 }
@@ -768,8 +774,8 @@ fn layer_6_remove_keyword() {
 #[test]
 fn layer_7a_cda() {
     let mut c = creature("test.cda_star", 0, 0);
-    c.power = Some(ValueExpressionAST("test.count_cards".into()));
-    c.toughness = Some(ValueExpressionAST("test.count_cards".into()));
+    c.power = Some(ValueExpressionAST::Memory("test.count_cards".to_owned()));
+    c.toughness = Some(ValueExpressionAST::Memory("test.count_cards".to_owned()));
     let mut env = Env::default().with(o(1), c);
     env.cda.insert(o(1), 6);
     assert_eq!(eval_pt(&ContinuousEffects::new(), &env, o(1)), Some((6, 6)));
@@ -1116,10 +1122,8 @@ fn keyword_counter_kinds_and_ward() {
     }
     assert!(!has_keyword(&c, "ward"));
     let ab = keyword_counter_ability("first strike");
-    assert_eq!(
-        ab.0.get("abilityId").and_then(|v| v.as_str()),
-        Some("counter:first strike")
-    );
+    assert_eq!(ab.base().ability_id, "counter:first strike");
+    assert!(matches!(&ab, AbilityAST::Keyword(k) if k.keyword == "FIRST_STRIKE"));
 }
 
 // REQ-LAYER-001; CR 122.1a, 613.4c: P/T counters by amount; zero amounts and other kinds do
@@ -1228,23 +1232,52 @@ fn pt_presence() {
     assert_eq!(minimal.counter_timestamp(o(1), "+1/+1"), None);
     assert!(minimal.attached_here(o(1)).is_empty());
     assert_eq!(
-        minimal.eval_value(&ValueExpressionAST("test.x".into()), o(1)),
+        minimal.eval_value(&ValueExpressionAST::Memory("test.x".to_owned()), o(1)),
         None
     );
     assert_eq!(minimal.eval_value(&literal(2), o(1)), Some(2));
 }
 
-// REQ-LAYER-001: literal forms of power and toughness.
+// REQ-LAYER-001, REQ-DSL-003: literal forms of power and toughness: `literal(n)` is
+// `{"LITERAL": n}`; every other expression is not a literal (#232: the bare-integer
+// placeholder form is gone).
 #[test]
 fn literal_forms() {
     assert_eq!(literal_of(&literal(-3)), Some(-3));
-    let tagged = ValueExpressionAST([("LITERAL", 7)].into_iter().collect());
-    assert_eq!(literal_of(&tagged), Some(7));
-    let two = ValueExpressionAST([("LITERAL", 7), ("X", 1)].into_iter().collect());
-    assert_eq!(literal_of(&two), None);
-    let other = ValueExpressionAST([("COUNT", 7)].into_iter().collect());
-    assert_eq!(literal_of(&other), None);
-    assert_eq!(literal_of(&ValueExpressionAST("X".into())), None);
+    assert_eq!(literal(7), ValueExpressionAST::Literal(7));
+    assert_eq!(
+        serde_json::to_value(literal(7)).unwrap(),
+        serde_json::json!({"LITERAL": 7})
+    );
+    let math: ValueExpressionAST = serde_json::from_value(
+        serde_json::json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 7}, "rhs": "X"}}),
+    )
+    .unwrap();
+    assert_eq!(literal_of(&math), None);
+    assert_eq!(
+        literal_of(&ValueExpressionAST::Memory("test.count".to_owned())),
+        None
+    );
+    assert_eq!(literal_of(&ValueExpressionAST::X), None);
+    assert!(serde_json::from_value::<ValueExpressionAST>(serde_json::json!(7)).is_err());
+}
+
+// REQ-LAYER-001, REQ-DSL-005 (#232): keyword names of engine-built keyword abilities: ASCII
+// letters upper-cased, digits kept, anything else `_`; a keyword name is unchanged.
+#[test]
+fn keyword_id_forms() {
+    assert_eq!(keyword_id("flying"), "FLYING");
+    assert_eq!(keyword_id("first strike"), "FIRST_STRIKE");
+    assert_eq!(keyword_id("hexproof from red"), "HEXPROOF_FROM_RED");
+    assert_eq!(keyword_id("FIRST_STRIKE"), "FIRST_STRIKE");
+    assert_eq!(keyword_id("a-b 2!"), "A_B_2_");
+    for kind in KEYWORD_COUNTER_KINDS {
+        let ab = keyword_counter_ability(kind);
+        assert!(
+            fineprint_dsl::canonical::to_canonical_vec(&ab).is_ok(),
+            "{kind}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1277,7 +1310,7 @@ fn scene() -> (Vec<(u64, ContinuousEffect)>, Env) {
             Layer::L3,
             2,
             objects([o(4)]),
-            LayerModification::SetText(TextTokenStream(vec!["t".into()])),
+            LayerModification::SetText(literal_text("t")),
         ),
         eff(
             Layer::L5,
@@ -1910,9 +1943,10 @@ fn variant_keyword_counter_grants_full_keyword() {
     );
     assert!(has_keyword(&c, "hexproof from red"));
     assert_eq!(
-        c.abilities[0].0.get("abilityId").and_then(|v| v.as_str()),
-        Some("counter:hexproof from red")
+        c.abilities[0].base().ability_id,
+        "counter:hexproof from red"
     );
+    assert!(matches!(&c.abilities[0], AbilityAST::Keyword(k) if k.keyword == "HEXPROOF_FROM_RED"));
     let c = eval(&ContinuousEffects::new(), &env, o(2)).characteristics;
     assert!(c.abilities.is_empty());
 }
@@ -2178,4 +2212,455 @@ fn variant_helper_accepts_and_rejects() {
             "{candidate:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evaluation cost work (#190 FP-147): results unchanged
+// ---------------------------------------------------------------------------------------------
+
+/// A deterministic generator for the equivalence boards (no randomness outside the seed).
+struct PerfLcg(u64);
+
+impl PerfLcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// A mid-size synthetic board for the equivalence tests: objects 1..=`n` listed, object 99
+/// with a base but not listed; counters; per-player characteristic-defining P/T that reads the
+/// view (CR 604.3, 613.4a); existence of a static effect judged on its source's view (it exists
+/// while the source has an ability, or for every third effect id; CR 613.8a, 611.3).
+struct PerfEnv {
+    bases: BTreeMap<ObjectId, ObjectBase>,
+    listed: Vec<ObjectId>,
+    counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+}
+
+const PERF_SUBTYPES: [&str; 3] = ["Testkin", "Testfolk", "Testling"];
+
+impl PerfEnv {
+    fn new(seed: u64, n: u64) -> PerfEnv {
+        let mut g = PerfLcg(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut bases = BTreeMap::new();
+        let mut counters = BTreeMap::new();
+        for i in (1..=n).chain([99]) {
+            let mut c = match g.below(6) {
+                0 => noncreature(&format!("test.relic_{i}"), "Artifact"),
+                1 => {
+                    let mut c = creature(&format!("test.counter_{i}"), 0, 0);
+                    c.power = Some(ValueExpressionAST::Memory("test.count".to_owned()));
+                    c.toughness = Some(ValueExpressionAST::Memory("test.count".to_owned()));
+                    c
+                }
+                _ => {
+                    let size = i64::try_from(g.below(4)).unwrap() + 1;
+                    creature(&format!("test.body_{i}"), size, size + 1)
+                }
+            };
+            c.subtypes = set([PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()]]);
+            if g.below(3) != 0 {
+                c.abilities = vec![keyword("vigilance", &format!("test.v{i}"))];
+            }
+            bases.insert(
+                o(i),
+                ObjectBase {
+                    characteristics: c,
+                    controller: Some(p(g.below(2) + 1)),
+                    on_battlefield: g.below(8) != 0,
+                },
+            );
+            match g.below(4) {
+                0 => {
+                    counters.insert(o(i), BTreeMap::from([("+1/+1".to_owned(), 2)]));
+                }
+                1 => {
+                    counters.insert(o(i), BTreeMap::from([("flying".to_owned(), 1)]));
+                }
+                _ => {}
+            }
+        }
+        // Listed in a scrambled order with one duplicate; the result must not depend on it.
+        let mut listed: Vec<ObjectId> = (1..=n).rev().map(o).collect();
+        listed.push(o(1));
+        PerfEnv {
+            bases,
+            listed,
+            counters,
+        }
+    }
+
+    /// Effects in every layer, most of them static effects of objects of the board.
+    fn registry(seed: u64, n: u64, count: u64) -> ContinuousEffects {
+        let mut g = PerfLcg(seed ^ 0x5151_7e57);
+        let mut r = ContinuousEffects::new();
+        for k in 1..=count {
+            let t = g.below(40) + 1;
+            let selector = match g.below(4) {
+                0 => creatures(),
+                1 => card_type("Artifact"),
+                2 => filter(PredicateAST::HasSubtype {
+                    value: WordRef::Name(
+                        PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()].to_owned(),
+                    ),
+                }),
+                _ => white_creatures(),
+            };
+            let (layer, m) = match g.below(12) {
+                0 => (
+                    Layer::L2,
+                    LayerModification::SetController(p(g.below(2) + 1)),
+                ),
+                1 => (
+                    Layer::L4,
+                    LayerModification::AddTypes {
+                        supertypes: BTreeSet::new(),
+                        card_types: set(["Creature"]),
+                        subtypes: BTreeSet::new(),
+                    },
+                ),
+                2 => (
+                    Layer::L4,
+                    LayerModification::AddTypes {
+                        supertypes: BTreeSet::new(),
+                        card_types: BTreeSet::new(),
+                        subtypes: set([PERF_SUBTYPES[usize::try_from(g.below(3)).unwrap()]]),
+                    },
+                ),
+                3 => (
+                    Layer::L4,
+                    LayerModification::SetTypes {
+                        supertypes: None,
+                        card_types: Some(set(["Artifact"])),
+                        subtypes: None,
+                    },
+                ),
+                4 => (Layer::L5, LayerModification::AddColors(ColorBitmask::WHITE)),
+                5 => (Layer::L6, LayerModification::RemoveAllAbilities),
+                6 => (
+                    Layer::L6,
+                    LayerModification::AddAbility(keyword("flying", &format!("test.f{k}"))),
+                ),
+                7 => (
+                    Layer::L6,
+                    LayerModification::RemoveKeyword("vigilance".to_owned()),
+                ),
+                8 => (Layer::L7b, set_pt(Some(1), Some(1))),
+                9 => (Layer::L7c, modify(2, -1)),
+                10 => (Layer::L7c, modify(1, 1)),
+                _ => (Layer::L7d, LayerModification::SwitchPt),
+            };
+            let effect = if g.below(4) == 0 {
+                let ids: BTreeSet<ObjectId> = (1..=n).filter(|_| g.below(3) == 0).map(o).collect();
+                eff(layer, t, Affected::Objects(ids), m)
+            } else {
+                let source = if g.below(8) == 0 {
+                    o(500)
+                } else {
+                    o(g.below(n) + 1)
+                };
+                stat(source, layer, t, Affected::Selector(selector), m)
+            };
+            r.register(e(k), effect).unwrap();
+        }
+        r
+    }
+}
+
+impl LayerEnvironment for PerfEnv {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.listed.clone()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.bases.get(&id).cloned()
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.counters.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn counter_timestamp(&self, id: ObjectId, kind: &str) -> Option<Timestamp> {
+        Some(ts(id.get() % 40 + u64::try_from(kind.len()).unwrap()))
+    }
+
+    fn matches(&self, selector: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        let ObjectSelectorAST::Filter(f) = selector else {
+            return false;
+        };
+        f.predicate.as_ref().is_some_and(|q| match q.as_ref() {
+            PredicateAST::HasSubtype {
+                value: WordRef::Name(w),
+            } => ctx.candidate_view.characteristics.subtypes.contains(w),
+            other => pred_holds(other, ctx.candidate_view),
+        })
+    }
+
+    fn eval_value_with_view(
+        &self,
+        _expr: &ValueExpressionAST,
+        object: ObjectId,
+        view: &EvaluatedView<'_>,
+    ) -> Option<i64> {
+        // CR 604.3, 613.4a: the creatures its controller controls after layers 1-6.
+        let controller = view.get(object)?.controller;
+        let count = view
+            .objects()
+            .into_iter()
+            .filter_map(|id| view.get(id))
+            .filter(|v| {
+                v.controller == controller && v.characteristics.card_types.contains("Creature")
+            })
+            .count();
+        i64::try_from(count).ok()
+    }
+
+    fn generating_ability_exists(
+        &self,
+        effect: EffectId,
+        _source: ObjectId,
+        source_view: Option<&Evaluated>,
+    ) -> bool {
+        // CR 613.8a, 611.3: judged on the source's state when it is known.
+        effect.get().is_multiple_of(3)
+            || source_view.is_none_or(|v| !v.characteristics.abilities.is_empty())
+    }
+}
+
+/// The fingerprint of every result of one equivalence board: the digest of `evaluate_all`, and
+/// the SHA-256 of the debug form of `evaluate_with_order` for every listed object and for the
+/// unlisted object 99 (its universe differs).
+fn perf_fingerprint(seed: u64) -> String {
+    let n = 24;
+    let env = PerfEnv::new(seed, n);
+    let r = PerfEnv::registry(seed, n, 22);
+    let all = evaluate_all(&r, &env).unwrap();
+    let mut orders = String::new();
+    for id in (1..=n).chain([99]).map(o) {
+        orders.push_str(&format!("{:?}\n", evaluate_with_order(&r, &env, id)));
+    }
+    format!(
+        "{}:{}",
+        evaluated_digest(&all).to_hex(),
+        fineprint_base::hash::sha256(orders.as_bytes()).to_hex()
+    )
+}
+
+/// The fingerprints of [`perf_fingerprint`] for seeds 0-7, recorded at commit 1360900 (before
+/// the #190 FP-147 changes) with the same code, and re-recorded by #232 FP-164 when DSL values
+/// became typed (literals `{"LITERAL": n}`, keyword names `[A-Z][A-Z0-9_]*`, typed `Debug`);
+/// [`req_layer_005_results_equal_pre_migration_semantics`] shows the results themselves did not
+/// change (docs/DECISIONS.md "#232 FP-164 — Golden hashes and replaced tests").
+const GOLDEN_PERF: [&str; 8] = [
+    "12f5235323525629cc1f1b2a2ea8d037295ddd8feb0963f56c34f33ba19da960:9835970fc7f8bb03da68dbef4d74a27dc2e89241000d89b62736e1219815ad8e",
+    "ab473815e4f9e2bcced5bd19a24ee3e166e52be0cb27329af0e293b350b57961:c5b476767e2b4bc874c6aab0d88928d34a2a85eec80fab475a5f5d2deedeec01",
+    "4eba405042636c4242e7ca4ef36fa44f196f0a0faad5cddfc49bd933d739d804:11d867ccbb283547090fe673b4bb1ce7c0dcef84a6e72e8b8e01272b7e446c95",
+    "74952e1c93333d420aada32f34e72eeae963550137714e9c78b7b879832d7abe:a8c5d1cdfe8be66f9369ea5a540076d4139b80389472dcc88e180e681d6a9752",
+    "8caef82a479e55ca7f3dc1cffb82ba5848e6b7539176497ea5a424d27f254ea8:e11995972ea87aefd4f75813d13f0430d975af1f09754d7f536e55df8f3ca3b4",
+    "8ccc4049cd34409ba9a03594458e7c6b5645fdd68cb5c6db36016affa534830d:d37455d25898865d895282870133c81ebc5982c2a389884e4875c8966e27afa3",
+    "6d1266c92083a2e8912373450316d0ea328dfd4d0b87bda17a7c69e46ded4834:cc6991cc7efa55596c118921b3cd7aec21f00ec7edde3306fd832de0cdd53fc3",
+    "a484ff7e09d1cf480257f969a6764f47304d76c5a7cfb4e564a40a663a267c6b:98e80ea7f9ae13b66a720def9b1697ef1cd9605e703ab34ec407229f9eacadcb",
+];
+
+// REQ-LAYER-005, REQ-LAYER-001, REQ-LAYER-002, REQ-CORE-001; CR 613.5, 613.8a, 604.3: the cost
+// work of #190 FP-147 changes no result. On eight mid-size boards with foreign-source static
+// effects, view-reading CDAs, counters, dependencies, an unlisted object and a scrambled object
+// list, `evaluate_all` and every `evaluate_with_order` (order records included) are exactly the
+// ones recorded at commit 1360900, before the change.
+#[test]
+fn req_layer_005_results_equal_pre_change_golden() {
+    let golden: [&str; 8] = GOLDEN_PERF;
+    for (seed, expected) in (0_u64..).zip(golden) {
+        assert_eq!(perf_fingerprint(seed), expected, "seed {seed}");
+    }
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
+}
+
+/// A representation-independent identity of an ability's JSON form: its ability id (or the
+/// string itself for a string), plus `/` and its keyword name in upper case with every other
+/// character `_` for a `KEYWORD` ability.
+fn semantic_ability(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(m) => {
+            let id = m.get("abilityId").and_then(|x| x.as_str()).unwrap_or("");
+            let kind = m.get("kind").and_then(|x| x.as_str());
+            match m.get("keyword").and_then(|x| x.as_str()) {
+                Some(k) if kind == Some("KEYWORD") => {
+                    let k: String = k
+                        .chars()
+                        .map(|c| {
+                            if c.is_ascii_alphanumeric() {
+                                c.to_ascii_uppercase()
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect();
+                    format!("{id}/{k}")
+                }
+                _ => id.to_owned(),
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Every characteristic of `ev` in a form that does not depend on how DSL values are stored:
+/// literal power and toughness as numbers (`cda` otherwise), abilities by
+/// [`semantic_ability`], the rules text by its token count.
+fn semantic_evaluated(ev: &Evaluated) -> String {
+    let c = &ev.characteristics;
+    let pt = |v: &Option<ValueExpressionAST>| match v {
+        None => "none".to_owned(),
+        Some(e) => literal_of(e).map_or_else(|| "cda".to_owned(), |n| n.to_string()),
+    };
+    let abilities: Vec<String> = c
+        .abilities
+        .iter()
+        .map(|a| semantic_ability(&serde_json::to_value(a).unwrap()))
+        .collect();
+    let text = serde_json::to_value(&c.rules_text).unwrap();
+    format!(
+        "{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        c.names,
+        c.mana_cost.as_ref().map(ToString::to_string),
+        c.color_indicator.map(|m| m.bits()),
+        c.colors.bits(),
+        c.supertypes,
+        c.card_types,
+        c.subtypes,
+        pt(&c.power),
+        pt(&c.toughness),
+        abilities,
+        text.as_array().map_or(0, Vec::len),
+        c.loyalty,
+        c.defense,
+        c.hand_modifier,
+        c.life_modifier,
+        ev.controller,
+        ev.mana_value_provenance,
+    )
+}
+
+/// The representation-independent fingerprint of every result of one equivalence board (see
+/// [`perf_fingerprint`]): `evaluate_all` and every `evaluate_with_order` (order records
+/// included) by [`semantic_evaluated`].
+fn semantic_fingerprint(seed: u64) -> String {
+    let n = 24;
+    let env = PerfEnv::new(seed, n);
+    let r = PerfEnv::registry(seed, n, 22);
+    let all = evaluate_all(&r, &env).unwrap();
+    let mut out = String::new();
+    for (id, ev) in &all {
+        out.push_str(&format!("{id:?}:{}\n", semantic_evaluated(ev)));
+    }
+    for id in (1..=n).chain([99]).map(o) {
+        match evaluate_with_order(&r, &env, id) {
+            Ok((ev, rec)) => out.push_str(&format!("{}:{rec:?}\n", semantic_evaluated(&ev))),
+            Err(e) => out.push_str(&format!("{e:?}\n")),
+        }
+    }
+    fineprint_base::hash::sha256(out.as_bytes()).to_hex()
+}
+
+/// The fingerprints of [`semantic_fingerprint`] for seeds 0-7, computed on the base tree
+/// 242545c, before the typed AST migration (#232), with the same code.
+const GOLDEN_SEMANTIC: [&str; 8] = [
+    "4c42ddee7fb19815308a4f662536b2277d8e97b8138eb94c06005560d6e46f5f",
+    "b9305decdc5ed4fc451dcdb29e284fceebfd6cfe87b5c9fc35bf3226232e5605",
+    "2d4eb01c5bd01be0fadb462fa809f76e76584b6ee1a900479dc730ffc2464812",
+    "b4947a1dfacc97f6b89de9080c04a29b68b4b84affed05e26c5f3132db48a0e0",
+    "8cd1be07e5f6d78283feb7a05c7e899a9d6c69cc5cc7d0b1e2201784a97dff61",
+    "b5a46853abd34a6f5ca1846935c79e641557792aa97aa494492645d9aaa101d5",
+    "4501dfec01be3085274a624156fa986094201addaec0ac2c5613b6c13c52fcc1",
+    "b9218f8b47bc2562125012dd182140f2ade6f7a1b454daef507bebd2332a37a6",
+];
+
+// REQ-LAYER-005, REQ-LAYER-001, REQ-NFR-006, REQ-DSL-003, REQ-DSL-010 (#232): typing the DSL
+// values changes no result. On the eight equivalence boards, every evaluated characteristic,
+// controller, provenance and order record is the one computed before the migration, compared
+// in a form that does not depend on how DSL values are stored (literal P/T as numbers,
+// abilities by id and keyword name). The byte-level fingerprints of
+// `req_layer_005_results_equal_pre_change_golden` changed only because literals are now
+// `{"LITERAL": n}` and keyword names `[A-Z][A-Z0-9_]*` (docs/DECISIONS.md "#232 FP-164 —
+// Golden hashes and replaced tests").
+#[test]
+fn req_layer_005_results_equal_pre_migration_semantics() {
+    for (seed, expected) in (0_u64..).zip(GOLDEN_SEMANTIC) {
+        assert_eq!(semantic_fingerprint(seed), expected, "seed {seed}");
+    }
+}
+
+// REQ-CORE-002, REQ-NFR-006, CR 613.7c, 613.7d, 613.7k: a ledger built once from its entries
+// equals the ledger the stamping operations give for the same timestamps (objects, counters of
+// two holders, stickers), and its entries read back unchanged.
+#[test]
+fn ledger_from_entries_equals_stamped_ledger() {
+    let mut ids: IdGenerator<Timestamp> = IdGenerator::new();
+    let mut stamped = TimestampLedger::new();
+    stamped
+        .stamp_object(&mut ids, o(3), StampReason::EntersZone)
+        .unwrap();
+    stamped
+        .stamp_object(&mut ids, o(1), StampReason::Attached)
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Object(o(1)), "+1/+1")
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Player(p(2)), "poison")
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Object(o(3)), "flying")
+        .unwrap();
+    stamped.put_sticker(&mut ids, o(3), 7).unwrap();
+    stamped.put_sticker(&mut ids, o(1), 2).unwrap();
+    let entries = stamped.entries();
+    let built = TimestampLedger::from_entries(
+        entries.objects.clone(),
+        entries.counters.clone(),
+        entries.stickers.clone(),
+    );
+    assert_eq!(built, stamped);
+    let expected_objects: BTreeMap<ObjectId, Timestamp> =
+        [(o(3), ts(1)), (o(1), ts(2))].into_iter().collect();
+    assert_eq!(built.entries().objects, &expected_objects);
+    assert_eq!(
+        built.counter_timestamp(CounterHolder::Player(p(2)), "poison"),
+        Some(ts(4))
+    );
+    assert_eq!(built.sticker_timestamp(o(1), 2), Some(ts(7)));
+    assert_eq!(
+        TimestampLedger::from_entries(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+        TimestampLedger::new()
+    );
 }

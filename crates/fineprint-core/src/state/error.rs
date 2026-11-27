@@ -6,9 +6,10 @@
 
 use core::fmt;
 
-use fineprint_base::ids::PlayerId;
+use fineprint_base::ids::{EffectId, PlayerId, Timestamp};
 
 use super::MAX_PLAYERS;
+use crate::layers::LayerError;
 
 /// An error from building, mutating, serializing or deserializing a [`GameState`]
 /// (REQ-CORE-001). A mutator that returns an error leaves the state unchanged.
@@ -32,6 +33,35 @@ pub enum StateError {
     /// Deserialization failed: malformed bytes, trailing bytes, wrong version or failed
     /// validation (the message describes why).
     Decode(String),
+    /// The layer system refused the operation (for example
+    /// [`LayerError::LayerMismatch`] from registering an effect).
+    Layer(LayerError),
+    /// An effect in layer 7a that is not from a characteristic-defining ability (SRS 6.2 item 1,
+    /// CR 613.4a: layer 7a consists only of characteristic-defining abilities).
+    NonCdaInLayer7a,
+    /// An effect of a static ability with a source was registered without the link to its
+    /// generating ability (CR 613.8a).
+    MissingGenerator,
+    /// The generating ability's source is not the effect's source.
+    GeneratorSourceMismatch,
+    /// A generating ability was given for a resolved effect or a static effect without a
+    /// source (only a static effect with a source has one).
+    UnexpectedGenerator,
+    /// The effect id was not issued by this state's effect generator.
+    EffectIdNotIssued(EffectId),
+    /// The effect id already has a generating-ability link.
+    AlreadyLinked(EffectId),
+    /// The effect id is a registered continuous effect (its link is made when it is registered).
+    EffectRegistered(EffectId),
+    /// The timestamp was not issued by this state's timestamp generator: it is 0 or above the
+    /// last issued timestamp (REQ-CORE-002).
+    TimestampNotIssued(Timestamp),
+    /// A resolved effect with a selector as its affected set was given to
+    /// `GameState::register_effect`, which does not lock selectors (CR 611.2c: the affected
+    /// set of a resolved effect is fixed when it begins). Register it through
+    /// `GameState::register_effect_group`, which locks it, or pass the locked set as
+    /// `Affected::Objects`.
+    UnlockedResolvedSelector,
 }
 
 impl fmt::Display for StateError {
@@ -48,6 +78,35 @@ impl fmt::Display for StateError {
             }
             StateError::Encode(msg) => write!(f, "state serialization failed: {msg}"),
             StateError::Decode(msg) => write!(f, "state deserialization failed: {msg}"),
+            StateError::Layer(e) => write!(f, "layer system: {e}"),
+            StateError::NonCdaInLayer7a => {
+                f.write_str("layer 7a holds only characteristic-defining abilities (CR 613.4a)")
+            }
+            StateError::MissingGenerator => {
+                f.write_str("a static effect with a source needs its generating ability")
+            }
+            StateError::GeneratorSourceMismatch => {
+                f.write_str("the generating ability is not on the effect's source")
+            }
+            StateError::UnexpectedGenerator => {
+                f.write_str("only a static effect with a source has a generating ability")
+            }
+            StateError::EffectIdNotIssued(id) => {
+                write!(f, "effect id {} was not issued by this state", id.get())
+            }
+            StateError::AlreadyLinked(id) => {
+                write!(f, "effect {} already has a generating ability", id.get())
+            }
+            StateError::EffectRegistered(id) => {
+                write!(f, "effect {} is a registered continuous effect", id.get())
+            }
+            StateError::TimestampNotIssued(t) => {
+                write!(f, "timestamp {} was not issued by this state", t.get())
+            }
+            StateError::UnlockedResolvedSelector => f.write_str(
+                "a resolved effect's selector must be locked (CR 611.2c): register it with \
+                 register_effect_group or pass the locked set as Affected::Objects",
+            ),
         }
     }
 }

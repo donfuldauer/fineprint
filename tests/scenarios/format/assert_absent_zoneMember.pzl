@@ -1,0 +1,70 @@
+{
+  "pzlVersion": 1,
+  "title": "A card on the battlefield is not in its owner's hand, and a card in hand is not in the graveyard",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {
+      "test.flier_2_2": "fd2d5eeeeb17df2cfc75df291119a8c5aeeabc8fc565a711c8f8d7dbf1b1c24e",
+      "test.vanilla_green_2_2": "e8744f6f3091b0523468ddb9b545c8a7213bdc9828ed949e50d7ea6450b2ffa4"
+    }
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20,
+      "zones": {
+        "hand": [
+          {
+            "id": "o1",
+            "card": "test.flier_2_2"
+          }
+        ],
+        "graveyard": []
+      }
+    },
+    {
+      "id": "p2",
+      "life": 20
+    }
+  ],
+  "battlefield": [
+    {
+      "id": "o2",
+      "card": "test.vanilla_green_2_2",
+      "owner": "p1",
+      "controller": "p1"
+    }
+  ],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "absent",
+      "what": "zoneMember",
+      "owner": "p1",
+      "zone": "hand",
+      "object": "o2"
+    },
+    {
+      "kind": "absent",
+      "what": "zoneMember",
+      "owner": "p1",
+      "zone": "graveyard",
+      "object": "o1"
+    }
+  ]
+}

@@ -5208,3 +5208,372 @@ fn req_event_001_h3_three_candidates_only_second_payable() {
         assert_not_payable(&e, &format!("index {unpayable} answered manually"));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #204 (FP-153) — the default on timeout of CHOOSE_REPLACEMENT_EFFECT is the first
+// candidate whose continuation completes and is payable (CR 616.1e, CR 614.12b)
+// ---------------------------------------------------------------------------------------------
+
+/// The id already registered in the continuous-effect registry that colliding copies redeclare.
+const D204_TAKEN: u64 = 900;
+
+/// A registry holding one in-force effect (on another object) with the id `D204_TAKEN`.
+fn d204_registry() -> ContinuousEffects {
+    let mut cont = ContinuousEffects::new();
+    cont.register(
+        eid(D204_TAKEN),
+        in_force(2, 1, Layer::L4, add_types_mod(&[TYPE_Y])),
+    )
+    .expect("register");
+    cont
+}
+
+/// A declared copy static whose id is already in the registry (CR 707.5; registering it fails
+/// with `LayerError::DuplicateEffect`).
+fn d204_colliding() -> Vec<(EffectId, ContinuousEffect)> {
+    vec![model_static(
+        D204_TAKEN,
+        Affected::Objects([oid(MODEL_OBJ)].into_iter().collect()),
+        add_types_mod(&[TYPE_X]),
+    )]
+}
+
+/// The P/T of the model copied by effect `n` (distinct per effect, so the copy is observable).
+fn d204_model(n: u64) -> Characteristics {
+    let n = i64::try_from(n).expect("small");
+    creature(&format!("test.etb_d204_model_{n}"), n + 1, n + 1)
+}
+
+fn d204_pt(n: u64) -> (Option<i64>, Option<i64>) {
+    let n = i64::try_from(n).expect("small");
+    spt(n + 1, n + 1)
+}
+
+/// Two copy effects `colliding` and `valid` (tier 616.1c); `colliding` declares a static whose id
+/// is already registered, `valid` declares nothing.
+fn d204_two_copies(colliding: u64, valid: u64) -> EtbEffects {
+    let mut e = effects_of(vec![
+        d204_copy(colliding, d204_model(colliding)),
+        d204_copy(valid, d204_model(valid)),
+    ]);
+    declare(&mut e, colliding, d204_colliding(), &[]);
+    e
+}
+
+fn d204_descs(ns: &[u64]) -> Vec<String> {
+    ascending(ns)
+        .iter()
+        .map(|e| {
+            let n = (1..=9).find(|&n| eid(n) == *e).expect("small id");
+            desc(n)
+        })
+        .collect()
+}
+
+fn d204_assert_copy(o: &Obs, k: u64, what: &str) {
+    assert_eq!(o.projected.effects, ids(&[k]), "{what}");
+    assert_eq!(o.projected.order, eids(&[k]), "{what}");
+    assert_eq!(
+        o.projected.evaluated.characteristics.card_types,
+        set(&[CREATURE]),
+        "{what}"
+    );
+    assert_eq!(pt(&o.projected.evaluated), d204_pt(k), "{what}");
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 614.12, CR 707.5 — issue #204, requirement 1 and 2: of two
+// same-tier copies one declares a static whose id is already in `ctx.continuous`. Either id may
+// collide, with a budget for the chooser and with none. Both candidates are always offered
+// (Number(0), Number(1), ascending ids); the default is the first candidate whose continuation
+// completes: index 1 when the lower id collides (the colliding first copy), index 0 when the
+// higher id collides (control). `submit_default` and a manual answer of that index complete the
+// entry with the valid copy's characteristics.
+#[test]
+fn req_event_001_d204_default_skips_colliding_copy() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    for payable in [budget(&[(P1, 5)]), no_budget()] {
+        for (colliding, valid, default) in [(1u64, 2u64, 1u32), (2, 1, 0)] {
+            let what = format!("colliding {colliding} {payable:?}");
+            let effects = d204_two_copies(colliding, valid);
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &effects,
+            };
+            let expected = replacement_request_default(0, P1, 1, &d204_descs(&[1, 2]), default);
+            assert_eq!(
+                first_status(&ctx, &entries, &payable)
+                    .unwrap_or_else(|e| panic!("{what}: start failed: {e}")),
+                Some(expected.clone()),
+                "{what}"
+            );
+            assert_eq!(
+                expected.default_on_timeout,
+                ChoiceResponse::SelectReplacement { index: default }
+            );
+            let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+                .unwrap_or_else(|e| panic!("{what}: the default on timeout failed: {e}"));
+            assert_eq!(requests, vec![expected.clone()], "{what}");
+            d204_assert_copy(&out[0], valid, &format!("{what}: default"));
+            let run = drive_ok(&ctx, &entries, &payable, &[Ans::Index(default)]);
+            assert_eq!(run.requests, vec![expected], "{what}");
+            assert_eq!(run.out, out, "{what}");
+            // Not leaked into the caller's registry.
+            assert_eq!(cont, d204_registry(), "{what}");
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 707.5 — issue #204, requirement 3: both copies declare the
+// colliding static. Nothing better exists, so the default stays index 0 and both candidates are
+// still offered; answering the default fails with the `DuplicateEffect` procedure error.
+#[test]
+fn req_event_001_d204_both_collide_default_zero_and_error() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    let mut effects = d204_two_copies(1, 2);
+    declare(&mut effects, 2, d204_colliding(), &[]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let expected = EtbError::Layer(LayerError::DuplicateEffect(eid(D204_TAKEN))).to_string();
+    for payable in [budget(&[(P1, 5)]), no_budget()] {
+        assert_eq!(
+            first_status(&ctx, &entries, &payable).unwrap_or_else(|e| panic!("start: {e}")),
+            Some(replacement_request_default(
+                0,
+                P1,
+                1,
+                &d204_descs(&[1, 2]),
+                0
+            )),
+            "{payable:?}"
+        );
+        match drive_defaults(&ctx, &entries, &payable) {
+            Err(ChoiceError::Procedure(msg)) => assert_eq!(msg, expected, "{payable:?}"),
+            other => panic!("{payable:?}: expected the DuplicateEffect error, got {other:?}"),
+        }
+        for i in [0u32, 1] {
+            match drive(&ctx, &entries, &payable, &[Ans::Index(i)]) {
+                Err(ChoiceError::Procedure(msg)) => assert_eq!(msg, expected, "{payable:?} {i}"),
+                Err(e) => panic!("{payable:?} {i}: expected a procedure error, got {e}"),
+                Ok(r) => panic!("{payable:?} {i}: expected an error, got {:?}", r.out),
+            }
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 616.1e — issue #204, requirement 4: a manual answer choosing the colliding
+// candidate is not filtered from the offer; it still yields the `DuplicateEffect` procedure
+// error, whichever id collides, while the other candidate answered manually completes.
+#[test]
+fn req_event_001_d204_manual_colliding_answer_still_errors() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    let expected = EtbError::Layer(LayerError::DuplicateEffect(eid(D204_TAKEN))).to_string();
+    for payable in [budget(&[(P1, 5)]), no_budget()] {
+        for (colliding, valid) in [(1u64, 2u64), (2, 1)] {
+            let what = format!("colliding {colliding} {payable:?}");
+            let effects = d204_two_copies(colliding, valid);
+            let ctx = EtbContext {
+                env: &env,
+                continuous: &cont,
+                effects: &effects,
+            };
+            // Candidates are in ascending effect id: the colliding one is at index colliding-1.
+            let bad = u32::try_from(colliding - 1).expect("small");
+            let good = u32::try_from(valid - 1).expect("small");
+            match drive(&ctx, &entries, &payable, &[Ans::Index(bad)]) {
+                Err(ChoiceError::Procedure(msg)) => assert_eq!(msg, expected, "{what}"),
+                Err(e) => panic!("{what}: expected a procedure error, got {e}"),
+                Ok(r) => panic!("{what}: expected an error, got {:?}", r.out),
+            }
+            let run = drive_ok(&ctx, &entries, &payable, &[Ans::Index(good)]);
+            d204_assert_copy(&run.out[0], valid, &what);
+        }
+    }
+}
+
+const D204_ARTIFACT_MODEL: &str = "test.etb_d204_artifact_model";
+
+/// A copy effect (tier 616.1c) that applies only while the entrant is still the enchantment
+/// base, so applying any copy ends the applicability of the others (they are exclusive).
+fn d204_copy(n: u64, model: Characteristics) -> EtbEffect {
+    fx(n, copy_of(model))
+        .with_tier(Tier::CopyEtb)
+        .with_condition(EtbCondition::HasCardType("Enchantment".to_owned()))
+}
+
+/// A cost-1 Choose that applies only while the permanent is an artifact (so only after the
+/// artifact copy), applied in the later tier.
+fn d204_paid_choose(id: u64) -> EtbEffect {
+    fx(id, choose(KEY_A, K::Color, &[(OPT_A, 1)]))
+        .with_condition(EtbCondition::HasCardType(ARTIFACT.to_owned()))
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 614.12b — issue #204, requirement 5: payability still counts.
+// Three same-tier copies; candidate 0 copies an artifact (projects fine) after which a later
+// tier cost-1 Choose becomes applicable, unpayable under budget 0; candidate 1 is a colliding
+// copy; candidate 2 is a valid cost-free creature copy. All three are offered and the default is
+// index 2; it completes the entry. With an unlimited chooser (no budget) candidate 0 is payable,
+// so the default is index 0 and the entry completes with the Choose's single option.
+#[test]
+fn req_event_001_d204_payability_still_counts() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    let mut effects = effects_of(vec![
+        d204_copy(1, artifact(D204_ARTIFACT_MODEL)),
+        d204_copy(2, d204_model(2)),
+        d204_copy(3, d204_model(3)),
+        d204_paid_choose(10),
+    ]);
+    declare(&mut effects, 2, d204_colliding(), &[]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &effects,
+    };
+    let payable = budget(&[(P1, 0)]);
+    let expected = replacement_request_default(0, P1, 1, &d204_descs(&[1, 2, 3]), 2);
+    assert_eq!(
+        first_status(&ctx, &entries, &payable).unwrap_or_else(|e| panic!("start: {e}")),
+        Some(expected.clone())
+    );
+    let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+        .unwrap_or_else(|e| panic!("the default on timeout failed: {e}"));
+    assert_eq!(requests, vec![expected]);
+    d204_assert_copy(&out[0], 3, "default 2 under budget 0");
+    // Candidate 0 is unpayable, candidate 1 collides.
+    assert_not_payable(
+        &drive_err(&ctx, &entries, &payable, &[Ans::Index(0)]),
+        "candidate 0",
+    );
+    match drive(&ctx, &entries, &payable, &[Ans::Index(1)]) {
+        Err(ChoiceError::Procedure(msg)) => assert_eq!(
+            msg,
+            EtbError::Layer(LayerError::DuplicateEffect(eid(D204_TAKEN))).to_string()
+        ),
+        other => panic!(
+            "candidate 1: expected the DuplicateEffect error, got {:?}",
+            other.err()
+        ),
+    }
+    // Unlimited chooser: candidate 0 is payable and projects fine.
+    assert_eq!(
+        first_status(&ctx, &entries, &no_budget()).unwrap_or_else(|e| panic!("start: {e}")),
+        Some(replacement_request_default(
+            0,
+            P1,
+            1,
+            &d204_descs(&[1, 2, 3]),
+            0
+        ))
+    );
+}
+
+// REQ-EVENT-001, CR 616.1e, CR 707.5 — issue #204, requirement 6: a deeper failing continuation.
+// Candidate 0 (copy `k`) declares an ETB ability `m` (a `ThisPermanent` copy effect of the model);
+// after `k` applies, `m` is the only remaining step and its declared static collides, so the
+// continuation fails one step later. The other candidate completes. The default is the other
+// candidate, with both id orders (which of the two candidates is the deep failing one).
+#[test]
+fn req_event_001_d204_deeper_failing_continuation() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    for (k, valid, default) in [(1u64, 2u64, 1u32), (2, 1, 0)] {
+        let m = 3u64;
+        let mut effects = effects_of(vec![
+            d204_copy(k, d204_model(k)),
+            d204_copy(valid, d204_model(valid)),
+            own_fx(m, MODEL_OBJ, copy_of(d204_model(m))).with_tier(Tier::CopyEtb),
+        ]);
+        declare(&mut effects, k, Vec::new(), &[m]);
+        declare(&mut effects, m, d204_colliding(), &[]);
+        let ctx = EtbContext {
+            env: &env,
+            continuous: &cont,
+            effects: &effects,
+        };
+        let what = format!("deep failing {k}");
+        let expected = replacement_request_default(0, P1, 1, &d204_descs(&[1, 2]), default);
+        for payable in [budget(&[(P1, 5)]), no_budget()] {
+            assert_eq!(
+                first_status(&ctx, &entries, &payable)
+                    .unwrap_or_else(|e| panic!("{what}: start: {e}")),
+                Some(expected.clone()),
+                "{what} {payable:?}"
+            );
+            let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+                .unwrap_or_else(|e| panic!("{what} {payable:?}: default failed: {e}"));
+            assert_eq!(requests, vec![expected.clone()], "{what}");
+            d204_assert_copy(&out[0], valid, &what);
+            // Answering the deep failing candidate manually still errors.
+            let bad = u32::try_from(k - 1).expect("small");
+            match drive(&ctx, &entries, &payable, &[Ans::Index(bad)]) {
+                Err(ChoiceError::Procedure(msg)) => assert_eq!(
+                    msg,
+                    EtbError::Layer(LayerError::DuplicateEffect(eid(D204_TAKEN))).to_string(),
+                    "{what}"
+                ),
+                other => panic!("{what}: expected the error, got {:?}", other.err()),
+            }
+        }
+    }
+}
+
+// REQ-EVENT-001, CR 616.1e — issue #204, requirement 7 (pins): with no collision anywhere the
+// default is index 0 and the full list is offered; a single candidate asks no request.
+#[test]
+fn req_event_001_d204_no_collision_default_zero_single_asks_nothing() {
+    let env = enchantment_env(&[(1, P1)]);
+    let cont = d204_registry();
+    let entries = [entry(1, P1)];
+    let two = effects_of(vec![
+        d204_copy(1, d204_model(1)),
+        d204_copy(2, d204_model(2)),
+    ]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &two,
+    };
+    for payable in [budget(&[(P1, 5)]), no_budget()] {
+        let expected = replacement_request_default(0, P1, 1, &d204_descs(&[1, 2]), 0);
+        let (requests, out) = drive_defaults(&ctx, &entries, &payable)
+            .unwrap_or_else(|e| panic!("{payable:?}: default failed: {e}"));
+        assert_eq!(requests, vec![expected], "{payable:?}");
+        d204_assert_copy(&out[0], 1, "no collision: default 0");
+    }
+    // A single (colliding) candidate: no request; the procedure error surfaces directly.
+    let mut one = effects_of(vec![d204_copy(1, d204_model(1))]);
+    declare(&mut one, 1, d204_colliding(), &[]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &one,
+    };
+    match first_status(&ctx, &entries, &no_budget()) {
+        Err(ChoiceError::Procedure(msg)) => assert_eq!(
+            msg,
+            EtbError::Layer(LayerError::DuplicateEffect(eid(D204_TAKEN))).to_string()
+        ),
+        other => panic!("single colliding candidate: expected the error, got {other:?}"),
+    }
+    let ok = effects_of(vec![d204_copy(1, d204_model(1))]);
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &cont,
+        effects: &ok,
+    };
+    let run = drive_ok(&ctx, &entries, &no_budget(), &[]);
+    assert!(run.requests.is_empty());
+    d204_assert_copy(&run.out[0], 1, "single candidate");
+}

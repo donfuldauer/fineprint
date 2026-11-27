@@ -1,0 +1,2247 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
+
+//! Unit tests for the lints (REQ-ING-009; REQ-OBJ-001 and REQ-ING-002 for the characteristics
+//! checks). Every card, id and word is synthetic (R5).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use fineprint_base::prng::Pcg64Dxsm;
+use serde_json::{Map, Value, json};
+
+use super::*;
+use crate::ability::{AbilityBase, KeywordInstanceAST};
+use crate::card::{
+    AbilityAST, CardDefinitionDSL, CardDefinitionError, CardFaceDSL, ColorBitmask,
+    CommanderEligibilityDSL, DSL_VERSION, FaceKind, LayoutBehavior, Legality, Origin,
+    PartnerAbilityDSL, ProvenanceDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
+};
+use crate::mana::ManaCostDSL;
+
+// ---------------------------------------------------------------------------------------------
+// Helpers
+
+/// `n` synthetic LITERAL text tokens.
+fn tokens(n: usize) -> TextTokenStream {
+    serde_json::from_value(Value::Array(
+        (0..n)
+            .map(|k| json!({"id": format!("t{k}"), "kind": "LITERAL", "text": "word"}))
+            .collect(),
+    ))
+    .expect("valid tokens")
+}
+
+/// `v` decoded as a real ability (panics on invalid test content: the typed positions cannot
+/// hold it, #232).
+fn ability(v: Value) -> AbilityAST {
+    serde_json::from_value(v.clone())
+        .unwrap_or_else(|e| panic!("fixture does not decode: {e}: {v}"))
+}
+
+/// `v` decoded as a partner ability (panics on invalid test content).
+fn partner(v: Value) -> PartnerAbilityDSL {
+    serde_json::from_value(v.clone())
+        .unwrap_or_else(|e| panic!("partner does not decode: {e}: {v}"))
+}
+
+/// A synthetic face of `kind` with `cost`, `n` text tokens and `abilities`.
+fn face_of(kind: FaceKind, cost: Option<&str>, n: usize, abilities: Vec<Value>) -> CardFaceDSL {
+    CardFaceDSL {
+        face_kind: kind,
+        name: "test.face".to_owned(),
+        mana_cost: cost.map(|c| ManaCostDSL::parse(c).expect("cost")),
+        color_indicator: None,
+        supertypes: Vec::new(),
+        card_types: vec!["Creature".to_owned()],
+        subtypes: Vec::new(),
+        power: Some(ValueExpressionAST::Literal(2)),
+        toughness: Some(ValueExpressionAST::Literal(2)),
+        loyalty: None,
+        defense: None,
+        hand_modifier: None,
+        life_modifier: None,
+        text: tokens(n),
+        abilities: abilities.into_iter().map(ability).collect(),
+    }
+}
+
+/// A MAIN face with `cost`, `n` tokens and `abilities`.
+fn face(cost: Option<&str>, n: usize, abilities: Vec<Value>) -> CardFaceDSL {
+    face_of(FaceKind::Main, cost, n, abilities)
+}
+
+/// A synthetic definition with `faces` and identity `identity`.
+fn def_of(faces: Vec<CardFaceDSL>, identity: ColorBitmask) -> CardDefinitionDSL {
+    CardDefinitionDSL {
+        card_def_id: "test.lint_card".to_owned(),
+        dsl_version: DSL_VERSION.to_owned(),
+        definition_hash: String::new(),
+        source: ProvenanceDSL {
+            oracle_text_hash: "0".repeat(64),
+            origin: Origin::ClientOverride,
+            parser_version: None,
+            override_source: None,
+            verified_by: None,
+            rules_baseline: "test-baseline".to_owned(),
+        },
+        support_status: SupportStatus::AutoParsed,
+        known_gaps: None,
+        layout: LayoutBehavior::Normal,
+        faces,
+        meld_partner: None,
+        color_identity: identity,
+        commander_eligibility: None,
+        legalities: BTreeMap::from([("test_format".to_owned(), Legality::Legal)]),
+        digital_only: false,
+        related_tokens: None,
+    }
+}
+
+/// A keyword ability `id` covering token span `[s, e]`.
+fn keyword(id: &str, s: u32, e: u32) -> Value {
+    json!({"abilityId": id, "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "textSpan": [s, e]})
+}
+
+/// A one-face definition with cost `{1}{W}`, one token and `abilities` (identity white).
+fn one_face(abilities: Vec<Value>) -> CardDefinitionDSL {
+    def_of(
+        vec![face(Some("{1}{W}"), 1, abilities)],
+        ColorBitmask::WHITE,
+    )
+}
+
+/// The clean synthetic definition `test.lint_card`: no finding under any check.
+fn clean() -> CardDefinitionDSL {
+    one_face(vec![keyword("a1", 0, 0)])
+}
+
+/// Lints with an empty context.
+fn run(def: &CardDefinitionDSL) -> LintReport {
+    lint_definition(def, &LintContext::default())
+}
+
+/// A finding reduced to (severity, path, face, ability).
+type Short = (Severity, String, Option<usize>, Option<usize>);
+
+/// The findings of `id`, reduced.
+fn of(report: &LintReport, id: LintId) -> Vec<Short> {
+    report
+        .with_id(id)
+        .map(|l| {
+            (
+                l.severity,
+                l.location.path.clone(),
+                l.location.face_index,
+                l.location.ability_index,
+            )
+        })
+        .collect()
+}
+
+/// Asserts the report has no finding of `id`.
+fn none_of(report: &LintReport, id: LintId) {
+    assert_eq!(of(report, id), Vec::new(), "{id}: {report:#?}");
+}
+
+/// Overwrites the members of `base` with those of `extra` (a `null` removes the member).
+fn merge(base: &mut Value, extra: Value) {
+    let (Value::Object(b), Value::Object(e)) = (base, extra) else {
+        panic!("objects expected")
+    };
+    for (k, v) in e {
+        if v.is_null() {
+            b.remove(&k);
+        } else {
+            b.insert(k, v);
+        }
+    }
+}
+
+/// An ACTIVATED ability with `members` merged over a mana-ability-shaped base.
+fn activated(members: Value) -> Value {
+    let mut base = json!({
+        "abilityId": "m1",
+        "kind": "ACTIVATED",
+        "isManaAbility": true,
+        "cost": [{"cost": "TAP_SOURCE"}],
+        "effect": [{"op": "POPULATE"}],
+        "textSpan": [0, 0],
+    });
+    merge(&mut base, members);
+    base
+}
+
+/// A TRIGGERED ability with `members` merged over a mana-ability-shaped base.
+fn triggered(members: Value) -> Value {
+    let mut base = json!({
+        "abilityId": "m2",
+        "kind": "TRIGGERED",
+        "isManaAbility": true,
+        "trigger": {"mode": "EVENT", "event": {"kind": "ACTIVATED", "subject": {"ref": "SELF"}}},
+        "effect": [{"op": "POPULATE"}],
+        "textSpan": [0, 0],
+    });
+    merge(&mut base, members);
+    base
+}
+
+/// A target slot with `min` 0 (still "requires a target", CR 115.6).
+fn slot() -> Value {
+    json!({"slot": 0, "selector": {"ref": "SELF"}, "min": 0, "max": 1})
+}
+
+/// Asserts `ability` decodes (so no FPL-SCHEMA finding).
+fn decodes(v: &Value) {
+    let _ = ability(v.clone());
+}
+
+/// A hand-built keyword ability whose `keyword` breaks the `[A-Z][A-Z0-9_]*` rule, so it does
+/// not encode: since #232 the only way an AST position of a definition can be invalid.
+fn broken_keyword(id: &str, keyword: &str) -> AbilityAST {
+    AbilityAST::Keyword(KeywordInstanceAST::new(AbilityBase::new(id), keyword))
+}
+
+/// Asserts that the clean definition with `raw` as its only ability is refused by plain serde
+/// and by `from_json` (`Schema`): JSON the typed positions cannot hold never reaches the lints
+/// (#232, docs/DECISIONS.md "#232 FP-164 — Lint schema check after typed storage").
+fn assert_rejected_at_load(raw: &Value) {
+    let mut v = serde_json::to_value(clean().seal().expect("seal")).expect("value");
+    v["faces"][0]["abilities"] = json!([raw]);
+    assert!(
+        serde_json::from_value::<CardDefinitionDSL>(v.clone()).is_err(),
+        "{raw}"
+    );
+    let bytes = serde_json::to_vec(&v).expect("bytes");
+    match CardDefinitionDSL::from_json(&bytes) {
+        Err(CardDefinitionError::Schema(_)) => {}
+        r => panic!("{raw}: unexpected {r:?}"),
+    }
+}
+
+/// Runs every check over the JSON forms `raws` as the abilities of face 0 of `def`, bypassing
+/// the typed decode (each fact's typed ability is a plain keyword, so only the checks that read
+/// JSON can report). This exercises the raw-JSON checks (`FPL-LAYER-KIND`, `FPL-LOOK-BACK`,
+/// `FPL-MAX-ITER`, `FPL-LINK-ID`, `FPL-TOKEN-REF`, the `FPL-TEXT-COVERAGE` spans) on JSON the
+/// typed positions cannot hold (#232).
+fn run_raw_with(def: &CardDefinitionDSL, raws: &[Value], ctx: &LintContext) -> LintReport {
+    let typed = ability(json!({"abilityId": "raw", "kind": "KEYWORD", "keyword": "RAW"}));
+    let facts = walk::CardFacts {
+        abilities: raws
+            .iter()
+            .enumerate()
+            .map(|(j, raw)| walk::AbilityFacts::new(0, j, &typed, raw, None))
+            .collect(),
+        partners: Vec::new(),
+    };
+    lint_facts(def, &facts, ctx)
+}
+
+/// [`run_raw_with`] on a one-face definition with no typed abilities and an empty context.
+fn run_raw(raws: &[Value]) -> LintReport {
+    run_raw_with(&one_face(vec![]), raws, &LintContext::default())
+}
+
+/// A context with source faces `(mana value, colors)` and source identity.
+fn source(
+    faces: Vec<(Option<u32>, Option<ColorBitmask>)>,
+    identity: Option<ColorBitmask>,
+) -> LintContext {
+    LintContext {
+        source: Some(SourceCharacteristics {
+            faces: faces
+                .into_iter()
+                .map(|(mana_value, colors)| SourceFaceCharacteristics { mana_value, colors })
+                .collect(),
+            color_identity: identity,
+        }),
+        known_token_ids: None,
+    }
+}
+
+/// A color mask from bits.
+fn mask(bits: u8) -> ColorBitmask {
+    ColorBitmask::new(bits).expect("mask")
+}
+
+// ---------------------------------------------------------------------------------------------
+// API, Display and the clean definition
+
+/// REQ-ING-009: the twelve stable lint id strings, `ALL` order, `Display` and severity strings.
+#[test]
+fn req_ing_009_lint_ids_and_severity() {
+    let strings: Vec<&str> = LintId::ALL.iter().map(|id| id.as_str()).collect();
+    assert_eq!(
+        strings,
+        [
+            "FPL-SCHEMA",
+            "FPL-MANA-ABILITY",
+            "FPL-TIER-HINT",
+            "FPL-LAYER-KIND",
+            "FPL-TEXT-COVERAGE",
+            "FPL-LOOK-BACK",
+            "FPL-MAX-ITER",
+            "FPL-TOKEN-REF",
+            "FPL-LINK-ID",
+            "FPL-MANA-VALUE",
+            "FPL-COLORS",
+            "FPL-COLOR-IDENTITY",
+        ]
+    );
+    assert_eq!(LintId::SCHEMA.to_string(), "FPL-SCHEMA");
+    assert!(Severity::Error < Severity::Warning);
+    assert_eq!(Severity::Error.as_str(), "ERROR");
+    assert_eq!(Severity::Warning.to_string(), "WARNING");
+    assert!(LintId::COLORS < LintId::SCHEMA);
+}
+
+/// REQ-ING-009: `Lint` Display is `"{SEVERITY} {id} {path}{span}: {message}"`.
+#[test]
+fn req_ing_009_display_format() {
+    let mut lint = Lint {
+        id: LintId::TEXT_COVERAGE,
+        severity: Severity::Warning,
+        location: LintLocation::face(0, ".text"),
+        message: "gap".to_owned(),
+    };
+    assert_eq!(
+        lint.to_string(),
+        "WARNING FPL-TEXT-COVERAGE faces[0].text: gap"
+    );
+    lint.location.text_span = Some((2, 5));
+    assert_eq!(
+        lint.to_string(),
+        "WARNING FPL-TEXT-COVERAGE faces[0].text [2,5]: gap"
+    );
+}
+
+/// REQ-ING-009, REQ-ING-002: the clean synthetic definition passes every check, with a full
+/// context too.
+#[test]
+fn req_ing_009_clean_definition_passes_every_check() {
+    let def = clean();
+    assert!(def.clone().seal().is_ok());
+    let report = run(&def);
+    assert!(report.is_empty(), "{report:#?}");
+    assert!(!report.has_errors());
+    let mut ctx = source(
+        vec![(Some(2), Some(ColorBitmask::WHITE))],
+        Some(ColorBitmask::WHITE),
+    );
+    ctx.known_token_ids = Some(BTreeSet::new());
+    assert!(lint_definition(&def, &ctx).is_empty());
+}
+
+/// REQ-ING-009: report accessors.
+#[test]
+fn req_ing_009_report_accessors() {
+    let mut def = one_face(vec![
+        json!({"abilityId": "l1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "linkIds": ["solo"]}),
+    ]);
+    def.faces[0]
+        .abilities
+        .insert(0, broken_keyword("x", "lowercase"));
+    def.faces[0].text = tokens(0);
+    let report = run(&def);
+    assert!(report.has_errors());
+    assert_eq!(report.errors().count(), 1);
+    assert_eq!(report.warnings().count(), 1);
+    assert_eq!(report.with_id(LintId::SCHEMA).count(), 1);
+    assert_eq!(report.with_id(LintId::LINK_ID).count(), 1);
+    assert_eq!(report.lints.len(), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-SCHEMA
+
+/// REQ-ING-009 (schema validity), REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232): every position
+/// whose typed value does not encode (a hand-built value breaking an invariant of its type) is
+/// reported, not only the first.
+#[test]
+fn req_ing_009_schema_reports_every_position() {
+    let mut def = one_face(vec![keyword("a1", 0, 0)]);
+    def.faces[0]
+        .abilities
+        .push(broken_keyword("a2", "not upper"));
+    def.faces[0]
+        .abilities
+        .push(broken_keyword("", "TEST_KEYWORD"));
+    // Literals beyond the safe integer range do not encode (REQ-NFR-006).
+    def.faces[0].power = Some(ValueExpressionAST::Literal(i64::MAX));
+    def.faces[0].toughness = Some(ValueExpressionAST::Literal(i64::MIN));
+    def.commander_eligibility = Some(CommanderEligibilityDSL {
+        eligible: true,
+        partner_abilities: vec![
+            partner(json!({"abilityId": "p0", "kind": "KEYWORD", "keyword": "PARTNER"})),
+            PartnerAbilityDSL::new(broken_keyword("p1", "partner")).expect("a KEYWORD ability"),
+        ],
+    });
+    let report = run(&def);
+    assert_eq!(
+        of(&report, LintId::SCHEMA),
+        vec![
+            (
+                Severity::Error,
+                "commanderEligibility.partnerAbilities[1]".to_owned(),
+                None,
+                None
+            ),
+            (Severity::Error, "faces[0].power".to_owned(), Some(0), None),
+            (
+                Severity::Error,
+                "faces[0].toughness".to_owned(),
+                Some(0),
+                None
+            ),
+            (
+                Severity::Error,
+                "faces[0].abilities[1]".to_owned(),
+                Some(0),
+                Some(1)
+            ),
+            (
+                Severity::Error,
+                "faces[0].abilities[2]".to_owned(),
+                Some(0),
+                Some(2)
+            ),
+        ]
+    );
+    let partner = report.with_id(LintId::SCHEMA).next().expect("partner");
+    assert!(partner.message.contains("keyword"), "{}", partner.message);
+}
+
+/// REQ-ING-009 (schema validity), REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232, replaces the
+/// lint test over undecodable JSON positions): the same invalid JSON (a `null` power, a string
+/// toughness, a non-object text token, an ability of an unknown kind, a `null` ability, a SPELL
+/// partner) can no longer be held by a definition: each is refused at load with `Schema`.
+#[test]
+fn req_ing_009_schema_invalid_json_rejected_at_load() {
+    let good = serde_json::to_value(clean().seal().expect("seal")).expect("value");
+    let edits: Vec<(&str, Value)> = vec![
+        ("/faces/0/power", Value::Null),
+        ("/faces/0/toughness", json!("x")),
+        (
+            "/faces/0/text",
+            json!([{"id": "t0", "kind": "LITERAL", "text": "w"}, 7]),
+        ),
+        ("/faces/0/abilities/0", json!({"kind": "NOPE"})),
+        ("/faces/0/abilities/0", Value::Null),
+        (
+            "/commanderEligibility",
+            json!({"eligible": true, "partnerAbilities": [
+                {"abilityId": "p1", "kind": "SPELL", "effect": []}]}),
+        ),
+    ];
+    for (pointer, bad) in edits {
+        let mut v = good.clone();
+        if pointer == "/commanderEligibility" {
+            v["commanderEligibility"] = bad.clone();
+        } else {
+            *v.pointer_mut(pointer).expect("pointer") = bad.clone();
+        }
+        assert!(
+            serde_json::from_value::<CardDefinitionDSL>(v.clone()).is_err(),
+            "{pointer} {bad}"
+        );
+        let bytes = serde_json::to_vec(&v).expect("bytes");
+        match CardDefinitionDSL::from_json(&bytes) {
+            Err(CardDefinitionError::Schema(msg)) => {
+                if pointer == "/commanderEligibility" {
+                    assert!(msg.contains("KEYWORD"), "{msg}");
+                }
+            }
+            r => panic!("{pointer} {bad}: unexpected {r:?}"),
+        }
+    }
+}
+
+/// REQ-ING-009: a schema-valid definition has no FPL-SCHEMA finding; encoder messages are
+/// clipped.
+#[test]
+fn req_ing_009_schema_passes_and_clips() {
+    none_of(&run(&clean()), LintId::SCHEMA);
+    let long = "z".repeat(5000);
+    let mut def = one_face(vec![]);
+    def.faces[0].abilities.push(broken_keyword("a", &long));
+    let report = run(&def);
+    let lint = report.with_id(LintId::SCHEMA).next().expect("schema");
+    assert!(
+        lint.message.chars().count() <= CLIP_MESSAGE + 3,
+        "{}",
+        lint.message.len()
+    );
+    assert_rejected_at_load(&json!({"abilityId": "a", "kind": "Z".repeat(5000)}));
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-MANA-ABILITY
+
+/// REQ-ING-009 (CR 605.1a): a targetless, non-loyalty activated ability with an effect and no
+/// library movement may declare `isManaAbility: true`; `false` and `None` are never findings.
+#[test]
+fn req_ing_009_mana_ability_activated_passes() {
+    let ok = activated(json!({}));
+    decodes(&ok);
+    none_of(&run(&one_face(vec![ok])), LintId::MANA_ABILITY);
+    // Not declared: never a finding, even with a target and no effect.
+    for flag in [json!(false), Value::Null] {
+        let a = activated(json!({"isManaAbility": flag, "targets": [slot()], "effect": []}));
+        decodes(&a);
+        none_of(&run(&one_face(vec![a])), LintId::MANA_ABILITY);
+    }
+}
+
+/// REQ-ING-009 (CR 605.1a, CR 115.6): each violated criterion of an activated ability is one
+/// Error.
+#[test]
+fn req_ing_009_mana_ability_activated_criteria() {
+    let modal_target = json!({"min": 1, "max": 1, "modes": [
+        {"id": "m", "targets": [slot()], "effect": [{"op": "POPULATE"}]}
+    ]});
+    let search = json!({"op": "SEARCH_LIBRARY", "player": {"ref": "CONTROLLER"},
+        "selector": {"zones": ["LIBRARY"], "pred": "IS_LAND"}, "count": {"LITERAL": 1},
+        "toZone": "HAND"});
+    let cases = [
+        // CR 115.6: requires a target even when zero may be chosen.
+        (activated(json!({"targets": [slot()]})), 1),
+        (activated(json!({"modes": modal_target})), 1),
+        // Loyalty ability: flag, LOYALTY cost, LOYALTY inside COMPOSITE.
+        (activated(json!({"isLoyalty": true})), 1),
+        (
+            activated(json!({"cost": [{"cost": "LOYALTY", "delta": {"LITERAL": 1}}]})),
+            1,
+        ),
+        (
+            activated(json!({"cost": [{"cost": "COMPOSITE", "costs": [
+                {"cost": "TAP_SOURCE"}, {"cost": "LOYALTY", "delta": {"LITERAL": -1}}
+            ]}]})),
+            1,
+        ),
+        // Library movement in the effect (nested too) or the cost.
+        (
+            activated(
+                json!({"effect": [{"op": "DRAW", "player": {"ref": "CONTROLLER"},
+                "count": {"LITERAL": 1}}]}),
+            ),
+            1,
+        ),
+        (
+            activated(
+                json!({"effect": [{"op": "MILL", "player": {"ref": "CONTROLLER"},
+                "count": {"LITERAL": 1}}]}),
+            ),
+            1,
+        ),
+        (
+            activated(
+                json!({"effect": [{"op": "PUT_ON_TOP_OR_BOTTOM", "objects": {"ref": "SELF"},
+                "player": {"ref": "CONTROLLER"}}]}),
+            ),
+            1,
+        ),
+        (
+            activated(
+                json!({"effect": [{"op": "IF", "cond": {"pred": "IS_CREATURE"},
+                "then": [search]}]}),
+            ),
+            1,
+        ),
+        (
+            activated(json!({"effect": [{"op": "MOVE", "objects": {"ref": "SELF"},
+                "toZone": "LIBRARY"}]})),
+            1,
+        ),
+        (
+            activated(json!({"effect": [{"op": "MOVE",
+                "objects": {"zones": ["LIBRARY"], "pred": "IS_LAND"}, "toZone": "HAND"}]})),
+            1,
+        ),
+        (
+            activated(
+                json!({"cost": [{"cost": "EXILE_FROM_ZONE", "zone": "LIBRARY",
+                "selector": {"zones": ["LIBRARY"]}, "count": {"LITERAL": 1}}]}),
+            ),
+            1,
+        ),
+        // No effect at all (cannot add mana).
+        (activated(json!({"effect": []})), 1),
+        // Two criteria at once: two findings.
+        (activated(json!({"isLoyalty": true, "effect": []})), 2),
+    ];
+    for (a, n) in cases {
+        decodes(&a);
+        let report = run(&one_face(vec![a.clone()]));
+        let found = of(&report, LintId::MANA_ABILITY);
+        assert_eq!(found.len(), n, "{a}: {report:#?}");
+        for f in found {
+            assert_eq!(
+                f,
+                (
+                    Severity::Error,
+                    "faces[0].abilities[0]".to_owned(),
+                    Some(0),
+                    Some(0)
+                )
+            );
+        }
+    }
+    // A MOVE elsewhere is fine; an effect only in a mode counts as an effect.
+    for a in [
+        activated(
+            json!({"effect": [{"op": "MOVE", "objects": {"ref": "SELF"}, "toZone": "HAND"}]}),
+        ),
+        activated(
+            json!({"effect": [], "modes": {"min": 1, "max": 1, "modes": [
+                {"id": "m", "effect": [{"op": "POPULATE"}]}
+            ]}}),
+        ),
+    ] {
+        decodes(&a);
+        none_of(&run(&one_face(vec![a])), LintId::MANA_ABILITY);
+    }
+}
+
+/// REQ-ING-009 (CR 605.1b): triggered abilities: target, trigger event and effect criteria;
+/// the loyalty and library criteria do not apply.
+#[test]
+fn req_ing_009_mana_ability_triggered_criteria() {
+    let pass = [
+        triggered(json!({})),
+        triggered(json!({"trigger": {"mode": "EVENT", "event": {"kind": "RESOLVED"}}})),
+        // CR 605.1b has no library criterion.
+        triggered(
+            json!({"effect": [{"op": "SEARCH_LIBRARY", "player": {"ref": "CONTROLLER"},
+            "selector": {"zones": ["LIBRARY"]}, "count": {"LITERAL": 1}, "toZone": "HAND"}]}),
+        ),
+    ];
+    for a in pass {
+        decodes(&a);
+        none_of(&run(&one_face(vec![a])), LintId::MANA_ABILITY);
+    }
+    let state = json!({"mode": "STATE", "state": {"pred": "IS_CREATURE"}});
+    let fail = [
+        (triggered(json!({"targets": [slot()]})), 1),
+        (
+            triggered(
+                json!({"trigger": {"mode": "EVENT", "event": {"kind": "ATTACKS",
+                "subject": {"ref": "SELF"}}}}),
+            ),
+            1,
+        ),
+        (triggered(json!({"trigger": state.clone()})), 1),
+        (triggered(json!({"effect": []})), 1),
+        (
+            triggered(json!({"targets": [slot()], "effect": [], "trigger": state})),
+            3,
+        ),
+    ];
+    for (a, n) in fail {
+        decodes(&a);
+        let report = run(&one_face(vec![a.clone()]));
+        assert_eq!(report.with_id(LintId::MANA_ABILITY).count(), n, "{a}");
+    }
+}
+
+/// REQ-ING-009 (CR 605.1): other kinds with `isManaAbility: true` are Errors; KEYWORD is
+/// skipped; an undecodable ability is not checked (FPL-SCHEMA reports it).
+#[test]
+fn req_ing_009_mana_ability_other_kinds() {
+    let kinds = [
+        json!({"abilityId": "s", "kind": "SPELL", "isManaAbility": true, "effect": []}),
+        json!({"abilityId": "s", "kind": "STATIC", "isManaAbility": true,
+            "effects": [{"type": "RULE", "kind": "SKIP"}]}),
+        json!({"abilityId": "s", "kind": "REPLACEMENT", "isManaAbility": true,
+            "match": {"event": "DIES", "affected": {"ref": "SELF"}}, "replaceWith": [{"op": "SKIP"}]}),
+    ];
+    for a in kinds {
+        decodes(&a);
+        assert_eq!(
+            run(&one_face(vec![a]))
+                .with_id(LintId::MANA_ABILITY)
+                .count(),
+            1
+        );
+    }
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "isManaAbility": true});
+    decodes(&kw);
+    none_of(&run(&one_face(vec![kw])), LintId::MANA_ABILITY);
+    // An undecodable ability is refused at load (#232) and its JSON alone is not checked.
+    let broken = activated(json!({"targets": [slot()], "bogus": 1}));
+    assert_rejected_at_load(&broken);
+    none_of(&run_raw(&[broken]), LintId::MANA_ABILITY);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-TIER-HINT
+
+/// A replacement with `tierHint`, `event` and `ops`.
+fn replacement(hint: Option<&str>, event: &str, ops: Value) -> Value {
+    let mut r = json!({
+        "abilityId": "r1",
+        "kind": "REPLACEMENT",
+        "match": {"event": event, "affected": {"ref": "SELF"}},
+        "replaceWith": ops,
+        "textSpan": [0, 0],
+    });
+    if let Some(h) = hint {
+        r["tierHint"] = json!(h);
+    }
+    r
+}
+
+/// REQ-ING-009, REQ-DSL-009 (CR 616.1b-d): tier hints on ENTERS replacements that modify the
+/// entry pass; absent hints never fail; self-replacement is independent.
+#[test]
+fn req_ing_009_tier_hint_passes() {
+    let modify = json!([{"op": "MODIFY_EVENT", "set": {"tapped": true}}]);
+    for hint in ["CONTROL_ETB", "COPY_ETB", "BACK_FACE_ETB"] {
+        let r = replacement(Some(hint), "ENTERS", modify.clone());
+        decodes(&r);
+        none_of(&run(&one_face(vec![r])), LintId::TIER_HINT);
+    }
+    // CR 616.1e: no hint, any event, any ops.
+    let r = replacement(None, "DIES", json!([{"op": "SKIP"}]));
+    decodes(&r);
+    none_of(&run(&one_face(vec![r])), LintId::TIER_HINT);
+    // CR 616.1a is a different tier: isSelfReplacement does not interact with the hint.
+    let mut r = replacement(Some("COPY_ETB"), "ENTERS", modify);
+    r["isSelfReplacement"] = json!(true);
+    decodes(&r);
+    none_of(&run(&one_face(vec![r])), LintId::TIER_HINT);
+}
+
+/// REQ-ING-009, REQ-DSL-009 (CR 616.1b-d): a hint on a non-ENTERS event, or with only SKIP and
+/// PREVENT operations, is an Error per criterion.
+#[test]
+fn req_ing_009_tier_hint_fails() {
+    let modify = json!([{"op": "MODIFY_EVENT", "set": {"tapped": true}}]);
+    let cases = [
+        (
+            replacement(Some("CONTROL_ETB"), "ZONE_CHANGE", modify.clone()),
+            1,
+        ),
+        (replacement(Some("COPY_ETB"), "DIES", modify), 1),
+        (
+            replacement(Some("BACK_FACE_ETB"), "ENTERS", json!([{"op": "SKIP"}])),
+            1,
+        ),
+        (
+            replacement(
+                Some("COPY_ETB"),
+                "ENTERS",
+                json!([{"op": "PREVENT"}, {"op": "SKIP"}]),
+            ),
+            1,
+        ),
+        (
+            replacement(Some("COPY_ETB"), "DIES", json!([{"op": "SKIP"}])),
+            2,
+        ),
+    ];
+    for (r, n) in cases {
+        decodes(&r);
+        let report = run(&one_face(vec![r.clone()]));
+        let found = of(&report, LintId::TIER_HINT);
+        assert_eq!(found.len(), n, "{r}");
+        assert!(
+            found
+                .iter()
+                .all(|f| f.0 == Severity::Error && f.3 == Some(0))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-LAYER-KIND
+
+/// REQ-ING-009, REQ-DSL-008: static effects declare a layer (CHAR) or kind (RULE); PLAYER needs
+/// neither.
+#[test]
+fn req_ing_009_layer_kind_passes() {
+    let s = json!({"abilityId": "s1", "kind": "STATIC", "textSpan": [0, 0], "effects": [
+        {"type": "CHAR", "layer": "7c", "affected": {"ref": "SELF"},
+            "modification": {"op": "MODIFY_PT", "power": 1, "toughness": 1}},
+        {"type": "RULE", "kind": "SKIP"},
+        {"type": "PLAYER", "affected": {"ref": "CONTROLLER"},
+            "modification": {"op": "TEST_PLAYER_MOD"}},
+    ]});
+    decodes(&s);
+    none_of(&run(&one_face(vec![s])), LintId::LAYER_KIND);
+}
+
+/// REQ-ING-009, REQ-DSL-008: raw static effects without a layer or kind, with a missing or
+/// unknown type, non-object elements and a non-array `effects` are Errors; non-STATIC
+/// abilities are not checked. Since #232 such JSON is refused at load, so the check is
+/// exercised on the JSON form alone ([`run_raw`]).
+#[test]
+fn req_ing_009_layer_kind_fails() {
+    let s = json!({"abilityId": "s1", "kind": "STATIC", "effects": [
+        {"type": "CHAR", "affected": {"ref": "SELF"}, "modification": {"op": "MODIFY_PT"}},
+        {"type": "RULE"},
+        {"affected": {"ref": "SELF"}},
+        {"type": "OTHER"},
+        {"type": 3},
+        5,
+        {"type": "PLAYER"},
+    ]});
+    let report = run_raw(std::slice::from_ref(&s));
+    let found = of(&report, LintId::LAYER_KIND);
+    assert_eq!(found.len(), 6, "{report:#?}");
+    assert!(
+        found
+            .iter()
+            .all(|f| f.0 == Severity::Error && f.1 == "faces[0].abilities[0]")
+    );
+    // The typed decoder refuses it too.
+    assert_rejected_at_load(&s);
+    for effects in [json!({"type": "RULE"}), Value::Null] {
+        let mut s = json!({"abilityId": "s1", "kind": "STATIC"});
+        if !effects.is_null() {
+            s["effects"] = effects;
+        }
+        assert_rejected_at_load(&s);
+        assert_eq!(run_raw(&[s]).with_id(LintId::LAYER_KIND).count(), 1);
+    }
+    let not_static = json!({"abilityId": "x", "kind": "SPELL", "effects": [{"type": "CHAR"}]});
+    assert_rejected_at_load(&not_static);
+    none_of(&run_raw(&[not_static]), LintId::LAYER_KIND);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-TEXT-COVERAGE
+
+/// REQ-ING-009 (SRS §14.3 textSpan): full coverage passes, overlaps are fine, and N = 0 has
+/// nothing to cover.
+#[test]
+fn req_ing_009_text_coverage_passes() {
+    let mut def = one_face(vec![
+        keyword("a", 0, 2),
+        keyword("b", 1, 4),
+        keyword("c", 5, 5),
+    ]);
+    def.faces[0].text = tokens(6);
+    none_of(&run(&def), LintId::TEXT_COVERAGE);
+    let mut empty = one_face(vec![
+        json!({"abilityId": "a", "kind": "KEYWORD", "keyword": "TEST_KEYWORD"}),
+    ]);
+    empty.faces[0].text = tokens(0);
+    none_of(&run(&empty), LintId::TEXT_COVERAGE);
+}
+
+/// REQ-ING-009 (SRS §14.3): each maximal uncovered run is one finding with its span; Error for
+/// VERIFIED and AUTO_PARSED, Warning for PARTIAL, nothing for UNSUPPORTED.
+#[test]
+fn req_ing_009_text_coverage_gaps_by_status() {
+    let mut def = one_face(vec![keyword("a", 2, 3), keyword("b", 6, 6)]);
+    def.faces[0].text = tokens(9);
+    for (status, severity) in [
+        (SupportStatus::Verified, Some(Severity::Error)),
+        (SupportStatus::AutoParsed, Some(Severity::Error)),
+        (SupportStatus::Partial, Some(Severity::Warning)),
+        (SupportStatus::Unsupported, None),
+    ] {
+        def.support_status = status;
+        let report = run(&def);
+        let found: Vec<_> = report
+            .with_id(LintId::TEXT_COVERAGE)
+            .map(|l| (l.severity, l.location.clone()))
+            .collect();
+        let Some(severity) = severity else {
+            assert!(found.is_empty(), "{found:?}");
+            continue;
+        };
+        let loc = |s: u32, e: u32| LintLocation {
+            face_index: Some(0),
+            ability_index: None,
+            path: "faces[0].text".to_owned(),
+            text_span: Some((s, e)),
+        };
+        assert_eq!(
+            found,
+            vec![
+                (severity, loc(0, 1)),
+                (severity, loc(4, 5)),
+                (severity, loc(7, 8))
+            ]
+        );
+    }
+}
+
+/// REQ-ING-009 (SRS §14.3): a span past the last token or a malformed span is an Error at the
+/// ability (except UNSUPPORTED); a well-formed overlong span still covers its in-range part.
+/// Since #232 a malformed span is refused at load, so the spans are read from the JSON forms
+/// alone ([`run_raw_with`]); the in-range overlong span is also checked on a typed definition.
+#[test]
+fn req_ing_009_text_coverage_bad_spans() {
+    let kw = |id: &str, span: Value| json!({"abilityId": id, "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "textSpan": span});
+    let raws = [
+        keyword("a", 0, 5),
+        kw("b", json!([3, 1])),
+        kw("c", json!("x")),
+        kw("d", json!([-1, 1])),
+        kw("e", json!([0])),
+        kw("f", json!([9, 99_999_999_999u64])),
+    ];
+    for bad in &raws[1..] {
+        assert_rejected_at_load(bad);
+    }
+    let mut def = one_face(vec![raws[0].clone()]);
+    def.faces[0].text = tokens(3);
+    def.support_status = SupportStatus::Partial;
+    let typed = run(&def);
+    assert_eq!(
+        of(&typed, LintId::TEXT_COVERAGE),
+        vec![(
+            Severity::Error,
+            "faces[0].abilities[0]".to_owned(),
+            Some(0),
+            Some(0)
+        )]
+    );
+    let report = run_raw_with(&def, &raws, &LintContext::default());
+    let found = of(&report, LintId::TEXT_COVERAGE);
+    let abilities: Vec<_> = found.iter().map(|f| (f.0, f.3)).collect();
+    assert_eq!(
+        abilities,
+        (0..6)
+            .map(|j| (Severity::Error, Some(j)))
+            .collect::<Vec<_>>()
+    );
+    // The overlong span keeps its own span in the location; an over-u32 span has none.
+    let spans: Vec<_> = report
+        .with_id(LintId::TEXT_COVERAGE)
+        .map(|l| l.location.text_span)
+        .collect();
+    assert_eq!(spans[0], Some((0, 5)));
+    assert_eq!(spans[5], None);
+    def.support_status = SupportStatus::Unsupported;
+    none_of(&run(&def), LintId::TEXT_COVERAGE);
+    none_of(
+        &run_raw_with(&def, &raws, &LintContext::default()),
+        LintId::TEXT_COVERAGE,
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-LOOK-BACK
+
+/// REQ-ING-009 (CR 603.10): look-back keys at any depth, in any spelling, are Errors naming the
+/// key and path; ordinary keys are not. Since #232 the typed decoder refuses a look-back member
+/// outside opaque parameters, so the full example is refused at load and checked on its JSON
+/// form alone ([`run_raw`]); a look-back key inside opaque keyword parameters still reaches the
+/// check on a typed definition.
+#[test]
+fn req_ing_009_look_back() {
+    none_of(&run(&clean()), LintId::LOOK_BACK);
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"lookBack": 1}});
+    let typed = run(&one_face(vec![kw]));
+    let messages: Vec<&str> = typed
+        .with_id(LintId::LOOK_BACK)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{typed:#?}");
+    assert!(messages[0].contains("$.params.lookBack"), "{}", messages[0]);
+    let t = json!({"abilityId": "t1", "kind": "TRIGGERED", "lookBack": true, "textSpan": [0, 0],
+        "trigger": {"mode": "EVENT", "event": {"kind": "DIES", "subject": {"ref": "SELF"},
+            "filters": {"look_back": true, "Look-Back-Mode": 1, "lookingBack": 1}}},
+        "effect": [{"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+            "params": {"x": [{"LOOKBACK": 1}]}}]});
+    assert_rejected_at_load(&t);
+    let report = run_raw(&[t]);
+    let messages: Vec<&str> = report
+        .with_id(LintId::LOOK_BACK)
+        .map(|l| l.message.as_str())
+        .collect();
+    // Brief Gate 06-turn F53: a look-back-like key under the `params` of a NATIVE_EFFECT is
+    // opaque native-effect data (REQ-DSL-015, SRS §14.8) and is not reported, so the three
+    // other keys are (this assertion counted four before F53).
+    assert_eq!(messages.len(), 3, "{messages:#?}");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("\"lookBack\" at $.lookBack"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("$.trigger.event.filters.look_back"))
+    );
+    assert!(messages.iter().any(|m| m.contains("\"Look-Back-Mode\"")));
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("$.effect[0].params.x[0].LOOKBACK"))
+    );
+    assert!(
+        report
+            .with_id(LintId::LOOK_BACK)
+            .all(|l| l.severity == Severity::Error && l.location.ability_index == Some(0))
+    );
+    assert!(walk::is_lookback_key("LookBack"));
+    assert!(!walk::is_lookback_key("look"));
+    assert!(!walk::is_lookback_key("lookingBack"));
+}
+
+/// REQ-ING-009 (CR 603.10): long paths are rendered from their last segments only.
+#[test]
+fn req_ing_009_look_back_deep_path_is_bounded() {
+    let mut v = json!({"lookBack": 1});
+    for _ in 0..50 {
+        v = json!({"k": v});
+    }
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"n": v}});
+    let report = run(&one_face(vec![kw]));
+    let lint = report.with_id(LintId::LOOK_BACK).next().expect("found");
+    assert!(lint.message.contains("$...."), "{}", lint.message);
+    assert!(lint.message.len() < 300);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-MAX-ITER
+
+/// A SPELL whose effect holds a REPEAT_WHILE (inside an IF) with `max_iter` (`null`: absent).
+fn repeat_while(max_iter: Value) -> Value {
+    let mut r = json!({"op": "REPEAT_WHILE", "cond": {"pred": "IS_CREATURE"},
+        "body": [{"op": "POPULATE"}]});
+    if !max_iter.is_null() {
+        r["maxIter"] = max_iter;
+    }
+    json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0],
+        "effect": [{"op": "IF", "cond": {"pred": "IS_CREATURE"}, "then": [r]}]})
+}
+
+/// REQ-ING-009, REQ-DSL-010 (SRS §14.4.5): every REPEAT_WHILE declares an integer maxIter >= 1.
+/// Since #232 the typed decoder refuses a bad maxIter, so each bad example is refused at load
+/// and checked on its JSON form alone ([`run_raw`]); an opaque keyword parameter shaped like a
+/// bad REPEAT_WHILE still reaches the check on a typed definition.
+#[test]
+fn req_ing_009_max_iter() {
+    let ok = repeat_while(json!(3));
+    decodes(&ok);
+    none_of(&run(&one_face(vec![ok])), LintId::MAX_ITER);
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"n": {"op": "REPEAT_WHILE"}}});
+    assert_eq!(
+        run(&one_face(vec![kw])).with_id(LintId::MAX_ITER).count(),
+        1
+    );
+    for bad in [Value::Null, json!(0), json!(-2), json!("3"), json!(1.5)] {
+        assert_rejected_at_load(&repeat_while(bad.clone()));
+        let report = run_raw(&[repeat_while(bad.clone())]);
+        assert_eq!(
+            of(&report, LintId::MAX_ITER),
+            vec![(
+                Severity::Error,
+                "faces[0].abilities[0]".to_owned(),
+                Some(0),
+                Some(0)
+            )],
+            "{bad}"
+        );
+        let msg = &report
+            .with_id(LintId::MAX_ITER)
+            .next()
+            .expect("one")
+            .message;
+        assert!(msg.contains("$.effect[0].then[0]"), "{msg}");
+    }
+    // A huge maxIter is not this check's concern (the typed decoder bounds it).
+    none_of(&run_raw(&[repeat_while(json!(u64::MAX))]), LintId::MAX_ITER);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-TOKEN-REF
+
+/// A SPELL creating token `def` and an inline token.
+fn create(def: &str) -> Value {
+    json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0], "effect": [
+        {"op": "CREATE_TOKEN", "tokenDef": def, "count": {"LITERAL": 1}},
+        {"op": "CREATE_TOKEN", "inline": {}, "count": {"LITERAL": 1}},
+    ]})
+}
+
+/// REQ-ING-009 (referenced token definitions exist): with known ids, unknown `tokenDef`s and
+/// `relatedTokens` are Errors; inline tokens need no lookup; no known set skips the check.
+#[test]
+fn req_ing_009_token_ref() {
+    let mut def = one_face(vec![create("test.token_known")]);
+    def.related_tokens = Some(vec![
+        "test.token_known".to_owned(),
+        "test.token_other".to_owned(),
+    ]);
+    let known = LintContext {
+        source: None,
+        known_token_ids: Some(BTreeSet::from([
+            "test.token_known".to_owned(),
+            "test.token_other".to_owned(),
+        ])),
+    };
+    decodes(&create("x"));
+    none_of(&lint_definition(&def, &known), LintId::TOKEN_REF);
+    def.faces[0].abilities[0] = ability(create("test.token_missing"));
+    def.related_tokens = Some(vec![
+        "test.token_known".to_owned(),
+        "test.token_gone".to_owned(),
+    ]);
+    def.commander_eligibility = Some(CommanderEligibilityDSL {
+        eligible: true,
+        partner_abilities: vec![partner(
+            json!({"abilityId": "p", "kind": "KEYWORD", "keyword": "PARTNER",
+                "params": {"x": {"op": "CREATE_TOKEN", "tokenDef": "test.token_p"}}}),
+        )],
+    });
+    let report = lint_definition(&def, &known);
+    assert_eq!(
+        of(&report, LintId::TOKEN_REF),
+        vec![
+            (
+                Severity::Error,
+                "commanderEligibility.partnerAbilities[0]".to_owned(),
+                None,
+                None
+            ),
+            (Severity::Error, "relatedTokens[1]".to_owned(), None, None),
+            (
+                Severity::Error,
+                "faces[0].abilities[0]".to_owned(),
+                Some(0),
+                Some(0)
+            ),
+        ]
+    );
+    // Skipped without a known set.
+    none_of(&run(&def), LintId::TOKEN_REF);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-LINK-ID
+
+/// A keyword ability `id` declaring `links`.
+fn declares(id: &str, links: &[&str]) -> Value {
+    json!({"abilityId": id, "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "linkIds": links})
+}
+
+/// A spell ability `id` referring to `link` through a LINKED reference.
+fn refers(id: &str, link: &str) -> Value {
+    json!({"abilityId": id, "kind": "SPELL", "effect": [
+        {"op": "DESTROY", "objects": {"ref": "LINKED", "linkId": link}}
+    ]})
+}
+
+/// REQ-ING-009 (CR 607.1, 607.1b, 607.1c, 607.4): paired links across faces, self-links,
+/// many-declarer ids and many-id abilities pass.
+#[test]
+fn req_ing_009_link_id_passes() {
+    let mut def = def_of(
+        vec![
+            face(None, 0, vec![declares("a", &["l1", "l2"])]),
+            face_of(
+                FaceKind::Back,
+                None,
+                0,
+                vec![refers("b", "l1"), refers("c", "l2")],
+            ),
+        ],
+        ColorBitmask::NONE,
+    );
+    def.layout = LayoutBehavior::DfcNonmodal;
+    none_of(&run(&def), LintId::LINK_ID);
+    // CR 607.1c: linked to itself.
+    let mut own = refers("s", "self");
+    own["linkIds"] = json!(["self"]);
+    decodes(&own);
+    let mut def = one_face(vec![own]);
+    def.faces[0].text = tokens(0);
+    none_of(&run(&def), LintId::LINK_ID);
+    // CR 607.4: an id declared by several abilities and referenced by none is fine.
+    let mut def = one_face(vec![declares("a", &["l"]), declares("b", &["l"])]);
+    def.faces[0].text = tokens(0);
+    none_of(&run(&def), LintId::LINK_ID);
+}
+
+/// REQ-ING-009 (CR 607.1): a reference to an undeclared id is an Error at the referencing
+/// ability; an id declared once and never referenced is a Warning at the declarer. A repeated
+/// id within one declarer (refused at load since #232) counts once on its JSON form.
+#[test]
+fn req_ing_009_link_id_fails() {
+    let mut def = one_face(vec![refers("r", "ghost"), declares("d", &["lonely"])]);
+    def.faces[0].text = tokens(0);
+    let repeated = [refers("r", "ghost"), declares("d", &["lonely", "lonely"])];
+    assert_rejected_at_load(&repeated[1]);
+    let raw = run_raw_with(&def, &repeated, &LintContext::default());
+    assert_eq!(of(&raw, LintId::LINK_ID), of(&run(&def), LintId::LINK_ID));
+    let report = run(&def);
+    assert_eq!(
+        of(&report, LintId::LINK_ID),
+        vec![
+            (
+                Severity::Error,
+                "faces[0].abilities[0]".to_owned(),
+                Some(0),
+                Some(0)
+            ),
+            (
+                Severity::Warning,
+                "faces[0].abilities[1]".to_owned(),
+                Some(0),
+                Some(1)
+            ),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-MANA-VALUE
+
+/// REQ-ING-009, REQ-ING-002, REQ-OBJ-001 (CR 202.3, 202.3e-g): every symbol's contribution.
+#[test]
+fn req_ing_009_mana_value_symbols() {
+    // {2}=2, {W}=1, {C}=1, {S}=1, {X}=0, {W/U}=1, {2/W}=2, {C/W}=1, {W/P}=1, {W/U/P}=1 -> 11
+    let cost = "{X}{2}{W}{W/U}{2/W}{C/W}{W/P}{W/U/P}{C}{S}";
+    let def = def_of(vec![face(Some(cost), 0, vec![])], mask(3));
+    none_of(
+        &lint_definition(&def, &source(vec![(Some(11), None)], None)),
+        LintId::MANA_VALUE,
+    );
+    let report = lint_definition(&def, &source(vec![(Some(10), None)], None));
+    assert_eq!(
+        of(&report, LintId::MANA_VALUE),
+        vec![(Severity::Error, "faces[0]".to_owned(), Some(0), None)]
+    );
+    let msg = &report
+        .with_id(LintId::MANA_VALUE)
+        .next()
+        .expect("one")
+        .message;
+    assert!(msg.contains("10") && msg.contains("11"), "{msg}");
+    // CR 202.3a: no mana cost is 0.
+    let none = def_of(vec![face(None, 0, vec![])], ColorBitmask::NONE);
+    none_of(
+        &lint_definition(&none, &source(vec![(Some(0), None)], None)),
+        LintId::MANA_VALUE,
+    );
+    assert_eq!(
+        lint_definition(&none, &source(vec![(Some(1), None)], None))
+            .with_id(LintId::MANA_VALUE)
+            .count(),
+        1
+    );
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 202.3b, 202.3c, 202.3d): DFC back faces, split halves, meld
+/// results; extra or missing source entries and absent values are ignored.
+#[test]
+fn req_ing_009_mana_value_layouts() {
+    let mv = |def: &CardDefinitionDSL, faces: Vec<Option<u32>>| {
+        let ctx = source(faces.into_iter().map(|m| (m, None)).collect(), None);
+        of(&lint_definition(def, &ctx), LintId::MANA_VALUE)
+    };
+    let mut dfc = def_of(
+        vec![
+            face(Some("{3}{G}"), 0, vec![]),
+            face_of(FaceKind::Back, None, 0, vec![]),
+        ],
+        ColorBitmask::GREEN,
+    );
+    dfc.layout = LayoutBehavior::DfcNonmodal;
+    // CR 202.3b: the back face uses the front face's cost.
+    assert!(mv(&dfc, vec![Some(4), Some(4)]).is_empty());
+    assert_eq!(
+        mv(&dfc, vec![Some(4), Some(0)]),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    // A modal DFC back face uses its own (absent) cost.
+    dfc.layout = LayoutBehavior::DfcModal;
+    assert!(mv(&dfc, vec![Some(4), Some(0)]).is_empty());
+    // CR 202.3d: each split half has the combined cost off the stack.
+    let mut split = def_of(
+        vec![
+            face_of(FaceKind::LeftHalf, Some("{1}{R}"), 0, vec![]),
+            face_of(FaceKind::RightHalf, Some("{2}{U}"), 0, vec![]),
+        ],
+        mask(10),
+    );
+    split.layout = LayoutBehavior::Split;
+    assert!(mv(&split, vec![Some(5), Some(5)]).is_empty());
+    assert_eq!(mv(&split, vec![Some(2), Some(3)]).len(), 2);
+    // CR 202.3c: a meld result is skipped.
+    let meld = def_of(
+        vec![face_of(FaceKind::MeldResult, None, 0, vec![])],
+        ColorBitmask::NONE,
+    );
+    assert!(mv(&meld, vec![Some(9)]).is_empty());
+    // Extra source entries, no source value, no source at all: skipped.
+    let one = def_of(vec![face(Some("{1}"), 0, vec![])], ColorBitmask::NONE);
+    assert!(mv(&one, vec![Some(1), Some(7)]).is_empty());
+    assert!(mv(&one, vec![None]).is_empty());
+    assert!(mv(&one, vec![]).is_empty());
+    none_of(&run(&one), LintId::MANA_VALUE);
+}
+
+/// REQ-ING-009, REQ-OBJ-001: generic amounts at the limit sum without overflow (u64).
+#[test]
+fn req_ing_009_mana_value_large() {
+    let cost = "{1000000}{1000000}{1000000/W}";
+    let def = def_of(vec![face(Some(cost), 0, vec![])], ColorBitmask::WHITE);
+    none_of(
+        &lint_definition(&def, &source(vec![(Some(3_000_000), None)], None)),
+        LintId::MANA_VALUE,
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-COLORS
+
+/// REQ-ING-009, REQ-ING-002 (CR 202.2, 105.2, 204.2): colors from cost symbols and the color
+/// indicator; a computed color missing from the source is an Error, an extra source color a
+/// Warning.
+#[test]
+fn req_ing_009_colors() {
+    let colors = |def: &CardDefinitionDSL, src: Option<ColorBitmask>| {
+        of(
+            &lint_definition(def, &source(vec![(None, src)], None)),
+            LintId::COLORS,
+        )
+    };
+    let mut f = face(Some("{W/U}{B/P}{2/R}{C/G}{1}{C}{S}{X}"), 0, vec![]);
+    let def = def_of(vec![f.clone()], mask(31));
+    assert!(colors(&def, Some(mask(31))).is_empty());
+    // Missing red: Error.
+    assert_eq!(
+        colors(&def, Some(mask(31 - 8))),
+        vec![(Severity::Error, "faces[0]".to_owned(), Some(0), None)]
+    );
+    let report = lint_definition(&def, &source(vec![(None, Some(mask(31 - 8)))], None));
+    let msg = &report.with_id(LintId::COLORS).next().expect("one").message;
+    assert!(msg.contains("colors R "), "{msg}");
+    // Color indicator (CR 204.2) on a costless face; an extra source color is a Warning.
+    f.mana_cost = None;
+    f.color_indicator = Some(ColorBitmask::GREEN);
+    let def = def_of(vec![f], ColorBitmask::GREEN);
+    assert!(colors(&def, Some(ColorBitmask::GREEN)).is_empty());
+    assert_eq!(
+        colors(&def, Some(mask(16 | 1))),
+        vec![(Severity::Warning, "faces[0]".to_owned(), Some(0), None)]
+    );
+    // Both directions at once.
+    let sev: Vec<_> = colors(&def, Some(ColorBitmask::WHITE))
+        .into_iter()
+        .map(|f| f.0)
+        .collect();
+    assert_eq!(sev, vec![Severity::Error, Severity::Warning]);
+    // No source colors, or no source: skipped.
+    assert!(colors(&def, None).is_empty());
+    none_of(&run(&def), LintId::COLORS);
+}
+
+// ---------------------------------------------------------------------------------------------
+// FPL-COLOR-IDENTITY
+
+/// REQ-ING-009, REQ-ING-002 (CR 903.4, 903.4d): identity unions every face's cost and indicator
+/// and every typed PAY_MANA / WATERBEND cost node of decodable abilities.
+#[test]
+fn req_ing_009_color_identity_passes() {
+    let act = json!({"abilityId": "a", "kind": "ACTIVATED",
+        "cost": [{"cost": "COMPOSITE", "costs": [
+            {"cost": "PAY_MANA", "mana": "{B}"}, {"cost": "TAP_SOURCE"}
+        ]}],
+        "effect": [{"op": "WATERBEND", "cost": [{"cost": "WATERBEND", "mana": "{G/U}"}]}]});
+    decodes(&act);
+    let mut back = face_of(FaceKind::Back, None, 0, vec![]);
+    back.color_indicator = Some(ColorBitmask::RED);
+    let mut def = def_of(vec![face(Some("{W}"), 0, vec![act]), back], mask(31));
+    def.layout = LayoutBehavior::DfcNonmodal;
+    none_of(&run(&def), LintId::COLOR_IDENTITY);
+    none_of(
+        &lint_definition(&def, &source(vec![], Some(mask(31)))),
+        LintId::COLOR_IDENTITY,
+    );
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 903.4): a computed color missing from the declared or source
+/// identity is an Error; a declared color not derivable is a Warning; literal text and
+/// undecodable abilities contribute nothing.
+#[test]
+fn req_ing_009_color_identity_fails() {
+    // Declared white, computed white + black (from an activated cost): Error.
+    let act = json!({"abilityId": "a", "kind": "ACTIVATED",
+        "cost": [{"cost": "PAY_MANA", "mana": "{B}"}], "effect": []});
+    decodes(&act);
+    let mut def = def_of(vec![face(Some("{W}"), 0, vec![act])], ColorBitmask::WHITE);
+    assert_eq!(
+        of(&run(&def), LintId::COLOR_IDENTITY),
+        vec![(Severity::Error, "$".to_owned(), None, None)]
+    );
+    // Declared white + black + green: green is a Warning.
+    def.color_identity = mask(1 | 4 | 16);
+    assert_eq!(
+        of(&run(&def), LintId::COLOR_IDENTITY),
+        vec![(Severity::Warning, "$".to_owned(), None, None)]
+    );
+    // Against the source too: declared fine, source lacks black.
+    def.color_identity = mask(1 | 4);
+    let report = lint_definition(&def, &source(vec![], Some(ColorBitmask::WHITE)));
+    let found: Vec<_> = report.with_id(LintId::COLOR_IDENTITY).collect();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].message.contains("source"), "{}", found[0].message);
+    // LITERAL text with symbols contributes nothing; an ability that does not encode
+    // contributes nothing either (FPL-SCHEMA reports it); the undecodable JSON of the old test
+    // is refused at load (#232).
+    let undecodable = json!({"abilityId": "x", "kind": "ACTIVATED",
+        "cost": [{"cost": "PAY_MANA", "mana": "{G}"}], "effect": [], "bogus": 1});
+    assert_rejected_at_load(&undecodable);
+    let mut f = face(Some("{W}"), 0, vec![]);
+    f.abilities.push(broken_keyword("x", "pay {G}"));
+    f.text = serde_json::from_value(json!([{"id": "t0", "kind": "LITERAL", "text": "{U}"}]))
+        .expect("text");
+    let def = def_of(vec![f], ColorBitmask::WHITE);
+    none_of(&run(&def), LintId::COLOR_IDENTITY);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ordering, de-duplication, determinism
+
+/// REQ-ING-009 (deterministic and ordered output): the report follows the total key
+/// (face, ability, id, severity, span, path, message), None first.
+#[test]
+fn req_ing_009_report_is_sorted_by_total_key() {
+    let mut def = def_of(
+        vec![
+            face(
+                Some("{W}"),
+                4,
+                vec![
+                    refers("r", "ghost"),
+                    json!({"abilityId": "z", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+                        "params": {"lookBack": 1}}),
+                ],
+            ),
+            face(Some("{U}"), 2, vec![declares("d", &["lonely"])]),
+        ],
+        ColorBitmask::NONE,
+    );
+    def.related_tokens = Some(vec!["test.token_gone".to_owned()]);
+    let mut ctx = source(vec![(Some(9), Some(ColorBitmask::GREEN))], None);
+    ctx.known_token_ids = Some(BTreeSet::new());
+    let report = lint_definition(&def, &ctx);
+    assert!(report.lints.len() > 8, "{report:#?}");
+    let keys: Vec<_> = report.lints.iter().map(Lint::key).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted);
+    sorted.dedup();
+    assert_eq!(keys.len(), sorted.len(), "duplicates");
+    // Card-level findings come first, the last face's last.
+    assert_eq!(report.lints[0].location.face_index, None);
+    assert_eq!(
+        report.lints.last().expect("last").location.face_index,
+        Some(1)
+    );
+}
+
+/// REQ-ING-009: equal findings appear once.
+#[test]
+fn req_ing_009_duplicates_removed() {
+    // Two unknown references to the same token in one ability give equal findings.
+    let s = json!({"abilityId": "s", "kind": "SPELL", "effect": [
+        {"op": "CREATE_TOKEN", "tokenDef": "test.t", "count": {"LITERAL": 1}},
+        {"op": "CREATE_TOKEN", "tokenDef": "test.t", "count": {"LITERAL": 1}},
+    ]});
+    let mut def = one_face(vec![s]);
+    def.faces[0].text = tokens(0);
+    let ctx = LintContext {
+        source: None,
+        known_token_ids: Some(BTreeSet::new()),
+    };
+    assert_eq!(
+        lint_definition(&def, &ctx)
+            .with_id(LintId::TOKEN_REF)
+            .count(),
+        1
+    );
+}
+
+/// Per original ability index (`order[j]` is the original index of position `j`): its
+/// findings as (id, severity, message).
+type PerAbility = BTreeMap<usize, Vec<(LintId, Severity, String)>>;
+
+/// Groups the ability-level findings of `report` by original ability index.
+fn per_ability(report: &LintReport, order: &[usize]) -> PerAbility {
+    let mut m: PerAbility = BTreeMap::new();
+    for l in &report.lints {
+        if let Some(j) = l.location.ability_index {
+            m.entry(order[j])
+                .or_default()
+                .push((l.id, l.severity, l.message.clone()));
+        }
+    }
+    m
+}
+
+/// REQ-ING-009, REQ-CORE-001 (R3): two runs give equal reports; reordering abilities gives the
+/// same findings per ability, with indices following the new positions.
+#[test]
+fn req_ing_009_determinism_and_reordering() {
+    let abilities = vec![
+        activated(json!({"targets": [slot()]})),
+        refers("r", "ghost"),
+        json!({"abilityId": "z", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+            "params": {"lookBack": 1}, "textSpan": [9, 9]}),
+        declares("d", &["lonely"]),
+    ];
+    let def = def_of(
+        vec![face(Some("{R}"), 3, abilities.clone())],
+        ColorBitmask::NONE,
+    );
+    let ctx = source(
+        vec![(Some(5), Some(ColorBitmask::BLUE))],
+        Some(ColorBitmask::GREEN),
+    );
+    let first = lint_definition(&def, &ctx);
+    assert_eq!(first, lint_definition(&def, &ctx));
+    let order = [3usize, 1, 0, 2];
+    let mut reordered = def.clone();
+    reordered.faces[0].abilities = order
+        .iter()
+        .map(|&k| ability(abilities[k].clone()))
+        .collect();
+    let second = lint_definition(&reordered, &ctx);
+    assert_eq!(
+        per_ability(&first, &[0, 1, 2, 3]),
+        per_ability(&second, &order)
+    );
+    assert_eq!(per_ability(&first, &[0, 1, 2, 3]).len(), 4);
+    let card_level = |r: &LintReport| -> Vec<Lint> {
+        r.lints
+            .iter()
+            .filter(|l| l.location.ability_index.is_none())
+            .cloned()
+            .collect()
+    };
+    assert_eq!(card_level(&first), card_level(&second));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Robustness (R12)
+
+/// `depth` alternately nested objects and arrays around `leaf`, built iteratively.
+fn nested(depth: usize, leaf: Value) -> Value {
+    let mut v = leaf;
+    for k in 0..depth {
+        let mut m = Map::new();
+        let key = if k % 3 == 0 { "op" } else { "k" };
+        m.insert(key.to_owned(), v);
+        v = if k % 2 == 0 {
+            Value::Object(m)
+        } else {
+            Value::Array(vec![Value::Object(m)])
+        };
+    }
+    v
+}
+
+/// Drops a deep value without recursion.
+fn drop_deep(v: Value) {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Array(items) => stack.extend(items),
+            Value::Object(map) => stack.extend(map.into_iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+}
+
+/// A keyword ability whose parameter `n` is `value` (hand-built: deep or unsafe values do not
+/// encode).
+fn keyword_with_param(id: &str, value: Value) -> AbilityAST {
+    let mut k = KeywordInstanceAST::new(AbilityBase::new(id), "TEST_KEYWORD");
+    k.params = Some(BTreeMap::from([("n".to_owned(), value)]));
+    AbilityAST::Keyword(k)
+}
+
+/// Drops the keyword parameters of every face and partner ability of `def` without recursion.
+fn drop_def(mut def: CardDefinitionDSL) {
+    let mut take = |a: AbilityAST| {
+        if let AbilityAST::Keyword(k) = a {
+            k.params
+                .into_iter()
+                .flat_map(BTreeMap::into_values)
+                .for_each(drop_deep);
+        }
+    };
+    for face in std::mem::take(&mut def.faces) {
+        face.abilities.into_iter().for_each(&mut take);
+    }
+    if let Some(e) = def.commander_eligibility.take() {
+        e.partner_abilities
+            .into_iter()
+            .map(PartnerAbilityDSL::into_ability)
+            .for_each(&mut take);
+    }
+}
+
+/// REQ-ING-009, R12: deep nesting far beyond MAX_DEPTH, null, huge integers and an empty face
+/// list never panic. Since #232 such content can only reach a definition as hand-built typed
+/// values (it does not encode, so FPL-SCHEMA reports each position and nothing else is walked);
+/// the JSON walker itself still walks the same deep JSON without recursion, and the JSON is
+/// refused at load.
+#[test]
+fn req_ing_009_robust_on_hostile_values() {
+    let depth = crate::canonical::MAX_DEPTH * 40;
+    let deep = nested(depth, json!({"lookBack": 1, "op": "REPEAT_WHILE"}));
+    let deep_partner = nested(depth, json!({"look_back": 0}));
+    // The walker: one look-back key and one bad REPEAT_WHILE at the bottom of each.
+    let scanned = walk::scan(&deep);
+    assert_eq!(scanned.lookback.len(), 1);
+    assert_eq!(scanned.bad_repeat.len(), 1);
+    assert_eq!(walk::scan(&deep_partner).lookback.len(), 1);
+    let paths = scanned.lookback.iter().map(|(_, p)| p);
+    for path in paths.chain(scanned.bad_repeat.iter().map(|(p, _)| p)) {
+        assert!(path.len() < 400, "{path}");
+    }
+    drop(scanned);
+    let mut def = one_face(vec![]);
+    def.faces[0].abilities = vec![
+        keyword_with_param("a0", deep),
+        keyword_with_param("a1", Value::Null),
+        keyword_with_param("a2", json!(18_446_744_073_709_551_615u64)),
+        broken_keyword("a3", "x"),
+    ];
+    // A value expression just past the depth budget, and literals beyond the safe range.
+    let mut power = ValueExpressionAST::X;
+    for _ in 0..crate::canonical::MAX_DEPTH {
+        power = ValueExpressionAST::Math {
+            op: crate::expr::MathOp::Add,
+            lhs: Box::new(power),
+            rhs: Box::new(ValueExpressionAST::Literal(1)),
+        };
+    }
+    def.faces[0].power = Some(power);
+    def.faces[0].toughness = Some(ValueExpressionAST::Literal(-i64::MAX));
+    def.commander_eligibility = Some(CommanderEligibilityDSL {
+        eligible: false,
+        partner_abilities: vec![
+            PartnerAbilityDSL::new(keyword_with_param("p0", deep_partner)).expect("keyword"),
+        ],
+    });
+    let report = run(&def);
+    assert_eq!(report.with_id(LintId::SCHEMA).count(), 7, "{report:#?}");
+    assert_eq!(report.with_id(LintId::LOOK_BACK).count(), 0);
+    assert_eq!(report.with_id(LintId::MAX_ITER).count(), 0);
+    for l in &report.lints {
+        assert!(l.message.len() < 400, "{}", l.message);
+    }
+    drop_def(def);
+    // The JSON forms are refused at load.
+    for raw in [
+        json!(null),
+        json!("x"),
+        json!([1, [2]]),
+        json!({"abilityId": "z", "lookBack": 1}),
+    ] {
+        assert_rejected_at_load(&raw);
+    }
+    let mut empty = one_face(vec![]);
+    empty.faces.clear();
+    empty.color_identity = ColorBitmask::NONE;
+    let ctx = source(
+        vec![(Some(1), Some(ColorBitmask::RED))],
+        Some(ColorBitmask::RED),
+    );
+    let report = lint_definition(&empty, &ctx);
+    assert_eq!(
+        of(&report, LintId::COLOR_IDENTITY),
+        vec![(Severity::Warning, "$".to_owned(), None, None)]
+    );
+    assert_eq!(report.lints.len(), 1);
+}
+
+/// Member names biased towards the DSL.
+const KEYS: [&str; 16] = [
+    "op",
+    "kind",
+    "abilityId",
+    "effect",
+    "effects",
+    "type",
+    "layer",
+    "maxIter",
+    "tokenDef",
+    "ref",
+    "linkId",
+    "linkIds",
+    "textSpan",
+    "lookBack",
+    "cost",
+    "mana",
+];
+
+/// String values biased towards the DSL.
+const STRS: [&str; 14] = [
+    "REPEAT_WHILE",
+    "CREATE_TOKEN",
+    "LINKED",
+    "STATIC",
+    "CHAR",
+    "RULE",
+    "PLAYER",
+    "PAY_MANA",
+    "{W}{U}",
+    "{2/G}",
+    "ACTIVATED",
+    "KEYWORD",
+    "l1",
+    "",
+];
+
+/// A uniform index below `n` from `rng`.
+fn pick(rng: &mut Pcg64Dxsm, n: usize) -> usize {
+    let bound = u64::try_from(n).unwrap_or(u64::MAX);
+    usize::try_from(rng.next_bounded(bound).unwrap_or(0)).unwrap_or(0)
+}
+
+/// A pseudo-random JSON value from `rng` with at most about `budget` nodes.
+fn random_value(rng: &mut Pcg64Dxsm, budget: &mut u32, depth: u32) -> Value {
+    *budget = budget.saturating_sub(1);
+    let choice = if *budget == 0 || depth > 12 {
+        pick(rng, 5)
+    } else {
+        pick(rng, 8)
+    };
+    match choice {
+        0 => Value::Null,
+        1 => Value::Bool(rng.next_u64() & 1 == 1),
+        2 => match pick(rng, 4) {
+            0 => json!(rng.next_u64()),
+            1 => json!(-i64::try_from(rng.next_u64() >> 2).unwrap_or(0)),
+            2 => serde_json::from_str("0.5").expect("number"),
+            _ => json!(pick(rng, 4)),
+        },
+        3 | 4 => json!(STRS[pick(rng, STRS.len())]),
+        5 => {
+            let n = pick(rng, 4);
+            Value::Array(
+                (0..n)
+                    .map(|_| random_value(rng, budget, depth + 1))
+                    .collect(),
+            )
+        }
+        _ => {
+            let n = pick(rng, 5);
+            let mut m = Map::new();
+            for _ in 0..n {
+                let k = KEYS[pick(rng, KEYS.len())].to_owned();
+                m.insert(k, random_value(rng, budget, depth + 1));
+            }
+            Value::Object(m)
+        }
+    }
+}
+
+/// Asserts `report` is sorted by its key, de-duplicated and equal to `again`.
+fn assert_sorted_and_stable(report: &LintReport, again: &LintReport) {
+    let keys: Vec<_> = report.lints.iter().map(Lint::key).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(keys, sorted);
+    assert_eq!(report, again);
+}
+
+/// REQ-ING-009, R12 (bounded pseudo-random run): random raw abilities, text tokens and value
+/// expressions never panic. Since #232 the typed positions take only what decodes, so each
+/// random value is decoded into its position when it can be (the definition is then linted)
+/// and the raw abilities are also linted by their JSON form alone ([`run_raw_with`]); every
+/// report is sorted, de-duplicated and stable.
+#[test]
+fn req_ing_009_random_values_never_panic() {
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x0016_1157_0000_0001);
+    for _ in 0..400 {
+        let mut budget = 60;
+        let abilities: Vec<Value> = (0..3)
+            .map(|_| random_value(&mut rng, &mut budget, 0))
+            .collect();
+        let mut def = one_face(vec![]);
+        def.faces[0].abilities = abilities
+            .iter()
+            .filter_map(|a| serde_json::from_value(a.clone()).ok())
+            .collect();
+        let mut budget = 20;
+        let text = Value::Array(
+            (0..2)
+                .map(|_| random_value(&mut rng, &mut budget, 0))
+                .collect(),
+        );
+        if let Ok(text) = serde_json::from_value(text) {
+            def.faces[0].text = text;
+        }
+        if let Ok(t) = serde_json::from_value(random_value(&mut rng, &mut budget, 0)) {
+            def.faces[0].toughness = Some(t);
+        }
+        def.related_tokens = Some(vec!["test.t".to_owned()]);
+        let mut ctx = source(
+            vec![(Some(1), Some(ColorBitmask::BLUE))],
+            Some(ColorBitmask::GREEN),
+        );
+        ctx.known_token_ids = Some(BTreeSet::from(["l1".to_owned()]));
+        assert_sorted_and_stable(&lint_definition(&def, &ctx), &lint_definition(&def, &ctx));
+        assert_sorted_and_stable(
+            &run_raw_with(&def, &abilities, &ctx),
+            &run_raw_with(&def, &abilities, &ctx),
+        );
+    }
+}
+
+/// REQ-ING-009: `clip` cuts on a character boundary.
+#[test]
+fn req_ing_009_clip_on_char_boundary() {
+    assert_eq!(clip("abc", 5), "abc");
+    assert_eq!(clip("ééé", 2), "éé...");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn review fixes
+
+/// A DRAW of one card by the controller.
+fn draw_one() -> Value {
+    json!({"op": "DRAW", "player": {"ref": "CONTROLLER"}, "count": {"LITERAL": 1}})
+}
+
+/// Asserts the one-face definition with `a` as its only ability gives `n` FPL-MANA-ABILITY
+/// findings.
+fn mana_findings(a: &Value, n: usize) {
+    decodes(a);
+    let report = run(&one_face(vec![a.clone()]));
+    assert_eq!(
+        of(&report, LintId::MANA_ABILITY).len(),
+        n,
+        "{a}: {report:#?}"
+    );
+}
+
+/// REQ-ING-009 (CR 605.1a, gate 06-turn F50): an `EXILE_UNTIL` whose `objects` selector takes
+/// cards from a library moves a card from a library, so a targetless TAP_SOURCE ability
+/// declared a mana ability is an Error; the same instruction on the battlefield is not.
+#[test]
+fn req_ing_009_mana_ability_exile_until_from_library() {
+    let exile = |zone: &str| {
+        activated(json!({"effect": [{"op": "EXILE_UNTIL",
+            "objects": {"zones": [zone], "pred": "IS_LAND"},
+            "duration": {"kind": "UNTIL_END_OF_TURN"}}]}))
+    };
+    let library = exile("LIBRARY");
+    mana_findings(&library, 1);
+    let report = run(&one_face(vec![library]));
+    let lint = report.with_id(LintId::MANA_ABILITY).next().expect("one");
+    assert!(lint.message.contains("library"), "{}", lint.message);
+    mana_findings(&exile("BATTLEFIELD"), 0);
+}
+
+/// REQ-ING-009 (CR 605.1a, CR 603.7, gate 06-turn F51): the body of a delayed trigger the
+/// ability creates is a separate ability, so its DRAW is not counted; the same DRAW in the
+/// ability itself, or in an inline IF branch, is.
+#[test]
+fn req_ing_009_mana_ability_skips_delayed_trigger_body() {
+    let delayed = json!({"op": "CREATE_DELAYED_TRIGGER",
+        "trigger": {"mode": "EVENT", "event": {"kind": "DIES"}},
+        "effect": [draw_one()], "oneShot": true});
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"}, delayed]})),
+        0,
+    );
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"}, draw_one()]})),
+        1,
+    );
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"},
+            {"op": "IF", "cond": {"pred": "IS_CREATURE"}, "then": [draw_one()]}]})),
+        1,
+    );
+}
+
+/// REQ-ING-009, REQ-DSL-015 (CR 605.1a, SRS §14.8, gate 06-turn R16): the `params` of a
+/// NATIVE_EFFECT are opaque data, so a DRAW-shaped or MOVE-to-LIBRARY-shaped object inside them
+/// is not counted as moving a card to or from a library; a real DRAW or MOVE to LIBRARY next to
+/// the native effect in the same effect list still is.
+#[test]
+fn req_ing_009_mana_ability_skips_native_effect_params() {
+    let native = |params: Value| json!({"op": "NATIVE_EFFECT", "id": "test.native", "version": 1, "params": params});
+    let move_to_library = json!({"op": "MOVE", "objects": {"ref": "SELF"}, "toZone": "LIBRARY"});
+    for params in [
+        json!({"op": "DRAW"}),
+        json!({"op": "MOVE", "toZone": "LIBRARY"}),
+    ] {
+        mana_findings(
+            &activated(json!({"effect": [{"op": "POPULATE"}, native(params.clone())]})),
+            0,
+        );
+        mana_findings(
+            &activated(json!({"effect": [native(params.clone()), draw_one()]})),
+            1,
+        );
+        mana_findings(
+            &activated(json!({"effect": [native(params), move_to_library.clone()]})),
+            1,
+        );
+    }
+}
+
+/// REQ-ING-009, REQ-DSL-005, REQ-DSL-015 (CR 603.10, gate 06-turn R17): keyword `params` are
+/// keyword data, so an object there whose `op` is NATIVE_EFFECT is not a native instruction and
+/// a look-back key inside its `params` is reported at its path under the keyword's `params`.
+#[test]
+fn req_ing_009_look_back_in_keyword_native_shaped_param() {
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0],
+        "params": {"k": {"op": "NATIVE_EFFECT", "params": {"lookBack": true}}}});
+    decodes(&kw);
+    for report in [run(&one_face(vec![kw.clone()])), run_raw(&[kw])] {
+        let messages: Vec<&str> = report
+            .with_id(LintId::LOOK_BACK)
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("$.params.k.params.lookBack"),
+            "{}",
+            messages[0]
+        );
+    }
+}
+
+/// REQ-ING-009, REQ-DSL-015 (CR 603.10, SRS §14.8, gate 06-turn R17): a NATIVE_EFFECT
+/// instruction nested in an IF body of a SPELL effect is still an instruction, so its `params`
+/// stay opaque and a look-back key inside them is not reported.
+#[test]
+fn req_ing_009_look_back_skips_nested_native_effect_params() {
+    let spell = json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0], "effect": [
+        {"op": "IF", "cond": {"pred": "IS_CREATURE"}, "then": [
+            {"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+                "params": {"lookBack": true}}
+        ]}
+    ]});
+    decodes(&spell);
+    none_of(&run(&one_face(vec![spell.clone()])), LintId::LOOK_BACK);
+    none_of(&run_raw(&[spell]), LintId::LOOK_BACK);
+}
+
+/// REQ-ING-009, REQ-DSL-015 (CR 603.10, SRS §14.8, gate 06-turn F53): a look-back-like key in
+/// the opaque `params` of a NATIVE_EFFECT is not reported; one nested in a trigger matcher's
+/// filters still is, and so is one in keyword `params` (`req_ing_009_look_back`).
+#[test]
+fn req_ing_009_look_back_skips_native_effect_params() {
+    let spell = json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0], "effect": [
+        {"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+            "params": {"lookBack": true}}
+    ]});
+    decodes(&spell);
+    let typed = run(&one_face(vec![spell.clone()]));
+    none_of(&typed, LintId::LOOK_BACK);
+    none_of(&run_raw(&[spell]), LintId::LOOK_BACK);
+    // Nested in a matcher filter (refused at load, so checked on its JSON form).
+    let t = json!({"abilityId": "t", "kind": "TRIGGERED", "textSpan": [0, 0],
+        "trigger": {"mode": "EVENT", "event": {"kind": "DIES", "subject": {"ref": "SELF"},
+            "filters": {"inner": {"lookBack": true}}}},
+        "effect": [{"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+            "params": {"lookBack": true}}]});
+    let report = run_raw(&[t]);
+    let messages: Vec<&str> = report
+        .with_id(LintId::LOOK_BACK)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert!(
+        messages[0].contains("$.trigger.event.filters.inner.lookBack"),
+        "{}",
+        messages[0]
+    );
+    // A member named `params` outside a NATIVE_EFFECT is not opaque.
+    let other = json!({"abilityId": "o", "kind": "SPELL", "textSpan": [0, 0],
+        "effect": [{"op": "POPULATE", "params": {"lookBack": true}}]});
+    assert_eq!(run_raw(&[other]).with_id(LintId::LOOK_BACK).count(), 1);
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 202.3d, CR 709.4b, CR 709.5, gate 06-turn F98): each half of
+/// a Room has the combined mana value of both halves (unequal halves {1}{U} and {3}{R}: 6).
+#[test]
+fn req_ing_009_mana_value_room_combined() {
+    let mut room = def_of(
+        vec![
+            face_of(FaceKind::LeftHalf, Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::RightHalf, Some("{3}{R}"), 0, vec![]),
+        ],
+        mask(10),
+    );
+    room.layout = LayoutBehavior::Room;
+    let mv = |faces: Vec<Option<u32>>| {
+        let ctx = source(faces.into_iter().map(|m| (m, None)).collect(), None);
+        of(&lint_definition(&room, &ctx), LintId::MANA_VALUE)
+    };
+    assert!(mv(vec![Some(6), Some(6)]).is_empty());
+    assert_eq!(
+        mv(vec![Some(2), Some(4)]),
+        vec![
+            (Severity::Error, "faces[0]".to_owned(), Some(0), None),
+            (Severity::Error, "faces[1]".to_owned(), Some(1), None),
+        ]
+    );
+    assert_eq!(mv(vec![Some(6), Some(4)]).len(), 1);
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 710.1c, gate 06-turn F99): the Flipped face of a flip card
+/// has the Main face's mana value and colors; a modal double-faced card's back face keeps its
+/// own (absent) cost.
+#[test]
+fn req_ing_009_flip_uses_main_cost_and_colors() {
+    let mut flip = def_of(
+        vec![
+            face(Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::Flipped, None, 0, vec![]),
+        ],
+        ColorBitmask::BLUE,
+    );
+    flip.layout = LayoutBehavior::Flip;
+    let blue = Some(ColorBitmask::BLUE);
+    let report = lint_definition(&flip, &source(vec![(Some(2), blue), (Some(2), blue)], None));
+    none_of(&report, LintId::MANA_VALUE);
+    none_of(&report, LintId::COLORS);
+    let report = lint_definition(
+        &flip,
+        &source(
+            vec![(Some(2), blue), (Some(0), Some(ColorBitmask::NONE))],
+            None,
+        ),
+    );
+    assert_eq!(
+        of(&report, LintId::MANA_VALUE),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    assert_eq!(
+        of(&report, LintId::COLORS),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    // A modal DFC computes per face: its back face without a cost has value 0 and no colors.
+    let mut mdfc = def_of(
+        vec![
+            face(Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::Back, None, 0, vec![]),
+        ],
+        ColorBitmask::BLUE,
+    );
+    mdfc.layout = LayoutBehavior::DfcModal;
+    let none = Some(ColorBitmask::NONE);
+    let report = lint_definition(&mdfc, &source(vec![(Some(2), blue), (Some(0), none)], None));
+    none_of(&report, LintId::MANA_VALUE);
+    none_of(&report, LintId::COLORS);
+    let report = lint_definition(&mdfc, &source(vec![(Some(2), blue), (Some(2), blue)], None));
+    assert_eq!(
+        of(&report, LintId::MANA_VALUE),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    assert_eq!(
+        of(&report, LintId::COLORS),
+        vec![(Severity::Warning, "faces[1]".to_owned(), Some(1), None)]
+    );
+}
+
+/// A finding reduced to (severity, path, face, span).
+type Spanned = (Severity, String, Option<usize>, Option<(u32, u32)>);
+
+/// A finding reduced to (id, severity, path, face, span).
+type Ordered<'a> = (
+    &'a str,
+    Severity,
+    &'a str,
+    Option<usize>,
+    Option<(u32, u32)>,
+);
+
+/// REQ-ING-009, REQ-NFR-006 (SRS §14.3 `textSpan`, gate 06-turn F100): many faces with one
+/// covering ability each, one face with no ability and one face with an uncovered token give
+/// exactly the expected coverage findings.
+#[test]
+fn req_ing_009_text_coverage_many_faces() {
+    const FACES: usize = 2_000;
+    let mut faces: Vec<CardFaceDSL> = (0..FACES)
+        .map(|_| face(None, 1, vec![keyword("k", 0, 0)]))
+        .collect();
+    // Face 1000: two tokens and no ability; face FACES: three tokens, only token 0 covered.
+    faces[1_000] = face(None, 2, vec![]);
+    faces.push(face(None, 3, vec![keyword("k", 0, 0)]));
+    let def = def_of(faces, ColorBitmask::NONE);
+    let report = run(&def);
+    let found: Vec<Spanned> = report
+        .with_id(LintId::TEXT_COVERAGE)
+        .map(|l| {
+            (
+                l.severity,
+                l.location.path.clone(),
+                l.location.face_index,
+                l.location.text_span,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            (
+                Severity::Error,
+                "faces[1000].text".to_owned(),
+                Some(1_000),
+                Some((0, 1))
+            ),
+            (
+                Severity::Error,
+                "faces[2000].text".to_owned(),
+                Some(2_000),
+                Some((1, 2))
+            ),
+        ]
+    );
+}
+
+/// REQ-ING-009 (CR 607.1, gate 06-turn F101): two link ids that differ only after the clip
+/// give two distinct findings; the same id twice gives one.
+#[test]
+fn req_ing_009_link_id_clipped_ids_stay_distinct() {
+    let long_a = format!("{}a", "x".repeat(64));
+    let long_b = format!("{}b", "x".repeat(64));
+    let spell = |ids: [&str; 2]| {
+        json!({"abilityId": "r", "kind": "SPELL", "effect": [
+            {"op": "DESTROY", "objects": {"ref": "LINKED", "linkId": ids[0]}},
+            {"op": "DESTROY", "objects": {"ref": "LINKED", "linkId": ids[1]}},
+        ]})
+    };
+    let count = |a: Value| {
+        let mut def = one_face(vec![a]);
+        def.faces[0].text = tokens(0);
+        let report = run(&def);
+        assert!(
+            report
+                .with_id(LintId::LINK_ID)
+                .all(|l| l.severity == Severity::Error),
+            "{report:#?}"
+        );
+        report.with_id(LintId::LINK_ID).count()
+    };
+    assert_eq!(count(spell([&long_a, &long_b])), 2);
+    assert_eq!(count(spell([&long_a, &long_a])), 1);
+    // Unclipped ids keep their plain quoted form.
+    let mut def = one_face(vec![spell(["ghost", "ghost"])]);
+    def.faces[0].text = tokens(0);
+    let report = run(&def);
+    let msg = &report.with_id(LintId::LINK_ID).next().expect("one").message;
+    assert!(msg.contains("\"ghost\" that"), "{msg}");
+}
+
+/// REQ-ING-009 (referenced token definitions exist, gate 06-turn F101): two unknown token ids
+/// that differ only after the clip give two distinct findings; the same id twice gives one.
+#[test]
+fn req_ing_009_token_ref_clipped_ids_stay_distinct() {
+    let long_a = format!("test.{}a", "x".repeat(64));
+    let long_b = format!("test.{}b", "x".repeat(64));
+    let spell = |ids: [&str; 2]| {
+        json!({"abilityId": "s", "kind": "SPELL", "effect": [
+            {"op": "CREATE_TOKEN", "tokenDef": ids[0], "count": {"LITERAL": 1}},
+            {"op": "CREATE_TOKEN", "tokenDef": ids[1], "count": {"LITERAL": 1}},
+        ]})
+    };
+    let ctx = LintContext {
+        source: None,
+        known_token_ids: Some(BTreeSet::new()),
+    };
+    let count = |a: Value| {
+        let mut def = one_face(vec![a]);
+        def.faces[0].text = tokens(0);
+        lint_definition(&def, &ctx)
+            .with_id(LintId::TOKEN_REF)
+            .count()
+    };
+    assert_eq!(count(spell([&long_a, &long_b])), 2);
+    assert_eq!(count(spell([&long_a, &long_a])), 1);
+    // relatedTokens entries are told apart too, each at its own path.
+    let mut def = clean();
+    def.related_tokens = Some(vec![long_a.clone(), long_b.clone()]);
+    let report = lint_definition(&def, &ctx);
+    let messages: BTreeSet<&str> = report
+        .with_id(LintId::TOKEN_REF)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 2, "{report:#?}");
+}
+
+/// REQ-ING-009 (location contract `LintLocation::ability`, gate 06-turn F104): an ability
+/// that does not encode keeps its typed, ordered `text_span` in the finding's location; an
+/// unordered typed span gives no span.
+#[test]
+fn req_ing_009_schema_keeps_typed_span() {
+    let with_span = |span: (u32, u32)| {
+        let mut base = AbilityBase::new("b");
+        base.text_span = Some(span);
+        let mut def = one_face(vec![]);
+        def.faces[0]
+            .abilities
+            .push(AbilityAST::Keyword(KeywordInstanceAST::new(
+                base,
+                "not upper",
+            )));
+        run(&def)
+    };
+    let report = with_span((0, 0));
+    let schema: Vec<&Lint> = report.with_id(LintId::SCHEMA).collect();
+    assert_eq!(schema.len(), 1, "{report:#?}");
+    assert_eq!(schema[0].location.path, "faces[0].abilities[0]");
+    assert_eq!(schema[0].location.text_span, Some((0, 0)));
+    // The span covers the one token, so there is no coverage gap.
+    none_of(&report, LintId::TEXT_COVERAGE);
+    let report = with_span((3, 1));
+    let schema: Vec<&Lint> = report.with_id(LintId::SCHEMA).collect();
+    assert_eq!(schema.len(), 1, "{report:#?}");
+    assert_eq!(schema[0].location.text_span, None);
+}
+
+/// REQ-ING-009 (deterministic and ordered output, gate 06-turn F24): the report order written
+/// out literally for two findings whose face order and lint-id order disagree: the face-0
+/// FPL-TEXT-COVERAGE gap comes before the face-1 FPL-MANA-VALUE mismatch although
+/// "FPL-MANA-VALUE" < "FPL-TEXT-COVERAGE" (key: face, ability, id, severity, span, path,
+/// message).
+#[test]
+fn req_ing_009_report_order_literal() {
+    let def = def_of(
+        vec![face(Some("{W}"), 1, vec![]), face(Some("{W}"), 0, vec![])],
+        ColorBitmask::WHITE,
+    );
+    let report = lint_definition(&def, &source(vec![(Some(1), None), (Some(5), None)], None));
+    let order: Vec<Ordered<'_>> = report
+        .lints
+        .iter()
+        .map(|l| {
+            (
+                l.id.as_str(),
+                l.severity,
+                l.location.path.as_str(),
+                l.location.face_index,
+                l.location.text_span,
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (
+                "FPL-TEXT-COVERAGE",
+                Severity::Error,
+                "faces[0].text",
+                Some(0),
+                Some((0, 0))
+            ),
+            ("FPL-MANA-VALUE", Severity::Error, "faces[1]", Some(1), None),
+        ]
+    );
+}

@@ -1,0 +1,53 @@
+{
+  "cardDefId": "test.first_strike_2_1",
+  "colorIdentity": 8,
+  "definitionHash": "c342ffc7495f68fc3f14fe98d2695573940b2ec519c4c9e1f76698a6230063bd",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "keyword": "FIRST_STRIKE",
+          "kind": "KEYWORD",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{1}{R}",
+      "name": "test.first_strike_2_1",
+      "power": {
+        "LITERAL": 2
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ],
+      "toughness": {
+        "LITERAL": 1
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

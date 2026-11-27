@@ -23,8 +23,8 @@ use std::rc::Rc;
 use fineprint_base::ids::ObjectId;
 use fineprint_core::layers::{
     Affected, ContinuousEffect, ContinuousEffects, ForAsLongAsWindow, LayerCache, LayerError,
-    LayerModification, MatchContext, OrderItem, OrderRecord, decode_rules_text, encode_rules_text,
-    evaluate, evaluate_all, evaluate_with_order, evaluated_digest, resolve_selector_words,
+    LayerModification, MatchContext, OrderItem, OrderRecord, evaluate, evaluate_all,
+    evaluate_with_order, evaluated_digest, resolve_selector_words,
 };
 use fineprint_core::objects::Characteristics;
 use fineprint_dsl::ability::Layer;
@@ -74,12 +74,14 @@ fn stream(tokens: Vec<TextToken>) -> Stream {
     Stream::new(tokens).expect("valid stream")
 }
 
+/// #232 FP-164: the rules text of `Characteristics` is the typed stream itself, so the former
+/// `encode_rules_text`/`decode_rules_text` bridge is the identity.
 fn enc(tokens: Vec<TextToken>) -> card::TextTokenStream {
-    encode_rules_text(&stream(tokens))
+    stream(tokens)
 }
 
 fn dec(t: &card::TextTokenStream) -> Stream {
-    decode_rules_text(t).expect("evaluated rules text decodes")
+    t.clone()
 }
 
 fn replace(category: RewritableCategory, from: &str, to: &str) -> LayerModification {
@@ -393,7 +395,11 @@ fn card_name_replacement_rejected() {
     let mut env = TestEnv::new();
     let a = env.put(oid(A), with_text("test.text_a", req1_tokens()));
     let mut r = registry(&[(1, text_eff(5, &[a], BasicLandType, "Swamp", "Island"))]);
-    for (from, to) in [("Swamp", "Island"), ("", ""), ("\u{FFFF}", "x")] {
+    for (from, to) in [
+        ("test.name_one", "test.name_two"),
+        ("", ""),
+        ("\u{FFFF}", "x"),
+    ] {
         for affected in [objs(&[a]), by_sel(SEL_ALL)] {
             let e = eff(Layer::L3, 6, affected, replace(CardName, from, to));
             let res = register_all_three(&mut r, &env, 2, e);
@@ -1148,12 +1154,18 @@ fn set_text_keeping_matched_word_and_replace_both_orders() {
 // 11. no-op rules
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-DSL-012, REQ-CORE-001, REQ-LAYER-005: placeholder garbage and empty text evaluate Ok and
-/// unchanged; an effect matching no token leaves the text equal to the base.
+/// REQ-DSL-012, REQ-CORE-001, REQ-LAYER-005: text without a matching word (literal-only text
+/// holding the former placeholder word, empty text, text whose words do not match) evaluates
+/// Ok and unchanged; an effect matching no token leaves the text equal to the base. #232
+/// FP-164: the former undecodable placeholder `["test.word"]` is refused as a typed stream and
+/// is replaced by a valid LITERAL token with the same text.
 #[test]
 fn no_op_rules() {
-    let garbage = card::TextTokenStream(vec!["test.word".into()]);
-    let empty = card::TextTokenStream(Vec::new());
+    assert!(
+        serde_json::from_value::<card::TextTokenStream>(serde_json::json!(["test.word"])).is_err()
+    );
+    let garbage = enc(vec![lit_t("g0", "test.word")]);
+    let empty = card::TextTokenStream::default();
     let unmatched = enc(req1_tokens());
     for base_text in [garbage, empty, unmatched] {
         let mut env = TestEnv::new();
@@ -1169,16 +1181,27 @@ fn no_op_rules() {
             (2, text_eff(6, &[a], ColorWord, "Green", "Blue")),
         ]);
         let e = evaluate(&r, &env, a).expect("evaluate is Ok");
-        assert_eq!(e.characteristics.rules_text.0, base_text.0);
+        assert_eq!(e.characteristics.rules_text, base_text);
+        assert_eq!(
+            serde_json::to_vec(&e.characteristics.rules_text).unwrap(),
+            serde_json::to_vec(&base_text).unwrap(),
+            "byte-identical text"
+        );
         assert_eq!(e.characteristics, norm(env.base_chars(a)));
     }
 }
 
-/// REQ-DSL-012, REQ-CORE-001: garbage placeholder text under a matching-looking replacement
-/// stays unchanged too (the effect is a no-op, never an error).
+/// REQ-DSL-012, REQ-CORE-001, CR 612.1: text under a matching-looking replacement stays
+/// unchanged too when the matching value is not a rewritable word (the effect is a no-op, never
+/// an error). #232 FP-164 (T2 replacement of "garbage placeholder text"): the synthetic card
+/// name `["test.name_one"]` is refused as a typed stream; the same spelling as LITERAL text and
+/// as an OTHER name reference, with a replacement whose `from` is that spelling, is never
+/// rewritten (R5: a card name, not basic-land vocabulary).
 #[test]
 fn no_op_on_undecodable_text_with_effect() {
-    let garbage = card::TextTokenStream(vec!["Swamp".into()]);
+    const NAME: &str = "test.name_one";
+    assert!(serde_json::from_value::<card::TextTokenStream>(serde_json::json!([NAME])).is_err());
+    let garbage = enc(vec![lit_t("g0", NAME), other_ref("g1", NAME)]);
     let mut env = TestEnv::new();
     let a = env.put(
         oid(A),
@@ -1187,7 +1210,7 @@ fn no_op_on_undecodable_text_with_effect() {
             ..enchantment("test.noop")
         },
     );
-    let r = registry(&[(1, text_eff(5, &[a], BasicLandType, "Swamp", "Island"))]);
+    let r = registry(&[(1, text_eff(5, &[a], BasicLandType, NAME, "Island"))]);
     let e = evaluate(&r, &env, a).expect("Ok");
     assert_eq!(e.characteristics.rules_text, garbage);
 }

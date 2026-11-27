@@ -14,8 +14,10 @@ use fineprint_base::hash::{
 use fineprint_base::ids::{IdGenerators, PlayerId};
 use fineprint_base::prng::{ALGORITHM_ID, Pcg64Dxsm, SplitMix64};
 
+use super::effects_tests::populate_layers;
 use super::wire::{DesignationWire, PlayerWire, StateWire};
 use super::*;
+use crate::layers::{CounterHolder, LayerModification, StampReason};
 
 // ---------------------------------------------------------------------------------------------
 // Harness
@@ -127,6 +129,9 @@ fn gen_state_with(rng: &mut SplitMix64, count: usize) -> GameState {
     let mut order = ids.clone();
     shuffle(rng, &mut order);
     s.set_turn_order(order).unwrap();
+    // The layer components (REQ-LAYER-001, REQ-CORE-002): effects, links and timestamps.
+    let steps = below(rng, 12);
+    populate_layers(rng, &mut s, steps);
     s
 }
 
@@ -211,6 +216,7 @@ fn wire_shape_members() {
     assert_eq!(
         keys,
         [
+            "effect_generators",
             "effects",
             "format_version",
             "history",
@@ -218,6 +224,7 @@ fn wire_shape_members() {
             "players",
             "prng",
             "prng_algorithm",
+            "timestamps",
             "turn"
         ]
     );
@@ -304,6 +311,38 @@ fn mutators() -> Vec<(&'static str, Mutator)> {
         ("timestamp", |s| ok(s.issue_timestamp())),
         ("link", |s| ok(s.issue_link_id())),
         ("add_player", |s| ok(s.add_player(3))),
+        ("register_effect", |s| {
+            let ts = s.stamp_resolved_effect().unwrap();
+            let effect = crate::layers::ContinuousEffect {
+                source: None,
+                controller: pid(1),
+                timestamp: ts,
+                layer: fineprint_dsl::ability::Layer::L6,
+                is_cda: false,
+                origin: crate::layers::EffectOrigin::Resolved,
+                affected: crate::layers::Affected::Objects(Default::default()),
+                modification: LayerModification::RemoveAllAbilities,
+            };
+            ok(s.register_effect(effect, None));
+        }),
+        ("stamp_object", |s| {
+            ok(s.stamp_object(
+                fineprint_base::ids::ObjectId::new(900),
+                StampReason::EntersZone,
+            ));
+        }),
+        ("stamp_counters", |s| {
+            let holder = CounterHolder::Player(pid(1));
+            ok(s.stamp_counters(holder, "test.counter_s"));
+        }),
+        ("link_effect_generator", |s| {
+            let id = s.issue_effect_id().unwrap();
+            let g = GeneratingAbility::new(
+                fineprint_base::ids::ObjectId::new(900),
+                synthetic_ability("test.ability.link"),
+            );
+            ok(s.link_effect_generator(id, g));
+        }),
         ("set_turn_order", |s| {
             let mut o = s.turn_order().to_vec();
             o.reverse();
@@ -467,8 +506,8 @@ fn golden_mutated() -> GameState {
     s
 }
 
-const GOLDEN_NEW_42_2_20: &str = "f32bbec462508986efd89ed35f9184bec86a107f774505e19c4f65d3db4fb0d5";
-const GOLDEN_MUTATED: &str = "7ebe9f5c17abfc986c0168e1722807514fd1372a1e6dcc10dca594afdfa58371";
+const GOLDEN_NEW_42_2_20: &str = "7389c79ba648f778a6925577d462382782418b603f487e7eef53a39898a87030";
+const GOLDEN_MUTATED: &str = "61143120a7a8869bc2fb299244f20d4d6085bf324fefe398afb16d6cf354cb7c";
 
 // REQ-CORE-001, REQ-NFR-006: pinned golden digests (computed once and recorded; never changed
 // to make a test pass).
@@ -529,7 +568,7 @@ fn manual_root(s: &GameState) -> Digest {
             })
             .collect(),
     );
-    // Placeholders: exactly put_len(0).
+    // The history placeholder: exactly put_len(0).
     let mut empty = Vec::new();
     put_len(&mut empty, 0);
     node(vec![
@@ -537,7 +576,9 @@ fn manual_root(s: &GameState) -> Digest {
         (n("ids"), ids_node),
         (n("turn"), turn_node),
         (n("players"), players_node),
-        (n("effects"), leaf_digest(&empty)),
+        (n("effects"), leaf(s.effects())),
+        (n("timestamps"), leaf(s.timestamps())),
+        (n("effect_generators"), leaf(s.effect_generators())),
         (n("history"), leaf_digest(&empty)),
     ])
 }
@@ -642,6 +683,47 @@ fn hash_per_component_sensitivity() {
             m(&mut b);
             assert_diverges_at(&a, &b, &expected);
         }
+        // The layer components (CR-005): each leaf on its own.
+        let mut a = a.clone();
+        let object = fineprint_base::ids::ObjectId::new(901);
+        a.stamp_object(object, StampReason::EntersZone).unwrap();
+        a.stamp_counters(CounterHolder::Object(object), "test.counter_l")
+            .unwrap();
+        let etb = a.issue_effect_id().unwrap();
+        let ability = synthetic_ability;
+        a.link_effect_generator(etb, GeneratingAbility::new(object, ability("test.l1")))
+            .unwrap();
+        let mut b = a.clone();
+        b.forget_object_stamps(object);
+        assert_diverges_at(&a, &b, &path(&[n("timestamps")]));
+        let mut b = a.clone();
+        b.clear_counter_stamp(CounterHolder::Object(object), "test.counter_l");
+        assert_diverges_at(&a, &b, &path(&[n("timestamps")]));
+        let mut b = a.clone();
+        assert!(b.remove_effect(etb));
+        assert_diverges_at(&a, &b, &path(&[n("effect_generators")]));
+        let mut b = a.clone();
+        assert!(b.remove_effect(etb));
+        b.link_effect_generator(etb, GeneratingAbility::new(object, ability("test.l2")))
+            .unwrap();
+        assert_diverges_at(&a, &b, &path(&[n("effect_generators")]));
+        let mut b = a.clone();
+        b.effects_mut()
+            .register(
+                fineprint_base::ids::EffectId::new(etb.get() + 1),
+                crate::layers::ContinuousEffect {
+                    source: None,
+                    controller: pid(1),
+                    timestamp: fineprint_base::ids::Timestamp::new(1),
+                    layer: fineprint_dsl::ability::Layer::L7d,
+                    is_cda: false,
+                    origin: crate::layers::EffectOrigin::Resolved,
+                    affected: crate::layers::Affected::Objects(Default::default()),
+                    modification: LayerModification::SwitchPt,
+                },
+            )
+            .unwrap();
+        assert_diverges_at(&a, &b, &path(&[n("effects")]));
         // Adding a player: the first component to differ is the player generator, and the new
         // player's subtree exists only in the bigger state.
         let mut b = a.clone();
@@ -925,7 +1007,9 @@ fn deserialize_rejects_each_invalid_case() {
         assert_decode_err(decode_wire(&w));
     };
     corrupt(&|w| w.format_version = 0);
-    corrupt(&|w| w.format_version = 2);
+    // Version 1 (no layer members) is not read (CR-005).
+    corrupt(&|w| w.format_version = 1);
+    corrupt(&|w| w.format_version = 3);
     corrupt(&|w| w.format_version = u32::MAX);
     corrupt(&|w| w.prng_algorithm = "PCG64".into());
     corrupt(&|w| w.prng_algorithm = String::new());
@@ -976,9 +1060,10 @@ fn deserialize_rejects_each_invalid_case() {
     w.turn.order.pop();
     assert!(decode_wire(&w).is_ok());
 
-    // Byte-level corruptions.
-    let bytes = base.serialize().unwrap();
-    assert_eq!(bytes[0], 0x88, "top level is an 8-member map");
+    // Byte-level corruptions (a state with empty layer components, so the last member's bytes
+    // are known).
+    let bytes = GameState::new(8, 3, 20).unwrap().serialize().unwrap();
+    assert_eq!(bytes[0], 0x8a, "top level is a 10-member map");
     // Trailing bytes.
     for tail in [&[0x00_u8][..], &[0xc0], &bytes[..]] {
         let mut b = bytes.clone();
@@ -987,17 +1072,17 @@ fn deserialize_rejects_each_invalid_case() {
     }
     // Unknown top-level member.
     let mut b = bytes.clone();
-    b[0] = 0x89;
+    b[0] = 0x8b;
     b.extend_from_slice(&fixstr("zzz"));
     b.push(0x00);
     assert_decode_err(GameState::deserialize(&b));
-    // Missing top-level member (history is last).
+    // Missing top-level member (effect_generators is last, an empty array).
     let mut b = bytes.clone();
-    let mut hist = fixstr("history");
-    hist.push(0x80);
-    assert!(b.ends_with(&hist));
-    b.truncate(b.len() - hist.len());
-    b[0] = 0x87;
+    let mut last = fixstr("effect_generators");
+    last.push(0x90);
+    assert!(b.ends_with(&last));
+    b.truncate(b.len() - last.len());
+    b[0] = 0x89;
     assert_decode_err(GameState::deserialize(&b));
     // Missing Option member (active_player) inside `turn`.
     let mut w = good.clone();
@@ -1024,7 +1109,7 @@ fn deserialize_rejects_each_invalid_case() {
     // Wrong type: format_version as a string.
     let mut b = bytes.clone();
     let mut fv = fixstr("format_version");
-    fv.push(0x01);
+    fv.push(0x02);
     let at = find(&b, &fv) + fv.len() - 1;
     b.splice(at..=at, fixstr("1"));
     assert_decode_err(GameState::deserialize(&b));
@@ -1155,9 +1240,14 @@ fn turn_info_and_placeholders() {
     assert_eq!(s.turn(), &t);
     assert!(s.effects().is_empty());
     assert!(s.history().is_empty());
-    assert_eq!(s.effects(), &EffectRegistry::default());
+    assert_eq!(s.effects(), &crate::layers::ContinuousEffects::default());
+    assert_eq!(s.timestamps(), &crate::layers::TimestampLedger::default());
+    assert!(s.effect_generators().is_empty());
     assert_eq!(s.history(), &HistoryLedger::default());
+    // CR-005: each empty layer component, like the history placeholder, is put_len(0).
     assert_eq!(encode_to_vec(s.effects()), [0, 0, 0, 0]);
+    assert_eq!(encode_to_vec(s.timestamps()), [0, 0, 0, 0]);
+    assert_eq!(encode_to_vec(s.effect_generators()), [0, 0, 0, 0]);
     assert_eq!(encode_to_vec(s.history()), [0, 0, 0, 0]);
     assert_eq!(s.prng(), &Pcg64Dxsm::from_u64_seed(42));
     let mut gens = IdGenerators::new();
@@ -1170,7 +1260,6 @@ fn turn_info_and_placeholders() {
     assert!(m.player_mut(pid(3)).is_none());
     assert!(format!("{s:?}").contains("GameState"));
     assert!(format!("{t:?}").contains("TurnInfo"));
-    assert!(format!("{:?}", EffectRegistry::default()).contains("EffectRegistry"));
     assert!(format!("{:?}", HistoryLedger::default()).contains("HistoryLedger"));
     // REQ-CORE-001: all randomness comes from the state's PRNG.
     let mut a = s.clone();
@@ -1392,4 +1481,12 @@ fn deserialize_counter_bounds() {
         GameState::deserialize(&spliced(i64::MAX.cast_unsigned())).unwrap(),
         with_max
     );
+}
+
+/// A synthetic `KEYWORD` ability with ability id `id` (R5).
+fn synthetic_ability(id: &str) -> fineprint_dsl::card::AbilityAST {
+    fineprint_dsl::card::AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(id),
+        "TEST_KEYWORD",
+    ))
 }

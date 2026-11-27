@@ -59,14 +59,16 @@ fn zone_change(object: ObjectId, to: ZoneKind, cause: ZoneChangeCause) -> GameEv
 }
 
 /// Asserts that `old` left the battlefield for its owner's graveyard through one SBA move.
-fn assert_died(r: &SbaRun, old: ObjectId) {
+fn assert_died(r: &SbaRun, old: ObjectId, expected: ZoneChangeCause) {
     let owner = r.before.zones.object(old).expect("existed").owner;
     assert!(r.after.zones.object(old).is_none(), "{old:?} left");
     let moves: Vec<_> = r.moves().into_iter().filter(|m| m.0 == old).collect();
     assert_eq!(moves.len(), 1, "{old:?} moved exactly once");
     let (_, new, kind, cause) = moves[0];
     assert_eq!(kind, ZoneKind::Graveyard);
-    assert_eq!(cause, ZoneChangeCause::StateBasedAction);
+    // CR 701.8b: 704.5g and 704.5h destroy (`StateBasedDestroy`); the other SBA moves here
+    // carry `StateBasedAction`. The caller names the cause it expects.
+    assert_eq!(cause, expected);
     assert_eq!(
         r.after.zones.object(new).expect("moved object").zone,
         ZoneId::Graveyard(owner)
@@ -156,7 +158,7 @@ fn assert_ceases_under_new_id(other: Other, dest: ZoneKind, creature_first: bool
     assert!(r.after.zones.object_of_card(card).is_none());
     let all = r.after.zones.all_object_ids();
     assert!(!all.contains(&new) && !all.contains(&c));
-    assert_died(&r, a);
+    assert_died(&r, a, ZoneChangeCause::StateBasedAction);
 }
 
 /// The surviving case: C moved to `dest` by the Instead stays there.
@@ -172,7 +174,7 @@ fn assert_survives_move(other: Other, dest: ZoneKind, creature_first: bool) {
     );
     assert!(o.performed);
     assert_eq!(r.after.zone_of(new), Some(dest));
-    assert_died(&r, a);
+    assert_died(&r, a, ZoneChangeCause::StateBasedAction);
 }
 
 // REQ-SBA-001, CR 704.5e, 707.10a, 400.7, 704.3: a card copy in exile moved to a hand by an
@@ -231,7 +233,7 @@ fn req_sba_001_token_named_by_instead_stays_put_and_ceases() {
         let lt = r.after.lki.get(t).expect("LKI of the ceased token");
         assert_eq!(lt.zone(), ZoneId::Graveyard(P1));
         assert_eq!(lt.owner(), P1);
-        assert_died(&r, a);
+        assert_died(&r, a, ZoneChangeCause::StateBasedAction);
     }
 }
 
@@ -292,7 +294,7 @@ fn req_sba_001_one_use_skip_is_performed() {
     assert!(r1.after.replacements.is_empty(), "the use is consumed");
     let r2 = run_sba(r1.after.clone());
     assert!(r2.outcome().performed);
-    assert_died(&r2, a);
+    assert_died(&r2, a, ZoneChangeCause::StateBasedAction);
 }
 
 // REQ-SBA-001, CR 704.3, 704.5a: a pass whose only effect is a player losing is performed.
@@ -562,7 +564,7 @@ fn req_sba_001_deathtouch_window_closes_while_indestructible() {
     assert_eq!(s.check(), vec![finding("704.5h", obj(a))]);
     let r3 = run_sba(s);
     assert!(r3.outcome().performed);
-    assert_died(&r3, a);
+    assert_died(&r3, a, ZoneChangeCause::StateBasedDestroy);
 }
 
 // ---------------------------------------------------------------------------------------------

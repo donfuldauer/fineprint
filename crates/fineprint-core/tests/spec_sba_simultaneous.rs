@@ -153,7 +153,13 @@ fn req_sba_001_all_sbas_performed_simultaneously() {
         assert_eq!(moves.len(), 3);
         for (old, new, kind, cause) in &moves {
             assert_eq!(*kind, ZoneKind::Graveyard);
-            assert_eq!(*cause, ZoneChangeCause::StateBasedAction);
+            // CR 701.8b: the 704.5g (lethal damage) move destroys; the others are plain SBA moves.
+            let expected = if *old == b.lethal {
+                ZoneChangeCause::StateBasedDestroy
+            } else {
+                ZoneChangeCause::StateBasedAction
+            };
+            assert_eq!(*cause, expected);
             let owner = r.before.zones.object(*old).unwrap().owner;
             assert_eq!(
                 r.after.zones.object(*new).unwrap().zone,
@@ -424,19 +430,21 @@ fn req_sba_001_perform_all_is_deterministic() {
 #[test]
 fn req_sba_001_batch_members_are_sba_zone_changes() {
     let b = board(&[1, 0, 2, 3, 4]);
+    let lethal = b.lethal;
     let r = run_sba(b.sim);
     let batch = &r.nonempty_batches()[0];
     for e in &batch.events {
-        assert!(
-            matches!(
-                e.instance.event(),
-                GameEvent::ZoneChange {
-                    cause: ZoneChangeCause::StateBasedAction,
-                    ..
-                }
-            ),
-            "{e:?}"
-        );
+        // CR 701.8b: the lethal-damage member is a `StateBasedDestroy` move; the rest are
+        // `StateBasedAction` moves.
+        let GameEvent::ZoneChange { object, cause, .. } = e.instance.event() else {
+            panic!("not a ZoneChange: {e:?}");
+        };
+        let expected = if *object == lethal {
+            ZoneChangeCause::StateBasedDestroy
+        } else {
+            ZoneChangeCause::StateBasedAction
+        };
+        assert_eq!(*cause, expected, "{e:?}");
     }
     let logged = r
         .after

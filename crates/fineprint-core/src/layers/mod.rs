@@ -3,7 +3,7 @@
 // https://mozilla.org/MPL/2.0/.
 
 //! The layer system (REQ-LAYER-001, REQ-LAYER-002, REQ-LAYER-003, REQ-CORE-002, SRS 6.1-6.3):
-//! the continuous-effect registry, per-object evaluation through layers 1a-7d, the ordering
+//! the continuous-effect registry, layer-major evaluation through layers 1a-7d, the ordering
 //! within each layer, lock-in of affected sets, timestamps and the LKI hook; and the passes after
 //! the layers (REQ-LAYER-004, SRS 6.4).
 //!
@@ -20,6 +20,27 @@
 //! (CR 122.1a, 613.4c). Layer 7 is the last layer. Evaluation takes shared references only: the
 //! base is never mutated.
 //!
+//! **Layer-major evaluation across objects** (REQ-LAYER-001, CR 613.5). [`evaluate`],
+//! [`evaluate_with_order`], [`evaluate_all`] and [`copiable_values`] run one board pass: every
+//! object of the universe advances through each layer together. The universe is
+//! `env.objects()` sorted ascending and de-duplicated, with the object asked for added, keeping
+//! only objects with a base (an object without one is absent; it is an error only for the object
+//! asked for, or for any listed object in [`evaluate_all`], the first by ascending id). Objects
+//! are always processed by ascending [`ObjectId`], each with its own scratch state and lock-in
+//! record, and read each other only through start-of-layer snapshots, so results never depend on
+//! the order or duplicates of `env.objects()` and `evaluate(id) == evaluate_all()[id]`. At the
+//! start of layer 7a every object after layers 1-6 is frozen into an [`EvaluatedView`] handed to
+//! [`LayerEnvironment::eval_value_with_view`] for each non-literal power or toughness (CR 604.3,
+//! 613.4a): it sees each object's controller after layer 2 (CR 613.1b) and its types, colors and
+//! abilities after layers 3-6; power and toughness in it are those after layer 6 (a CDA never
+//! reads another CDA's result: no recursion). A literal power or toughness never reaches the
+//! environment. [`LayerEnvironment::generating_ability_exists`] gets `Some` source view for
+//! every source in the universe: the object under evaluation its state so far; another object
+//! its state through the end of the effect's own layer without the effect (CR 613.8a), one level
+//! deep (inside, other sources are judged on their start-of-layer state). The dependency trial
+//! (CR 613.8a) is still judged on the object under evaluation only, and a selector
+//! ([`LayerEnvironment::matches`]) sees only [`MatchContext::candidate_view`].
+//!
 //! **Ordering within a layer** (REQ-LAYER-002, SRS 6.2). In layers 2-6, effects from
 //! characteristic-defining abilities apply first (CR 613.3); layer 7a holds only those
 //! (CR 613.4a). Then, repeatedly, the unapplied step that depends on no other unapplied step and
@@ -34,13 +55,12 @@
 //! the [`OrderRecord`] of the order used, ready for a rules-trace event.
 //!
 //! **Text changes** (REQ-DSL-012, SRS 14.5). [`LayerModification::ReplaceTextWord`] is the
-//! layer 3 text-changing effect `REPLACE_TEXT_WORD` (CR 612.1, 613.1c): it decodes the object's
-//! rules text into a token stream ([`decode_rules_text`]), replaces every rewritable word of its
-//! category whose value is exactly `from` by `to` ([`rewrite_text_words`]) and writes the text
-//! back only if a word changed ([`encode_rules_text`]). Literal text, name references (CR 201.5,
-//! 612.2) and card-name words are never rewritten; category `CARD_NAME` and empty or
-//! noncharacter words are rejected at registration (CR 612.2). Text that is empty or does not
-//! decode is left unchanged. Only the object's own text changes: abilities granted by effects
+//! layer 3 text-changing effect `REPLACE_TEXT_WORD` (CR 612.1, 613.1c): it replaces every
+//! rewritable word of the object's rules text (a typed token stream) of its category whose value
+//! is exactly `from` by `to` ([`rewrite_text_words`]) and writes the text back only if a word
+//! changed. Literal text, name references (CR 201.5, 612.2) and card-name words are never
+//! rewritten; category `CARD_NAME` and empty or noncharacter words are rejected at registration
+//! (CR 612.2). Empty text is left unchanged. Only the object's own text changes: abilities granted by effects
 //! are not rewritten (CR 612.3). Chained text effects are ordered by the generic dependency
 //! trial above (CR 613.8). AST nodes read rewritable words by token id: [`resolve_word_ref`],
 //! [`text_token_matches`], [`resolve_predicate_words`] and [`resolve_selector_words`] read them
@@ -56,7 +76,7 @@
 //! A resolved part with a selector is locked to the concrete set
 //! [`resolve_affected_set`] gives at registration, each part independently (CR 611.2c); a static
 //! selector is matched again on every evaluation, so a static group's lock holds within one
-//! evaluation only (CR 611.3a). The record lives in the single per-object evaluation and is
+//! evaluation only (CR 611.3a). The record belongs to one object's evaluation and is
 //! never cached or shared across objects; the [`LayerCache`] stores only finished [`Evaluated`]
 //! values. [`ContinuousEffects::register_group_for_as_long_as`]
 //! registers nothing when its [`ForAsLongAsWindow`] makes the effect do nothing (CR 611.2b).
@@ -126,24 +146,30 @@
 //! **Cache** (REQ-LAYER-005, SRS 6.5). [`LayerCache`] caches [`Evaluated`] values keyed by
 //! `(`[`StateVersion`]`, ObjectId)`; it detects registry changes itself and takes every other
 //! change as an explicit [`LayerCache::invalidate`] with an [`Invalidation`] cause, which drops
-//! every entry. The cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI
-//! compares both modes through [`evaluated_digest`].
+//! every entry. [`LayerCache::evaluate_all`] answers all its misses from one board pass. The
+//! cargo feature `full-recompute` ([`FULL_RECOMPUTE`]) turns storing off; CI compares both modes
+//! through [`evaluated_digest`]. The evaluation cost, its profile and the benchmark figures are
+//! in the [`LayerCache`] module documentation.
 //!
-//! **Scope.** This module is standalone: it is not wired into the game state, its Merkle layout
-//! or the state hash (the placeholder `state::EffectRegistry` stays), and the cache keeps its
-//! own [`StateVersion`] counter. **Out of scope** (later units): wiring into the game state, the
-//! state hash and calling [`LayerCache::invalidate`] from the real mutation points
-//! (#183 FP-144); switching the call sites in events, triggers, replacement and zones;
-//! layer-major evaluation across objects (#186 FP-146; dependency is judged on the object under
-//! evaluation only); effect expiry and durations (the caller removes ended effects; a "for as
+//! **Scope.** The game state (`crate::state::GameState`) stores the [`ContinuousEffects`] and the
+//! [`TimestampLedger`], hashes them (their canonical encodings, CR-005) and evaluates them
+//! through `crate::state::GameEnvironment`; the cache keeps its own [`StateVersion`] counter and
+//! is not part of the state. **Out of scope** (later units): calling [`LayerCache::invalidate`]
+//! from the zone, control, counter, attachment and status mutation points; switching the call
+//! sites in events, triggers, replacement and zones; forwarding the [`EvaluatedView`] from the
+//! game state's environment (`crate::state::GameEnvironment` and the entering-permanent
+//! projection still use the default [`LayerEnvironment::eval_value_with_view`]); effect expiry and durations (the caller removes ended effects; a "for as
 //! long as" window is judged by the caller); typed player properties derived from pass A and the
 //! cost calculation itself (the casting procedure).
 //!
 //! **Determinism.** Only `Vec`, `BTreeMap` and `BTreeSet`; no floats, clock or I/O; the order
 //! of registration never changes a result (REQ-CORE-001).
 
+mod board;
 mod cache;
+mod compile;
 mod copy;
+mod encode;
 mod error;
 mod facedown;
 mod lockin;
@@ -158,7 +184,13 @@ mod timestamps;
 #[cfg(test)]
 mod cache_tests;
 #[cfg(test)]
+mod compile_tests;
+#[cfg(test)]
 mod copy_tests;
+#[cfg(test)]
+mod cross_object_tests;
+#[cfg(test)]
+mod encode_tests;
 #[cfg(test)]
 mod facedown_tests;
 #[cfg(test)]
@@ -170,13 +202,16 @@ mod tests;
 #[cfg(test)]
 mod text_tests;
 
+pub use board::EvaluatedView;
 pub use cache::{
     CacheStats, FULL_RECOMPUTE, Invalidation, LayerCache, StateVersion, evaluated_digest,
 };
+pub use compile::{compile_text_effect, compile_text_modification};
 pub use copy::{
     CopiableValues, CopiedCharacteristic, CopyException, ValueSource, copiable_characteristics,
     copiable_effect, copiable_values, merge_effect, modification_effect,
 };
+pub(crate) use encode::{effect_links, provenance_from_parts, provenance_parts, put_typed};
 pub use error::LayerError;
 pub use facedown::{
     FaceDownRefusal, FaceDownTarget, FaceUpRefusal, face_down_effect, turn_face_down, turn_face_up,
@@ -185,8 +220,8 @@ pub use lockin::{ForAsLongAsWindow, resolve_affected_set};
 pub use ordering::{OrderItem, OrderRecord, OrderStep, Selection};
 pub use pipeline::{
     Evaluated, KEYWORD_COUNTER_KINDS, LayerEnvironment, MatchContext, ObjectBase, evaluate,
-    evaluate_all, evaluate_with_order, keyword_counter_ability, keyword_counter_keyword, literal,
-    literal_of, pt_counter_delta,
+    evaluate_all, evaluate_with_order, keyword_counter_ability, keyword_counter_keyword,
+    keyword_id, literal, literal_of, pt_counter_delta,
 };
 pub use post::{
     AppliedPlayerEffect, CostStages, DEFAULT_LAND_PLAYS, DEFAULT_MAX_HAND_SIZE, PlayerAffected,
@@ -199,8 +234,8 @@ pub use registry::{
     ManaValueProvenance,
 };
 pub use text::{
-    TextWordError, decode_rules_text, encode_rules_text, resolve_predicate_words,
-    resolve_selector_words, resolve_word_ref, rewrite_text_words, text_token_matches,
+    TextWordError, resolve_predicate_words, resolve_selector_words, resolve_value_words,
+    resolve_word_ref, rewrite_text_words, text_token_matches,
 };
 pub use timestamps::{
     CounterHolder, SimultaneousStamp, StampReason, TimestampLedger, restamp_static_effects,

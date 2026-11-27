@@ -25,9 +25,19 @@
 //!
 //! **Sources of truth.** Counters on objects live only in [`ObjectMarkers`] and attachments only
 //! in the permanent container; LKI records take both from there, never from the
-//! characteristics provider. A permanent's face-down status is kept equal in the zone record
-//! (which the redacted view and LKI read) and in the permanent container: entering face down,
-//! a battlefield reposition and turning face up or down update both.
+//! characteristics provider. The characteristics in an LKI record come from
+//! [`EventContext::provider`], which must be the layer-evaluated one (layers 1a-7d,
+//! REQ-LAYER-001, CR 613.1-613.4; recipe on [`EventContext`]). A permanent's face-down
+//! status is kept equal in the zone record (which the redacted view and LKI read) and in the
+//! permanent container: entering face down, a battlefield reposition and turning face up or
+//! down update both.
+//!
+//! **Graveyard order (CR 404.3).** When one batch puts two or more nontoken cards into the same
+//! graveyard, their owner may arrange them: [`EventContext::graveyard_order_groups`] lists the
+//! [`GraveyardOrderGroup`]s of a (final, post-replacement) batch, [`GraveyardOrderGroup::request`]
+//! builds the owner's `ORDER_CARDS` request (answered with `SUBMIT_ORDERING.graveyard`, top
+//! first) and [`EventContext::execute_batch_ordered`] executes the batch with the chosen
+//! [`GraveyardOrder`]s. The timeout default is the order `execute_batch` yields.
 //!
 //! **History.** [`History`] counts, per game turn and player, spells cast, life gained and
 //! lost, cards drawn, damage dealt and tokens created, fed only from executed events (after
@@ -56,6 +66,7 @@
 mod error;
 mod exec;
 mod history;
+mod order;
 mod state;
 mod types;
 
@@ -65,8 +76,9 @@ mod tests;
 pub use error::EventError;
 pub use exec::EventContext;
 pub use history::{History, HistoryQuery, HistoryScope, HistoryStat};
+pub use order::{GraveyardOrder, GraveyardOrderGroup};
 pub use state::{EventLog, EventState, ObjectMarkers};
 pub use types::{
     AppliedEffects, CounterTarget, DamageTarget, EventBatch, EventInstance, ExecutedBatch,
-    ExecutedEvent, GameEvent, Outcome, Phase, Step, ZoneChangeCause,
+    ExecutedEvent, GameEvent, Outcome, Phase, Step, UnattachRecord, ZoneChangeCause,
 };

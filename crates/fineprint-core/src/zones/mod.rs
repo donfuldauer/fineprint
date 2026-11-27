@@ -27,9 +27,14 @@
 //! generator restored with `IdGenerator::from_last_issued(9)`; a later generator that proposes 5
 //! gets `IdCollision(5)` although 5 was never held.
 //!
+//! **Retired cards.** A card whose object ceased to exist ([`Zones::cease_to_exist`]) is retired
+//! for the rest of the match (REQ-CORE-002): [`Zones::create_object`],
+//! [`Zones::enter_from_outside`] and [`Zones::add_outside_card`] reject it with
+//! [`ZoneError::CardCeased`].
+//!
 //! **Omniscient state.** [`Zones`] is the omniscient engine state: `contents`, `object`,
 //! `object_of_card`, `all_object_ids` and the canonical encoding expose hidden information
-//! (library order, hand membership, the `CardId` of face-down objects). It must stay behind the
+//! (library order, hand membership, the `CardId` of face-down objects, the retired-card set). It must stay behind the
 //! redacted per-player view and the determinized-fork boundary (REQ-CORE-004, REQ-API-004) and is
 //! never handed to a client directly.
 //!

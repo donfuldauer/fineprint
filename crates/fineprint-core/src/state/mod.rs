@@ -5,8 +5,10 @@
 //! The root game-state value `S_t` (REQ-CORE-001, REQ-CORE-002, REQ-NFR-010).
 //!
 //! A [`GameState`](crate::state::GameState) holds the players (N players from the start), the
-//! turn position and turn order, the PRNG, one monotonic generator per identifier kind, and
-//! placeholders for the effect registry and history ledger. All randomness comes from the
+//! turn position and turn order, the PRNG, one monotonic generator per identifier kind, the
+//! layer system's continuous effects and timestamp ledger with the link from each static (and
+//! ETB) effect to its generating ability (REQ-LAYER-001, REQ-CORE-002; [`GameEnvironment`]
+//! evaluates them), and a placeholder for the history ledger. All randomness comes from the
 //! state's PRNG.
 //!
 //! **Snapshots.** Large components are held behind `Arc` and written copy-on-write with
@@ -20,6 +22,9 @@
 //! [`GameState::serialize`](crate::state::GameState::serialize) writes MessagePack, which is
 //! never a hash input (REQ-NFR-006).
 
+mod effects;
+mod effects_wire;
+mod environment;
 mod error;
 mod hash;
 mod placeholders;
@@ -27,6 +32,10 @@ mod player;
 mod turn;
 mod wire;
 
+#[cfg(test)]
+mod effects_tests;
+#[cfg(test)]
+mod environment_tests;
 #[cfg(test)]
 mod tests;
 
@@ -39,8 +48,12 @@ use fineprint_base::ids::{
 };
 use fineprint_base::prng::Pcg64Dxsm;
 
+use crate::layers::{ContinuousEffects, TimestampLedger};
+
+pub use effects::GeneratingAbility;
+pub use environment::{GameEnvironment, ObjectWorld};
 pub use error::StateError;
-pub use placeholders::{EffectRegistry, HistoryLedger};
+pub use placeholders::HistoryLedger;
 pub use player::{DesignationValue, PlayerMut, PlayerState};
 pub use turn::TurnInfo;
 
@@ -48,12 +61,14 @@ pub use turn::TurnInfo;
 pub const MAX_PLAYERS: usize = 256;
 
 /// The version of the serialized state format written by [`GameState::serialize`].
-pub const STATE_FORMAT_VERSION: u32 = 1;
+pub const STATE_FORMAT_VERSION: u32 = 2;
 
 /// The whole match state at one tick (REQ-CORE-001).
 ///
 /// Cloning is a cheap snapshot with structural sharing: every [`PlayerState`] stays shared until
-/// it is written through [`GameState::player_mut`]. Mutating one copy never affects another.
+/// it is written through [`GameState::player_mut`], and the continuous effects, the timestamp
+/// ledger and the generating-ability links stay shared until one of them is written. Mutating
+/// one copy never affects another.
 /// Equality compares values, never pointers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameState {
@@ -62,7 +77,9 @@ pub struct GameState {
     turn: TurnInfo,
     turn_order: Arc<Vec<PlayerId>>,
     players: BTreeMap<PlayerId, Arc<PlayerState>>,
-    effects: EffectRegistry,
+    effects: Arc<ContinuousEffects>,
+    timestamps: Arc<TimestampLedger>,
+    generators: Arc<BTreeMap<EffectId, GeneratingAbility>>,
     history: HistoryLedger,
 }
 
@@ -93,7 +110,9 @@ impl GameState {
             turn: TurnInfo::default(),
             turn_order: Arc::new(Vec::new()),
             players: BTreeMap::new(),
-            effects: EffectRegistry::default(),
+            effects: Arc::new(ContinuousEffects::new()),
+            timestamps: Arc::new(TimestampLedger::new()),
+            generators: Arc::new(BTreeMap::new()),
             history: HistoryLedger::default(),
         };
         for _ in 0..player_count {
@@ -265,12 +284,6 @@ impl GameState {
     /// [`StateError::IdExhausted`] on exhaustion; the state is then unchanged.
     pub fn issue_link_id(&mut self) -> Result<LinkId, StateError> {
         issue(&mut self.ids.link)
-    }
-
-    /// The effect registry (placeholder).
-    #[must_use]
-    pub fn effects(&self) -> &EffectRegistry {
-        &self.effects
     }
 
     /// The history ledger (placeholder).

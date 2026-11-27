@@ -42,3 +42,6 @@ pub mod effect;
 /// supertypes, subtypes, keywords, counter kinds and predefined tokens extracted from the CR,
 /// bundled from `data/vocab.json`.
 pub mod vocab;
+
+/// Static validation lints over card definitions (REQ-ING-009).
+pub mod lint;

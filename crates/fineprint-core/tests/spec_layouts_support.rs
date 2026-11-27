@@ -58,19 +58,34 @@ fn via_msgpack<In: serde::Serialize, Out: serde::de::DeserializeOwned>(value: &I
     rmp_serde::from_slice(&bytes).expect("decode")
 }
 
+/// A printed value `Literal(n)` (#232 FP-164: formerly the bare JSON integer placeholder).
 pub fn printed(n: i64) -> ValueExpressionAST {
-    via_msgpack(&n)
+    ValueExpressionAST::Literal(n)
 }
 
+/// Rules text of one LITERAL token per word, id `w:<word>` (#232 FP-164: formerly a
+/// placeholder list of bare JSON strings, which is not a valid token stream). The word is part
+/// of the id so that the texts of two halves with different words concatenate to a valid
+/// stream (the combined characteristics checked by the layout tests).
 pub fn text(tokens: &[&str]) -> TextTokenStream {
-    via_msgpack(&tokens.to_vec())
+    let tokens = tokens
+        .iter()
+        .map(|w| serde_json::json!({"id": format!("w:{w}"), "kind": "LITERAL", "text": w}))
+        .collect();
+    serde_json::from_value(serde_json::Value::Array(tokens)).expect("valid synthetic text")
 }
 
-/// A synthetic ability: the JSON object `{key: n}`.
+/// A synthetic ability identified by `(key, n)` (#232 FP-164: formerly the free-form JSON
+/// object `{key: n}`, which is not a valid ability): the KEYWORD ability with `abilityId` `key`,
+/// the synthetic keyword `TEST_SYNTHETIC` and the opaque parameter `n`.
 pub fn ability(key: &str, n: i64) -> AbilityAST {
-    let mut m = BTreeMap::new();
-    m.insert(key.to_string(), n);
-    via_msgpack(&m)
+    serde_json::from_value(serde_json::json!({
+        "abilityId": key,
+        "kind": "KEYWORD",
+        "keyword": "TEST_SYNTHETIC",
+        "params": {"n": n},
+    }))
+    .expect("valid synthetic ability")
 }
 
 pub fn strings(items: &[&str]) -> Vec<String> {
@@ -97,7 +112,7 @@ pub fn blank(kind: FaceKind, face_name: &str) -> CardFaceDSL {
         defense: None,
         hand_modifier: None,
         life_modifier: None,
-        text: TextTokenStream(Vec::new()),
+        text: TextTokenStream::default(),
         abilities: Vec::new(),
     }
 }
@@ -571,8 +586,8 @@ pub fn split_combined(left: &CardFaceDSL, right: &CardFaceDSL) -> Characteristic
             b.unwrap_or(ColorBitmask::NONE),
         )),
     };
-    let mut rules_text = l.rules_text.0.clone();
-    rules_text.extend(r.rules_text.0.iter().cloned());
+    let mut rules_text = l.rules_text.tokens().to_vec();
+    rules_text.extend(r.rules_text.tokens().iter().cloned());
     let mut abilities = l.abilities.clone();
     abilities.extend(r.abilities.iter().cloned());
     Characteristics {
@@ -583,7 +598,7 @@ pub fn split_combined(left: &CardFaceDSL, right: &CardFaceDSL) -> Characteristic
         supertypes: l.supertypes.union(&r.supertypes).cloned().collect(),
         card_types: l.card_types.union(&r.card_types).cloned().collect(),
         subtypes: l.subtypes.union(&r.subtypes).cloned().collect(),
-        rules_text: TextTokenStream(rules_text),
+        rules_text: TextTokenStream::new(rules_text).expect("halves' token ids are distinct"),
         abilities,
         power: None,
         toughness: None,

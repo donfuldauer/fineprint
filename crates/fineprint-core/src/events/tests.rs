@@ -22,6 +22,15 @@ use crate::permanent::{AttachTarget, PermanentError, Permanents};
 use crate::state::{GameState, StateError};
 use crate::zones::{MoveRequest, Moved, Position, ZoneError, ZoneId, ZoneKind, Zones, ZonesConfig};
 
+// Simultaneous graveyard entry ordered by the owner (#208 FP-154, CR 404.3).
+mod graveyard_order;
+// LKI with layer-evaluated characteristics (#184 FP-145, CR 608.2h).
+mod lki_layers;
+// The state-based destruction cause (#209 FP-155, CR 701.8b, CR 122.1c).
+mod state_based_destroy;
+// Lost attachment links in executed outcomes (#180 FP-143, CR 701.3d).
+mod unattach;
+
 // ---------------------------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------------------------
@@ -47,7 +56,7 @@ fn chars(name: &str) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: BTreeSet::from(["Creature".to_owned()]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,
@@ -1995,6 +2004,10 @@ fn sample_events() -> Vec<GameEvent> {
         },
         GameEvent::TurnFaceUp { object: o },
         GameEvent::TurnFaceDown { object: o },
+        GameEvent::UnattachFrom {
+            attachment: o,
+            host: AttachTarget::Player(p(1)),
+        },
     ]
 }
 
@@ -2038,6 +2051,7 @@ fn event_field_variants() -> Vec<GameEvent> {
         ZoneChangeCause::Exile,
         ZoneChangeCause::CounterSpell,
         ZoneChangeCause::StateBasedAction,
+        ZoneChangeCause::StateBasedDestroy,
     ] {
         out.push(GameEvent::ZoneChange {
             object: o,
@@ -2134,6 +2148,18 @@ fn event_field_variants() -> Vec<GameEvent> {
         object: o,
         copied: ObjectId::new(2),
     });
+    out.push(GameEvent::UnattachFrom {
+        attachment: o,
+        host: AttachTarget::Player(p(2)),
+    });
+    out.push(GameEvent::UnattachFrom {
+        attachment: o,
+        host: AttachTarget::Permanent(ObjectId::new(1)),
+    });
+    out.push(GameEvent::UnattachFrom {
+        attachment: ObjectId::new(2),
+        host: AttachTarget::Player(p(1)),
+    });
     out
 }
 
@@ -2214,6 +2240,7 @@ fn req_core_006_outcome_and_records_encoding() {
         instance: inst.clone(),
         outcome: Outcome::Applied,
         lki_captured: false,
+        unattached: vec![],
     };
     let variants = [
         ExecutedEvent {

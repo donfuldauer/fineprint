@@ -1,0 +1,42 @@
+{
+  "pzlVersion": 1,
+  "title": "An empty event subsequence matches any event stream",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {}
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20
+    },
+    {
+      "id": "p2",
+      "life": 20
+    }
+  ],
+  "battlefield": [],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "events",
+      "mode": "subsequence",
+      "events": []
+    }
+  ]
+}

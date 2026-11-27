@@ -78,6 +78,7 @@ impl BusEventKind {
             GameEvent::StepBegins { .. } => BusEventKind::StepBegins,
             GameEvent::Attach { .. } => BusEventKind::Attach,
             GameEvent::Unattach { .. } => BusEventKind::Unattach,
+            GameEvent::UnattachFrom { .. } => BusEventKind::Unattach,
             GameEvent::BecomeCopy { .. } => BusEventKind::BecomeCopy,
             GameEvent::TurnFaceUp { .. } => BusEventKind::TurnFaceUp,
             GameEvent::TurnFaceDown { .. } => BusEventKind::TurnFaceDown,
@@ -513,7 +514,7 @@ impl ReplacementEffect {
 
     /// The destroy half of a shield counter (CR 122.1c): if `object` would be destroyed as the
     /// result of an effect (cause `Destroy`), instead remove a shield counter from it. A
-    /// state-based destruction (cause `StateBasedAction`, CR 701.8b, CR 704.1) is not replaced.
+    /// state-based destruction (cause `StateBasedDestroy`, CR 701.8b, CR 704.1) is not replaced.
     #[must_use]
     pub fn shield_counter_destroy(id: EffectId, object: ObjectId) -> Self {
         // CR 122.1c
@@ -858,9 +859,9 @@ pub(super) fn affected_object(event: &GameEvent) -> Option<ObjectId> {
         | GameEvent::TurnFaceUp { object }
         | GameEvent::TurnFaceDown { object }
         | GameEvent::BecomeCopy { object, .. } => Some(*object),
-        GameEvent::Attach { attachment, .. } | GameEvent::Unattach { attachment } => {
-            Some(*attachment)
-        }
+        GameEvent::Attach { attachment, .. }
+        | GameEvent::Unattach { attachment }
+        | GameEvent::UnattachFrom { attachment, .. } => Some(*attachment),
         GameEvent::Damage {
             target: DamageTarget::Object(o),
             ..

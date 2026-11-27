@@ -13,7 +13,7 @@ use fineprint_base::ids::{ObjectId, PlayerId};
 
 use super::types::{GameVariant, LOST_THE_GAME, SbaEnvironment, SbaSubject};
 use crate::events::EventState;
-use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, literal_of};
+use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, evaluate_all, literal_of};
 use crate::permanent::{AttachTarget, AttackState, AttackTarget, Permanents};
 use crate::state::{GameState, PlayerState};
 use crate::zones::{ZoneId, Zones};
@@ -114,12 +114,15 @@ pub(super) struct SbaView<'a> {
 /// The vocabulary id of the start your engines! keyword ability (CR 702.179).
 const START_YOUR_ENGINES: &str = "START_YOUR_ENGINES";
 
-/// Whether `abilities` hold the keyword ability `keyword` (an ability of kind `KEYWORD`).
+/// The vocabulary id of the indestructible keyword ability (read for the CR 702.12b check below).
+const INDESTRUCTIBLE: &str = "INDESTRUCTIBLE";
+
+/// Whether `abilities` hold the keyword ability `keyword` (a `KEYWORD` ability whose keyword
+/// name is `keyword`).
 fn has_keyword(abilities: &[fineprint_dsl::card::AbilityAST], keyword: &str) -> bool {
-    abilities.iter().any(|a| {
-        a.0.get("kind").and_then(|k| k.as_str()) == Some("KEYWORD")
-            && a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword)
-    })
+    abilities
+        .iter()
+        .any(|a| matches!(a, fineprint_dsl::card::AbilityAST::Keyword(k) if k.keyword == keyword))
 }
 
 impl<'a> SbaView<'a> {
@@ -139,14 +142,22 @@ impl<'a> SbaView<'a> {
         env: &'a dyn SbaEnvironment,
     ) -> SbaView<'a> {
         let mut permanents = BTreeMap::new();
+        // CR 613.1, CR 613.4: one layer pass for the whole snapshot. `evaluate_all` fails the
+        // whole pass if any listed object has no base; then fall back to per-object evaluation,
+        // skipping the objects that error.
+        let all = evaluate_all(effects, layer_env).ok();
         for id in zones.contents(ZoneId::Battlefield) {
             // CR 702.26b
             if phasing.get(id).is_some_and(|p| p.status().phased_out) {
                 continue;
             }
             // CR 613.1, CR 613.4: the characteristics after every layer.
-            let Ok(evaluated) = evaluate(effects, layer_env, id) else {
-                continue;
+            let evaluated = match all.as_ref().and_then(|m| m.get(&id)) {
+                Some(e) => e.clone(),
+                None => match evaluate(effects, layer_env, id) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                },
             };
             let c = &evaluated.characteristics;
             // CR 613.4: the pipeline writes the final P/T as numeric literals; read the
@@ -163,7 +174,7 @@ impl<'a> SbaView<'a> {
                     planeswalker: c.card_types.contains("Planeswalker"),
                     toughness,
                     // CR 702.12b
-                    indestructible: has_keyword(&c.abilities, "indestructible"),
+                    indestructible: has_keyword(&c.abilities, INDESTRUCTIBLE),
                     loyalty,
                     names: c.names.clone(),
                     // CR 205.4: supertypes.

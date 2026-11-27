@@ -1,0 +1,53 @@
+{
+  "cardDefId": "test.haste_2_1",
+  "colorIdentity": 8,
+  "definitionHash": "bfeefeb814ab4b78d69a126809bcf49742f1c687b61e8685ea004ae74f39d52a",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "keyword": "HASTE",
+          "kind": "KEYWORD",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Creature"
+      ],
+      "faceKind": "MAIN",
+      "manaCost": "{1}{R}",
+      "name": "test.haste_2_1",
+      "power": {
+        "LITERAL": 2
+      },
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ],
+      "toughness": {
+        "LITERAL": 1
+      }
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

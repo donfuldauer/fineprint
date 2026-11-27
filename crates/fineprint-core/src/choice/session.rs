@@ -56,6 +56,10 @@ pub struct ChoiceContext<'a> {
     suspended: Option<Digest>,
     /// A protocol misuse seen in this run (reported even if the procedure swallows it).
     misuse: Option<ChoiceError>,
+    /// Test hook (F95): answer every unrecorded ask with its `default_on_timeout` instead of
+    /// suspending, so a unit test can drive a long procedure in one run.
+    #[cfg(test)]
+    auto_default: bool,
 }
 
 impl<'a> ChoiceContext<'a> {
@@ -66,6 +70,20 @@ impl<'a> ChoiceContext<'a> {
             position: 0,
             suspended: None,
             misuse: None,
+            #[cfg(test)]
+            auto_default: false,
+        }
+    }
+
+    /// Test hook (F95): a context with no recorded answers that answers every ask with the
+    /// request's `default_on_timeout` instead of suspending. Asks are checked exactly as on the
+    /// live path (id, well-formedness, valid default); nothing is recorded. Not part of any
+    /// session: [`ChoiceSession`] never builds one.
+    #[cfg(test)]
+    pub(crate) fn auto_default() -> ChoiceContext<'static> {
+        ChoiceContext {
+            auto_default: true,
+            ..ChoiceContext::new(&[], &[])
         }
     }
 }
@@ -124,6 +142,11 @@ impl ChoiceContext<'_> {
                 }
                 self.position += 1;
                 Ok(answer.clone())
+            }
+            #[cfg(test)]
+            _ if self.auto_default => {
+                self.position += 1;
+                Ok(request.default_on_timeout)
             }
             _ => {
                 self.suspended = Some(request.digest());

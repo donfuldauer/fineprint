@@ -1,0 +1,61 @@
+{
+  "cardDefId": "test.mana_land_blue",
+  "colorIdentity": 2,
+  "definitionHash": "1c6a4e92b45daadc8905ec7cc8418e21a0c24a2b6686545a5b96e124bed010b5",
+  "digitalOnly": false,
+  "dslVersion": "1.0",
+  "faces": [
+    {
+      "abilities": [
+        {
+          "abilityId": "a0",
+          "cost": [
+            {
+              "cost": "TAP_SOURCE"
+            }
+          ],
+          "effect": [
+            {
+              "id": "test.add_mana",
+              "op": "NATIVE_EFFECT",
+              "params": {
+                "mana": "{U}"
+              },
+              "version": 1
+            }
+          ],
+          "isManaAbility": true,
+          "kind": "ACTIVATED",
+          "textSpan": [
+            0,
+            0
+          ]
+        }
+      ],
+      "cardTypes": [
+        "Land"
+      ],
+      "faceKind": "MAIN",
+      "name": "test.mana_land_blue",
+      "subtypes": [],
+      "supertypes": [],
+      "text": [
+        {
+          "id": "t0",
+          "kind": "LITERAL",
+          "text": "test ability 0"
+        }
+      ]
+    }
+  ],
+  "layout": "NORMAL",
+  "legalities": {
+    "testformat": "LEGAL"
+  },
+  "source": {
+    "oracleTextHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "origin": "PARSER",
+    "rulesBaseline": "test-baseline"
+  },
+  "supportStatus": "AUTO_PARSED"
+}

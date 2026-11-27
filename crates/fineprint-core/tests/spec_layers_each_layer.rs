@@ -708,15 +708,17 @@ fn effects_modify_only_affected_objects() {
     assert_eq!(eb.characteristics.colors, mask(16));
 }
 
-// REQ-LAYER-001, CR 613.1: a layer-2 change is visible to a later selector (controller of
-// the evaluated view), and the MatchContext carries the effect's source and controller and the
-// candidate.
+// REQ-LAYER-001, REQ-LAYER-002, CR 613.1: a layer-2 change is visible to a later selector
+// (controller of the evaluated view), and the MatchContext carries the effect's source and
+// controller and the candidate. CR 109.5, 611.3a: the controller of a static effect with a
+// source is the source's evaluated controller (P2, who controls `src`), not the controller
+// stored at registration (P1).
 #[test]
 fn selector_sees_layer_2_result_and_context_fields() {
     let mut env = TestEnv::new();
     let a = env.put(oid(1), creature("test.vanilla_2_2", 2, 2));
     let b = env.put(oid(2), creature("test.vanilla_3_3", 3, 3));
-    let src = env.put(oid(3), enchantment("test.anthem_source"));
+    let src = env.put_full(oid(3), enchantment("test.anthem_source"), Some(P2), true);
     type Seen = Vec<(Option<ObjectId>, PlayerId, ObjectId)>;
     let log: Rc<RefCell<Seen>> = Rc::new(RefCell::new(Vec::new()));
     let log2 = Rc::clone(&log);
@@ -736,7 +738,7 @@ fn selector_sees_layer_2_result_and_context_fields() {
         Affected::Selector(sel(100)),
         modify_pt(1, 1),
     );
-    boost.controller = P2;
+    boost.controller = P1;
     let r = registry(&[
         (
             1,

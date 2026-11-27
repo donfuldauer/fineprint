@@ -62,7 +62,7 @@ itself is the set of GitHub issues labelled `work-unit` (milestones M1-M3). Proc
 | `fineprint-wasm` | `crates/fineprint-wasm` | WebAssembly binding | core |
 | `fineprint-bot` | `crates/fineprint-bot` | reference bots | core |
 | `fineprint-cli` | `clients/cli` | terminal client (library stub now) | core, ingest, bot |
-| `xtask` | `xtask` | repository automation (binary) | nothing |
+| `xtask` | `xtask` | repository automation (binary) | core (only for `cargo xtask pzl`, which runs scenarios on the engine: docs/DECISIONS.md "#51 FP-049 — The runner command lives in xtask") |
 
 Dependency direction is downward only: base, dsl, core, then bindings and tools. The rules
 crates are base, dsl and core: no floats, no `HashMap`/`HashSet` (REQ-CORE-006, enforced by
@@ -115,7 +115,7 @@ the first issue that needs it.
 | `keywords/` | keyword macros; created by the first issue that needs it |
 | `native/` | native-effect registry; created by the first issue that needs it |
 | `loops/` | loop detection and shortcuts; created by the first issue that needs it |
-| `scenario/` | scenario loading for tests; created by the first issue that needs it |
+| `scenario/` | the `.pzl` scenario format: the defensive loader (`parse_scenario`), the runner (`run_scenario`, `evaluate_assertions`), the `ScenarioHost` seam and the reference host `StateHost` (#51 FP-049; see "`.pzl` scenarios" below) |
 | `api/` | the public engine facade; created by the first issue that needs it |
 | `view/` | redacted per-player views; created by the first issue that needs it |
 | `replay/` | replay recording and playback; created by the first issue that needs it |
@@ -132,6 +132,142 @@ the first issue that needs it.
   format exists (#51 FP-049).
 - Fixtures use synthetic cards only (R5): `tests/fixtures/cards/`, scenarios in
   `tests/scenarios/` (`.pzl`), golden hashes in `tests/golden/`.
+
+## `.pzl` scenarios
+
+Every rules regression test, card smoke test and client behavioural test is a `.pzl` scenario
+(REQ-TEST-001 item 1; #51 FP-049; conventions in `.claude/skills/pzl-test/SKILL.md`). A scenario
+is one JSON object (UTF-8, extension `.pzl`; docs/DECISIONS.md "#51 FP-049 — .pzl file syntax")
+holding an exact starting state, a scripted sequence of player choices and assertions. The loader
+is `fineprint_core::scenario::parse_scenario`, the runner `run_scenario`, the reference host
+`StateHost`.
+
+Samples (one per assertion kind, each with a deliberately wrong twin) live in
+`tests/scenarios/format/`; the loader's negative tests read malformed files from
+`crates/fineprint-core/tests/data/pzl_negative/`.
+
+### Schema
+
+Every object rejects unknown members; names are camelCase; numbers are integers only (`i64`, or
+`u64` where noted); a float anywhere is an error (R3).
+
+| Member | Type | Notes |
+|---|---|---|
+| `pzlVersion` | integer | required, exactly `1` (checked first) |
+| `title` | string | required, 1 to 200 characters |
+| `requirements` | array of strings | required; each starts `REQ-`; may be empty only with `ruling` |
+| `cr` | array of strings | required; CR rule numbers, free-form, may be empty |
+| `ruling` | `{"date": "YYYY-MM-DD", "ref": string}` | optional |
+| `format` | string | required, non-empty; a format id (metadata for the reference host) |
+| `rulesBaseline` | string | required, non-empty (library cards use `test-baseline`) |
+| `cardDatabase` | `{"version": string, "definitionHashes": {cardDefId: hash}}` | required; a hash is 64 lowercase hex characters; every card used must have an entry |
+| `prngSeed` | `u64` | required |
+| `players` | array of player objects | required, 1 to 8, in turn order |
+| `battlefield` | array of object entries | optional (default empty) |
+| `stack` | array of `{"id", "card", "owner", "controller"?}` | optional, BOTTOM FIRST (the last entry is the top) |
+| `sharedExile` | array of object entries without `attachedTo` | optional; exiled objects not listed under a player |
+| `turn` | `{"number": u64 >= 1, "activePlayer", "phase", "step"}` | required; `phase` is `BEGINNING`, `PRECOMBAT_MAIN`, `COMBAT`, `POSTCOMBAT_MAIN` or `ENDING`; `step` is `UNTAP`, `UPKEEP`, `DRAW`, `MAIN`, `BEGINNING_OF_COMBAT`, `DECLARE_ATTACKERS`, `DECLARE_BLOCKERS`, `FIRST_STRIKE_DAMAGE`, `COMBAT_DAMAGE`, `END_OF_COMBAT`, `END` or `CLEANUP` and must belong to the phase (`MAIN` in both main phases) |
+| `priority` | player id or `null` | required |
+| `script` | array of steps | optional (default empty) |
+| `assertions` | array of assertions | required |
+
+A **player** is `{"id", "life": i64, "counters"?: {kind: i64 >= 1}, "designations"?: {key: true |
+false | string | i64}, "zones"?: {"library", "hand", "graveyard", "exile", "command"}}`; each
+zone list is optional. The library is TOP FIRST, the graveyard BOTTOM FIRST. A designation `false`
+means absent. A zone entry (a cardRef) is a cardDefId string, or `{"id", "card"}` when an
+assertion or answer must name it; an unnamed entry gets the id `<player>.<zone>.<index>` (for
+example `p1.library.0`).
+
+A battlefield or shared-exile **object entry** is `{"id", "card", "owner", "controller"?,
+"tapped"?, "flipped"?, "faceDown"?, "phasedOut"?, "counters"?, "designations"?, "attachedTo"?,
+"timestamp"?: u64, "controlledSinceTurn"?: u64}`. `controller` defaults to the owner;
+`attachedTo` names another battlefield object or a player; objects are stamped in ascending
+`timestamp` (absent counts as 0), ties in declaration order; `controlledSinceTurn` (default 0)
+is the turn since which the controller has controlled it continuously.
+
+Every id (players and objects together) is declared once; every player, object and card named
+anywhere must be declared.
+
+A **script step** is `{"expect"?: {"chooser"?, "choiceType"?}, "answer": {"type": <response
+name>, ...}}`. `choiceType` is an SRS 15.3 choice type (`PRIORITY_ACTION`, ...); the answer
+`type` is a `ChoiceResponse` wire name (`PASS_PRIORITY`, `PLAY_LAND`, ...) with that response's
+other members. Before each step the runner checks the pending choice against `expect`, then
+gives the answer to the pending chooser.
+
+**Assertions** (each has `"kind"` and an optional `"note"`; all are evaluated, in file order):
+
+| `kind` | Members | Passes when |
+|---|---|---|
+| `characteristics` | `object`, `expect`: any of `power`, `toughness`, `types`, `subtypes`, `supertypes`, `colors`, `abilities`, `controller`, `manaValue` | each listed value equals the evaluated one; arrays compare as sets; colors are `W U B R G` (full names accepted); an ability key is a keyword id (`FLYING`) or, for another ability, its kind (`ACTIVATED`, `STATIC`, ...) |
+| `zone` | `owner` (required for per-player zones), `zone` (`library`, `hand`, `graveyard`, `exile`, `command`, `battlefield`, `stack`, `sharedExile`), `contents` (object ids), `order` (`exact` default, or `any`) | the zone holds exactly these objects (order as in the setup conventions); a shared zone ignores `owner` |
+| `life` | `player`, `equals` | the life total equals |
+| `counters` | `target` (player or object), `counter`, `equals` | the count equals (0 = none) |
+| `designation` | `target`, `key`, `equals` (value, or `null`/`false` = absent) | the designation equals |
+| `events` | `mode` (`subsequence` default, or `exact`), `events`: `[{"type", "fields"?}]` | subsequence: the listed events occur in that order, not necessarily adjacent; exact: the whole stream is exactly the list. An event matches by `type` and every listed field; extra fields are ignored in both modes |
+| `absent` | `what`: `event` with `event`; or `zoneMember` with `zone`, `object`, `owner` (per-player zones) | no event matches; or the object is not in the zone |
+| `pendingChoice` | `chooser` (player, or `null` = none pending), `choiceType`?, `options`?, `optionsMode`? (`exact` default, or `contains`; options compare as sets) | the pending choice matches |
+| `result` | `status` (`IN_PROGRESS`, `WON`, `DRAWN`), `winners`?, `losers`? (sets) | the result matches |
+
+### Limits and errors
+
+`parse_scenario` treats the file as untrusted input (R12) and never panics. It rejects: input
+over `MAX_SCENARIO_BYTES` (1 MiB) or with more than `MAX_ARRAY_ELEMENTS` (10,000) array elements
+in total (`TooLarge`), nesting deeper than `MAX_DEPTH` (64, `TooDeep`), empty input, non-UTF-8
+bytes and bad JSON (`Syntax`), duplicate keys (`DuplicateKey`, at the object, positioned at the second key), unknown members (`UnknownField`, at the object holding them, positioned at the key),
+missing members (`MissingField`, at the object that lacks them), wrong JSON types and every float (`WrongType`), integers
+outside `i64`/`u64` and out-of-range lengths and counts, including a `definitionHash` that is not
+64 lowercase hex characters (`OutOfRange`), unknown enumerated names
+(`UnknownTag`), undeclared players, objects and cards (`UnresolvedReference`), ids declared twice
+(`Duplicate`), a `pzlVersion` other than 1 (`Unsupported`) and malformed values such as a bad
+date, requirement id, empty name or a step outside its phase (`Invalid`). A leading byte-order
+mark is tolerated. Each error is a `ScenarioError { path, line, column, kind, message }`: `path` is
+a JSON pointer (`""` for the root), `line`/`column` are 1-based (columns count characters) and
+present for syntax errors and wherever the value's position is known; `message` quotes at most 80
+characters of input. `Display` is `path:line:col: message` (`?` for an unknown line or column).
+
+### Runner and host
+
+`run_scenario(&scenario, &mut dyn ScenarioHost)` calls `build(&setup)`, then for each step
+checks `pending()` against `expect` and calls `answer(chooser, answer)`, then evaluates every
+assertion against `observe()`. A host that cannot build, refuses an answer, has no pending choice
+for a step or a different chooser or choice type stops the script: the report's `script_error`
+names the step (a build failure is step 0 with a message starting `setup could not be built: `;
+its assertions are not evaluated), and the scenario fails. `ScenarioReport::to_text()` is
+deterministic (R3). `ScenarioHost` is the seam: later units give hosts more abilities.
+
+The reference host `StateHost` (load cards with `add_card_json`) builds the exact state on
+`GameState`, `Zones`, `Permanents` and `EventState`, evaluates characteristics through the layer
+system and drives answers through `ChoiceSession` and the priority heartbeat with the real
+state-based-action pass. Supported now: every setup member except face-down objects;
+`PRIORITY_ACTION` answered with `PASS_PRIORITY` in the current step (the step ends when every
+player still in the game passes with an empty stack; the host does not advance to the next
+step); real state-based actions before each priority. Everything else fails loudly with a message
+starting `unsupported by the reference host:` that names the item: face-down objects, battlefield
+objects with static, triggered or replacement abilities, unsupported layouts, priority held by a
+non-active player at setup, resolving a stack object, every action (casting, activating, playing a
+land, special actions) and every answer other than `PASS_PRIORITY` and the field-less answers.
+Format, rules baseline and card-database version are metadata. Every card must be loaded and its
+`definitionHash` must equal the scenario's (R11).
+
+Observed zones are keyed `<player>/<zone>` for the per-player zones and `battlefield`, `stack`,
+`sharedExile` and `command` (the whole command zone) for the rest. Observed
+events are the executed game events since the build, named after the `GameEvent` variant in upper
+snake case (`ZONE_CHANGE {object, from, to, cause}`, `LIFE_CHANGE {player, delta}`,
+`ADD_COUNTERS {target, kind, amount}`, ...; zones and causes in upper snake case, players and
+objects by scenario id), plus `PLAYER_LOST {player}`, `PRIORITY_PASSED {player, result, to?}`
+(`result` is `PRIORITY_MOVED`, `TOP_RESOLVED` or `STEP_ENDS`) and `STEP_ENDS {phase, step?}`.
+The observation is the omniscient test view and never reaches a client (R12).
+
+### Command
+
+`cargo xtask pzl [--cards <dir>] <path.pzl|dir>...` runs each `.pzl` file, or every `*.pzl` file
+under a directory (recursive, sorted by path), on `StateHost` loaded with every `*.json` card under
+`--cards` (default `tests/fixtures/cards` under the workspace root). It prints `PASS <file>` or
+`FAIL <file>` on stdout and, for a failure, one line per problem on stderr as
+`<file>:<line>:<col>: <pointer>: <message>` (`1:1` when the position is unknown). Exit codes: 0
+every scenario passed (one summary line on stdout), 1 a scenario failed an assertion, hit a script
+error or did not parse, 2 usage or I/O error (no path, an unreadable path, a path with no `.pzl`
+file, an unreadable or invalid card library).
 
 ## Commands
 
@@ -156,6 +292,8 @@ cargo xtask cr index [--cache <dir>] [--root <dir>] [--out <file>]
                                      # parse the CR, scan citations, write docs/cr-citations.json
 cargo xtask cr check [--cache <dir>] [--root <dir>] [--index <file>]
                                      # fail on a cited rule missing from the CR, not indexed, or with changed text
+cargo xtask pzl [--cards <dir>] <path.pzl|dir>...
+                                     # run .pzl scenarios on the reference host (see ".pzl scenarios")
 cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt
                                      # regenerate crates/fineprint-dsl/data/vocab.json (RulesVocabulary, #15 FP-014)
 cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check
@@ -172,10 +310,10 @@ FINEPRINT_REQUIRE_CR_CACHE=1 cargo test --locked -p fineprint-ingest --test spec
 cargo test --workspace --locked --features fineprint-core/full-recompute
                                      # the whole suite with the layer cache bypassed (REQ-LAYER-005)
 rm -rf target/differential && \
-FINEPRINT_DIFF_DIR="$PWD/target/differential/cached" cargo test --locked -p fineprint-core --test spec_layers_cache_diff && \
-FINEPRINT_DIFF_DIR="$PWD/target/differential/full" cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/cached" cargo test --locked -p fineprint-core --test spec_layers_cache_diff --test spec_layers_cache_diff_state && \
+FINEPRINT_DIFF_DIR="$PWD/target/differential/full" cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff --test spec_layers_cache_diff_state && \
 diff -r target/differential/cached target/differential/full
-                                     # layer-result digests of the differential scenarios, both modes; must be identical
+                                     # layer-result digests (*.digest) and GameState state hashes (*.statehash) of the differential scenarios, both modes; must be identical
 cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot
                                      # 200-permanent layer recompute benchmark (criterion; REQ-NFR-009)
 cargo llvm-cov --workspace --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry|git)/|/\.rustup/|/rustc/)' --json --summary-only   # needs: rustup component add llvm-tools;
@@ -195,8 +333,9 @@ never line numbers.
 
 Environment: none needed. `RUSTFLAGS="-D warnings"` is optional; `CARGO_TERM_COLOR=never` for
 logs. xtask is run as `cargo xtask <command>` (alias in `.cargo/config.toml`);
-`cargo run -p xtask -- <command>` is equivalent. xtask uses the standard library only and takes
-its file list from `git ls-files`, so new files must be `git add`ed to be checked. Exit codes: 0
+`cargo run -p xtask -- <command>` is equivalent. xtask uses the standard library only (apart from `pzl`) and takes
+its file list from `git ls-files`, so new files must be `git add`ed to be checked (`pzl` is
+the exception: it links `fineprint-core` and reads the paths it is given). Exit codes: 0
 success (one summary line on stdout), 1 violations (`path:line: message` per line on stderr),
 2 usage or input error.
 
@@ -258,8 +397,6 @@ Lands later:
 
 - `cargo run -p xtask -- check-paths`: not delivered by #4 FP-003 (its guards are the three
   above); a path check lands only if a later issue asks for it.
-- `.pzl` runner `cargo run -p fineprint-cli -- pzl <file>` or an xtask equivalent (final syntax
-  set by #51 FP-049).
 - Replay and golden-hash verification: lands with #83 FP-081 and #106 FP-104.
 - Benchmarks beyond the layer recompute benchmark (#36 FP-035): land with #120 FP-118. Fuzzer: lands with #119 FP-117.
 - Toolchain CLI `fineprint-ingest`: the binary and its `vocab` subcommand landed with #15 FP-014
@@ -295,7 +432,8 @@ committed (`core.autocrlf false`) so all three systems see the same bytes.
 | `test (macos-latest)` | `cargo test --workspace --locked` |
 | `coverage (ubuntu-latest)` | `cargo llvm-cov --workspace --locked --all-targets --no-default-ignore-filename-regex --ignore-filename-regex '(/\.cargo/(registry\|git)/\|/\.rustup/\|/rustc/)' --json --summary-only --output-path target/llvm-cov-summary.json`, then `cargo xtask coverage --input target/llvm-cov-summary.json` (cargo-llvm-cov 0.9.1, `llvm-tools` added in the job) |
 | `guards` | `cargo xtask guard all` |
-| `differential (ubuntu-latest)` | `cargo test --workspace --locked --features fineprint-core/full-recompute`, then `spec_layers_cache_diff` in both modes with an absolute `FINEPRINT_DIFF_DIR` (`target/differential/cached` and `target/differential/full`), then a step that fails unless both directories hold the same files with identical bytes (REQ-LAYER-005; the cached-mode suite is the `test` job). Skips its steps on documentation-only pull requests like `test` |
+| `pzl (ubuntu-latest)` | `cargo xtask pzl tests/scenarios` (the sample scenarios; #51 FP-049). Skips its steps on documentation-only pull requests like `test`. NOT a required status check yet |
+| `differential (ubuntu-latest)` | `cargo test --workspace --locked --features fineprint-core/full-recompute`, then `spec_layers_cache_diff` (layer-result `*.digest` files) and `spec_layers_cache_diff_state` (`GameState::state_hash` `*.statehash` files) in both modes with an absolute `FINEPRINT_DIFF_DIR` (`target/differential/cached` and `target/differential/full`), then a step that fails unless both directories hold the same files with identical bytes and at least 7 `*.statehash` files (REQ-LAYER-005; the cached-mode suite is the `test` job). Skips its steps on documentation-only pull requests like `test` |
 | `bench (ubuntu-latest)` | `cargo bench --locked -p fineprint-core --bench layers_recompute -- --noplot`; Criterion writes to `$RUNNER_TEMP/criterion` (`CRITERION_HOME`, outside the cached `target`, so no earlier result is published); the summary step fails unless all four groups have results, writes their median table to the job summary, and that directory is uploaded as an artifact (actions/upload-artifact v4.6.2) for the trend (REQ-NFR-009). NOT a required status check |
 | `req-coverage` | `python3 scripts/req_coverage.py` (whole plan, `GH_TOKEN` from `github.token`, permissions `contents: read`, `issues: read`) |
 | `cr` (workflow `.github/workflows/cr.yml`) | `cargo xtask cr fetch` (pull requests; `--force` on the weekly schedule and `workflow_dispatch`), then `cargo xtask cr check`, then `cargo run --locked -p fineprint-ingest -- vocab --cr cr-cache/rules.txt --check` (runs even if the citation check failed), then `cargo test --locked -p fineprint-ingest --test spec_ingest_vocab` with `FINEPRINT_REQUIRE_CR_CACHE=1` (step `env:`; the real-CR test fails instead of skipping when `cr-cache/rules.txt` is missing; also runs even if an earlier check failed); `cr-cache/` cached with actions/cache. Runs on pull requests touching `docs/SRS.md`, `docs/cr-citations.json`, `xtask/src/cr/**`, `crates/fineprint-dsl/data/vocab.json`, `crates/fineprint-dsl/src/vocab/**`, `crates/fineprint-ingest/src/vocab/**`, `**/*.rs` or the workflow, and weekly (Monday). NOT a required status check (it depends on the network) |

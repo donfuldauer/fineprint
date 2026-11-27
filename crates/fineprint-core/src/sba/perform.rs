@@ -5,6 +5,7 @@
 //! One state-based action pass (REQ-SBA-001, CR 704.3): check every entry against one
 //! snapshot, then perform every result simultaneously as one event.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{IdGenerator, ObjectId, PlayerId};
@@ -22,13 +23,16 @@ use crate::events::{
     CounterTarget, EventBatch, EventContext, EventError, EventState, ExecutedBatch, GameEvent,
     ObjectMarkers, Outcome, ZoneChangeCause,
 };
-use crate::layers::{ContinuousEffects, LayerEnvironment};
+use crate::layers::{ContinuousEffects, Evaluated, LayerEnvironment, evaluate, evaluate_all};
 use crate::memory::{
     CharacteristicsProvider, LkiStore, MemoryError, MemoryTable, capture_lki_on_move,
 };
 use crate::objects::Characteristics;
 use crate::permanent::{AttachTarget, Permanents};
-use crate::replacement::{BusError, BusInterrupt, ReplacementRegistry, process_batch};
+use crate::replacement::{
+    BusError, BusInterrupt, ProviderRefresh, ReplacementRegistry, process_batch,
+    process_batch_refreshing,
+};
 use crate::state::{DesignationValue, GameState};
 use crate::zones::{MoveRequest, ZoneId, ZoneKind, Zones};
 
@@ -288,9 +292,12 @@ impl Plan {
 ///   order: one `Unattach` event per attachment that becomes unattached (CR 704.5n,
 ///   CR 704.5p, CR 701.3d; one event even if both entries apply), ascending id; then one
 ///   `ZoneChange` to the owner's graveyard per moving object (CR 704.5f-704.5k,
-///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedAction`]
-///   ([`ZoneChangeCause::Sacrifice`] for a Saga its controller sacrifices, CR 704.5s, even if
-///   another entry also moves it; an object with several findings moves once); then one
+///   CR 704.5m, CR 704.5s), ascending id, cause [`ZoneChangeCause::StateBasedDestroy`] for
+///   a permanent destroyed by CR 704.5g or CR 704.5h (CR 701.8b) and
+///   [`ZoneChangeCause::StateBasedAction`] for the other moves ([`ZoneChangeCause::Sacrifice`]
+///   for a Saga its controller sacrifices, CR 704.5s, even if another entry also moves it; an
+///   object with several findings moves once, CR 704.7, with the cause of highest precedence:
+///   `Sacrifice`, then `StateBasedDestroy`, then `StateBasedAction`); then one
 ///   `RemoveCounters` event per object and counter kind (CR 704.5q, CR 704.5r), ascending id
 ///   then kind. The unattach events come first so that the bus, which executes the events
 ///   that are not zone changes in submission order (a replacement's `Instead` events at the
@@ -310,7 +317,7 @@ impl Plan {
 ///   host's zone change then has nothing to unattach), and the look-back of "becomes
 ///   unattached" triggers (CR 603.10c) sees it. Counters left on an object that moves get no
 ///   removal event (CR 122.2). [`SbaOutcome::unattached`] lists the attachment of every
-///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
+///   `Unattach` or `UnattachFrom` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
 /// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): before
@@ -407,6 +414,13 @@ impl Plan {
 /// supplies the layer inputs of the state after the batch; a caller whose protector facts
 /// ([`SbaEnvironment::battle_protector`], [`SbaEnvironment::can_be_protector`]) also depend on
 /// such state calls [`perform_all_post_batch`] and supplies a read-only view of them too.
+///
+/// # Follow-up batches
+/// The batch is submitted through [`process_batch`]: the SBA batch and every `Prevent` follow-up
+/// batch of the bus are resolved and executed with `ctx.provider` (the pre-pass snapshot).
+/// [`perform_all_relayered`] and [`perform_all_post_batch`] instead submit it through
+/// [`process_batch_refreshing`] and rebuild the evaluated provider from their post-batch
+/// provider before each follow-up batch (gate 06-turn F6/F13).
 pub fn perform_all(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
@@ -416,7 +430,9 @@ pub fn perform_all(
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
-    perform_all_relayered(
+    // The pre-batch inputs describe no later state: the follow-up batches of the bus keep the
+    // context's provider (gate 06-turn F6/F13; see "Follow-up batches" above).
+    perform_pass(
         registry,
         ctx,
         replacements,
@@ -424,7 +440,8 @@ pub fn perform_all(
         layer_env,
         env,
         choices,
-        &mut |_, view| view(effects, layer_env),
+        false,
+        &mut |_, view| view(effects, layer_env, None),
     )
 }
 
@@ -447,10 +464,16 @@ pub type PostBatchLayers<'a> =
 /// post-batch protector step of the retained zero-defense battles ("Battle protectors" in
 /// [`perform_all`]) reads the inputs `post_batch` supplies, for both the test that the battle
 /// is still a CR 704.5x or CR 704.5y subject and its request (the chooser, its controller, and
-/// the candidates).
+/// the candidates), and so do the `Prevent` follow-up batches of the bus ("Follow-up batches"
+/// in [`perform_all`]).
 ///
-/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
-/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// `post_batch` is called, after the batch, at most once per pass for the retained battles, and
+/// only when the pass has a retained battle that is still on the battlefield; in addition, the
+/// bus calls it once before each `Prevent` follow-up batch of the pass's batch, with the context
+/// as the previous batch left it, and resolves and executes that follow-up batch with the
+/// characteristics evaluated from the inputs it supplies (CR 613.1b, CR 616.1, CR 603.10a,
+/// CR 608.2h; [`process_batch_refreshing`], gate 06-turn F6/F13). An ordinary pass (no retained
+/// battle, no follow-up batch) never calls it. It must
 /// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
 /// environment read), so that re-running the pass from the same state (a
 /// [`ChoiceSession`](crate::choice::ChoiceSession) replay) gives the same requests.
@@ -478,6 +501,7 @@ pub fn perform_all_relayered(
         layer_env,
         env,
         choices,
+        true,
         &mut |after, view| post_batch(after, &mut |e, l| view(e, l, None)),
     )
 }
@@ -511,8 +535,13 @@ pub type PostBatchState<'a> = &'a mut dyn FnMut(
 /// its candidates. A caller whose protector facts depend on state the batch can change (an
 /// attachment the batch unattaches) uses this entry point.
 ///
-/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
-/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// `post_batch` is called, after the batch, at most once per pass for the retained battles, and
+/// only when the pass has a retained battle that is still on the battlefield; in addition, the
+/// bus calls it once before each `Prevent` follow-up batch of the pass's batch, with the context
+/// as the previous batch left it, and resolves and executes that follow-up batch with the
+/// characteristics evaluated from the inputs it supplies (CR 613.1b, CR 616.1, CR 603.10a,
+/// CR 608.2h; [`process_batch_refreshing`], gate 06-turn F6/F13). An ordinary pass (no retained
+/// battle, no follow-up batch) never calls it. It must
 /// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
 /// environment read). The view it supplies is read-only: every write (the chosen protectors
 /// through [`SbaEnvironment::set_battle_protector`], the deathtouch flag) goes to `env`, and
@@ -540,6 +569,7 @@ pub fn perform_all_post_batch(
         layer_env,
         env,
         choices,
+        true,
         &mut |after, view| post_batch(after, &mut |e, l, s| view(e, l, Some(s))),
     )
 }
@@ -562,6 +592,7 @@ fn perform_pass(
     layer_env: &dyn LayerEnvironment,
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
+    refresh_follow_ups: bool,
     post_batch: PostBatchInputs<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
     // CR 704.3: every predicate is evaluated against one snapshot before anything changes.
@@ -587,6 +618,7 @@ fn perform_pass(
         replacements,
         findings,
         &plan,
+        refresh_follow_ups,
         post_batch,
         &*env,
         choices,
@@ -631,6 +663,7 @@ fn perform_findings(
     replacements: &mut ReplacementRegistry,
     findings: Vec<SbaFinding>,
     plan: &Plan,
+    refresh_follow_ups: bool,
     post_batch: PostBatchInputs<'_>,
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
@@ -683,11 +716,11 @@ fn perform_findings(
     let mut dungeons: BTreeSet<ObjectId> = BTreeSet::new();
     // CR 704.5j: the legend-rule losers are put into their owners' graveyards.
     for &o in &legend_losers {
-        moving.insert(o, ZoneChangeCause::StateBasedAction);
+        merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
     }
     // CR 704.5x, CR 704.5y: no player can be chosen: its owner's graveyard.
     for &o in &unprotectable {
-        moving.entry(o).or_insert(ZoneChangeCause::StateBasedAction);
+        merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
     }
     // CR 704.5aa: the players whose speed becomes 1 (once per player).
     let mut speed_set: BTreeSet<PlayerId> = BTreeSet::new();
@@ -706,13 +739,18 @@ fn perform_findings(
                     .or_default()
                     .extend(cease_reasons(finding.entry_id, o, env));
             }
-            (SbaAction::PutIntoGraveyard | SbaAction::Destroy, SbaSubject::Object(o)) => {
-                moving.entry(o).or_insert(ZoneChangeCause::StateBasedAction);
+            // CR 704.5f, CR 704.5i, CR 704.5k: put into the graveyard, not destroyed.
+            (SbaAction::PutIntoGraveyard, SbaSubject::Object(o)) => {
+                merge_move(&mut moving, o, ZoneChangeCause::StateBasedAction);
+            }
+            // CR 704.5g, CR 704.5h, CR 701.8b: destroyed by a state-based action.
+            (SbaAction::Destroy, SbaSubject::Object(o)) => {
+                merge_move(&mut moving, o, ZoneChangeCause::StateBasedDestroy);
             }
             // CR 704.5s, CR 715.4: the controller sacrifices it; the sacrifice cause wins over
             // a plain SBA move of the same object (decision #42 FP-041).
             (SbaAction::Sacrifice, SbaSubject::Object(o)) => {
-                moving.insert(o, ZoneChangeCause::Sacrifice);
+                merge_move(&mut moving, o, ZoneChangeCause::Sacrifice);
             }
             // CR 704.5n, CR 704.5p
             (SbaAction::Unattach, SbaSubject::Object(o)) => {
@@ -799,13 +837,19 @@ fn perform_findings(
     let mut executed: Vec<ExecutedBatch> = Vec::new();
     if !moves.is_empty() {
         // CR 704.3, CR 704.7, CR 704.8: one simultaneous event through the bus.
-        let report = process_batch(
-            ctx,
-            replacements,
-            &EventBatch::from_events(moves),
-            true,
-            choices,
-        )?;
+        let batch = EventBatch::from_events(moves);
+        let report = if refresh_follow_ups {
+            // Gate 06-turn F6/F13: each `Prevent` follow-up batch is resolved and executed with
+            // the characteristics evaluated over the state the previous batch left (CR 613.1b,
+            // CR 616.1, CR 603.10a, CR 608.2h); the SBA batch itself keeps the context's
+            // provider (CR 704.8).
+            let refresh = PostBatchRefresh {
+                inputs: RefCell::new(&mut *post_batch),
+            };
+            process_batch_refreshing(ctx, replacements, &batch, true, choices, &refresh)?
+        } else {
+            process_batch(ctx, replacements, &batch, true, choices)?
+        };
         executed = report.executed;
     }
 
@@ -908,20 +952,23 @@ fn perform_findings(
     removed_from_game.sort_unstable();
 
     // CR 704.5n, CR 704.5p, CR 701.3d: "It remains on the battlefield": the permanents that
-    // every Unattach event of the batch, planned or produced by a replacement, unattached and
-    // that are still on the battlefield as the same object at the end of the pass (decision
-    // #42 FP-041, D2). An unattach that found nothing attached is no event (the bus records
-    // only events that occurred), and an executed one reports `Outcome::Applied`. The event
-    // itself stays in `executed` either way.
+    // every Unattach or UnattachFrom event of the batch, planned or produced by a replacement,
+    // unattached and that are still on the battlefield as the same object at the end of the pass (decision
+    // #42 FP-041, D2). An unattach that found nothing attached (an `UnattachFrom` of another
+    // host included) is no event (the bus records only events that occurred), and an executed
+    // one reports `Outcome::Applied`. The event itself stays in `executed` either way (gate
+    // 06-turn R18).
     let unattached: Vec<ObjectId> = executed
         .iter()
         .flat_map(|b| &b.events)
         .filter_map(|ev| match (ev.instance.event(), ev.outcome) {
-            (GameEvent::Unattach { attachment }, Outcome::Applied)
-                if ctx
-                    .zones
-                    .object(*attachment)
-                    .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
+            (
+                GameEvent::Unattach { attachment } | GameEvent::UnattachFrom { attachment, .. },
+                Outcome::Applied,
+            ) if ctx
+                .zones
+                .object(*attachment)
+                .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
             {
                 Some(*attachment)
             }
@@ -1243,6 +1290,39 @@ enum CeaseReason {
     CardCopy,
 }
 
+/// The precedence of a cause in the CR 704.7 merge of one object's SBA moves: higher wins.
+/// `Sacrifice` (CR 704.5s, decision #42 FP-041) over `StateBasedDestroy` (CR 704.5g,
+/// CR 704.5h: the object is destroyed, CR 701.8b) over `StateBasedAction` (decision
+/// "#209 FP-155 - SBA destruction cause"). Any other cause ranks lowest; the SBA pass submits
+/// none.
+fn move_precedence(cause: ZoneChangeCause) -> u8 {
+    match cause {
+        ZoneChangeCause::Sacrifice => 3,
+        ZoneChangeCause::StateBasedDestroy => 2,
+        ZoneChangeCause::StateBasedAction => 1,
+        ZoneChangeCause::Other
+        | ZoneChangeCause::Destroy
+        | ZoneChangeCause::Discard
+        | ZoneChangeCause::Mill
+        | ZoneChangeCause::Exile
+        | ZoneChangeCause::CounterSpell => 0,
+    }
+}
+
+/// CR 704.7: records a move of `object` with `cause`, merging with a move already recorded for
+/// it: one move per object per pass, with the cause of higher [`move_precedence`] whatever the
+/// order of the findings.
+fn merge_move(
+    moving: &mut BTreeMap<ObjectId, ZoneChangeCause>,
+    object: ObjectId,
+    cause: ZoneChangeCause,
+) {
+    let slot = moving.entry(object).or_insert(cause);
+    if move_precedence(cause) > move_precedence(*slot) {
+        *slot = cause;
+    }
+}
+
 /// The reasons a cease finding of entry `entry_id` gives for `object`, from the check snapshot.
 fn cease_reasons(entry_id: &str, object: ObjectId, env: &dyn SbaEnvironment) -> Vec<CeaseReason> {
     match entry_id {
@@ -1262,9 +1342,127 @@ fn cease_reasons(entry_id: &str, object: ObjectId, env: &dyn SbaEnvironment) -> 
     }
 }
 
+/// The [`ProviderRefresh`] of the follow-up batches of an SBA batch (gate 06-turn F6/F13;
+/// REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003): the caller's post-batch provider supplies the
+/// layer inputs of the live state the previous batch left, and an [`EvaluatedSnapshot`] of
+/// that state is built from them (CR 613.1-613.4). The provider is called once per follow-up
+/// batch, through a [`RefCell`] because [`ProviderRefresh::refresh`] takes `&self`; the bus is
+/// single-threaded and never calls `refresh` re-entrantly.
+struct PostBatchRefresh<'p> {
+    inputs: RefCell<PostBatchInputs<'p>>,
+}
+
+impl ProviderRefresh for PostBatchRefresh<'_> {
+    fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_> {
+        let mut snapshot = EvaluatedSnapshot::default();
+        let mut inputs = self.inputs.borrow_mut();
+        (*inputs)(ctx, &mut |effects, layer_env, _| {
+            snapshot = EvaluatedSnapshot::of(ctx, effects, layer_env);
+        });
+        Box::new(snapshot)
+    }
+}
+
+/// One object of an [`EvaluatedSnapshot`]: what a
+/// [`LayeredProvider`](crate::layers::LayeredProvider) over the same inputs answers for it.
+#[derive(Debug)]
+struct SnapshotEntry {
+    evaluated: Evaluated,
+    counters: BTreeMap<String, i64>,
+    attached_here: Vec<ObjectId>,
+}
+
+/// An owned provider of the characteristics evaluated through layers 1a-7d over one state
+/// (REQ-LAYER-001; CR 613.1-613.4, CR 613.1b): for every object it knows it answers exactly
+/// what a [`LayeredProvider`](crate::layers::LayeredProvider) over the same layer inputs
+/// answers, so that it can outlive the inputs, which never leave the post-batch provider's
+/// call. An object it does not know is unknown (`None`, no counters, no attachments).
+#[derive(Debug, Default)]
+struct EvaluatedSnapshot {
+    objects: BTreeMap<ObjectId, SnapshotEntry>,
+}
+
+impl EvaluatedSnapshot {
+    /// The snapshot of every object of `layer_env.objects()` and of every object in the zones
+    /// of `ctx`, by ascending id (R3, REQ-CORE-001: never in the environment's order). The
+    /// objects are evaluated in one layer-major board pass (REQ-LAYER-001, REQ-LAYER-005); an
+    /// object outside that pass (not listed by the environment, or the pass failed because a
+    /// listed object has no base) is evaluated alone, exactly as `evaluate` does; an object
+    /// without a base is left out.
+    fn of(
+        ctx: &EventContext<'_>,
+        effects: &ContinuousEffects,
+        layer_env: &dyn LayerEnvironment,
+    ) -> EvaluatedSnapshot {
+        let board = evaluate_all(effects, layer_env).unwrap_or_default();
+        let mut ids = layer_env.objects();
+        ids.extend(ctx.zones.all_object_ids());
+        ids.sort_unstable();
+        ids.dedup();
+        let mut objects = BTreeMap::new();
+        for id in ids {
+            let evaluated = match board.get(&id) {
+                Some(e) => e.clone(),
+                None => match evaluate(effects, layer_env, id) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                },
+            };
+            let counters = layer_env
+                .counters(id)
+                .into_iter()
+                .filter(|&(_, n)| n >= 1)
+                .collect();
+            let attached_here = layer_env.attached_here(id);
+            objects.insert(
+                id,
+                SnapshotEntry {
+                    evaluated,
+                    counters,
+                    attached_here,
+                },
+            );
+        }
+        EvaluatedSnapshot { objects }
+    }
+}
+
+impl CharacteristicsProvider for EvaluatedSnapshot {
+    fn characteristics(&self, id: ObjectId) -> Option<Characteristics> {
+        self.objects
+            .get(&id)
+            .map(|o| o.evaluated.characteristics.clone())
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.objects
+            .get(&id)
+            .map(|o| o.counters.clone())
+            .unwrap_or_default()
+    }
+
+    fn attached_here(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.objects
+            .get(&id)
+            .map(|o| o.attached_here.clone())
+            .unwrap_or_default()
+    }
+
+    // CR 613.1b: the controller after layer 2.
+    fn controller(&self, id: ObjectId) -> Option<PlayerId> {
+        self.objects.get(&id).and_then(|o| o.evaluated.controller)
+    }
+}
+
 /// The LKI provider of a ceasing object: characteristics from the context's provider, counters
 /// from the object markers (CR 122.1) and attachments from the permanent container
 /// (CR 701.3a), the same three answers the event executor gives on a zone change.
+///
+/// The context's provider must answer with the characteristics evaluated through layers 1a-7d
+/// (REQ-LAYER-001, REQ-CORE-003; CR 613.1-613.4, CR 608.2h), e.g. a
+/// [`LayeredProvider`](crate::layers::LayeredProvider) over a snapshot of the state taken
+/// before the pass (see [`EventContext`]); layers do not change counter amounts, so the
+/// markers' counters are the evaluated ones.
 struct CeasingLki<'a> {
     inner: &'a dyn CharacteristicsProvider,
     markers: &'a ObjectMarkers,
@@ -1286,10 +1484,11 @@ impl CharacteristicsProvider for CeasingLki<'_> {
 }
 
 /// Captures the last known information of `id` before it ceases to exist (REQ-CORE-003,
-/// CR 608.2h, CR 704.8), reading the permanent state and counters from the given snapshot. The request names exile as a pseudo-destination: for exile
-/// `capture_lki_on_move` always treats the object as leaving its zone, so a record is stored
-/// from any zone (a token already in a graveyard included). An object the provider does not
-/// know gets no record (it still ceases).
+/// CR 608.2h, CR 704.8), reading the permanent state and counters from the given snapshot and
+/// the evaluated characteristics from the context's provider (REQ-LAYER-001). The request
+/// names exile as a pseudo-destination: for exile `capture_lki_on_move` always treats the
+/// object as leaving its zone, so a record is stored from any zone (a token already in a
+/// graveyard included). An object the provider does not know gets no record (it still ceases).
 fn capture_ceasing_lki(
     ctx: &mut EventContext<'_>,
     id: ObjectId,
@@ -1312,5 +1511,125 @@ fn capture_ceasing_lki(
     ) {
         Ok(_) | Err(MemoryError::NoCharacteristics(_) | MemoryError::AlreadyCaptured(_)) => Ok(()),
         Err(e) => Err(BusInterrupt::Error(BusError::Event(EventError::from(e)))),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use std::collections::BTreeMap;
+
+    use fineprint_base::ids::ObjectId;
+
+    use super::{ZoneChangeCause, merge_move};
+
+    /// Every permutation of `items`.
+    fn permutations(items: &[ZoneChangeCause]) -> Vec<Vec<ZoneChangeCause>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let first = rest.remove(i);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, first);
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// The merged cause of one object whose findings arrive in `order`.
+    fn merged(order: &[ZoneChangeCause]) -> ZoneChangeCause {
+        let o = ObjectId::new(7);
+        let mut moving = BTreeMap::new();
+        for &cause in order {
+            merge_move(&mut moving, o, cause);
+        }
+        assert_eq!(moving.len(), 1, "CR 704.7: one move per object");
+        moving[&o]
+    }
+
+    // REQ-SBA-001, CR 704.7, CR 701.8b: one object's plain SBA move (CR 704.5f, the legend-rule
+    // or unprotectable-battle pre-insert) and destroy move (CR 704.5g, CR 704.5h) merge into one
+    // `StateBasedDestroy` move in every arrival order; `Sacrifice` (CR 704.5s) wins over both in
+    // every order; a single cause is kept as it is.
+    #[test]
+    fn req_sba_001_cr_704_7_merge_precedence_in_every_order() {
+        use ZoneChangeCause::{Sacrifice, StateBasedAction, StateBasedDestroy};
+        for cause in [StateBasedAction, StateBasedDestroy, Sacrifice] {
+            assert_eq!(merged(&[cause]), cause);
+            assert_eq!(merged(&[cause, cause]), cause);
+        }
+        for order in permutations(&[StateBasedAction, StateBasedDestroy]) {
+            assert_eq!(merged(&order), StateBasedDestroy, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, StateBasedAction, StateBasedDestroy]) {
+            assert_eq!(merged(&order), StateBasedDestroy, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+        for order in permutations(&[StateBasedDestroy, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+        for order in permutations(&[StateBasedAction, StateBasedDestroy, Sacrifice]) {
+            assert_eq!(merged(&order), Sacrifice, "{order:?}");
+        }
+    }
+
+    // REQ-SBA-001, CR 704.7: merging is per object; other objects keep their own cause, and the
+    // map stays ordered by object id (R3).
+    #[test]
+    fn req_sba_001_cr_704_7_merge_is_per_object() {
+        let mut moving = BTreeMap::new();
+        merge_move(
+            &mut moving,
+            ObjectId::new(3),
+            ZoneChangeCause::StateBasedDestroy,
+        );
+        merge_move(
+            &mut moving,
+            ObjectId::new(1),
+            ZoneChangeCause::StateBasedAction,
+        );
+        merge_move(&mut moving, ObjectId::new(2), ZoneChangeCause::Sacrifice);
+        merge_move(
+            &mut moving,
+            ObjectId::new(1),
+            ZoneChangeCause::StateBasedAction,
+        );
+        assert_eq!(
+            moving.into_iter().collect::<Vec<_>>(),
+            [
+                (ObjectId::new(1), ZoneChangeCause::StateBasedAction),
+                (ObjectId::new(2), ZoneChangeCause::Sacrifice),
+                (ObjectId::new(3), ZoneChangeCause::StateBasedDestroy),
+            ]
+        );
+    }
+
+    // REQ-SBA-001: a cause the SBA pass never submits ranks lowest: a recorded SBA cause is not
+    // replaced by it, and it is replaced by any SBA cause.
+    #[test]
+    fn req_sba_001_non_sba_causes_rank_lowest() {
+        for other in [
+            ZoneChangeCause::Other,
+            ZoneChangeCause::Destroy,
+            ZoneChangeCause::Discard,
+            ZoneChangeCause::Mill,
+            ZoneChangeCause::Exile,
+            ZoneChangeCause::CounterSpell,
+        ] {
+            for sba in [
+                ZoneChangeCause::StateBasedAction,
+                ZoneChangeCause::StateBasedDestroy,
+                ZoneChangeCause::Sacrifice,
+            ] {
+                assert_eq!(merged(&[other, sba]), sba);
+                assert_eq!(merged(&[sba, other]), sba);
+            }
+            assert_eq!(merged(&[other]), other);
+        }
     }
 }

@@ -482,7 +482,7 @@ fn room_709_5a_locked_keeps_type_line() {
     assert_eq!(got.card_types, set(&["Artifact", "Enchantment"]));
     assert_eq!(got.subtypes, set(&["Room"]));
     assert!(got.abilities.is_empty());
-    assert!(got.rules_text.0.is_empty());
+    assert!(got.rules_text.is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1,0 +1,1133 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
+
+//! Property tests for the casting announce procedure (REQ-CAST-001, REQ-CORE-005,
+//! REQ-NET-003, REQ-DSL-013, REQ-TEST-001; CR 601.2, 601.2c, 601.2d, 734.1, 734.2, 101.2,
+//! 115.3, 115.5, 702.11e; R3, R12).
+//!
+//! Bounded random inputs from `Pcg64Dxsm::from_u64_seed` over fixed seeds (no wall clock, R3,
+//! R7). Black-box: written from the work-item brief only. Synthetic data only (R5).
+
+#[path = "spec_casting_announce_support.rs"]
+mod support;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use fineprint_base::ids::PlayerId;
+use fineprint_base::prng::Pcg64Dxsm;
+use fineprint_core::casting::*;
+use fineprint_core::choice::{
+    ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse, ChoiceTarget, PendingChoiceRequest,
+    Status,
+};
+use fineprint_core::txn::Transactional;
+use fineprint_dsl::ability::RuleKind;
+use serde_json::{Map, Value, json};
+use support::*;
+
+const CASES: u64 = 300;
+
+fn below(rng: &mut Pcg64Dxsm, bound: u64) -> u64 {
+    rng.next_bounded(bound).expect("bound > 0")
+}
+
+fn between(rng: &mut Pcg64Dxsm, lo: u64, hi: u64) -> u64 {
+    lo + below(rng, hi - lo + 1)
+}
+
+fn coin(rng: &mut Pcg64Dxsm) -> bool {
+    below(rng, 2) == 1
+}
+
+fn pick<'a, T>(rng: &mut Pcg64Dxsm, items: &'a [T]) -> &'a T {
+    rng.choose(items).expect("non-empty")
+}
+
+/// The candidate universe: both players, objects 10..=15 and the first stack id (CR 115.5).
+fn universe() -> Vec<ChoiceTarget> {
+    let mut v = vec![tp(1), tp(2)];
+    v.extend((10..=15).map(to));
+    v.push(to(FIRST_STACK_ID));
+    v
+}
+
+fn random_candidates(rng: &mut Pcg64Dxsm) -> Vec<ChoiceTarget> {
+    let mut v: Vec<ChoiceTarget> = universe().into_iter().filter(|_| coin(rng)).collect();
+    v.sort();
+    v
+}
+
+fn random_slot(rng: &mut Pcg64Dxsm) -> TargetSlotSpec {
+    let min = below(rng, 3);
+    let max = between(rng, min.max(1), 3);
+    slot(min, max, &random_candidates(rng))
+}
+
+fn random_slots(rng: &mut Pcg64Dxsm, n: u64) -> Vec<TargetSlotSpec> {
+    (0..below(rng, n + 1)).map(|_| random_slot(rng)).collect()
+}
+
+/// A random well-formed targeting entry from the brief's vocabulary.
+fn random_targeting_params(rng: &mut Pcg64Dxsm) -> Value {
+    let mut m = Map::new();
+    let keyword = *pick(rng, &["HEXPROOF", "SHROUD", "PROTECTION", "OTHER"]);
+    m.insert("keyword".into(), json!(keyword));
+    if keyword == "HEXPROOF" && below(rng, 4) == 0 {
+        m.insert("effect".into(), json!("IGNORE_HEXPROOF"));
+    } else if coin(rng) {
+        m.insert("effect".into(), json!("PROHIBIT"));
+    }
+    match *pick(rng, &universe()) {
+        ChoiceTarget::Player(p) => m.insert("target_player".into(), json!(p.get())),
+        ChoiceTarget::Object(o) => m.insert("target_object".into(), json!(o.get())),
+    };
+    if coin(rng) {
+        m.insert("sources".into(), json!(*pick(rng, &["ANY", "OPPONENTS"])));
+    }
+    if coin(rng) {
+        m.insert("quality".into(), json!(*pick(rng, &[QUALITY_A, QUALITY_B])));
+    }
+    if below(rng, 4) == 0 {
+        m.insert("source_player".into(), json!(between(rng, 1, 2)));
+    }
+    Value::Object(m)
+}
+
+/// A random well-formed prohibition (the fake reads `test.*`).
+fn random_prohibition_params(rng: &mut Pcg64Dxsm) -> Value {
+    let mut m = Map::new();
+    m.insert("action".into(), json!(*pick(rng, &["CAST", "ACTIVATE"])));
+    match below(rng, 4) {
+        0 => {}
+        1 => {
+            m.insert("test.could_lapse".into(), json!(true));
+            m.insert("test.applies".into(), json!(coin(rng)));
+        }
+        2 => {
+            m.insert("test.parity".into(), json!(*pick(rng, &["even", "odd"])));
+        }
+        _ => {
+            m.insert("test.could_lapse".into(), json!(true));
+        }
+    }
+    if below(rng, 4) == 0 {
+        m.insert(
+            "object".into(),
+            json!(*pick(rng, &[SPELL_OBJECT, ABILITY_SOURCE, 99])),
+        );
+    }
+    Value::Object(m)
+}
+
+fn random_players(rng: &mut Pcg64Dxsm) -> Vec<PlayerId> {
+    match below(rng, 3) {
+        0 => vec![P1],
+        1 => vec![P2],
+        _ => vec![P1, P2],
+    }
+}
+
+fn random_rules(rng: &mut Pcg64Dxsm, first_id: u64, n: u64, prohibitions: bool) -> Vec<R> {
+    let count = below(rng, n + 1);
+    (0..count)
+        .map(|i| {
+            let id = first_id + i;
+            let ts = below(rng, 20);
+            let players = random_players(rng);
+            if prohibitions && below(rng, 4) == 0 {
+                prohibition(id, random_prohibition_params(rng), &players, ts)
+            } else {
+                r(
+                    id,
+                    RuleKind::TargetingRule,
+                    random_targeting_params(rng),
+                    &players,
+                    ts,
+                )
+            }
+        })
+        .collect()
+}
+
+fn random_costs(rng: &mut Pcg64Dxsm) -> CostSpec {
+    let mut c = no_costs();
+    if below(rng, 3) == 0 {
+        c.alternative_costs = (0..between(rng, 1, 2))
+            .map(|i| format!("test.alt_{i}"))
+            .collect();
+    }
+    if below(rng, 3) == 0 {
+        c.additional_costs = (0..between(rng, 1, 2))
+            .map(|i| format!("test.add_{i}"))
+            .collect();
+    }
+    if coin(rng) {
+        // B3: sometimes a range that reaches above i64::MAX.
+        let lo = if below(rng, 6) == 0 {
+            i64::MAX as u64 - below(rng, 2)
+        } else {
+            below(rng, 3)
+        };
+        c.x_range = Some((lo, lo + below(rng, 4)));
+    }
+    if below(rng, 4) == 0 {
+        c.symbol_slots = (0..between(rng, 1, 2))
+            .map(|_| vec!["test.sym_a".to_owned(), "test.sym_b".to_owned()])
+            .collect();
+    }
+    if below(rng, 5) == 0 {
+        c.harmonize_candidates = vec![oid(30), oid(31)];
+    }
+    c
+}
+
+/// A random configuration of the fake (its rules built from the returned entries) and a random
+/// request.
+fn random_case(rng: &mut Pcg64Dxsm) -> (Fake, CastRequest, Vec<R>) {
+    let caster = if coin(rng) { P1 } else { P2 };
+    let req = if coin(rng) {
+        spell(caster)
+    } else {
+        ability(caster)
+    };
+    let mut f = Fake::new();
+    f.priority = *pick(rng, &[Some(P1), Some(P2), None]);
+    f.marker = below(rng, 1000);
+    if coin(rng) {
+        f.stack = vec![oid(90)];
+    }
+    for n in 10..=15 {
+        if coin(rng) {
+            f.controllers.insert(n, P1);
+        }
+    }
+    if below(rng, 3) == 0 {
+        let n = between(rng, 1, 3) as usize;
+        let min = between(rng, 1, n as u64) as u32;
+        let max = between(rng, u64::from(min), n as u64 + 1) as u32;
+        f.mode_spec = Some(modes_spec(n, min, max, coin(rng)));
+        f.mode_slots = (0..n).map(|_| random_slots(rng, 1)).collect();
+    }
+    f.cost_spec = random_costs(rng);
+    // CR-011 (B2): the host's symbol slots after the first cost answer.
+    f.symbols = match below(rng, 3) {
+        0 => SymbolHost::Default,
+        1 => SymbolHost::Always(f.cost_spec.symbol_slots.clone()),
+        _ => {
+            let mut per = BTreeMap::new();
+            per.insert((None, Vec::new()), f.cost_spec.symbol_slots.clone());
+            for i in 0..f.cost_spec.alternative_costs.len() as u32 {
+                if coin(rng) {
+                    let n = between(rng, 1, 3) as usize;
+                    per.insert(
+                        (Some(i), Vec::new()),
+                        vec![(0..n).map(|k| format!("test.alt_sym_{k}")).collect(); n],
+                    );
+                }
+            }
+            SymbolHost::PerCosts(per)
+        }
+    };
+    // CR-012 (B1): some modes get other slots with an alternative cost or additional cost 0.
+    if let Some(spec) = &f.mode_spec {
+        for m in 0..spec.labels.len() as u32 {
+            if !f.cost_spec.alternative_costs.is_empty() && coin(rng) {
+                f.mode_cost_slots
+                    .insert((m, Some(0), Vec::new()), random_slots(rng, 1));
+            }
+            if !f.cost_spec.additional_costs.is_empty() && coin(rng) {
+                f.mode_cost_slots
+                    .insert((m, None, vec![0]), random_slots(rng, 1));
+            }
+        }
+    }
+    f.base_slots = random_slots(rng, 2);
+    if !f.cost_spec.additional_costs.is_empty() && coin(rng) {
+        f.additional_slots = random_slots(rng, 1);
+    }
+    if below(rng, 3) == 0 {
+        f.division = Some(below(rng, 6));
+    }
+    for q in [QUALITY_A, QUALITY_B] {
+        if coin(rng) {
+            f.qualities.insert(q.to_owned());
+        }
+    }
+    f.combination_legal = below(rng, 6) != 0;
+    let items = random_rules(rng, 1, 6, true);
+    (f.with_rules(&items), req, items)
+}
+
+/// A random answer to `p` built to satisfy the request's pinned semantics.
+fn valid_answer(rng: &mut Pcg64Dxsm, p: &PendingChoiceRequest) -> ChoiceResponse {
+    match &p.payload {
+        ChoicePayload::ChooseModes {
+            labels,
+            repeats_allowed,
+            ..
+        } => {
+            let n = labels.len() as u64;
+            let cap = if *repeats_allowed {
+                p.max
+            } else {
+                p.max.min(n)
+            };
+            let k = between(rng, p.min, cap.max(p.min));
+            let modes: Vec<u32> = if *repeats_allowed {
+                (0..k).map(|_| below(rng, n) as u32).collect()
+            } else {
+                let mut all: Vec<u32> = (0..n as u32).collect();
+                rng.shuffle(&mut all);
+                all.truncate(k as usize);
+                all
+            };
+            select_modes(&modes)
+        }
+        ChoicePayload::ChooseCostsAndX {
+            alternative_costs,
+            additional_costs,
+            x_range,
+            symbol_slots,
+            harmonize_candidates,
+        } => {
+            let alternative = if !alternative_costs.is_empty() && coin(rng) {
+                Some(below(rng, alternative_costs.len() as u64) as u32)
+            } else {
+                None
+            };
+            let additional = (0..additional_costs.len() as u32)
+                .filter(|_| coin(rng))
+                .collect();
+            let x = x_range.map(|(lo, hi)| between(rng, lo, hi));
+            let symbol_options = symbol_slots
+                .iter()
+                .map(|s| below(rng, s.len() as u64) as u32)
+                .collect();
+            let harmonize = if !harmonize_candidates.is_empty() && coin(rng) {
+                Some(*pick(rng, harmonize_candidates))
+            } else {
+                None
+            };
+            configure(&CostChoice {
+                alternative,
+                additional,
+                x,
+                symbol_options,
+                harmonize,
+            })
+        }
+        ChoicePayload::ChooseTargets { slots, .. } => {
+            let targets = slots
+                .iter()
+                .map(|s| {
+                    let cap = s.max.min(s.legal.len() as u64);
+                    let k = between(rng, s.min, cap.max(s.min));
+                    let mut l = s.legal.clone();
+                    rng.shuffle(&mut l);
+                    l.truncate(k as usize);
+                    l
+                })
+                .collect();
+            ChoiceResponse::SelectTargets { targets }
+        }
+        ChoicePayload::DivideValue { total, recipients } => {
+            let floor: u64 = recipients.iter().map(|(_, m)| m).sum();
+            let mut shares: Vec<u64> = recipients.iter().map(|(_, m)| *m).collect();
+            let mut rest = total.saturating_sub(floor);
+            while rest > 0 {
+                let i = below(rng, shares.len() as u64) as usize;
+                shares[i] += 1;
+                rest -= 1;
+            }
+            submit_division(
+                &recipients
+                    .iter()
+                    .zip(shares)
+                    .map(|((t, _), s)| (*t, s))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        other => panic!("unexpected request payload {other:?}"),
+    }
+}
+
+/// A random (probably invalid) answer of a random announce-response shape.
+fn junk_answer(rng: &mut Pcg64Dxsm) -> ChoiceResponse {
+    let u = universe();
+    match below(rng, 5) {
+        0 => select_modes(
+            &(0..below(rng, 4))
+                .map(|_| below(rng, 5) as u32)
+                .collect::<Vec<_>>(),
+        ),
+        1 => with_x(below(rng, 20)),
+        2 => ChoiceResponse::SelectTargets {
+            targets: (0..below(rng, 4))
+                .map(|_| (0..below(rng, 4)).map(|_| *pick(rng, &u)).collect())
+                .collect(),
+        },
+        3 => submit_division(
+            &(0..below(rng, 4))
+                .map(|_| (*pick(rng, &u), below(rng, 5)))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ChoiceResponse::PassPriority,
+    }
+}
+
+/// One random run: drives the session with valid answers, interleaving junk answers that must
+/// either be rejected without changing anything or be valid.
+struct Driven {
+    requests: Vec<PendingChoiceRequest>,
+    answers: Vec<ChoiceResponse>,
+    state: Fake,
+    final_hash: fineprint_base::hash::Digest,
+    observed: Observed,
+}
+
+fn drive_random(rng: &mut Pcg64Dxsm, f: &Fake, req: &CastRequest) -> Driven {
+    let mut s = start(f, req);
+    let mut requests = Vec::new();
+    loop {
+        let p = match s.status() {
+            Status::Pending(p) => p.clone(),
+            Status::Done { state, output } => {
+                return Driven {
+                    requests,
+                    answers: s.answers().to_vec(),
+                    state: state.clone(),
+                    final_hash: s.state_hash(),
+                    observed: output.clone(),
+                };
+            }
+        };
+        assert_eq!(s.state_hash(), f.state_hash(), "base hash while pending");
+        assert!(requests.len() < 8, "too many requests: {requests:?}");
+        if coin(rng) {
+            let junk = junk_answer(rng);
+            if p.validate(&junk).is_err() {
+                let before = s.answers().len();
+                assert!(s.submit(p.request_id, junk).is_err());
+                assert_eq!(s.answers().len(), before, "a rejected answer was recorded");
+                assert_eq!(
+                    s.pending(),
+                    Some(&p),
+                    "a rejected answer changed the session"
+                );
+            }
+        }
+        check_request(&p);
+        let a = valid_answer(rng, &p);
+        if let Err(e) = p.validate(&a) {
+            panic!("constructed answer {a:?} rejected by {:?}: {e}", p.payload);
+        }
+        requests.push(p.clone());
+        s.submit(p.request_id, a).expect("valid answer accepted");
+    }
+}
+
+/// Property (e), REQ-NET-003, R12 (B3, B4): the request validates its own default answer, every
+/// enumerated option stands for something the request accepts (a `Number` is the exact X of the
+/// payload's range and the default with that X validates; an `Object` of a cost request is one
+/// of its harmonize candidates; a `Text` of a cost request is one of its alternative or
+/// additional cost labels or symbol options; no other kind appears in a cost request; a
+/// recipient or mode is in the payload), and a validator contract carries the request's bounds.
+fn check_request(p: &PendingChoiceRequest) {
+    assert!(
+        p.validate(&p.default_on_timeout).is_ok(),
+        "default of {:?} rejected",
+        p.payload
+    );
+    match &p.options {
+        ChoiceOptions::Validator(c) => {
+            assert_eq!((c.min, c.max), (p.min, p.max), "validator bounds");
+        }
+        ChoiceOptions::Enumerated(items) => {
+            for item in items {
+                match (item, &p.payload) {
+                    (ChoiceOption::Number(n), ChoicePayload::ChooseCostsAndX { x_range, .. }) => {
+                        let (lo, hi) = x_range.expect("Number without an X range");
+                        let v = u64::try_from(*n).expect("negative Number");
+                        assert!(lo <= v && v <= hi, "lossy Number({n}) for {lo}..={hi}");
+                        let ChoiceResponse::ConfigureCosts {
+                            alternative,
+                            additional,
+                            symbol_options,
+                            harmonize,
+                            ..
+                        } = p.default_on_timeout.clone()
+                        else {
+                            panic!("cost default is not ConfigureCosts");
+                        };
+                        let a = ChoiceResponse::ConfigureCosts {
+                            alternative,
+                            additional,
+                            x: Some(v),
+                            symbol_options,
+                            harmonize,
+                        };
+                        assert!(p.validate(&a).is_ok(), "X {v} rejected");
+                    }
+                    (
+                        ChoiceOption::Object(o),
+                        ChoicePayload::ChooseCostsAndX {
+                            harmonize_candidates,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            harmonize_candidates.contains(o),
+                            "harmonize option {o:?} not in {harmonize_candidates:?}"
+                        );
+                    }
+                    (
+                        ChoiceOption::Text(t),
+                        ChoicePayload::ChooseCostsAndX {
+                            alternative_costs,
+                            additional_costs,
+                            symbol_slots,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            alternative_costs.contains(t)
+                                || additional_costs.contains(t)
+                                || symbol_slots.iter().any(|s| s.contains(t)),
+                            "cost option {t:?} is no cost or symbol option of {:?}",
+                            p.payload
+                        );
+                    }
+                    (o, ChoicePayload::ChooseCostsAndX { .. }) => {
+                        panic!("unexpected cost option {o:?} for {:?}", p.payload)
+                    }
+                    (ChoiceOption::Mode(m), ChoicePayload::ChooseModes { labels, .. }) => {
+                        assert!((*m as usize) < labels.len(), "mode option {m}");
+                    }
+                    (o, ChoicePayload::DivideValue { recipients, .. }) => {
+                        let t = match o {
+                            ChoiceOption::Object(x) => ChoiceTarget::Object(*x),
+                            ChoiceOption::Player(x) => ChoiceTarget::Player(*x),
+                            other => panic!("division option {other:?}"),
+                        };
+                        assert!(recipients.iter().any(|(r, _)| *r == t), "{t:?}");
+                    }
+                    (o, ChoicePayload::ChooseTargets { slots, .. }) => {
+                        let t = match o {
+                            ChoiceOption::Object(x) => ChoiceTarget::Object(*x),
+                            ChoiceOption::Player(x) => ChoiceTarget::Player(*x),
+                            other => panic!("target option {other:?}"),
+                        };
+                        assert!(slots.iter().any(|s| s.legal.contains(&t)), "{t:?}");
+                    }
+                    (o, payload) => panic!("option {o:?} for {payload:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// Property (f), CR-011 (B2), REQ-CAST-001; CR 601.2b: for an announced proposal, the cost
+/// requests follow the two-request shape and `symbol_options` comes from the second request.
+fn check_cost_requests(f: &Fake, req: &CastRequest, d: &Driven, proposal: &Proposal) {
+    let idx: Vec<usize> = d
+        .requests
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.payload, ChoicePayload::ChooseCostsAndX { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let spec = &f.cost_spec;
+    let two_step = !spec.alternative_costs.is_empty() || !spec.additional_costs.is_empty();
+    let Some(&first) = idx.first() else {
+        assert_eq!(proposal.costs, no_choice());
+        return;
+    };
+    let ChoicePayload::ChooseCostsAndX { symbol_slots, .. } = &d.requests[first].payload else {
+        unreachable!()
+    };
+    if !two_step {
+        assert_eq!(
+            idx.len(),
+            1,
+            "one cost request without alternative/additional costs"
+        );
+        assert_eq!(symbol_slots, &spec.symbol_slots);
+        return;
+    }
+    assert!(
+        symbol_slots.is_empty(),
+        "first cost request with symbol slots"
+    );
+    let ChoiceResponse::ConfigureCosts {
+        alternative,
+        additional,
+        x,
+        harmonize,
+        ..
+    } = d.answers[first].clone()
+    else {
+        panic!("first cost answer is not ConfigureCosts");
+    };
+    let asked = CostChoice {
+        alternative,
+        additional,
+        x,
+        symbol_options: Vec::new(),
+        harmonize,
+    };
+    let expected = f.symbol_slots(req, &proposal.modes, &asked);
+    if expected.is_empty() {
+        assert_eq!(idx.len(), 1, "a symbol request without slots");
+        assert!(proposal.costs.symbol_options.is_empty());
+    } else {
+        assert_eq!(idx, vec![first, first + 1], "the symbol request follows");
+        let second = &d.requests[first + 1];
+        assert_eq!(
+            second.request_id.get(),
+            d.requests[first].request_id.get() + 1
+        );
+        assert_eq!(second.chooser, req.caster);
+        assert_eq!(
+            second.payload,
+            ChoicePayload::ChooseCostsAndX {
+                alternative_costs: Vec::new(),
+                additional_costs: Vec::new(),
+                x_range: None,
+                symbol_slots: expected.clone(),
+                harmonize_candidates: Vec::new(),
+            }
+        );
+        let ChoiceResponse::ConfigureCosts { symbol_options, .. } = &d.answers[first + 1] else {
+            panic!("second cost answer is not ConfigureCosts");
+        };
+        assert_eq!(&proposal.costs.symbol_options, symbol_options);
+    }
+    assert_eq!(
+        CostChoice {
+            symbol_options: Vec::new(),
+            ..proposal.costs.clone()
+        },
+        asked
+    );
+}
+
+/// Checks (a) and (b) on one run.
+fn check_invariants(f: &Fake, req: &CastRequest, d: &Driven) {
+    match &d.observed.outcome {
+        // (a) CR 734.1, 734.2, REQ-CORE-005.
+        AnnounceOutcome::RolledBack(rb) => {
+            assert_eq!(rb.state_hash, f.state_hash());
+            assert_eq!(rb.priority_player, f.priority);
+            assert_eq!(d.final_hash, f.state_hash());
+            assert_eq!(&d.state, f);
+        }
+        AnnounceOutcome::NotStarted { reason } => {
+            assert!(
+                matches!(reason, StopReason::Prohibited { .. }),
+                "{reason:?}"
+            );
+            assert!(d.requests.is_empty());
+            assert_eq!(&d.state, f);
+        }
+        // (b) CR 601.2c, 601.2d, 115.3, 115.5.
+        AnnounceOutcome::Announced {
+            stack_object,
+            proposal,
+        } => {
+            assert_eq!(*stack_object, oid(f.next_id));
+            check_cost_requests(f, req, d, proposal);
+            assert_eq!(d.state.stack.len(), f.stack.len() + 1);
+            assert_eq!(d.state.priority, f.priority);
+            let targets_req = d
+                .requests
+                .iter()
+                .find(|p| matches!(p.payload, ChoicePayload::ChooseTargets { .. }));
+            match targets_req {
+                Some(p) => {
+                    let slots = target_slots_of(p);
+                    assert_eq!(proposal.targets.len(), slots.len());
+                    for (chosen, s) in proposal.targets.iter().zip(&slots) {
+                        let set: BTreeSet<_> = chosen.iter().collect();
+                        assert_eq!(set.len(), chosen.len(), "repeat in a slot");
+                        assert!(chosen.iter().all(|t| s.legal.contains(t)));
+                        assert!(!s.legal.contains(&ChoiceTarget::Object(*stack_object)));
+                        assert!(chosen.len() as u64 >= s.min && chosen.len() as u64 <= s.max);
+                    }
+                }
+                None => assert!(proposal.targets.iter().all(Vec::is_empty)),
+            }
+            let chosen: Vec<ChoiceTarget> = proposal.targets.iter().flatten().copied().collect();
+            if let Some(div) = &proposal.division {
+                let p = d
+                    .requests
+                    .iter()
+                    .find(|p| matches!(p.payload, ChoicePayload::DivideValue { .. }))
+                    .expect("a division without a DIVIDE_VALUE request");
+                let ChoicePayload::DivideValue { total, .. } = &p.payload else {
+                    unreachable!()
+                };
+                assert_eq!(Some(*total), f.division);
+                assert_eq!(div.iter().map(|(_, a)| a).sum::<u64>(), *total);
+                assert!(div.iter().all(|(_, a)| *a >= 1));
+                // Each chosen target is a recipient once (the DIVIDE_VALUE protocol needs
+                // distinct recipients; docs/DECISIONS.md "#52 FP-050 tester — Division
+                // recipients chosen in two slots").
+                let got: Vec<ChoiceTarget> = div.iter().map(|(t, _)| *t).collect();
+                let distinct: BTreeSet<ChoiceTarget> = got.iter().copied().collect();
+                assert_eq!(distinct.len(), got.len(), "a recipient appears twice");
+                let want: BTreeSet<ChoiceTarget> = chosen.iter().copied().collect();
+                assert_eq!(distinct, want, "division recipients are the chosen targets");
+            } else if f.division.is_some() {
+                assert!(chosen.is_empty(), "division total without a division");
+            }
+        }
+    }
+}
+
+/// REQ-CAST-001, REQ-CORE-005, REQ-NET-003; CR 601.2, 734.1, 734.2 (property a), CR 601.2c,
+/// 601.2d, 115.3, 115.5 (property b): for random fakes, rule sets and answer sequences, every
+/// RolledBack restores the identical hash and priority, and every Announced proposal uses only
+/// offered legal targets without repeats in a slot and divides the exact total with shares of
+/// at least 1.
+#[test]
+fn prop_rollback_identity_and_announced_proposals() {
+    let mut kinds = [0u32; 3];
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_0050_0000 + seed);
+        let (f, req, _) = random_case(&mut rng);
+        let d = drive_random(&mut rng, &f, &req);
+        check_invariants(&f, &req, &d);
+        kinds[match d.observed.outcome {
+            AnnounceOutcome::NotStarted { .. } => 0,
+            AnnounceOutcome::Announced { .. } => 1,
+            AnnounceOutcome::RolledBack(_) => 2,
+        }] += 1;
+        // Determinism (R3): the same seed gives the same run.
+        let mut again = Pcg64Dxsm::from_u64_seed(0x0052_0050_0000 + seed);
+        let (f2, req2, _) = random_case(&mut again);
+        let d2 = drive_random(&mut again, &f2, &req2);
+        assert_eq!(d2.requests, d.requests);
+        assert_eq!(d2.observed, d.observed);
+        assert_eq!(d2.final_hash, d.final_hash);
+    }
+    // The generator reaches every outcome.
+    assert!(kinds.iter().all(|&k| k > 0), "outcome mix {kinds:?}");
+}
+
+/// Random JSON of any shape (depth <= 3), with keys and strings drawn from a pool that includes
+/// the convention's names.
+fn random_json(rng: &mut Pcg64Dxsm, depth: u32, keys: &[&str]) -> Value {
+    let strings = [
+        "HEXPROOF",
+        "SHROUD",
+        "PROTECTION",
+        "OTHER",
+        "WARD",
+        "PROHIBIT",
+        "IGNORE_HEXPROOF",
+        "OPPONENTS",
+        "ANY",
+        "CAST",
+        "ACTIVATE",
+        QUALITY_A,
+        "",
+        "\u{0}",
+        "even",
+    ];
+    let top = if depth == 0 { 6 } else { 8 };
+    match below(rng, top) {
+        0 => Value::Null,
+        1 => json!(coin(rng)),
+        2 => json!(*pick(rng, &[0u64, 1, 2, 5, 6, 10, 11, 12, 100, u64::MAX])),
+        3 => json!(*pick(rng, &[-1i64, -10, i64::MIN])),
+        4 => json!(*pick(rng, &[0.5f64, 10.0, -1.5, 1e300])),
+        5 => json!(*pick(rng, &strings)),
+        6 => Value::Array(
+            (0..below(rng, 4))
+                .map(|_| random_json(rng, depth - 1, keys))
+                .collect(),
+        ),
+        _ => {
+            let mut m = Map::new();
+            for _ in 0..below(rng, 6) {
+                let k = (*pick(rng, keys)).to_owned();
+                let v = random_json(rng, depth - 1, keys);
+                m.insert(k, v);
+            }
+            Value::Object(m)
+        }
+    }
+}
+
+const ALL_KEYS: [&str; 14] = [
+    "keyword",
+    "effect",
+    "target_object",
+    "target_player",
+    "sources",
+    "quality",
+    "source_player",
+    "action",
+    "zone",
+    "object",
+    "test.applies",
+    "test.could_lapse",
+    "test.parity",
+    "test.unrelated",
+];
+
+/// Keys that cannot make an entry well formed: targeting entries without "keyword",
+/// prohibitions without "action".
+const TARGETING_JUNK_KEYS: [&str; 9] = [
+    "effect",
+    "target_object",
+    "target_player",
+    "sources",
+    "quality",
+    "source_player",
+    "zone",
+    "object",
+    "test.unrelated",
+];
+const PROHIBITION_JUNK_KEYS: [&str; 8] = [
+    "zone",
+    "object",
+    "keyword",
+    "test.applies",
+    "test.could_lapse",
+    "test.parity",
+    "test.unrelated",
+    "effect",
+];
+
+/// Requests and outcome with the hash fields removed (the rule set is part of the fake's hash).
+fn shape(d: &Driven) -> (Vec<PendingChoiceRequest>, String) {
+    let o = match &d.observed.outcome {
+        AnnounceOutcome::RolledBack(rb) => {
+            format!(
+                "RolledBack {:?} {:?} {:?}",
+                rb.step, rb.reason, rb.priority_player
+            )
+        }
+        other => format!("{other:?}"),
+    };
+    (d.requests.clone(), o)
+}
+
+/// REQ-CAST-001, REQ-DSL-013, R12; CR 601.2, 734.1 (property c): `announce` never panics for
+/// TARGETING_RULE and PROHIBITION entries with params of any shape, still upholds (a)/(b), and
+/// entries that cannot be well formed (no string "keyword" / no string "action", or an unknown
+/// keyword or action) change nothing.
+#[test]
+fn prop_arbitrary_params_never_panic_and_malformed_do_not_apply() {
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_00C0_0000 + seed);
+        let (f, req, items0) = random_case(&mut rng);
+        let answer_seed = rng.next_u64();
+
+        // Fully arbitrary params: no panic, invariants hold.
+        let mut items = Vec::new();
+        for i in 0..between(&mut rng, 1, 4) {
+            let kind = if coin(&mut rng) {
+                RuleKind::TargetingRule
+            } else {
+                RuleKind::Prohibition
+            };
+            let params = random_json(&mut rng, 3, &ALL_KEYS);
+            let players = random_players(&mut rng);
+            items.push(r(200 + i, kind, params, &players, below(&mut rng, 20)));
+        }
+        let mut all = items0.clone();
+        all.extend(items.iter().cloned());
+        let wild = f.clone().with_rules(&all);
+        let d = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &wild, &req);
+        check_invariants(&wild, &req, &d);
+
+        // Malformed entries only: identical requests and outcome to the case without them.
+        let mut junk = Vec::new();
+        for i in 0..between(&mut rng, 1, 4) {
+            let players = random_players(&mut rng);
+            let ts = below(&mut rng, 20);
+            let (kind, mut params) = if coin(&mut rng) {
+                (
+                    RuleKind::TargetingRule,
+                    random_json(&mut rng, 2, &TARGETING_JUNK_KEYS),
+                )
+            } else {
+                (
+                    RuleKind::Prohibition,
+                    random_json(&mut rng, 2, &PROHIBITION_JUNK_KEYS),
+                )
+            };
+            // Optionally add the required key with a value that cannot be valid.
+            if let Value::Object(m) = &mut params
+                && coin(&mut rng)
+            {
+                let key = if kind == RuleKind::TargetingRule {
+                    "keyword"
+                } else {
+                    "action"
+                };
+                let bad = match below(&mut rng, 4) {
+                    0 => json!(7),
+                    1 => json!("WARD"),
+                    2 => json!(["CAST"]),
+                    _ => json!(null),
+                };
+                m.insert(key.to_owned(), bad);
+            }
+            junk.push(r(300 + i, kind, params, &players, ts));
+        }
+        let mut with_junk_items = items0.clone();
+        with_junk_items.extend(junk.iter().cloned());
+        let with_junk = f.clone().with_rules(&with_junk_items);
+        let a = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &f, &req);
+        let b = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &with_junk, &req);
+        check_invariants(&with_junk, &req, &b);
+        assert_eq!(
+            shape(&a),
+            shape(&b),
+            "seed {seed}: malformed entries {junk:?}"
+        );
+    }
+}
+
+/// REQ-CAST-001 (step 3), REQ-DSL-013; CR 101.2, 702.11e (property d): a candidate removed by
+/// an applicable PROHIBIT entry stays removed whatever other entries are added, unless the
+/// entry is a HEXPROOF one and an IGNORE_HEXPROOF for the caster on that target is added.
+#[test]
+fn prop_prohibit_is_monotone() {
+    let target = to(10);
+    let prohibits = [
+        shroud_obj(10),
+        protection_all_obj(10),
+        protection_from_player_obj(10, 1),
+        other_obj(10),
+        hexproof_obj(10),
+        hexproof_from_obj(10, QUALITY_A),
+        protection_obj(10, QUALITY_A),
+    ];
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_00D0_0000 + seed);
+        let req = if coin(&mut rng) {
+            spell(P1)
+        } else {
+            ability(P1)
+        };
+        let p = pick(&mut rng, &prohibits).clone();
+        let is_hexproof = p["keyword"] == "HEXPROOF";
+        let base = Fake::one_slot(0, 3, &[tp(1), tp(2), to(10), to(11), to(12)])
+            .with_qualities(&[QUALITY_A]);
+        let alone = base
+            .clone()
+            .with_rules(&[tr(1, p.clone(), below(&mut rng, 20))]);
+        assert!(!legal(&alone, &req).contains(&target), "precondition {p}");
+
+        let mut extra = random_rules(&mut rng, 10, 8, false);
+        // A random grant of a "can" for the caster in a random position.
+        if coin(&mut rng) {
+            extra.push(r(
+                40,
+                RuleKind::CastPermission,
+                json!({"action": action_of(&req)}),
+                &[P1],
+                below(&mut rng, 20),
+            ));
+        }
+        let lifts = |e: &R| {
+            e.kind == RuleKind::TargetingRule
+                && e.params.get("effect") == Some(&json!("IGNORE_HEXPROOF"))
+                && e.params.get("target_object") == Some(&json!(10))
+                && e.players.contains(&P1)
+        };
+        if is_hexproof {
+            extra.retain(|e| !lifts(e));
+        }
+        let mut all = vec![tr(1, p.clone(), below(&mut rng, 20))];
+        all.extend(extra.iter().cloned());
+        let f = base.clone().with_rules(&all);
+        assert!(
+            !legal(&f, &req).contains(&target),
+            "seed {seed}: {p} lifted by {extra:?}"
+        );
+
+        // The exception: IGNORE_HEXPROOF lifts a lone HEXPROOF entry.
+        if is_hexproof {
+            let f = base.clone().with_rules(&[
+                tr(1, p.clone(), below(&mut rng, 20)),
+                tr_for(2, ignore_hexproof_obj(10), &[P1], below(&mut rng, 20)),
+            ]);
+            assert!(
+                legal(&f, &req).contains(&target),
+                "seed {seed}: {p} not lifted"
+            );
+        }
+    }
+}
+
+/// A random modal fake for the probe model: 1-3 modes (choose exactly one), 0-2 alternative and
+/// 0-3 additional costs, X absent, a small range or `lo > hi`; each mode's only slot (min 1) is
+/// plain legal, plain illegal (object 30 has shroud), "mana value X" on its own object (maybe
+/// shrouded) or legal only with one random (alternative, additional) configuration (possibly
+/// one the spec does not have). Also returns the shrouded objects.
+fn random_probe_case(rng: &mut Pcg64Dxsm) -> (Fake, BTreeSet<ChoiceTarget>) {
+    let n = between(rng, 1, 3) as usize;
+    let alts = below(rng, 3) as usize;
+    let adds = below(rng, 4) as usize;
+    let x_range = match below(rng, 3) {
+        0 => None,
+        1 => {
+            let lo = below(rng, 3);
+            Some((lo, lo + below(rng, 4)))
+        }
+        _ => Some((between(rng, 3, 6), below(rng, 3))),
+    };
+    let mut f = Fake {
+        mode_spec: Some(modes_spec(n, 1, 1, false)),
+        cost_spec: CostSpec {
+            alternative_costs: (0..alts).map(|i| format!("test.alt_{i}")).collect(),
+            additional_costs: (0..adds).map(|i| format!("test.add_{i}")).collect(),
+            x_range,
+            symbol_slots: vec![vec!["test.sym_a".to_owned(), "test.sym_b".to_owned()]],
+            harmonize_candidates: vec![oid(31)],
+        },
+        ..Fake::new()
+    };
+    let mut items = vec![tr(1, shroud_obj(30), 1)];
+    let mut shrouded = BTreeSet::from([to(30)]);
+    for m in 0..n as u32 {
+        let own = 10 + u64::from(m);
+        match below(rng, 4) {
+            0 => f.mode_slots.push(vec![slot(1, 1, &[to(own)])]),
+            1 => f.mode_slots.push(vec![slot(1, 1, &[to(30)])]),
+            2 => {
+                f.mode_slots.push(Vec::new());
+                f.mode_x_slots.insert(m, slot(1, 1, &[to(own)]));
+                f.mana_values.insert(own, below(rng, 7));
+                if coin(rng) {
+                    items.push(tr(2 + u64::from(m), shroud_obj(own), 2));
+                    shrouded.insert(to(own));
+                }
+            }
+            _ => {
+                f.mode_slots.push(vec![slot(1, 1, &[to(30)])]);
+                let alternative = match below(rng, alts as u64 + 2) {
+                    0 => None,
+                    k => Some((k - 1) as u32),
+                };
+                let additional: Vec<u32> = (0..adds as u32 + 1).filter(|_| coin(rng)).collect();
+                f.mode_cost_slots
+                    .insert((m, alternative, additional), vec![slot(1, 1, &[to(own)])]);
+            }
+        }
+    }
+    (f.with_rules(&items), shrouded)
+}
+
+/// REQ-CAST-001 (step 2), REQ-CORE-005, REQ-TEST-001; CR 107.3a, 601.2b, 601.2c, 700.2a, 734.1
+/// (CR-014 model): for random small modal fakes, each mode is probed in exactly the CR-014 order
+/// (alternative-major, additional subsets by ascending mask, X ascending innermost; one value
+/// for no X or `lo > hi`) up to and including its first legal configuration, or over the whole
+/// product when none is legal, and nothing else calls `target_slots` before the modes request;
+/// every probe has empty symbol options and no harmonize creature; a mode is offered exactly
+/// when some probed configuration is legal; with no mode offered the cast rolls back at Choices
+/// with NoLegalMode to the identical hash and priority.
+#[test]
+fn prop_mode_probes_follow_the_cr014_product() {
+    let mut offered_some = 0;
+    let mut offered_none = 0;
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_0140_0000 + seed);
+        let (f, shrouded) = random_probe_case(&mut rng);
+        let req = if coin(&mut rng) {
+            spell(P1)
+        } else {
+            ability(P1)
+        };
+        let spec = f.cost_spec.clone();
+        let n = f.mode_spec.as_ref().map_or(0, |s| s.labels.len()) as u32;
+        let product = expected_probes(
+            spec.alternative_costs.len(),
+            spec.additional_costs.len(),
+            &x_values(spec.x_range),
+        );
+        // The model: a configuration is legal when every slot keeps at least `min` candidates
+        // that are not shrouded (CR 702.18a). Computed before the log is reset.
+        let mut want_probes = Vec::new();
+        let mut want_offered = Vec::new();
+        for m in 0..n {
+            let mut probes = Vec::new();
+            for (alternative, additional, x) in &product {
+                probes.push((*alternative, additional.clone(), *x));
+                let costs = CostChoice {
+                    alternative: *alternative,
+                    additional: additional.clone(),
+                    x: *x,
+                    symbol_options: Vec::new(),
+                    harmonize: None,
+                };
+                let slots = f.target_slots(&req, &[m], &costs);
+                if slots.iter().all(|s| {
+                    s.candidates
+                        .iter()
+                        .filter(|t| !shrouded.contains(t))
+                        .count() as u64
+                        >= s.min
+                }) {
+                    want_offered.push(m);
+                    break;
+                }
+            }
+            want_probes.push(probes);
+        }
+
+        f.reset_probes();
+        let session = start(&f, &req);
+        let log = f.target_slots_log.get();
+        let label = format!("seed {seed}");
+        assert_probe_shape(&log, &label);
+        for m in 0..n {
+            assert_eq!(
+                probes_for_mode(&log, m),
+                want_probes[m as usize],
+                "{label}: probes of mode {m} ({spec:?})"
+            );
+        }
+        assert_eq!(
+            log.len(),
+            want_probes.iter().map(Vec::len).sum::<usize>(),
+            "{label}: calls other than the probes"
+        );
+        match session.status() {
+            Status::Pending(p) => {
+                offered_some += 1;
+                let ChoicePayload::ChooseModes { labels, .. } = &p.payload else {
+                    panic!("{label}: expected ChooseModes, got {:?}", p.payload);
+                };
+                let all = mode_labels(n as usize);
+                let want: Vec<String> = want_offered
+                    .iter()
+                    .map(|&m| all[m as usize].clone())
+                    .collect();
+                assert_eq!(labels, &want, "{label}: offered modes");
+            }
+            Status::Done { state, output } => {
+                offered_none += 1;
+                assert!(want_offered.is_empty(), "{label}: {:?}", output.outcome);
+                let AnnounceOutcome::RolledBack(rb) = &output.outcome else {
+                    panic!("{label}: expected NoLegalMode, got {:?}", output.outcome);
+                };
+                assert_eq!(rb.step, CastStep::Choices, "{label}");
+                assert_eq!(rb.reason, StopReason::NoLegalMode, "{label}");
+                assert_eq!(rb.state_hash, f.state_hash(), "{label}");
+                assert_eq!(rb.priority_player, f.priority, "{label}");
+                assert_eq!(state, &f, "{label}");
+            }
+        }
+    }
+    assert!(
+        offered_some > 0 && offered_none > 0,
+        "{offered_some} / {offered_none}"
+    );
+}

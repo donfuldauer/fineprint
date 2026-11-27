@@ -133,6 +133,10 @@ fn expected_tree(s: &GameState) -> MerkleTree {
         );
     }
     put(&mut t, vec![n("effects")], vec![0, 0, 0, 0]);
+    // Format version 2 (#183 FP-144): the timestamp ledger and the effect-to-ability links,
+    // each an empty list here.
+    put(&mut t, vec![n("timestamps")], vec![0, 0, 0, 0]);
+    put(&mut t, vec![n("effect_generators")], vec![0, 0, 0, 0]);
     put(&mut t, vec![n("history")], vec![0, 0, 0, 0]);
     t
 }
@@ -198,13 +202,22 @@ fn root_matches_independent_layout() {
     }
 }
 
-// REQ-NFR-006, REQ-CORE-001: effects and history leaves are four zero bytes at their paths.
+// REQ-NFR-006, REQ-CORE-001: effects, timestamps, effect_generators and history leaves are
+// four zero bytes at their paths.
 #[test]
 fn effects_and_history_leaves_hash_as_zero_length_lists() {
     let s = rich(5, 2);
     let t = s.merkle_tree();
     assert_eq!(
         t.leaf_payload(&path(vec![n("effects")])),
+        Some(&[0u8; 4][..])
+    );
+    assert_eq!(
+        t.leaf_payload(&path(vec![n("timestamps")])),
+        Some(&[0u8; 4][..])
+    );
+    assert_eq!(
+        t.leaf_payload(&path(vec![n("effect_generators")])),
         Some(&[0u8; 4][..])
     );
     assert_eq!(

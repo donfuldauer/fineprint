@@ -13,7 +13,33 @@
 //! departing object first and then move them (CR 704.8). [`information_for`] chooses between
 //! an object's current information and its LKI (CR 608.2h, CR 113.7a, CR 608.2b); a static
 //! ability never gets LKI (CR 604.7). Fully evaluated characteristics come from a
-//! [`CharacteristicsProvider`]; the layer system plugs in there later.
+//! [`CharacteristicsProvider`] (see "Evaluated characteristics" below).
+//!
+//! **Evaluated characteristics** (REQ-LAYER-001, REQ-CORE-003; CR 613.1-613.4, CR 608.2h). The
+//! provider every rules caller injects (into [`capture_lki_on_move`] directly, or as
+//! [`EventContext::provider`](crate::events::EventContext::provider), which event execution,
+//! the replacement bus and the state-based-action ceasing capture use) MUST return the
+//! characteristics evaluated through layers 1a-7d, for example a
+//! [`LayeredProvider`](crate::layers::LayeredProvider). A provider that returns base
+//! characteristics is for unit fakes only. Counters and attachments in a record come from the
+//! events module's object markers and the permanent container, not from the provider's own
+//! answers, when captured through event execution or the ceasing capture; layers never change
+//! counter amounts, so the raw and evaluated counters coincide.
+//!
+//! Because an [`EventContext`](crate::events::EventContext) borrows the game state mutably, a
+//! provider cannot borrow the live state while the context exists. The supported recipe is a
+//! snapshot taken before the context is built (and so before the batch runs, as CR 603.10a and
+//! CR 704.8 require of the pre-event state):
+//!
+//! ```text
+//! let snap = game.clone();
+//! let env = GameEnvironment::new(&snap, &world);
+//! let provider = LayeredProvider::new(snap.effects(), &env);
+//! let mut ctx = EventContext { game: &mut game, /* ... */ provider: &provider };
+//! ```
+//!
+//! An object created inside the batch is unknown to the snapshot, as to any injected provider:
+//! its capture fails with [`MemoryError::NoCharacteristics`] (the ceasing capture skips it).
 //!
 //! **Memory** ([`Memory`], [`MemoryTable`]): per object id, the choices made for it, the
 //! choices that persist across zone changes (CR 607.2p), the spell history a permanent can see
@@ -49,6 +75,8 @@ mod linked;
 mod lki;
 mod record;
 
+#[cfg(test)]
+pub(crate) mod consumer_guard_tests;
 #[cfg(test)]
 mod tests;
 

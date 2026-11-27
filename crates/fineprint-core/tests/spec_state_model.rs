@@ -12,9 +12,10 @@ use std::collections::BTreeSet;
 use fineprint_base::hash::{ComponentPath, Label};
 use fineprint_base::ids::PlayerId;
 use fineprint_base::prng::Pcg64Dxsm;
+use fineprint_core::layers::{ContinuousEffects, TimestampLedger};
 use fineprint_core::state::{
-    DesignationValue, EffectRegistry, GameState, HistoryLedger, MAX_PLAYERS, PlayerState,
-    STATE_FORMAT_VERSION, StateError, TurnInfo,
+    DesignationValue, GameState, HistoryLedger, MAX_PLAYERS, PlayerState, STATE_FORMAT_VERSION,
+    StateError, TurnInfo,
 };
 
 fn pid(n: u64) -> PlayerId {
@@ -42,7 +43,7 @@ fn base() -> GameState {
 #[test]
 fn constants_have_documented_values() {
     assert_eq!(MAX_PLAYERS, 256);
-    assert_eq!(STATE_FORMAT_VERSION, 1);
+    assert_eq!(STATE_FORMAT_VERSION, 2);
 }
 
 // REQ-CORE-001, REQ-CORE-002: a fresh state.
@@ -57,8 +58,10 @@ fn fresh_state_has_documented_contents() {
     assert_eq!(s.turn().priority_player(), None);
     assert_eq!(*s.turn(), TurnInfo::default());
     assert!(s.effects().is_empty());
+    assert_eq!(s.effects().len(), 0);
     assert!(s.history().is_empty());
-    assert_eq!(*s.effects(), EffectRegistry::default());
+    assert_eq!(*s.effects(), ContinuousEffects::new());
+    assert_eq!(*s.timestamps(), TimestampLedger::new());
     assert_eq!(*s.history(), HistoryLedger::default());
     for p in s.players() {
         assert_eq!(p.life(), 20);
@@ -458,25 +461,31 @@ fn player_state_standalone() {
     assert_eq!(q.life(), -3);
 }
 
-// REQ-CORE-001: fresh TurnInfo, EffectRegistry, HistoryLedger.
+// REQ-CORE-001: fresh TurnInfo, ContinuousEffects, TimestampLedger, HistoryLedger.
 #[test]
 fn turn_effects_history_defaults() {
     let t = TurnInfo::default();
     assert_eq!(t.turn_number(), 0);
     assert_eq!(t.active_player(), None);
     assert_eq!(t.priority_player(), None);
-    assert!(EffectRegistry::default().is_empty());
+    assert!(ContinuousEffects::new().is_empty());
+    assert_eq!(ContinuousEffects::new().len(), 0);
+    assert_eq!(TimestampLedger::new(), TimestampLedger::default());
     assert!(HistoryLedger::default().is_empty());
 }
 
-// REQ-CORE-001: effects/history leaves encode as four zero bytes.
+// REQ-CORE-001: effects/timestamps/effect_generators/history leaves encode as four zero bytes.
 #[test]
 fn effects_and_history_leaves_are_four_zero_bytes() {
     let s = base();
     let t = s.merkle_tree();
     let eff = ComponentPath::new(vec![Label::name("effects")]);
+    let tss = ComponentPath::new(vec![Label::name("timestamps")]);
+    let links = ComponentPath::new(vec![Label::name("effect_generators")]);
     let his = ComponentPath::new(vec![Label::name("history")]);
     assert_eq!(t.leaf_payload(&eff), Some(&[0u8, 0, 0, 0][..]));
+    assert_eq!(t.leaf_payload(&tss), Some(&[0u8, 0, 0, 0][..]));
+    assert_eq!(t.leaf_payload(&links), Some(&[0u8, 0, 0, 0][..]));
     assert_eq!(t.leaf_payload(&his), Some(&[0u8, 0, 0, 0][..]));
 }
 

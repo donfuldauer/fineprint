@@ -11,10 +11,11 @@ use fineprint_base::ids::{CardId, IdGenerator, ObjectId, PlayerId};
 
 use super::error::EventError;
 use super::history::HistoryStat;
+use super::order::{GraveyardOrder, GraveyardOrderGroup, arrange, check_orders, groups_of};
 use super::state::{EventState, ObjectMarkers};
 use super::types::{
     CounterTarget, DamageTarget, EventBatch, EventInstance, ExecutedBatch, ExecutedEvent,
-    GameEvent, Outcome, Phase, Step,
+    GameEvent, Outcome, Phase, Step, UnattachRecord,
 };
 use crate::memory::{CharacteristicsProvider, LkiStore, MemoryTable, capture_lki_on_move};
 use crate::objects::Characteristics;
@@ -27,6 +28,38 @@ use crate::zones::{MoveRequest, Moved, Position, ZoneId, ZoneKind, Zones};
 /// `ids` is the object-id generator the [`Zones`] container uses (the game state's own object
 /// generator is not reachable from here; the integration unit joins them). `provider` supplies
 /// the evaluated characteristics that last-known-information capture snapshots.
+///
+/// **The provider must be the evaluated one** (REQ-LAYER-001, REQ-CORE-003; CR 613.1-613.4,
+/// CR 608.2h). `provider` MUST answer with the characteristics evaluated through layers 1a-7d,
+/// for example a [`LayeredProvider`](crate::layers::LayeredProvider); a base-characteristic
+/// provider is for unit fakes only. The context holds `game` mutably, so the provider cannot
+/// borrow the live game state; build it over a snapshot taken before the context (and so
+/// before the batch runs, CR 603.10a, CR 704.8):
+///
+/// ```text
+/// let snap = game.clone();
+/// let env = GameEnvironment::new(&snap, &world);
+/// let provider = LayeredProvider::new(snap.effects(), &env);
+/// let mut ctx = EventContext { game: &mut game, /* ... */ provider: &provider };
+/// ```
+///
+/// **The provider is a per-batch snapshot.** Every batch this context executes
+/// ([`EventContext::execute_batch`] and its variants) uses `provider` for all its events, so
+/// all simultaneous departures of one batch share one evaluation (CR 603.10a, CR 704.8). A
+/// context reused for a LATER batch keeps the same snapshot unless the caller rebuilds it.
+/// The replacement bus runs a submitted batch and then its `Prevent` follow-up batches on one
+/// context: [`process_batch_refreshing`](crate::replacement::process_batch_refreshing)
+/// rebuilds the provider over the live state before each follow-up batch (through a
+/// [`ProviderRefresh`](crate::replacement::ProviderRefresh)), whereas plain
+/// [`process_batch`](crate::replacement::process_batch) and
+/// [`process_event`](crate::replacement::process_event) keep this pre-call snapshot for the
+/// follow-up batches too (their choosers and LKI then reflect the state before the call).
+///
+/// An object created by an earlier event of the same batch is unknown to the snapshot, as to
+/// any injected provider, so its capture fails with
+/// [`MemoryError::NoCharacteristics`](crate::memory::MemoryError::NoCharacteristics). Only the
+/// provider's characteristics are read: LKI counters come from the object markers and
+/// attachments from `permanents` (see `LkiProvider`).
 pub struct EventContext<'a> {
     /// The game state: players, life, player counters, turn number, timestamps.
     pub game: &'a mut GameState,
@@ -42,7 +75,9 @@ pub struct EventContext<'a> {
     pub lki: &'a mut LkiStore,
     /// The events-owned state: markers, log, history, phase/step, flags.
     pub events: &'a mut EventState,
-    /// The characteristics source for LKI capture.
+    /// The characteristics source for LKI capture: the layer-evaluated characteristics (layers
+    /// 1a-7d, e.g. [`LayeredProvider`](crate::layers::LayeredProvider) over a snapshot of the
+    /// state); see the type documentation for the recipe.
     pub provider: &'a dyn CharacteristicsProvider,
 }
 
@@ -68,11 +103,13 @@ enum LkiMode<'s> {
 }
 
 /// The provider LKI capture uses (CR 603.10, CR 608.2h): characteristics from the caller's
-/// provider; counters only from [`ObjectMarkers`], the single source of counters on objects
+/// provider, which must be the layer-evaluated one (REQ-LAYER-001, CR 613.1-613.4; see
+/// [`EventContext`]); counters only from [`ObjectMarkers`], the single source of counters on objects
 /// (CR 122.1), which `AddCounters` and `RemoveCounters` also read and write; the objects
 /// attached here only from the permanent container, which `Attach` and `Unattach` write
 /// (CR 701.3a, CR 701.3d). The caller's provider's `counters` and `attached_here` are not
-/// consulted, so LKI always matches what the events themselves did (see DECISIONS).
+/// consulted, so LKI always matches what the events themselves did (see DECISIONS). Layers do
+/// not change counter amounts, so these raw counters are also the evaluated ones.
 struct LkiProvider<'a> {
     inner: &'a dyn CharacteristicsProvider,
     markers: &'a ObjectMarkers,
@@ -154,6 +191,93 @@ impl EventContext<'_> {
         batch: &EventBatch,
         copies: &[(usize, ObjectId)],
     ) -> Result<ExecutedBatch, EventError> {
+        self.execute_planned(batch, copies, &[])
+    }
+
+    /// The simultaneous graveyard entries of `batch` that its owners may arrange
+    /// (REQ-ZONE-001, REQ-EVENT-001, CR 404.3), ascending by owner PlayerId; empty if there is
+    /// none. Ask one `ORDER_CARDS` request per group ([`GraveyardOrderGroup::request`]), in
+    /// this order (ascending PlayerId: the CR gives no sequencing and the piles are
+    /// independent), then call [`EventContext::execute_batch_ordered`].
+    ///
+    /// `batch` is final (replacements were applied before it, CR 614.6). The groups come from a
+    /// planning run of the batch exactly as [`EventContext::execute_batch`] would execute it;
+    /// the group rule is in the docs/DECISIONS.md entry "#208 FP-154": two or more nontoken
+    /// cards (CR 111.6, CR 108.2b) put by `ZoneChange` events at `Position::Top` from another
+    /// zone into the same graveyard (CR 400.3: their owner's), and still there at the end of
+    /// the batch. Draws, `Bottom` and `Index` moves, tokens and graveyard repositions take no
+    /// part. Every component of the context is left unchanged.
+    ///
+    /// # Errors
+    /// As [`EventContext::execute_batch`] (the batch would fail, last-known-information
+    /// capture included, so no group is offered for a batch whose capture fails); nothing is
+    /// changed.
+    pub fn graveyard_order_groups(
+        &mut self,
+        batch: &EventBatch,
+    ) -> Result<Vec<GraveyardOrderGroup>, EventError> {
+        let snapshot = self.snapshot();
+        let result = self.plan_groups(batch, &snapshot);
+        self.restore(snapshot);
+        result
+    }
+
+    /// The rollback-only preflight of [`EventContext::graveyard_order_groups`]: the planning
+    /// run gives the groups, then the context is restored and the real run, LKI capture
+    /// included (CR 704.8, CR 603.10a), is tried so that a batch `execute_batch_ordered` would
+    /// reject (for example [`MemoryError::NoCharacteristics`](crate::memory::MemoryError))
+    /// offers no group. The caller restores `snapshot` afterwards.
+    fn plan_groups(
+        &mut self,
+        batch: &EventBatch,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<GraveyardOrderGroup>, EventError> {
+        let planned = self.run(batch, &LkiMode::Off, &[])?;
+        let groups = groups_of(self.zones, self.events.markers(), &planned);
+        self.restore(snapshot.clone());
+        self.run_captured(batch, &planned, &[])?;
+        Ok(groups)
+    }
+
+    /// Executes `batch` exactly as [`EventContext::execute_batch`] does (same events, same
+    /// outcomes and object ids, same log entry, LKI captured before any move, all-or-nothing),
+    /// except that the cards of each [`GraveyardOrderGroup`] end in the order `orders` gives
+    /// for its owner (REQ-ZONE-001, REQ-EVENT-001, CR 404.3). A group with no entry keeps its
+    /// [`GraveyardOrderGroup::default_order`]; the order of the entries of `orders` is
+    /// irrelevant. With no orders this is `execute_batch`.
+    ///
+    /// **Placement (CR 404.3, CR 404.1).** The group's cards take the positions ("slots") they
+    /// occupy in the `execute_batch` result, in the chosen order, `top_to_bottom[0]` in the
+    /// topmost slot. Every other object of the graveyard keeps its `execute_batch` position:
+    /// cards already there stay below, a `Bottom` or `Index` move keeps its requested place, a
+    /// token keeps its place (it ceases to exist at the next state-based-action check,
+    /// CR 111.7). So the group ends contiguous on top of the graveyard unless another object of
+    /// the batch landed between its cards (then that object stays where it landed), and an
+    /// order equal to `default_order` changes nothing. The arrangement uses same-zone
+    /// repositions only (CR 400.7): no event, no new object id.
+    ///
+    /// # Errors
+    /// [`EventError::InvalidGraveyardOrder`] if an entry names an owner with no group, an owner
+    /// twice, or a list that is not a permutation of that group's cards (the lowest such
+    /// owner), and every error of [`EventContext::execute_batch`]. Every component of the
+    /// context is then restored to its value before the call.
+    pub fn execute_batch_ordered(
+        &mut self,
+        batch: &EventBatch,
+        orders: &[GraveyardOrder],
+    ) -> Result<ExecutedBatch, EventError> {
+        self.execute_planned(batch, &[], orders)
+    }
+
+    /// The common body of the batch entry points: plan, check `orders` against the planned
+    /// groups (CR 404.3), restore, run for real with LKI captured first (CR 704.8), arrange
+    /// the ordered groups, log.
+    fn execute_planned(
+        &mut self,
+        batch: &EventBatch,
+        copies: &[(usize, ObjectId)],
+        orders: &[GraveyardOrder],
+    ) -> Result<ExecutedBatch, EventError> {
         let snapshot = self.snapshot();
         // Planning run: find which objects the batch moves out of their zones, in the exact
         // order and with the exact cards the real run will move (draws depend on library
@@ -165,8 +289,27 @@ impl EventContext<'_> {
                 return Err(e);
             }
         };
+        // CR 404.3: the chosen orders must fit the batch's final groups.
+        let orders = if orders.is_empty() {
+            Vec::new()
+        } else {
+            let groups = groups_of(self.zones, self.events.markers(), &planned);
+            match check_orders(&groups, orders) {
+                Ok(sorted) => sorted,
+                Err(e) => {
+                    self.restore(snapshot);
+                    return Err(e);
+                }
+            }
+        };
         self.restore(snapshot.clone());
-        match self.run_captured(batch, &planned, copies) {
+        let result = self
+            .run_captured(batch, &planned, copies)
+            .and_then(|events| {
+                self.arrange_all(&events, &orders)?;
+                Ok(events)
+            });
+        match result {
             Ok(events) => {
                 drop(snapshot);
                 let executed = ExecutedBatch {
@@ -184,6 +327,28 @@ impl EventContext<'_> {
                 Err(e)
             }
         }
+    }
+
+    /// CR 404.3: puts each ordered group of the real run's `events` in its chosen order.
+    fn arrange_all(
+        &mut self,
+        events: &[ExecutedEvent],
+        orders: &[GraveyardOrder],
+    ) -> Result<(), EventError> {
+        if orders.is_empty() {
+            return Ok(());
+        }
+        let renamed: BTreeMap<ObjectId, ObjectId> = events
+            .iter()
+            .filter_map(|e| match e.outcome {
+                Outcome::ZoneChange(m) => Some((m.old, m.new)),
+                _ => None,
+            })
+            .collect();
+        for order in orders {
+            arrange(self.zones, self.ids, order, &renamed)?;
+        }
+        Ok(())
     }
 
     /// The real run: captures LKI for every planned departure of an object that exists now
@@ -207,7 +372,8 @@ impl EventContext<'_> {
         self.run(batch, &LkiMode::On(&captured), copies)
     }
 
-    /// Captures the LKI of `id` before `req` moves it (CR 603.10, CR 608.2h).
+    /// Captures the LKI of `id` before `req` moves it (CR 603.10, CR 608.2h), with the
+    /// evaluated characteristics of the context's provider (REQ-LAYER-001).
     fn capture(&mut self, id: ObjectId, req: &MoveRequest) -> Result<bool, EventError> {
         let provider = LkiProvider {
             inner: self.provider,
@@ -257,7 +423,10 @@ impl EventContext<'_> {
     ) -> Result<Vec<ExecutedEvent>, EventError> {
         let mut executed = Vec::new();
         for (index, instance) in batch.events().iter().enumerate() {
-            if let Some((outcome, lki_captured)) = self.apply(instance.event(), mode)? {
+            let mut unattached = Vec::new();
+            if let Some((outcome, lki_captured)) =
+                self.apply(instance.event(), mode, &mut unattached)?
+            {
                 if let LkiMode::On(_) = mode {
                     for (_, copied) in copies.iter().filter(|(i, _)| *i == index) {
                         self.enter_as_copy(outcome, *copied)?;
@@ -267,24 +436,28 @@ impl EventContext<'_> {
                     instance: instance.clone(),
                     outcome,
                     lki_captured,
+                    unattached,
                 });
             }
         }
         Ok(executed)
     }
 
-    /// Executes one event; `None` for a no-op. The flag is whether LKI was stored.
+    /// Executes one event; `None` for a no-op. The flag is whether LKI was stored. Every
+    /// attachment link the event removes is appended to `unattached` (CR 701.3d); a no-op
+    /// appends nothing.
     fn apply(
         &mut self,
         event: &GameEvent,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         let applied = |o: Option<Outcome>| o.map(|o| (o, false));
         match event {
             GameEvent::ZoneChange {
                 object, request, ..
-            } => self.zone_change(*object, *request, mode),
-            GameEvent::Draw { player } => self.draw(*player, mode),
+            } => self.zone_change(*object, *request, mode, unattached),
+            GameEvent::Draw { player } => self.draw(*player, mode, unattached),
             GameEvent::Damage {
                 source_controller,
                 target,
@@ -317,9 +490,14 @@ impl EventContext<'_> {
             GameEvent::PhaseBegins { phase } => Ok(applied(Some(self.phase_begins(*phase)))),
             GameEvent::StepBegins { step } => Ok(applied(Some(self.step_begins(*step)))),
             GameEvent::Attach { attachment, target } => {
-                self.attach(*attachment, *target).map(applied)
+                self.attach(*attachment, *target, unattached).map(applied)
             }
-            GameEvent::Unattach { attachment } => self.unattach(*attachment).map(applied),
+            GameEvent::Unattach { attachment } => {
+                self.unattach(*attachment, None, unattached).map(applied)
+            }
+            GameEvent::UnattachFrom { attachment, host } => self
+                .unattach(*attachment, Some(*host), unattached)
+                .map(applied),
             GameEvent::BecomeCopy { object, copied } => {
                 self.become_copy(*object, *copied).map(applied)
             }
@@ -363,6 +541,7 @@ impl EventContext<'_> {
         object: ObjectId,
         request: MoveRequest,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         let record = *self
             .zones
@@ -372,7 +551,7 @@ impl EventContext<'_> {
         if self.events.markers().is_token(record.card) && record.zone != ZoneId::Battlefield {
             return Ok(None);
         }
-        let (moved, lki_captured) = self.move_with_lki(object, request, mode)?;
+        let (moved, lki_captured) = self.move_with_lki(object, request, mode, unattached)?;
         Ok(Some((Outcome::ZoneChange(moved), lki_captured)))
     }
 
@@ -383,6 +562,7 @@ impl EventContext<'_> {
         &mut self,
         player: PlayerId,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<(Outcome, bool)>, EventError> {
         self.require_player(player)?;
         let Some(top) = self
@@ -406,7 +586,7 @@ impl EventContext<'_> {
             return Ok(None);
         }
         let (moved, lki_captured) =
-            self.move_with_lki(top, MoveRequest::new(ZoneKind::Hand), mode)?;
+            self.move_with_lki(top, MoveRequest::new(ZoneKind::Hand), mode, unattached)?;
         let turn = self.turn();
         self.events
             .history_mut()
@@ -417,11 +597,17 @@ impl EventContext<'_> {
     /// Moves `object` with the zone-move primitive and applies CR 400.7 to every component:
     /// LKI (captured before the move, CR 603.10, CR 704.8), Memory, the permanent container
     /// (CR 110.1) and the object markers (CR 122.2).
+    ///
+    /// CR 701.3d: when a permanent leaves the battlefield, every attachment link it was part of
+    /// ends; they are appended to `unattached`, read before the permanent container drops them:
+    /// first the permanent's own link (under its old id), then one record per permanent
+    /// attached to it, ascending id. A same-zone reposition ends no link.
     fn move_with_lki(
         &mut self,
         object: ObjectId,
         request: MoveRequest,
         mode: &LkiMode<'_>,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<(Moved, bool), EventError> {
         let lki_captured = match mode {
             LkiMode::Off => false,
@@ -441,7 +627,18 @@ impl EventContext<'_> {
         }
         self.memories.apply_zone_change(&moved);
         if moved.from == ZoneId::Battlefield && self.permanents.get(moved.old).is_some() {
-            // CR 110.1: it stops being a permanent.
+            // CR 701.3d: its own link ends, as do the links of everything attached to it.
+            if let Some(host) = self.permanents.attached_to(moved.old) {
+                unattached.push(UnattachRecord {
+                    attachment: moved.old,
+                    host,
+                });
+            }
+            let host = AttachTarget::Permanent(moved.old);
+            for attachment in self.permanents.attachments_of(host) {
+                unattached.push(UnattachRecord { attachment, host });
+            }
+            // CR 110.1: it stops being a permanent (this drops the links read above).
             self.permanents.leave(moved.old)?;
         }
         if moved.to == ZoneId::Battlefield {
@@ -697,36 +894,74 @@ impl EventContext<'_> {
     }
 
     /// CR 701.3a: attach; CR 701.3b: to the current host it does nothing; CR 701.3c: a new
-    /// timestamp.
+    /// timestamp. CR 701.3d: attaching to a different host ends the link to the previous one,
+    /// which is appended to `unattached`; a first attach ends no link.
     fn attach(
         &mut self,
         attachment: ObjectId,
         target: AttachTarget,
+        unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<Outcome>, EventError> {
         self.require_permanent(attachment)?;
         match target {
             AttachTarget::Permanent(host) => self.require_permanent(host)?,
             AttachTarget::Player(p) => self.require_player(p)?,
         }
-        if self.permanents.attached_to(attachment) == Some(target) {
+        let previous = self.permanents.attached_to(attachment);
+        if previous == Some(target) {
             // CR 701.3b
             return Ok(None);
         }
         self.permanents.attach(attachment, target)?;
+        if let Some(host) = previous {
+            // CR 701.3d: it ceases to be attached to its previous host.
+            unattached.push(UnattachRecord { attachment, host });
+        }
         // CR 701.3c
         let timestamp = self.game.issue_timestamp()?;
         Ok(Some(Outcome::Attached { timestamp }))
     }
 
-    /// CR 701.3d: unattach; an unattached object is no event.
-    fn unattach(&mut self, attachment: ObjectId) -> Result<Option<Outcome>, EventError> {
-        if self.zones.object(attachment).is_none() {
-            return Err(EventError::UnknownObject(attachment));
-        }
-        if self.permanents.attached_to(attachment).is_none() {
-            return Ok(None);
-        }
+    /// CR 701.3d: unattach; the cleared link is appended to `unattached`.
+    ///
+    /// With `only_from` (`UnattachFrom`), the link is cleared only if it is to exactly that
+    /// host, and the live link is looked up before the unknown-object check: if the object no
+    /// longer exists (an earlier event, for example one of the same batch, moved it, so its old
+    /// id is gone), is unattached, or is attached to another host, the specified link is
+    /// already gone and the event is a no-op (no event, no error, so earlier events of the
+    /// batch are not rolled back; see docs/DECISIONS.md "Gate 06-turn F57"). Only an id the
+    /// object-id generator never issued is [`EventError::UnknownObject`]. Plain `Unattach`
+    /// (`only_from` is `None`) of an object that is in no zone is
+    /// [`EventError::UnknownObject`]; of an unattached object it is no event.
+    fn unattach(
+        &mut self,
+        attachment: ObjectId,
+        only_from: Option<AttachTarget>,
+        unattached: &mut Vec<UnattachRecord>,
+    ) -> Result<Option<Outcome>, EventError> {
+        let live = self.permanents.attached_to(attachment);
+        let host = if let Some(from) = only_from {
+            // CR 701.3d: only the exact live link to `from`, checked before existence.
+            match live {
+                Some(host) if host == from && self.zones.object(attachment).is_some() => host,
+                _ if self.zones.object(attachment).is_some()
+                    || (1..=self.ids.last_issued()).contains(&attachment.get()) =>
+                {
+                    return Ok(None);
+                }
+                _ => return Err(EventError::UnknownObject(attachment)),
+            }
+        } else {
+            if self.zones.object(attachment).is_none() {
+                return Err(EventError::UnknownObject(attachment));
+            }
+            let Some(host) = live else {
+                return Ok(None);
+            };
+            host
+        };
         self.permanents.detach(attachment)?;
+        unattached.push(UnattachRecord { attachment, host });
         Ok(Some(Outcome::Applied))
     }
 

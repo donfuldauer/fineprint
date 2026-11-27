@@ -17,12 +17,17 @@ use fineprint_base::ids::{IdGenerator, IdGenerators, PlayerId};
 use fineprint_base::prng::{ALGORITHM_ID, Pcg64Dxsm};
 use serde::{Deserialize, Serialize};
 
+use super::effects_wire::{
+    EffectsWire, GeneratorWire, Issued, TimestampsWire, check_effects, check_generators,
+    check_ledger_wire, effects_from_wire, generators_from_wire, generators_to_wire,
+    ledger_from_wire,
+};
 use super::{
-    DesignationValue, EffectRegistry, GameState, HistoryLedger, MAX_PLAYERS, PlayerState,
-    STATE_FORMAT_VERSION, StateError, TurnInfo, is_permutation_of_keys,
+    DesignationValue, GameState, HistoryLedger, MAX_PLAYERS, PlayerState, STATE_FORMAT_VERSION,
+    StateError, TurnInfo, is_permutation_of_keys,
 };
 
-/// The serialized game state (format version 1).
+/// The serialized game state (format version 2; version 1 is not read, CR-005).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StateWire {
@@ -32,8 +37,10 @@ pub(super) struct StateWire {
     pub(super) ids: IdsWire,
     pub(super) turn: TurnWire,
     pub(super) players: Vec<PlayerWire>,
-    pub(super) effects: EmptyWire,
+    pub(super) effects: EffectsWire,
     pub(super) history: EmptyWire,
+    pub(super) timestamps: TimestampsWire,
+    pub(super) effect_generators: Vec<GeneratorWire>,
 }
 
 /// The PRNG's two `u128` words, each as `[hi, lo]` (rmp-serde's `u128` support is not
@@ -94,7 +101,7 @@ pub(super) enum DesignationWire {
     Text(String),
 }
 
-/// An empty map: the placeholder effect registry and history ledger.
+/// An empty map: the placeholder history ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyWire {}
@@ -175,8 +182,10 @@ impl StateWire {
                         .collect(),
                 })
                 .collect(),
-            effects: EmptyWire {},
+            effects: EffectsWire::from_effects(&state.effects),
             history: EmptyWire {},
+            timestamps: TimestampsWire::from_ledger(&state.timestamps),
+            effect_generators: generators_to_wire(&state.generators),
         }
     }
 
@@ -244,15 +253,45 @@ impl StateWire {
             link: IdGenerator::from_last_issued(self.ids.link),
             player: IdGenerator::from_last_issued(self.ids.player),
         };
+        let issued = Issued {
+            effect: self.ids.effect,
+            timestamp: self.ids.timestamp,
+        };
+        let effects = effects_from_wire(self.effects, issued)?;
+        let timestamps = ledger_from_wire(self.timestamps, issued)?;
+        let generators = generators_from_wire(self.effect_generators, &effects, issued)?;
         Ok(GameState {
             prng,
             ids,
             turn: TurnInfo::from_parts(self.turn.number, active_player, priority_player),
             turn_order: Arc::new(order),
             players,
-            effects: EffectRegistry::default(),
+            effects: Arc::new(effects),
+            timestamps: Arc::new(timestamps),
+            generators: Arc::new(generators),
             history: HistoryLedger::default(),
         })
+    }
+
+    /// Refuses a wire value of `state` whose layer components decoding would refuse, with the
+    /// decoder's own checks ([`check_effects`], [`check_ledger_wire`], [`check_generators`]):
+    /// a state made inconsistent by raw writes ([`GameState::effects_mut`],
+    /// [`GameState::timestamps_mut`]) is not written (REQ-CORE-001, REQ-NFR-006).
+    ///
+    /// # Errors
+    /// [`StateError::Encode`] with the message decoding would give.
+    fn check_restorable(&self, state: &GameState) -> Result<(), StateError> {
+        let issued = Issued {
+            effect: self.ids.effect,
+            timestamp: self.ids.timestamp,
+        };
+        check_effects(&state.effects, issued)
+            .and_then(|()| check_ledger_wire(&self.timestamps, issued))
+            .and_then(|()| check_generators(&state.generators, &state.effects, issued))
+            .map_err(|e| match e {
+                StateError::Decode(msg) => StateError::Encode(msg),
+                other => other,
+            })
     }
 
     /// MessagePack bytes of this wire value (structs as maps keyed by member name).
@@ -277,10 +316,23 @@ impl GameState {
     /// The MessagePack transport form of this state (REQ-CORE-001, REQ-NFR-006): the same
     /// state always gives the same bytes. Never a hash input.
     ///
+    /// The encoder runs the decoder's checks of the layer components first, so a state whose
+    /// effects, timestamps or generating-ability links [`GameState::deserialize`] would refuse
+    /// is not written. Only raw writes ([`GameState::effects_mut`],
+    /// [`GameState::timestamps_mut`]) can make such a state; its [`GameState::state_hash`]
+    /// stays computable.
+    ///
     /// # Errors
-    /// [`StateError::Encode`] if the encoder fails.
+    /// [`StateError::Encode`] if the encoder fails, or with the message
+    /// [`GameState::deserialize`] would give for a layer component it would refuse: an effect
+    /// id or a timestamp (of an effect, its granting effect, an object, counters or a sticker)
+    /// not issued by this state's generators, a non-CDA effect in layer 7a (CR 613.4a), a
+    /// static effect with a source without its generating ability (CR 613.8a), or a generating
+    /// ability for an id not issued, for any other registered effect or on another source.
     pub fn serialize(&self) -> Result<Vec<u8>, StateError> {
-        StateWire::from_state(self).to_bytes()
+        let wire = StateWire::from_state(self);
+        wire.check_restorable(self)?;
+        wire.to_bytes()
     }
 
     /// Rebuilds a state from untrusted MessagePack bytes, validating everything (R12).
@@ -291,7 +343,14 @@ impl GameState {
     /// players, a player id that is 0, repeated, out of ascending order or beyond the player
     /// generator, a turn order that is not a permutation of the player ids, an active or
     /// priority player that is not a player, a counter amount below 1 or above `i64::MAX`,
-    /// unknown members, or wrong types.
+    /// unknown members, or wrong types; and for the layer components (format version 2,
+    /// CR-005): effect ids out of ascending order or not issued by the effect generator,
+    /// timestamps (of effects, granting effects, objects, counters and stickers) that are 0 or
+    /// above the timestamp generator, an effect or group that registration refuses (a layer
+    /// mismatch, an invalid text change, a bad `SameAsLayer` link, a resolved selector left
+    /// unlocked in a group), a non-CDA effect in layer 7a (CR 613.4a), a static effect with a
+    /// source without its generating ability, a generating ability for any other registered
+    /// effect or on another source, and duplicate or unordered ledger or link entries.
     pub fn deserialize(bytes: &[u8]) -> Result<GameState, StateError> {
         StateWire::from_bytes(bytes)?.into_state()
     }

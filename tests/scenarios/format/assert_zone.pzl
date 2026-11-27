@@ -1,0 +1,88 @@
+{
+  "pzlVersion": 1,
+  "title": "Zone assertions check exact library order, hand contents and an empty hand",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {
+      "test.mana_land_green": "1b4c2b9dd878bdc3d252651c269dbdd1a49f09da231752f2189e3320cfd0d6da",
+      "test.vanilla_white_1_1": "168ce6ad9b4766080ac7d9c8f678a991278faabc2ee1e4927880e05c3637dece",
+      "test.flier_2_2": "fd2d5eeeeb17df2cfc75df291119a8c5aeeabc8fc565a711c8f8d7dbf1b1c24e"
+    }
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20,
+      "zones": {
+        "library": [
+          {
+            "id": "o1",
+            "card": "test.mana_land_green"
+          },
+          {
+            "id": "o2",
+            "card": "test.vanilla_white_1_1"
+          }
+        ],
+        "hand": [
+          {
+            "id": "o3",
+            "card": "test.flier_2_2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "p2",
+      "life": 20,
+      "zones": {
+        "hand": []
+      }
+    }
+  ],
+  "battlefield": [],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "zone",
+      "owner": "p1",
+      "zone": "library",
+      "contents": [
+        "o1",
+        "o2"
+      ],
+      "order": "exact"
+    },
+    {
+      "kind": "zone",
+      "owner": "p1",
+      "zone": "hand",
+      "contents": [
+        "o3"
+      ],
+      "order": "any"
+    },
+    {
+      "kind": "zone",
+      "owner": "p2",
+      "zone": "hand",
+      "contents": [],
+      "order": "exact"
+    }
+  ]
+}

@@ -358,6 +358,7 @@ fn executed(ev: GameEvent, outcome: Outcome, lki: bool) -> ExecutedEvent {
         instance: EventInstance::new(ev),
         outcome,
         lki_captured: lki,
+        unattached: vec![],
     }
 }
 
@@ -379,6 +380,7 @@ fn executed_event_and_batch_encoding() {
                 .with_applied(applied(&[1])),
             outcome: Outcome::Applied,
             lki_captured: false,
+            unattached: vec![],
         },
     ];
     assert_distinct(&execs);

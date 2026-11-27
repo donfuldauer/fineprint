@@ -59,7 +59,7 @@ fn card(name: &str, card_type: &str, power: i64, toughness: i64) -> Characterist
         supertypes: BTreeSet::new(),
         card_types: set([card_type]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -2976,4 +2976,260 @@ fn req_event_001_default_payable_three_and_none() {
     let out = drive(&ctx, &en, &zero, &[]);
     assert_eq!(out.asked.len(), 1);
     assert_eq!(out.asked[0].default_on_timeout, pick(0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #204 (FP-153): the timeout default avoids a failing continuation
+// ---------------------------------------------------------------------------------------------
+
+/// A continuous-effect registry already holding the id `e(400)`.
+fn in_force_400() -> ContinuousEffects {
+    let mut in_force = ContinuousEffects::new();
+    in_force
+        .register(e(400), add_subtype(o(1), "Wall"))
+        .unwrap();
+    in_force
+}
+
+/// Declares for the copy effect `copy` a static whose id `e(400)` is already in force: applying
+/// it as the last copy fails the re-projection with `LayerError::DuplicateEffect`.
+fn declare_collision(fx: &mut EtbEffects, copy: u64) {
+    fx.set_copy_abilities(
+        e(copy),
+        CopyAbilities {
+            statics: vec![(e(400), add_type(Some(o(77)), o(77), "Creature"))],
+            etb: Vec::new(),
+        },
+    )
+    .unwrap();
+}
+
+/// A copy of an artifact model that applies while the entrant is not a creature.
+fn artifact_copy(id: u64, desc: &str) -> EtbEffect {
+    copy_of(id, artifact("test.etb_model_artifact"))
+        .with_condition(EtbCondition::LacksCardType("Creature".to_owned()))
+        .with_description(desc)
+}
+
+/// A copy of a creature model (after it applies, the artifact copies no longer apply).
+fn creature_copy(id: u64, desc: &str) -> EtbEffect {
+    copy_of(id, card("test.etb_model_creature", "Creature", 2, 2)).with_description(desc)
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b, CR 616.1f (issue #204): the first copy declares a static
+/// whose id is already in force, so applying it fails; the second copy completes. The default is
+/// index 1, both candidates are offered, and a timeout completes the entry with copy 2 applied,
+/// for a chooser with a budget and for one without.
+#[test]
+fn req_event_001_default_skips_colliding_copy() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![
+        artifact_copy(1, "colliding"),
+        creature_copy(2, "valid"),
+    ]);
+    declare_collision(&mut fx, 1);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 5)].into();
+    for payable in [budget, no_limit()] {
+        let out = drive(&ctx, &en, &payable, &[]);
+        assert_eq!(out.asked.len(), 1);
+        let request = &out.asked[0];
+        assert_eq!(request.default_on_timeout, pick(1));
+        assert_eq!(
+            request.options,
+            ChoiceOptions::Enumerated(vec![ChoiceOption::Number(0), ChoiceOption::Number(1)])
+        );
+        assert_eq!(
+            request.payload,
+            ChoicePayload::ChooseReplacementEffect {
+                event: "ZONE_CHANGE".to_owned(),
+                effects: vec!["colliding".to_owned(), "valid".to_owned()],
+            }
+        );
+        // submit_default (a timeout) completes the entry with copy 2 applied.
+        let proc =
+            |_s: &mut Nil, c: &mut ChoiceContext<'_>| resolve_entering(&ctx, &en, &payable, c);
+        let mut session = ChoiceSession::start(Nil, proc).unwrap();
+        let id = session.pending().unwrap().request_id;
+        session.submit_default(id).unwrap();
+        let Status::Done { output, .. } = session.status() else {
+            panic!("the default did not complete the entry");
+        };
+        assert_eq!(output[0].projected.applied.order, vec![e(2)]);
+        // A manual answer of the colliding candidate is still the projection error.
+        let out = drive(&ctx, &en, &payable, &[pick(0)]);
+        assert!(procedure_message(out.result).contains("400"));
+    }
+}
+
+/// REQ-EVENT-001, CR 616.1e (issue #204): a valid first copy stays the default (index 0).
+#[test]
+fn req_event_001_default_valid_first_copy_stays() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![artifact_copy(1, "first"), creature_copy(2, "second")]);
+    declare_collision(&mut fx, 2);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 5)].into();
+    for payable in [budget, no_limit()] {
+        let out = drive(&ctx, &en, &payable, &[]);
+        assert_eq!(out.asked[0].default_on_timeout, pick(0));
+    }
+}
+
+/// REQ-EVENT-001, CR 616.1e (issue #204): when every candidate fails the default is 0, the whole
+/// list is offered, and a manual answer ends in the projection error.
+#[test]
+fn req_event_001_default_all_candidates_fail() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![
+        copy_of(1, artifact("test.etb_model_artifact")),
+        copy_of(2, card("test.etb_model_creature", "Creature", 2, 2)),
+    ]);
+    declare_collision(&mut fx, 1);
+    declare_collision(&mut fx, 2);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 5)].into();
+    for payable in [budget, no_limit()] {
+        let out = drive(&ctx, &en, &payable, &[]);
+        assert_eq!(out.asked[0].default_on_timeout, pick(0));
+        assert_eq!(
+            out.asked[0].options,
+            ChoiceOptions::Enumerated(vec![ChoiceOption::Number(0), ChoiceOption::Number(1)])
+        );
+        for index in [0, 1] {
+            let out = drive(&ctx, &en, &payable, &[pick(index)]);
+            assert!(procedure_message(out.result).contains("400"));
+        }
+    }
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 616.1f (issue #204): the collision appears only after a second
+/// effect is applied (the first adds the type that makes the colliding copy applicable); the
+/// default is the candidate with another completing order.
+#[test]
+fn req_event_001_default_skips_deep_failing_continuation() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut fx = effects(vec![
+        EtbEffect::new(e(1), EtbAction::AddCardTypes(set(["Widget"])))
+            .with_condition(EtbCondition::LacksCardType("Creature".to_owned()))
+            .with_description("enables"),
+        EtbEffect::new(e(3), EtbAction::AddCardTypes(set(["Creature"]))).with_description("blocks"),
+        copy_of(2, artifact("test.etb_model_artifact"))
+            .with_condition(EtbCondition::HasCardType("Widget".to_owned())),
+    ]);
+    declare_collision(&mut fx, 2);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let budget: BTreeMap<PlayerId, u64> = [(p(1), 5)].into();
+    for payable in [budget, no_limit()] {
+        let out = drive(&ctx, &en, &payable, &[]);
+        assert_eq!(out.asked.len(), 1);
+        assert_eq!(out.asked[0].default_on_timeout, pick(1));
+        let out = drive(&ctx, &en, &payable, &[pick(1)]);
+        assert_eq!(out.result.unwrap()[0].projected.applied.order, vec![e(3)]);
+        let out = drive(&ctx, &en, &payable, &[pick(0)]);
+        assert!(procedure_message(out.result).contains("400"));
+    }
+}
+
+/// REQ-EVENT-001, REQ-CORE-001, CR 616.1e (issue #204): a completion search over its own bound
+/// of 4096 states raises no error: 13 independent additions (8192 states) all end in a colliding
+/// copy, so the search gives up and every candidate stays eligible (default 0); the request is
+/// still published and the timeout ends in the projection error, not a lookahead error.
+#[test]
+fn req_event_001_completion_bound_is_best_effort() {
+    let env = Env::default().with(o(1), artifact("test.etb_card_a"));
+    let mut list: Vec<EtbEffect> = (1..=13)
+        .map(|i| EtbEffect::new(e(i), EtbAction::AddCardTypes(set_of(&format!("T{i}")))))
+        .collect();
+    list.push(
+        copy_of(30, artifact("test.etb_model_artifact"))
+            .with_condition(EtbCondition::HasCardType("T13".to_owned())),
+    );
+    let mut fx = effects(list);
+    declare_collision(&mut fx, 30);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    let out = drive(&ctx, &en, &no_limit(), &[]);
+    assert_eq!(out.asked.len(), 1);
+    assert_eq!(out.asked[0].default_on_timeout, pick(0));
+    let ChoiceOptions::Enumerated(options) = &out.asked[0].options else {
+        panic!("not enumerated");
+    };
+    assert_eq!(options.len(), 13);
+    let answers = vec![pick(0); 13];
+    let out = drive(&ctx, &en, &no_limit(), &answers);
+    let msg = procedure_message(out.result);
+    assert!(msg.contains("400") && !msg.contains("exceeds"), "{msg}");
+}
+
+/// REQ-EVENT-001, CR 616.1e, CR 614.12b (issue #204): with a costed `Choose` in the set, the cost
+/// lookahead skips the infeasible branch of a colliding candidate instead of failing the entry
+/// up front: candidate 0 completes but its continuation costs 1 (unpayable at budget 0),
+/// candidate 1 collides, candidate 2 is a free valid copy. All three are offered, the default is
+/// 2 (budget 0 and 5: with 5, candidate 0 is payable, default 0), and a manual answer of the
+/// colliding candidate still ends in the projection error.
+#[test]
+fn req_event_001_default_costed_choose_and_colliding_candidate() {
+    let env = Env::default().with(o(1), card("test.etb_card_a", "Enchantment", 0, 0));
+    let ench = |c: EtbEffect| c.with_condition(EtbCondition::HasCardType("Enchantment".to_owned()));
+    let mut fx = effects(vec![
+        ench(copy_of(1, artifact("test.etb_model_artifact"))).with_description("costed"),
+        ench(copy_of(2, artifact("test.etb_model_artifact_b"))).with_description("colliding"),
+        ench(copy_of(
+            3,
+            card("test.etb_model_creature", "Creature", 2, 2),
+        ))
+        .with_description("valid"),
+        EtbEffect::new(e(4), choose("a", EtbChoiceKind::Color, vec![opt("x", 1)]))
+            .with_condition(EtbCondition::HasCardType("Artifact".to_owned())),
+    ]);
+    declare_collision(&mut fx, 2);
+    let continuous = in_force_400();
+    let ctx = EtbContext {
+        env: &env,
+        continuous: &continuous,
+        effects: &fx,
+    };
+    let en = [entry(o(1), p(1))];
+    for (budget, default) in [(0, 2), (5, 0)] {
+        let payable: BTreeMap<PlayerId, u64> = [(p(1), budget)].into();
+        let out = drive(&ctx, &en, &payable, &[]);
+        assert_eq!(out.asked.len(), 1);
+        assert_eq!(out.asked[0].default_on_timeout, pick(default));
+        let ChoiceOptions::Enumerated(options) = &out.asked[0].options else {
+            panic!("not enumerated");
+        };
+        assert_eq!(options.len(), 3);
+        let out = drive(&ctx, &en, &payable, &[pick(1)]);
+        assert!(procedure_message(out.result).contains("400"));
+    }
 }

@@ -48,7 +48,7 @@ fn creature(power: i64, toughness: i64, abilities: Vec<AbilityAST>) -> Character
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: set(["Testkin"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities,
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -73,20 +73,15 @@ fn artifact() -> Characteristics {
 
 /// A keyword ability.
 fn kw(keyword: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("test.kw.{keyword}")),
-            ("keyword", keyword.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(format!("test.kw.{keyword}")),
+        keyword_id(keyword),
+    ))
 }
 
 /// A non-keyword ability.
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
 }
 
 fn filter(pred: PredicateAST) -> Affected {
@@ -146,7 +141,7 @@ fn modify_pt(power: i64, toughness: i64) -> LayerModification {
 }
 
 fn text(word: &str) -> LayerModification {
-    LayerModification::SetText(TextTokenStream(vec![word.into()]))
+    LayerModification::SetText(literal_text(word))
 }
 
 fn eff(layer: Layer, t: u64, affected: Affected, m: LayerModification) -> ContinuousEffect {
@@ -312,7 +307,7 @@ fn pt(c: &Characteristics) -> Option<(i64, i64)> {
 fn has_kw(c: &Characteristics, keyword: &str) -> bool {
     c.abilities
         .iter()
-        .any(|a| a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword))
+        .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == keyword_id(keyword)))
 }
 
 fn layer_index(layer: Layer) -> usize {
@@ -403,7 +398,7 @@ fn req_layer_002_cda_first_layer_3() {
     );
     assert_eq!(
         ev.characteristics.rules_text,
-        TextTokenStream(vec!["test.word_plain".into()])
+        literal_text("test.word_plain")
     );
 }
 
@@ -1245,7 +1240,7 @@ fn random_effect(rng: &mut Lcg, affected: Affected) -> ContinuousEffect {
         ),
         3 => (
             Layer::L3,
-            LayerModification::SetText(TextTokenStream(vec![rng.pick(&words).into()])),
+            LayerModification::SetText(literal_text(&rng.pick(&words))),
         ),
         4 => (Layer::L4, add_subtypes([rng.pick(&words).as_str()])),
         5 => (
@@ -1488,8 +1483,11 @@ fn replay(
     };
     for &layer in Layer::ALL {
         if layer == Layer::L7a {
-            // The evaluator's own start of layer 7 (CR 613.4, 208.3).
-            scratch.pt = start_layer_7(&mut scratch.state, env, o(1), base.on_battlefield);
+            // The evaluator's own start of layer 7 (CR 613.4, 208.3), with the view of the one
+            // replayed object after layers 1-6 (CR 613.4a, 613.5).
+            let states = std::collections::BTreeMap::from([(o(1), scratch.state.clone())]);
+            let view = super::board::EvaluatedView::new(&states, Layer::L7a);
+            scratch.pt = start_layer_7(&mut scratch.state, env, o(1), base.on_battlefield, &view);
         }
         for s in rec.steps.iter().filter(|s| s.layer == layer) {
             match &s.item {
@@ -1638,16 +1636,18 @@ fn req_layer_002_generating_ability_kept_effect_applies_both_orders() {
     }
 }
 
-/// REQ-LAYER-002, CR 613.8a, 611.2, 613.8b: exempt effects. A resolved effect with a source
-/// (CR 611.2: it exists independently of its source's abilities), a static effect whose source
-/// is another object (its existence is not judged here: `source_view` is `None`, treated as
-/// existing), and a static effect without a source: in each case the grant depends on the
-/// remover and applies after it in both timestamp orders, and the marker is granted.
+/// REQ-LAYER-002, REQ-LAYER-001, CR 613.8a, 611.2, 613.8b: exempt effects. A resolved effect
+/// with a source (CR 611.2: it exists independently of its source's abilities), a static effect
+/// whose source is not in the evaluation's universe (it has no base: `source_view` is `None`,
+/// treated as existing by this environment), and a static effect without a source: in each case
+/// the grant depends on the remover and applies after it in both timestamp orders, and the
+/// marker is granted. (A source that is another object of the universe gets its own view since
+/// #186 FP-146, see `cross_object_tests`; this case uses object 9, which has no base.)
 #[test]
 fn req_layer_002_existence_exemptions_both_orders() {
     let cases = [
         (EffectOrigin::Resolved, Some(o(1))),
-        (static_origin(), Some(o(2))),
+        (static_origin(), Some(o(9))),
         (static_origin(), None),
     ];
     for (origin, source) in cases {
@@ -1673,10 +1673,10 @@ fn req_layer_002_existence_exemptions_both_orders() {
                 vec![(fx(1), first, true), (fx(2), Selection::Timestamp, true)]
             );
             let calls = env.generator_calls.borrow();
-            if source == Some(o(2)) {
-                // CR 613.8a: another object's source is asked without a view.
+            if source == Some(o(9)) {
+                // CR 613.8a: a source outside the universe is asked without a view.
                 assert!(!calls.is_empty());
-                assert!(calls.iter().all(|&call| call == (e(2), o(2), false)));
+                assert!(calls.iter().all(|&call| call == (e(2), o(9), false)));
             } else {
                 // Resolved, or no source: the hook is never asked.
                 assert!(calls.is_empty(), "{origin:?} {source:?}");
@@ -1934,4 +1934,169 @@ fn req_layer_002_two_switches_independent_both_orders() {
         }
         assert_eq!(steps_in(&rec, Layer::L7d), want, "{t1} {t2}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lazy dependency relation and comparison shortcuts (#190 FP-147)
+// ---------------------------------------------------------------------------------------------
+
+/// REQ-LAYER-005, REQ-LAYER-002, REQ-CORE-001; CR 613.8a, 613.8b: on random single-layer step
+/// sets (selector and locked effects, CDAs, static effects whose existence depends on the
+/// object's own abilities, counters), the lazy dependency relation equals the eager relation
+/// computed before #190 FP-147 cell for cell, whatever order its cells are asked in, and the
+/// earliest independent step it finds is the reference's.
+#[test]
+fn req_layer_005_lazy_relation_equals_eager_reference() {
+    use super::board::{layer_effects, layer_steps};
+    use super::ordering::{Scratch, relation_probe};
+    let mut rng = Lcg(0x0190_0147);
+    let words = ["Alphakin", "Betakin", "Testkin"];
+    let mut dependent = 0;
+    let mut no_candidate = 0;
+    for seed in 0..400 {
+        let mut env = Env::default();
+        let mut list: Vec<(u64, ContinuousEffect)> = Vec::new();
+        let layer = loop {
+            let probe = random_effect(&mut rng, only(o(1)));
+            if probe.layer != Layer::L1a && probe.layer != Layer::L1b {
+                break probe.layer;
+            }
+        };
+        let n = 2 + rng.below(6);
+        let mut k = 0;
+        while (list.len() as u64) < n {
+            k += 1;
+            let affected = match rng.below(5) {
+                0 => filter(has_subtype(&rng.pick(&words))),
+                1 => filter(not(has_subtype(&rng.pick(&words)))),
+                2 => filter(PredicateAST::IsCreature),
+                3 => filter(has_flying()),
+                _ => only(o(1)),
+            };
+            let mut x = random_effect(&mut rng, affected);
+            if x.layer != layer {
+                continue;
+            }
+            x.is_cda = rng.below(4) == 0;
+            if rng.below(3) == 0 {
+                // A static effect of the object itself, existing while it has flying.
+                x.source = Some(o(1));
+                x.origin = EffectOrigin::Static { granted_at: None };
+                env = env.generator(e(k), "flying");
+            }
+            list.push((k, x));
+        }
+        let abilities = if rng.below(2) == 0 {
+            vec![kw("flying")]
+        } else {
+            Vec::new()
+        };
+        let base = creature(2, 3, abilities);
+        env = env.with(o(1), base.clone());
+        for kind in ["+1/+1", "flying"] {
+            if rng.below(2) == 0 {
+                env = env.counter(o(1), kind, 1, rng.below(6));
+            }
+        }
+        let r = registry(&list);
+        let counters = env.counters(o(1));
+        let listed = layer_effects(&r, layer);
+        let steps = layer_steps(&listed, layer, &counters, &env, o(1), None);
+        let scratch = Scratch {
+            state: Evaluated {
+                characteristics: base,
+                controller: Some(p(1)),
+                mana_value_provenance: ManaValueProvenance::plain(),
+            },
+            pt: Some((2, 3)),
+        };
+        let locks = super::lockin::LockRecord::new(&r);
+        let probe = relation_probe(steps, &env, o(1), &scratch, &locks);
+        assert_eq!(probe.forward, probe.reference, "seed {seed}");
+        assert_eq!(probe.backward, probe.reference, "seed {seed}");
+        assert_eq!(probe.candidate, probe.reference_candidate, "seed {seed}");
+        if probe.reference.iter().flatten().any(|&d| d) {
+            dependent += 1;
+        }
+        if probe.candidate.is_none() {
+            no_candidate += 1;
+        }
+    }
+    // The generator reaches dependencies and loops: the comparison is not vacuous.
+    assert!(dependent > 20, "{dependent}");
+    assert!(no_candidate > 0, "{no_candidate}");
+}
+
+/// REQ-LAYER-005, CR 613.8a (b): the shortcuts of the set and ability-list comparisons give
+/// exactly the answer of their definitions ([`super::ordering::set_by_element`],
+/// [`super::ordering::list_by_count`]) on random small inputs, including lists where B appends
+/// items (the prefix shortcut) and states where B changes nothing.
+#[test]
+fn req_layer_005_comparison_shortcuts_equal_definitions() {
+    use super::ordering::{list, list_by_count, set, set_by_element};
+    let mut rng = Lcg(0x5e7_0147);
+    let pool = ["a", "b", "c"];
+    let random_list = |rng: &mut Lcg| -> Vec<&str> {
+        (0..rng.below(4))
+            .map(|_| pool[usize::try_from(rng.below(3)).unwrap()])
+            .collect()
+    };
+    let mut shortcut_true = 0;
+    for _ in 0..4000 {
+        let b0 = random_list(&mut rng);
+        let b1 = random_list(&mut rng);
+        let (a0, a1) = match rng.below(4) {
+            // B appends the same items in both states, or different ones.
+            0 => {
+                let added = random_list(&mut rng);
+                let other = if rng.below(2) == 0 {
+                    added.clone()
+                } else {
+                    random_list(&mut rng)
+                };
+                ([b0.clone(), added].concat(), [b1.clone(), other].concat())
+            }
+            // B changes nothing in one or both states.
+            1 => (b0.clone(), random_list(&mut rng)),
+            2 => (b0.clone(), b1.clone()),
+            _ => (random_list(&mut rng), random_list(&mut rng)),
+        };
+        let fast = list(&b0, &a0, &b1, &a1);
+        assert_eq!(
+            fast,
+            list_by_count(&b0, &a0, &b1, &a1),
+            "{b0:?} {a0:?} {b1:?} {a1:?}"
+        );
+        shortcut_true += usize::from(fast);
+        let to_set =
+            |v: &[&str]| -> BTreeSet<String> { v.iter().map(|s| (*s).to_owned()).collect() };
+        let (sb0, sa0, sb1, sa1) = (to_set(&b0), to_set(&a0), to_set(&b1), to_set(&a1));
+        assert_eq!(
+            set(&sb0, &sa0, &sb1, &sa1),
+            set_by_element(&sb0, &sa0, &sb1, &sa1),
+            "{sb0:?} {sa0:?} {sb1:?} {sa1:?}"
+        );
+    }
+    assert!(shortcut_true > 100, "{shortcut_true}");
+}
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+/// A one-token synthetic rules text: a LITERAL token `t1` whose text is `text` (R5; #232:
+/// replaces the former string placeholder text).
+fn literal_text(text: &str) -> TextTokenStream {
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "t1".to_owned(),
+        text: text.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }

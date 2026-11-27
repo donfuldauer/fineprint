@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use fineprint_base::hash::sha256;
+#[cfg(unix)]
+use fineprint_ingest::import::fetch::run_capped_to_file;
 use fineprint_ingest::import::fetch::{
     BULK_DATA_URL, FetchOptions, Http, Request, SourceMeta, fetch, is_fresh, parse_source_meta,
-    run_capped_to_file,
 };
 use serde_json::json;
 

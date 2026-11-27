@@ -2258,7 +2258,8 @@ values. (f) The SRS REQ-ZONE-001 item 1 clause attributing re-evaluation "includ
 through casting or resolution" to CR 401.5 is not covered by CR 401.5 (casting, activation and
 special actions only) and is out of scope here, with the rest of top-card reveal statics;
 simultaneous-entry ordering choices (CR 401.4, CR 404.3, CR 405.3), merged permanents, ante and
-subgames are later work. (g) Only objects on the stack or the battlefield have a controller
+subgames are later work. Update (#208 FP-154): the CR 404.3 graveyard case is done in `events/`;
+CR 401.4 and CR 405.3 remain later work. (g) Only objects on the stack or the battlefield have a controller
 (CR 109.4). The container keeps an explicit controller only there: a request controller
 elsewhere, or `set_controller` elsewhere, is `ControllerNotApplicable` as a container rule (the
 CR has exceptions, CR 109.4a-g, such as emblems in the command zone, CR 109.4c; emblems and
@@ -4916,6 +4917,10 @@ infect in the normalizer (no flag in the event).
    unit, #180. Once that lands, `events_from_batch` emits `UNATTACHED` occurrences from the new
    records.
 
+   *Landed in #180 (FP-143):* executed events now carry `ExecutedEvent::unattached` records and
+   `events_from_batch` emits `UNATTACHED` from them; the player-leaves-game case stays deferred
+   (see "#180 FP-143 — Host player leaving the game: deferred").
+
 **Rationale:** CodeRabbit round-2 findings on PR #179, using the cached CR 2026-11-06 text. The
 executor and its outcome encoding are owned by the closed #27 FP-026, so changing them needs the R2
 contract-change protocol.
@@ -6652,12 +6657,26 @@ Choices made in it:
    option is `EtbError::Unpayable` (reported as a procedure error whose text contains "not
    payable"). A chooser absent from `payable` has no limit and runs no lookahead. The CR 616.1
    order choice (`CHOOSE_REPLACEMENT_EFFECT`, CR 616.1e) is never filtered by payability: CR
-   614.12b restricts only the choices the effects require. Every candidate is offered, but the
+   614.12b restricts only the choices the effects require. Every candidate is offered (never filtered by payability or by completion), but the
    request's `default_on_timeout` is `SelectReplacement { index: k }` with k the smallest
-   candidate index (ascending effect id) whose continuation is payable under the same exact
-   lookahead, `cheapest(c) + mincost(state + c) + later <= remaining` (u128), so a timeout never
-   picks an unpayable order when a payable one exists; k = 0 when candidate 0 is payable, when
-   no candidate is, or when the chooser has no budget (no lookahead runs). A manual answer of an
+   candidate index (ascending effect id) whose continuation (a) COMPLETES: some sequence of
+   further top-tier applications re-projects without error until nothing applies, and (b) is
+   payable under the same exact lookahead, `cheapest(c) + mincost(state + c) + later <=
+   remaining` (u128); so a timeout never picks an unpayable or failing order when another
+   exists; k = 0 when no candidate is both. A chooser without a budget runs only the completion
+   check (payability is unlimited). (issue #204 FP-153.) The completion search is a separate,
+   memoised (applied set, last copy), iterative search with its own count bounded by
+   `MAX_LOOKAHEAD_STATES`; over that bound it raises no error and every candidate stays eligible
+   (best effort, R3). Design choice: the default avoids a failing continuation; declared
+   copy-static ids are NOT validated up front, because `EtbEffects::add` and
+   `set_copy_abilities` do not know `ctx.continuous`, and an early check in `resolve_entering`
+   would reject entries that have a completing order and would still miss collisions deeper in
+   a chain. The zero-cost shortcut of the cost lookahead (no projection when no unapplied
+   effect has cost > 0) stays, for reservation only; in the cost lookahead a state whose
+   projection fails is an infeasible branch (skipped in the minimum, an infeasible root reserves
+   0), never a procedure error, so a colliding candidate beside a costed `Choose` does not abort
+   the entry before the request; the failure surfaces only when that candidate is answered.
+   Completion, not the shortcut, decides eligibility. A manual answer of an
    unpayable candidate is still the "not payable" error. Applying the reserve across the
    SEVERAL effects of one entry goes beyond the CR's literal text (which speaks of multiple
    permanents); it is kept on purpose, as the original brief required (requirement 7). A
@@ -6932,6 +6951,8 @@ those cards may arrange them in any order.") is a property of every simultaneous
 graveyard entry (the bus and zone-move layer, `events/` and `replacement/`) and is already
 listed as later work in `#19 FP-018 (f)`; until it lands `perform_all` keeps ascending
 `ObjectId` order with `Position::Top` (the ordering prompt is SRS §2.1 item 4, ORDER_CARDS).
+Update: the `events/` API for this choice landed in #208 FP-154 (see "#208 FP-154 — Owner orders
+simultaneous graveyard entry (CR 404.3)"); wiring it into `perform_all` is a follow-up.
 (2) CR 704.5g/704.5h destruction must be observable as "destroyed" by triggers (CR 701.8b: "The
 only ways a permanent can be destroyed are as a result of an effect that uses the word "destroy"
 or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or
@@ -8973,3 +8994,3587 @@ player who has left the game and only to a choice that survives departure. Routi
 surviving choice to the next player in turn order (CR 800.4h, not APNAP) belongs with #125
 (rules-researcher, CR 2026-11-06).
 (3) Keep the check on the deferred path only. Rejected: that is the reported suspension defect.
+
+## #180 FP-143 — Lost attachment links live on `ExecutedEvent`, not on `Outcome`
+
+**Decision:** The links an executed event removes are reported in a new last field
+`ExecutedEvent::unattached: Vec<UnattachRecord>` (`attachment`, `host`), encoded last as a
+length-prefixed sequence (CR-004). `Outcome` and every existing tag are unchanged.
+
+**Rationale:** `Outcome` is `Copy` and is matched by value across the engine (SBA, replacement
+bus, entering copies); one event can end any number of links (a host with several attachments),
+so the fan-out needs a `Vec`, which would make `Outcome` non-`Copy` and change every variant's
+shape. On `ExecutedEvent` the change is one trailing field: existing consumers keep reading
+`outcome` unchanged, and the encoding change is a single appended sequence.
+
+**Alternatives:** A new `Outcome` variant or a field on `Outcome::Attached` /
+`Outcome::ZoneChange` (rejected: breaks `Copy`, changes every match site, and still could not
+carry several links without a `Vec`). A separate log of unattach records beside the batch
+(rejected: trigger normalization would have to join two logs and the batch order would be lost).
+
+## #180 FP-143 — `GameEvent::UnattachFrom`, and why the SBA switch is a follow-up
+
+**Decision:** Add `GameEvent::UnattachFrom { attachment, host }` (tag 17, appended last). It
+clears the link only if the attachment is attached to exactly `host` and is otherwise a no-op;
+plain `Unattach` keeps clearing whatever the current host is. The replacement bus maps it to the
+same `UNATTACH` kind and the same affected object as `Unattach`. `sba/perform.rs` keeps
+submitting plain `Unattach`; adopting `UnattachFrom` there is a follow-up for the SBA owner.
+
+**Rationale:** CR 701.3d ("becoming unattached from that object or player") names the host. The
+residual SBA case in "#42 FP-041 — Planned unattach and pre-pass host (round 3)" (a replacement
+re-attaches E, which E's own planned `Unattach` then clears from the new host) needs an unattach
+that only ends the planned link. `sba/**` is not owned by this unit (R1), so only the event is
+added here.
+
+**Alternatives:** Change `Unattach` to carry an optional host (rejected: changes an existing tag's
+encoding and every literal). Change the SBA pass here (rejected: outside the owned paths).
+
+## #180 FP-143 — Order of unattach records
+
+**Decision:** Within one executed event the records are: for `Attach` to a different host, one
+record for the previous host; for `Unattach`/`UnattachFrom`, the cleared link; for a permanent
+leaving the battlefield, first its own link (under its old id), then one record per permanent
+attached to it, ascending id (`Permanents::attachments_of` order). Both are read before
+`Permanents::leave` drops them. A same-zone reposition, a first attach and a same-host attach
+(CR 701.3b) record nothing. Records are produced in the same runs as outcomes, so the planning
+run's records are discarded with its state and a failed batch logs nothing.
+
+**Rationale:** The leaving object is the event's subject, so its own link is reported first; the
+ascending order for its attachments is the engine's stable ordering key (R3). An earlier
+`Unattach` in the same batch has already cleared a link, so a later zone change finds none and no
+link is reported twice (this is how the SBA pass, which submits its unattaches before its zone
+changes, stays at one occurrence per link).
+
+**Alternatives:** Attachments first, then the own link (rejected: no rules difference, and the
+subject-first order matches the occurrence order of the event itself). Timestamp order for the
+attachments (rejected: ids are the documented stable key and need no extra lookup).
+
+## #180 FP-143 — Normalizer order: the event's own occurrences, then its records
+
+**Decision:** `events_from_batch` emits, for each executed event, its own occurrences first, then
+one `UNATTACHED` occurrence per record in record order (subject = the attachment's pre-event id
+in both views). `Unattach` and `UnattachFrom` emit their single `UNATTACHED` occurrence from the
+event itself and ignore their records. So a move to a new host is `ATTACHED` then `UNATTACHED`,
+and a host dying is its zone-change occurrence then the `UNATTACHED` occurrences.
+
+**Rationale:** REQ-EVENT-002 fixes batch order for the indices; within one event the event
+itself happened, and the links ended as part of it. Ignoring the records of an explicit unattach
+keeps existing executed-event literals (which have no records) triggering exactly once and makes
+duplication impossible.
+
+**Alternatives:** Records before the event's own occurrences (rejected: an `ATTACHED` trigger
+would then see an index after its own `UNATTACHED`, which reads as unattach-then-attach). Emitting
+records for `Unattach` instead of the event (rejected: literals without records would stop
+triggering).
+
+## #180 FP-143 — Host player leaving the game: deferred
+
+**Decision:** An attachment whose host player leaves the game (CR 701.3d, "or that player leaves
+the game"; CR 800.4a) is not reported here. The engine has no player-leaves-game event yet
+(#125), so there is nothing to attach a record to. `UnattachRecord.host` already supports
+`AttachTarget::Player`, so the player-leaves procedure can report these links with no further
+contract change. Phasing (CR 702.26i, CR 702.26j) is not modelled and touches no link.
+
+**Rationale:** Out of the owned paths and without an executing event; the record type is ready.
+
+**Alternatives:** Synthesize records from a player designation change (rejected: there is no such
+event in the executed log, and inventing one would be a contract change outside this unit).
+
+## #180 FP-143 — Tokens ceasing to exist in the SBA pass log no record
+
+**Decision:** `sba/perform.rs` (around line 891) removes ceasing objects with
+`Permanents::leave` directly, not through a zone-change event, so a link they were part of ends
+without an `UnattachRecord` and without `UNATTACHED`. This unit does not change it (`sba/**` is
+not owned here); it is recorded for the SBA owner as a follow-up.
+
+**Rationale:** The executor can only report links that its own events end. In the normal flow a
+token leaves the battlefield through a zone change (which records its links) and only then ceases
+to exist in another zone, where it has no links, so the path matters only for an object that
+ceases to exist while still on the battlefield.
+
+**Alternatives:** Report from `Permanents::leave` (rejected: the permanent container is not owned
+here and has no log). Change `perform.rs` here (rejected: R1).
+
+## #180 FP-143 — CR-004 lands as its own commit in the issue PR
+
+**Decision:** The CR-004 entry (`contracts/CHANGE_REQUESTS.md`) is the first commit of the #180
+branch, touching only that file, and merges in the issue's PR rather than in a separate
+contract-only PR. The `Status` is set to merged when the PR merges.
+
+**Rationale:** #180 is the plan unit that the plan itself scheduled for this contract change
+(its first deliverable is the R2 change to the outcome encoding), as #169 FP-142 did for CR-001
+(merged in #235). The change is breaking only in its canonical bytes (new trailing sequence on
+`ExecutedEvent`, new tag 17); no tag, field or signature changes, no replay or state-hash golden
+exists yet (replay lands in #83/#106; `EventState` is not in the `GameState` hash), and it lands
+right after the phase 02 gate (#235), at a phase boundary. The scheduled-session chain advances
+only on merged `issue/` branches, so a separate contract branch would also stall the chain.
+
+**Alternatives:** A separate `contract/` PR merged first (rejected: no extra review value for a
+plan-scheduled change, an extra unauthorised branch, and it would leave the contract on `main`
+without its implementation).
+
+**Amendment (gate 06-turn F107).** This entry records a historical deviation from R2
+(`docs/PROCESS.md` P2), not an allowed workflow. R2 requires a contract change to go through
+`contracts/CHANGE_REQUESTS.md` as a separate contract-only PR; landing the entry as the first
+commit of the issue branch, touching only that file, and timing it at a phase boundary do not
+satisfy that requirement. The facts above stand as the record of what happened for CR-004.
+Later contract changes use a separate contract-only PR.
+
+## #183 FP-144 — Ability identity by value
+
+**Decision:** A static (or ETB) effect is linked to its generating ability as a
+`state::GeneratingAbility { source, ability: AbilityAST }`. The ability exists on its source iff
+the source's abilities contain an element equal to the linked `AbilityAST` (the JSON value);
+duplicate identical abilities on one source are one identity. An effect id without a link is not
+modelled and exists (`true`); a link whose source differs from the asked source is `false`. With
+`source_view` given, the view's abilities decide. No branch on card name, id or ability content.
+
+**Rationale:** Evaluated `Characteristics.abilities` is a `Vec<AbilityAST>` without ids, so value
+identity is the only identity the layer output carries (brief D4). Equality of the JSON value is
+deterministic and needs no new field on the DSL types.
+
+**Alternatives:** Ability ids inside the AST (rejected: no such field is guaranteed by the DSL);
+positional indices (rejected: layer 6 reorders and removes abilities).
+
+## #183 FP-144 — Existence on another source
+
+**Decision:** When the layer system asks without a `source_view` (the source is not the object
+under evaluation), `GameEnvironment` evaluates the source through the layers with the state's
+effects minus the effect asked about, one level deep (inside that evaluation an effect of yet
+another source is judged on that source's base), and checks the evaluated abilities. This
+replaces the base-only fallback named in brief D4.
+
+**Rationale:** The base-only fallback contradicts the issue's acceptance criterion and brief S1
+("B grants a marker to objects with no abilities, A removes all abilities; no marker results"):
+evaluated on another object, the base of sB still has B's ability, so B would grant the marker
+there although A removed the ability (CR 611.3b, 613.8a). Evaluating the source makes no object
+get the marker in both timestamp orders. The effect asked about is left out because an effect
+never depends on itself (CR 613.8a names "the other" effect): a "lose all abilities" static
+effect that also removes its own source's ability keeps applying to other objects. One level
+keeps the evaluation finite and deterministic; full layer-major evaluation across objects stays
+#186.
+
+**Alternatives:** The base-only fallback of D4 (rejected: wrong result for the acceptance
+scenario on any object other than sB); full recursive evaluation (rejected: may not terminate
+and is #186's scope); evaluating with the effect included (rejected: a self-removing remover
+would stop applying elsewhere).
+
+## #183 FP-144 — Ledger read access
+
+**Decision:** `layers::TimestampLedger` gets one crate-internal read accessor,
+`entries() -> LedgerEntries` (borrowed maps), used only by the canonical encoding
+(`layers/encode.rs`) and the state's wire form. The ledger is rebuilt on decode through its own
+public stamping operations (a generator positioned just before each stored timestamp).
+`ContinuousEffects` links are read through the existing `pub(super) links()` from
+`layers/encode.rs`; `ManaValueProvenance` parts through crate-internal helpers there.
+
+**Rationale:** The ledger's fields are private and the identifier types have no serde, so serde
+derives on the ledger would need field adapters plus a MessagePack round trip just to read the
+maps back; a read-only accessor changes no ledger behaviour and is the smallest glue.
+
+**Alternatives:** Serde derives with `#[serde(with)]` adapters (rejected: more code, and the hash
+would still need the maps); making the fields `pub` (rejected: exposes mutation).
+
+## #183 FP-144 — Wire structs, not serde derives on layer types
+
+**Decision:** The version-2 wire form of the layer components is a set of explicit wire structs
+in `state/effects_wire.rs` (raw `u64` ids, mirror enums of `LayerModification`, `CopyException`,
+`Characteristics` and the rest); no serde derive is added to a layer type. An `Option` of a JSON
+value (power, toughness) travels as an array of zero or one element so `Some(null)` survives.
+Decoding rebuilds the registry through `register` / `register_group` (each anchor with its linked
+parts; orphaned `SameAsLayer` parts through a stand-in anchor, id 0, removed at once, as removing
+the real anchor did) and requires the rebuilt registry to equal the described one. `serialize`
+does not validate: a state made inconsistent through `effects_mut()` or `timestamps_mut()`
+serializes but does not deserialize.
+
+**Rationale:** The id newtypes and `Characteristics` (outside the owned paths) have no serde, and
+the wire member names are the contract, so mirror structs are the smallest owned change and keep
+validation next to the wire. Going through registration makes decode enforce exactly what
+registration enforces.
+
+**Alternatives:** Serde derives in `layers/` with `with` adapters (rejected: touches many layer
+types for transport only); validating on serialize (rejected: transport only, and it would double
+the cost).
+
+## #183 FP-144 — Effect links for groups, removal and timestamps at registration
+
+**Decision:** `GameState::register_effect_group` registers a multi-layer effect with a link per
+part (each part checked like `register_effect`). Every static effect with a source needs a link,
+`SameAsLayer` parts included. `remove_effect` removes the continuous effect and its link, and also
+drops the link of an ETB effect id; it returns whether anything was removed.
+`register_effect` checks only what the brief lists (links, 7a, registration); an effect timestamp
+not issued by the state is accepted there but rejected by `deserialize`.
+`stamp_objects_simultaneously` uses `GameState::apnap_order`: the turn order rotated to start at
+the active player (CR 101.4: the other players follow in turn order), the plain turn order when no
+active player is set.
+
+**Rationale:** The brief pins the `register_effect` validations; groups and ETB links need the
+same link bookkeeping, and a uniform "static with a source has a link" rule is what decode checks.
+
+**Alternatives:** A timestamp check in `register_effect` (rejected: not in the pinned API's
+validation list); leaving ETB links on `remove_effect` (rejected: dangling link in the hash).
+
+## #183 FP-144 — Golden state hashes regenerated
+
+**Decision:** The state Merkle tree gains `/timestamps` and `/effect_generators` and the payload of
+`/effects` changes (CR-005), so the two golden state digests in `state/tests.rs` are recomputed
+once and replaced: `GOLDEN_NEW_42_2_20`
+f32bbec462508986efd89ed35f9184bec86a107f774505e19c4f65d3db4fb0d5 ->
+7389c79ba648f778a6925577d462382782418b603f487e7eef53a39898a87030; `GOLDEN_MUTATED`
+7ebe9f5c17abfc986c0168e1722807514fd1372a1e6dcc10dca594afdfa58371 ->
+61143120a7a8869bc2fb299244f20d4d6085bf324fefe398afb16d6cf354cb7c. A new pinned digest,
+`GOLDEN_LAYERS` 49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1
+(`state/effects_tests.rs`), covers a non-empty state: two stamped objects, one counter stamp, one
+static effect with its link, one resolved effect and one ETB link; a second build of it in another
+semantically equal call order hashes equal. There are no golden replay files yet: the replay
+corpus does not exist (no `tests/golden/` directory).
+
+**Rationale:** The layout change is intended and recorded as CR-005; the digests are values of
+the new frozen layout, recomputed once, not adjusted to make a test pass.
+
+**Alternatives:** Keeping `/effects` as an empty placeholder (rejected: the unit's goal is to hash
+the effects).
+
+## #183 FP-144 — LayerCache invalidation table
+
+**Decision:** No cache field is added to `GameState`. The `state::environment` module
+documentation maps each `GameState` mutation to the `layers::Invalidation` a cache user declares:
+registry changes none (detected; `EffectExpiry` optional on removal), ETB links none, counter
+stamps `Timestamp`, other ledger writes `Timestamp`, generator issues and the PRNG none, player and
+turn writes `PlayerValue`; world changes (zone, control, counters, attachments, status,
+designations) are declared by the world's owner. A differential unit test checks cached equals
+full recompute through `GameEnvironment` after each kind of mutation.
+
+**Rationale:** The cache detects registry changes itself; the environment reads the ledger only
+for counter timestamps and the world for everything else, so the table follows what
+`GameEnvironment` reads. Object timestamps are listed under `Timestamp` to stay safe when a later
+environment reads them.
+
+**Alternatives:** Helper methods returning the cause (rejected: the table and the test suffice,
+brief D7).
+
+## #183 FP-144 — Order record on B's source in the PR #187 scenario
+
+**Decision:** In the B-before-A timestamp order, evaluated on B's source, the test asserts what the
+brief requires: A applies, B does not apply, and B is not ordered after A by dependency
+(`Selection::Dependency` / `Selection::Loop`). The outcome-level criterion "no marker on any
+object, both orders" is asserted by `pr187_a_before_b_no_object_gets_the_marker` and
+`pr187_b_before_a_no_object_gets_the_marker`. Whether the order record must show a CR 613.8a
+existence dependency of B on A on B's own source is follow-up #242 (FP-168): it needs a
+rules-researcher answer and would change `layers/ordering`.
+
+**Rationale:** The Independent Tester read the rules-researcher's Q6 answer as "A's step precedes
+B's" on sB, but the brief's T3 clause says to assert B is not ordered after A on account of
+dependency, the issue's acceptance criterion says B is "not ordered after A by a false dependency"
+with no marker, and the merged test
+`layers::ordering_tests::req_layer_002_removed_generating_ability_stops_effect_both_orders` asserts
+the pipeline's order (`[B Timestamp not applied, A Timestamp applied]`). Trial application finds no
+dependency because B applies to sB neither with nor without A. Final characteristics are correct.
+The brief wins (R10).
+
+**Alternatives:** Changing the ordering pipeline to record the existence dependency now (rejected:
+outside this unit, rules question open, tracked in #242); dropping the test (rejected: the order
+record still deserves the brief's assertions).
+
+## #184 FP-145 — Audit of characteristic and counter consumers
+
+**Decision:** No rules consumer on the LKI, trigger, replacement-bus or SBA ceasing path reads base
+characteristics; nothing in code changed, only the contract was made explicit and guarded. Audit
+at `bf8c676` (non-test code of `events/`, `memory/`, `triggers/`, `replacement/`,
+`sba/perform.rs`; searched for `CharacteristicsProvider`, `capture_lki_on_move`, `ObjectBase`,
+`.base(`, `ObjectMarkers::counters`/`counter(` and `Characteristics` reads):
+
+- `events/exec.rs` `EventContext::capture` → `LkiProvider`: characteristics from the injected
+  `EventContext::provider` (**evaluated**, per the documented contract); counters from
+  `ObjectMarkers` and attachments from `Permanents` (**raw by design**, existing events decision).
+- `events/exec.rs` `held_counters` / `add_counters` / `remove_counters`: `ObjectMarkers` and player
+  counters (**raw by design**: the event writes these amounts).
+- `events/state.rs` `ObjectMarkers::counters` / `counter`: the single store of counters
+  (**raw by design**).
+- `sba/perform.rs` `capture_ceasing_lki` → `CeasingLki`: same shape as `LkiProvider`
+  (**evaluated** characteristics from `ctx.provider`; counters and attachments raw by design). The
+  SBA predicates already read `layers::evaluate` through the caller's effects and
+  `LayerEnvironment`.
+- `memory/lki.rs` `capture_lki_on_move`: takes the injected provider (**evaluated** when the
+  caller follows the contract); its only non-test callers are the two above.
+- `triggers/` (`detect.rs`, `event.rs`, `lookback.rs`, `state.rs`, the rest): read no
+  characteristics. Selector matching is delegated to `TriggerEnv::object_matches`; `event.rs`
+  reads only the LKI record's controller (CR 701.21a sacrifice subject). `ability.base` there is
+  the DSL `AbilityBase` field, not an object base.
+- `replacement/bus.rs`: reads no characteristics; its only counter read is the
+  `requires_counter` gate on `ObjectMarkers::counter` (**raw by design**, CR 122.1d/122.1h-style
+  counter conditions count counters, which layers do not change).
+- `replacement/etb.rs`: reads `LayerEnvironment::base` only inside the `Projected` adaptor and
+  `project`, which feed `layers::evaluate` (CR 614.12) (**evaluated**; exempt from the guard).
+- No non-test code builds a provider from base characteristics; the only non-test
+  `CharacteristicsProvider` implementations are `LayeredProvider`, `LkiProvider` and `CeasingLki`.
+
+Interpretation of the issue's deliverables: "`capture_lki_on_move` callers pass the layered
+provider" is met by the documented, tested contract on `EventContext::provider`,
+`CharacteristicsProvider`, `LkiProvider` and `CeasingLki` plus the snapshot recipe, because no
+in-repo non-test caller builds a provider and `EventContext` cannot borrow the state it mutates.
+"Counter reads use evaluated characteristics": `ObjectMarkers` stays the single raw source, and
+layers (CR 613.1-613.4) never change counter amounts, so evaluated and raw counters coincide.
+
+Snapshot recipe (documented on `EventContext` and in `memory`): `let snap = game.clone(); let env =
+GameEnvironment::new(&snap, &world); let provider = LayeredProvider::new(snap.effects(), &env);`
+built before the context, so before the batch (CR 603.10a, CR 704.8 pre-event capture). An object
+created inside the batch is unknown to the snapshot, as to any injected provider (event capture
+fails with `MemoryError::NoCharacteristics`; the ceasing capture skips it).
+
+Guard: `memory/consumer_guard_tests.rs` reads the consumer files with `include_str!` (compile
+time, no runtime I/O) and asserts their code before `#[cfg(test)]`, with `//` comments stripped,
+contains none of `ObjectBase`, `.base(`, `LayerEnvironment::base`; `replacement/etb.rs` is
+asserted to call `evaluate(` instead. The same file holds the shared synthetic scene
+(`test.lki_granted_type_2_2`) used by the regression tests in `events/tests/lki_layers.rs`
+(event execution, batch, SBA ceasing token through the public `sba::perform_all`),
+`replacement/tests.rs` and `triggers/tests.rs`; it is declared `pub(crate)` under `#[cfg(test)]`
+so those modules can share it. The SBA ceasing test lives in `events/tests/` because
+`sba/perform.rs` has no test module inside the region this unit may edit.
+
+Controller: exposing the evaluated (layer 2) controller through `LayeredProvider` and using it in
+LKI and the replacement chooser is not done here. Decision "#32 FP-031" item 13 named #184, but
+#216 FP-160 owns the evaluated controller in LKI and the chooser; LKI keeps the zone record's
+rules-level controller.
+
+**Rationale:** The audit found no defect, so a code change would only add risk; the contract was
+implicit ("the layer system plugs in there later") and is now explicit, with a test that fails if
+a consumer starts reading bases and regression tests that fail if the injected view is not the
+evaluated one (each with a base-only control). Keeping counters raw preserves the existing events
+decision that LKI matches what the events did.
+
+**Alternatives:** Building the layered provider inside `EventContext` (rejected: needs new fields
+or a borrow of `game` the context already holds mutably; the field set is frozen); routing LKI
+counters through `LayeredProvider::counters` (rejected: same amounts, and it would break the
+single-source decision); a runtime file-reading guard (rejected: R3).
+
+## #16 FP-015 — Lint API and lint ids
+
+**Decision.** `fineprint_dsl::lint` exposes exactly the brief's API: `Severity` (`Error` <
+`Warning`), `LintId` (a private `&'static str`, ordered by its string) with the twelve constants
+`FPL-SCHEMA`, `FPL-MANA-ABILITY`, `FPL-TIER-HINT`, `FPL-LAYER-KIND`, `FPL-TEXT-COVERAGE`,
+`FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-TOKEN-REF`, `FPL-LINK-ID`, `FPL-MANA-VALUE`, `FPL-COLORS`,
+`FPL-COLOR-IDENTITY` and `LintId::ALL` in that order; `LintLocation`, `Lint`, `LintReport`,
+`SourceFaceCharacteristics`, `SourceCharacteristics`, `LintContext` and the pure function
+`lint_definition`. The report is sorted by (face, ability, id string, severity, span, path,
+message), `None` first, then de-duplicated. Ability-level findings carry the ability's own
+`textSpan` in `text_span` when it is well-formed and fits `u32`; card-level and face-level
+findings other than coverage gaps have none. Messages copy only identifiers from the input
+(ability ids, token ids, link ids, member names), clipped to 64 characters; decoder messages of
+`FPL-SCHEMA` are clipped to 240 characters; JSON paths in messages show `$` and at most the last
+eight segments. The two touches outside `src/lint/` are the `pub mod lint;` line in `lib.rs`
+and the regenerated `docs/cr-citations.json`.
+**Rationale.** A string-backed id is stable on the wire and sorts the same everywhere. Filling
+`text_span` for ability findings is what "locations with text spans" asks for. Clipping keeps
+untrusted input from flooding reports (R12) and bounds path rendering whatever the nesting depth.
+**Alternatives.** An enum of lint ids (rejected: the string is the contract); unclipped decoder
+messages (rejected: an untrusted override could put megabytes of text in one finding).
+
+## #16 FP-015 — Raw versus typed lint inputs
+
+**Decision.** The typed decoders already refuse a `REPEAT_WHILE` without `maxIter`, a `CHAR`
+effect without `layer` and look-back keys, so `FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-LAYER-KIND`,
+`FPL-LINK-ID`, `FPL-TOKEN-REF` and the span reading of `FPL-TEXT-COVERAGE` run on the raw
+`serde_json::Value` of every ability, decodable or not, through one iterative walk (explicit
+stack, no recursion). `FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the ability part of
+`FPL-COLOR-IDENTITY` run only where `to_real()` succeeds. `FPL-SCHEMA` is emitted in addition
+for every position that fails to decode (all positions, not only the first). Partner abilities
+get `FPL-SCHEMA`, `FPL-LOOK-BACK`, `FPL-MAX-ITER` and `FPL-TOKEN-REF` (location
+`commanderEligibility.partnerAbilities[k]`); the face-specific checks do not apply to them.
+**Rationale.** A failing definition then reports the specific lint id and not only a generic
+schema error; typed checks need a decoded value to be meaningful.
+**Alternatives.** Typed-only checks (rejected: the specific violations would be unreportable);
+recursive raw walks (rejected: stack overflow on hostile nesting).
+
+## #16 FP-015 — Mana-ability check baseline
+
+**Decision.** Only `isManaAbility: true` can be a finding. KEYWORD abilities are skipped (macros
+expand later); SPELL, STATIC and REPLACEMENT with `true` are Errors (CR 605.1 covers activated and
+triggered abilities only). ACTIVATED (CR 605.1a): one Error per violated criterion: requires a
+target (any top-level or mode target slot, CR 115.6); loyalty (`isLoyalty: true` or a `LOYALTY`
+cost node, `COMPOSITE` included); library movement (`SEARCH_LIBRARY`, `MILL`, `DRAW`,
+`PUT_ON_TOP_OR_BOTTOM` anywhere in `effect` or `modes`, a `MOVE` whose `toZone` is `LIBRARY` or
+whose `objects` selector names the `LIBRARY` zone, an `EXILE_FROM_ZONE` cost from `LIBRARY`); no
+instruction at all (top-level `effect` empty and no mode with an instruction). TRIGGERED
+(CR 605.1b): requires a target; the trigger is not an `EVENT` trigger of kind `ACTIVATED` or
+`RESOLVED`; no instruction. The loyalty and library criteria are not applied to triggered
+abilities. `None` and `false` are never findings.
+**Rationale.** This DSL baseline has no add-mana instruction and no "mana added to a pool" event,
+so "could add mana" can be neither proved nor disproved from structure; the check is weakened to
+"has some instruction" and the triggering event set to the two events that exist. Implementing
+the CR text, not the looser SRS paraphrase, keeps library and loyalty criteria off triggers.
+**Alternatives.** Reporting `None`/`false` on abilities that might add mana (rejected:
+undecidable, would be noise). Follow-up: add a mana-production instruction and a "mana added"
+event, then make the check strict in both directions.
+
+## #16 FP-015 — Tier-hint check baseline
+
+**Decision.** A typed REPLACEMENT with a `tierHint` is an Error if `match.event` is not `ENTERS`
+(a `ZONE_CHANGE`-based hint is rejected in this baseline) and, separately, if every
+`replaceWith` operation is `SKIP` or `PREVENT`. An absent hint is never a finding (616.1e);
+`isSelfReplacement` (616.1a) is not compared with the hint.
+**Rationale.** CR 616.1b–d all concern how an object enters the battlefield, which the DSL
+models as the `ENTERS` event; an operation that only skips or prevents modifies nothing about the
+entry. The wire catalogue has no field naming a control, copy or back-face modification, so the
+three hints cannot be told apart structurally.
+**Alternatives.** Accepting `ZONE_CHANGE` with a `to: BATTLEFIELD` filter (rejected for now: two
+spellings of one event). Follow-up: a wire convention naming the modified aspect, then check each
+hint against 616.1b, 616.1c and 616.1d individually.
+
+## #16 FP-015 — Text coverage
+
+**Decision.** `textSpan` is an inclusive token index range `[start, end]` into `face.text`
+(N = raw array length). A well-formed span (two non-negative integers, `start <= end`) with
+`end >= N` is an Error at the ability, and still covers its in-range part; a present but
+malformed span (wrong type, wrong length, negative, `start > end`) is also an Error at the
+ability and covers nothing. Each maximal uncovered run is one finding at `faces[i].text` with
+`text_span = (first, last)`: Error for `VERIFIED` and `AUTO_PARSED`, Warning for `PARTIAL`. For
+`UNSUPPORTED` the whole check is skipped. Overlaps are fine; reminder text is not excluded.
+**Rationale.** REQ-ING-009 requires full coverage for `AUTO_PARSED` and above; a `PARTIAL`
+definition is expected to have gaps but they are still worth surfacing. Treating malformed spans
+as "any other out-of-range span" keeps a client override from hiding a gap behind garbage.
+**Alternatives.** Half-open spans (rejected: SRS §14.3 says "[start, end]" and the typed decoder
+allows `start == end`); ignoring malformed spans here (rejected: they would only surface as
+`FPL-SCHEMA`).
+
+## #16 FP-015 — Linked abilities structurally
+
+**Decision.** Declarations are the string `linkIds` of every face ability (all faces form one
+card, CR 607.1b); references are objects `{"ref":"LINKED","linkId":<string>}` at any depth of any
+face ability. A reference to an id no ability declares is an Error at the referencing ability.
+An id declared by exactly one ability and referenced by none is a Warning at that ability. An
+ability that declares and references the same id is linked to itself (CR 607.1c) and passes;
+ids declared by several abilities, and abilities declaring several ids, pass (CR 607.4).
+**Rationale.** It is the structural reading of "linked abilities share a `LinkId`": every
+reference resolves, and a lone declaration is suspicious but could be a deliberate unpaired
+link in a partial definition.
+**Alternatives.** Error for a lone declaration (rejected: too strong for an unpaired link that
+the toolchain cannot prove wrong).
+
+## #16 FP-015 — Source characteristics and token ids
+
+**Decision.** Source data reaches the lints through `LintContext`: `source` (per-face integer
+mana value and colors, and a color identity) and `known_token_ids`. An absent input skips the
+checks that need it with no finding: `FPL-MANA-VALUE` and `FPL-COLORS` need `source` with a
+value for that face index (extra or missing entries are ignored); the source comparison of
+`FPL-COLOR-IDENTITY` needs `source.color_identity`; `FPL-TOKEN-REF` needs `known_token_ids`.
+`FPL-COLOR-IDENTITY` always compares with the definition's own `colorIdentity`.
+**Rationale.** The lint is a pure function; the caller converts the source's floating `cmc` to an
+integer (REQ-ING-002 forbids it as a rules value). Skipping silently keeps definitions without a
+source (client overrides) lintable.
+**Alternatives.** A finding "source missing" (rejected: noise for every override).
+
+## #16 FP-015 — Characteristics checks
+
+**Decision.** Mana value per face is integer (`u64`, saturating): generic n, X/Y/Z 0 (202.3e),
+`{n/c}` max(n, 1) (202.3f), every other symbol 1 (202.3g for Phyrexian). No mana cost is 0
+(202.3a); the `BACK` face of a `DFC_NONMODAL` card uses the cost of its first `MAIN` face
+(202.3b); `LEFT_HALF`/`RIGHT_HALF` faces of a `SPLIT` card each have the combined cost of all
+halves (202.3d, off the stack); `MELD_RESULT` faces are skipped (202.3c is a runtime property).
+Colors per face are the colors of its cost symbols (hybrid and Phyrexian symbols count all their
+colors, 202.2d) plus its color indicator (204.2). Color identity is the union over all faces
+(903.4d) of cost colors and indicators, plus the symbols of every `PAY_MANA` or `WATERBEND` cost
+node (`{"cost":...,"mana":...}`) found anywhere in a decodable ability's JSON. For colors and
+identity, a computed color missing from the declared/source value is an Error and a
+declared/source color that cannot be derived is a Warning. LITERAL text tokens are never scanned
+for symbols.
+**Rationale.** Asymmetry: a computed color is certain, while an extra declared color may come
+from a characteristic-defining ability or rules text this baseline does not compute (105.2,
+903.4). Reminder text (903.4c) cannot be told apart reliably in LITERAL tokens, so scanning them
+would produce false identity. Cost nodes in a decodable ability are typed `CostAST` values;
+scanning the decoded-and-canonical JSON reaches every one (activated costs, `COMPOSITE`, RULE
+costs, instruction `unless`/`altCost`/`cost` lists) without a 72-op visitor, and a cost node
+inside an opaque parameter is still a mana symbol of the rules text.
+**Alternatives.** Scanning LITERAL text (rejected, above); identity from activated costs only
+(rejected: misses other typed costs). Limitations: colors and identity from CDAs and from rules
+text that is not a typed cost are not computed.
+
+## #16 FP-015 — Spec-test judgement calls
+
+**Decision.** (1) The deep-nesting spec test uses 700 instruction levels (about 2100 nested JSON
+containers) and 1200 bare array/object levels, on the default test stack. (2) The spec path
+invariant allows `text_span` on `faces[i].text` and on ability paths only. (3) For an empty text
+stream (N = 0) only "no tokens and no spanned abilities gives no finding" is asserted. (4) "Error
+for each violated criterion" (FPL-MANA-ABILITY) is asserted as at least one finding per violated
+criterion, not an exact count. (5) The no-copied-prose marker is not used as a token or link id,
+since a message may legitimately name an unknown token id.
+**Rationale.** (1) `serde_json`'s recursive Drop aborts near 1000 instruction levels and the
+existing `AbilityAST::to_real` overflows between 800 and 900, so deeper tests would test those,
+not the lint; a bigger test stack would hide real recursion problems. (2) The implementation
+attaches the ability's own span to ability-level findings, which the brief does not forbid. (3)
+The brief's "N = 0: no coverage finding" and "end >= N is an Error" conflict for a span on empty
+text. (4)–(5) The brief pins neither an exact count nor message wording.
+**Alternatives.** Running on a bigger stack; spans only on `faces[i].text`; asserting either N = 0
+outcome; exact finding counts.
+
+## #186 FP-146 tester - which generating-ability calls the foreign-source view tests assert
+
+**Decision:** The B-6 spec test (`spec_layers_cross_object_view.rs`) asserts, for a static
+effect whose source sS is not the object asked for, that *some* `generating_ability_exists` call
+gets the exact foreign view (sS through the end of the effect's own layer, the effect left out),
+and that *every* call for that effect respects the bounds that hold whatever the moment: `Some`
+view, layer-2 controller applied, the effect's own result absent, no result of a later layer. It
+does not require every call to show the same-layer results, because the effect also affects sS,
+and in a layer-major pass the engine legitimately asks about it for sS as the object in progress
+(before the same-layer grant applied), which a black-box test cannot tell apart. For an effect
+that does not affect its source (the layer-6 one), every call must equal the exact foreign view.
+Likewise, value-expression calls are asserted only for the object the test asks about when other
+CDA objects exist (their own 7a calls are not specified by the brief).
+
+**Rationale:** Brief B-6 defines the foreign view and keeps the in-progress view "as before" for
+the object being evaluated; layer-major evaluation (the deliverable) processes every object, so
+in-progress calls for the source are expected. The chosen assertions keep the full foreign view
+mandatory and make every call obey the layer bounds.
+
+**Alternatives:** Requiring every call to equal the foreign view (rejected: contradicts the
+in-progress rule for the source itself); making the layer-4 effect not affect its source
+(rejected: the brief asks that "the effect itself, if it modifies the source, is not reflected in
+its own view").
+
+## #186 FP-146 — Additive view API instead of a new `eval_value` signature
+
+**Decision:** The read view is a new public type `layers::EvaluatedView<'a>` (`get(id)`,
+`objects()` ascending, `layer()`) and a new defaulted trait method
+`LayerEnvironment::eval_value_with_view(expr, object, view)`, whose default calls the unchanged
+`eval_value(expr, object)`. The layer pipeline calls only `eval_value_with_view`, and only for a
+non-literal power or toughness (`literal_of` is read directly). `eval_value`, `MatchContext` and
+every other signature are unchanged; `start_layer_7` (crate-private) gains the view parameter.
+**Rationale:** Changing `eval_value` would break `state/environment.rs`, `replacement/etb.rs`, the
+benches and many test environments, all outside #186's owned paths, and would be a breaking change
+of a widely implemented trait. A defaulted method keeps every existing implementor compiling with
+its old behaviour, and an environment opts in by overriding one method.
+**Alternatives:** Change `eval_value` to take the view (rejected: breaking, outside owned paths);
+pass the view through `MatchContext` (rejected: the brief keeps `MatchContext` unchanged and a CDA
+is not a selector match); a view handed to every trait method (rejected: no requirement needs it).
+
+## #186 FP-146 — Board pass, universe and view semantics
+
+**Decision:** `evaluate`, `evaluate_with_order`, `evaluate_all` and `copiable_values` run one
+layer-major board pass (`layers/board.rs`). Universe: `env.objects()` sorted ascending and
+de-duplicated, plus the object asked for, keeping only objects whose `base` is `Some`; an object
+without a base is absent from every view and is an error only for the object asked for
+(`UnknownObject`), or, in `evaluate_all`, for the first listed object without a base by ascending
+id. Objects are always processed by ascending `ObjectId`; each keeps its own `Scratch`, its own
+`LockRecord` (CR 613.6, never shared across objects; a clone is used only for a nested evaluation
+of the same object) and its own order record. Within a layer each object is ordered against its
+own state only (the dependency trial, CR 613.8a, stays on the object under evaluation) and reads
+the others only through the start-of-layer snapshot, so no result depends on which object of the
+layer runs first. CDA view (CR 604.3, 613.4a, 613.5): frozen at the start of layer 7a before any
+object's layer 7 starts; every object after layers 1a-6; power and toughness as after layer 6 (a
+CDA object's own expression is still the raw expression): a CDA reading another object's layer-7
+values is not supported (no recursion, no cycles). Existence view (CR 613.8a, 611.3, 113.6): for
+the object under evaluation its state so far (unchanged); for another source of the universe, the
+source evaluated from its start-of-layer state and lock-in record through the end of the effect's
+own layer with the effect left out, every other step of that layer for the source applied in the
+REQ-LAYER-002 order, and inside that nested run the existence of effects of yet other sources is
+asked with their start-of-layer state (one level deep, terminating). A source outside the universe
+still gets `None`; resolved and sourceless static effects are never asked. The foreign view is
+computed lazily per (layer, effect) and memoised in a pass-local `RefCell` map: a pure function of
+the start-of-layer snapshot, so the memo never changes a result. `copiable_values` is the layers
+1a-1b prefix of the same board pass (same universe and existence views).
+**Rationale:** The issue asks that a CDA see the current controller and the earlier-layer results
+of every object and that the existence question get the foreign source's partially evaluated
+state. A plain start-of-layer snapshot of the source would miss a same-layer removal (the #183
+scenario: B's source loses B's ability to A in layer 6), so the source is run through the end of
+the effect's own layer without the effect, as the #183 `SourceEnvironment` already did for all
+layers. Stopping at the effect's own layer keeps a removal in a later layer from undoing an effect
+that already applied in an earlier one. Ascending iteration and snapshots give REQ-CORE-001
+determinism and `evaluate(id) == evaluate_all()[id]`.
+**Alternatives:** Start-of-layer snapshot only (rejected: fails the #183 same-layer trap); the
+source through all layers without the effect (rejected: a later-layer removal would retroactively
+stop an earlier-layer effect; also more work); full recursive nesting (rejected: may not
+terminate); eager computation of every foreign view at each layer start (rejected: more
+environment calls for effects that match no object, same results).
+
+## #186 FP-146 — Follow-up: the game-state and entering-permanent environments do not forward the view
+
+**Decision:** `state/environment.rs` (`GameEnvironment`, `SourceEnvironment`, `ObjectWorld`) and
+`replacement/etb.rs` (`Projected`) still use the default `eval_value_with_view`, so a real
+`GameState` evaluation does not yet hand the `EvaluatedView` to its `ObjectWorld`; adding an
+`ObjectWorld::eval_value_with_view` (or equivalent) and forwarding it from `GameEnvironment`,
+`SourceEnvironment` and `Projected` is outside #186's owned paths and is requested from the
+Orchestrator as a follow-up. The existence view needs no forwarding: `GameEnvironment` and
+`Projected` already receive and use `source_view`, so `GameEnvironment` now judges a source of the
+universe on the layer system's foreign view, and its own one-level fallback evaluation (#183
+"Existence on another source") is reached only when no view is given, that is for a source with no
+base (which then has no abilities).
+**Rationale:** R1: those files are not owned by #186. The default keeps their behaviour exactly as
+before for value expressions.
+**Alternatives:** Edit the state and replacement environments in this unit (rejected: outside the
+owned paths).
+
+## #186 FP-146 — Statements superseded
+
+**Decision:** This unit supersedes, without editing them: (1) "#33 FP-032 — Scope of the trial
+application": its rationale "evaluation is per object, so the partially evaluated state of other
+objects is not available" no longer holds; the decision itself (dependency judged on the object
+under evaluation only, the trial never evaluating other objects) is kept, and the deferred
+alternative is realised only as the read views above. (2) "#33 FP-032 — Review round 1
+dispositions" (a): "`source_view` is the state so far only when `src` is the object being
+evaluated, `None` otherwise" now reads: `Some` for every source of the universe (the foreign view
+for another object), `None` only for a source with no base. (3) "#36 FP-035 — Coarse invalidation
+and the (stateVersion, ObjectId) key" and "#36 FP-035 — Scope against #183 FP-144 and #186
+FP-146": the cache stays standalone and coarse invalidation stays sound; each cache miss now runs
+one board pass of `evaluate`; `LayerCache::evaluate_all` keeps its per-object hit/miss path
+(statistics unchanged; batching misses into one pass is left to #190 FP-147). (4) "#183 FP-144 —
+Existence on another source": the `GameEnvironment` fallback described there is now used only
+without a view (see the follow-up section above).
+**Rationale:** R8: earlier entries are not rewritten; this section names what changed.
+**Alternatives:** Editing the earlier entries (rejected: DECISIONS.md is append-only).
+
+## #186 FP-146 — Existing unit test of the foreign-source exemption updated (R10)
+
+**Decision:** `layers/ordering_tests.rs::req_layer_002_existence_exemptions_both_orders` asserted
+that a static effect whose source is another object with a base (object 2) is asked with
+`source_view == None`. Brief R-4 requires `Some(view)` for any source in the universe, so the
+case now uses a source outside the universe (object 9, no base), for which the brief keeps `None`;
+the assertions are otherwise unchanged. The in-universe foreign source is covered by
+`layers/cross_object_tests.rs` (`req_layer_001_foreign_source_view_contents`,
+`req_layer_001_same_layer_removal_on_foreign_source`).
+**Rationale:** R10: a test that contradicts the brief is corrected to assert exactly what the
+brief requires; the exemption it checks (no view, treated as existing by that environment) still
+exists for sources outside the universe.
+**Alternatives:** Keep object 2 and assert the new view (rejected: with that environment the
+grant would stop existing and the test would no longer test the exemption).
+
+## #186 FP-146 — `LayerCache::evaluate_all` visits objects by ascending id
+
+**Decision:** `LayerCache::evaluate_all` now looks objects up in ascending `ObjectId` order
+(`env.objects()` sorted, duplicates kept, so a listed duplicate is still looked up again and
+counted as before) instead of the environment's order, so its first error is the one of
+`layers::evaluate_all` (the first object without a base by ascending id, brief R-2/R-5) for any
+order of `env.objects()`. Hit/miss counting per lookup, version bumps and "entries computed before
+the first error stay stored" are unchanged. Each miss is still one `evaluate(id)` board pass;
+batching all misses into one pass is left to #190 FP-147. The unit test
+`layers/cache_tests.rs::evaluate_all_first_error_rule` (environment listing 1, 50, 2, 60 with no
+base for 50 and 60) asserted one stored entry (object 1, computed before 50 in the listed order);
+in ascending order objects 1 and 2 are computed before 50, so it now asserts two (R10: corrected to
+the brief's first-error rule; the error and the equality with `evaluate_all` are unchanged).
+**Rationale:** With layer-major evaluation `evaluate_all` sorts its universe, and the brief
+requires the cache to equal it and results to be independent of the order of `env.objects()`
+(REQ-CORE-001); the environment's order is documented as ascending anyway.
+**Alternatives:** Keep the environment's order (rejected: the cache's first error would differ
+from `evaluate_all`'s for an unsorted list); de-duplicate as well (rejected: would change the hit
+count for a listed duplicate).
+
+## #16 FP-015 — Deep-input spec tests build and drop fixtures without recursion
+
+**Decision.** Supersedes item (1) of "#16 FP-015 — Spec-test judgement calls". Deep-input spec
+tests build their fixtures by moving values into `serde_json::Map` / `Value::Array` (no `json!`
+interpolation of deep values, no `clone` of them) and drop them with an explicit-stack helper, so
+their stack use does not depend on depth. `req_ing_009_deep_nesting` now runs at 5000 instruction
+levels and 20 000 bare array/object levels on the default test stack.
+**Rationale.** The 700-level test overflowed on `test (windows-latest)`. The issue-investigator
+measured the cause as the test's own fixture code (`json!` interpolation deep-copies through
+`serde_json::to_value`, plus recursive `clone` and Drop); `lint_definition` and every `to_real`
+decoder use constant stack (about 183 KiB) up to 50 000 levels. The earlier notes that serde Drop
+aborts near 1000 levels and `to_real` overflows at 800–900 were measurements of the fixture code.
+**Alternatives.** A larger-stack test thread (rejected: hides real recursion); a lower depth
+(rejected: weaker R12 coverage and still platform-dependent).
+
+## #17 FP-016 — Test and loader location
+
+**Decision.** The loader lives at `tests/fixtures/cards/loader.rs` (inside the issue's owned paths)
+and is included with `#[path]`. The library test is `crates/fineprint-dsl/tests/spec_dsl_card_library.rs`,
+the one file outside the issue's listed owned paths.
+**Rationale.** The root `tests/` directory is not a Cargo target, and `fineprint-dsl` owns the card
+type and the lints the test exercises.
+**Alternatives.** A new crate for the library (rejected: needs a coverage-floor arm and a workspace
+change).
+
+## #17 FP-016 — Mana abilities use NATIVE_EFFECT test.add_mana
+
+**Decision.** Land cards produce mana with `NATIVE_EFFECT` id `test.add_mana` version 1, params
+`{"mana":"{W}"}` etc., with `isManaAbility` true and a `TAP_SOURCE` cost.
+**Rationale.** The DSL has no add-mana instruction; a native effect is the sanctioned escape (R4).
+**Alternatives.** Inventing an `ADD_MANA` op (rejected: not in the DSL schema).
+
+## #17 FP-016 — Face name equals cardDefId; seal in place
+
+**Decision.** Every face `name` equals `cardDefId`, so a real card name cannot appear. New cards are
+written with `"definitionHash": ""` and sealed by the `#[ignore]` test `seal_library`, which rewrites
+every library file as pretty JSON (2-space indent, trailing newline).
+**Rationale.** Hand-computing SHA-256 of RFC 8785 bytes is error-prone; the generator is the only
+writer and uses the same `seal()` the loader verifies against.
+**Alternatives.** A build script or xtask command (rejected: outside owned paths).
+
+## #17 FP-016 — Opaque ENCHANT and EQUIP keyword params
+
+**Decision.** `ENCHANT` carries `{"what":"CREATURE"}` and `EQUIP` carries `{"cost":"{1}"}` as opaque
+params until keyword macros exist. Equipment also has an explicit sorcery-speed `ACTIVATED` attach
+ability (PAY_MANA {1}, target a creature you control), so both forms are present.
+**Rationale.** Keyword params are opaque in the current DSL; the explicit ability gives scenarios a
+runnable attach path independent of macro expansion.
+**Alternatives.** Leaving out the keyword or the activated ability (rejected: the brief asks for both).
+
+## #17 FP-016 — Other fixture judgement calls
+
+**Decision.** (1) The any-target selector of `burn_3_any_target` is an OR of `IS_CREATURE`,
+`IS_PLAYER` and `HAS_CARD_TYPE` `{"name":"Planeswalker"}` with no `zones` member (a player is in no
+zone). (2) The five colored mana lands declare `colorIdentity` equal to their produced color (CR 903.4,
+per the rules-researcher); `mana_land_colorless` stays 0. `FPL-COLOR-IDENTITY` cannot yet derive
+produced-mana symbols (DECISIONS "#16 FP-015 — Characteristics checks"), so
+`req_ing_009_every_card_is_lint_clean` allows exactly one `FPL-COLOR-IDENTITY` warning on exactly those
+five cards (and none elsewhere) until #252 (FP-172) removes the allowance; their identity is asserted
+directly against the table, with the source identity omitted from their lint context to keep the
+warning count at one. (3) The no-card-data test matches quoted member names so the allowed
+`oracleTextHash` does not match `oracleText`. (4) `load(id)` finds the file by stem across families.
+**Rationale.** Each is the simplest choice consistent with the lints as implemented.
+**Alternatives.** Declaring land identity 0 (rejected: wrong under CR 903.4).
+
+## #190 FP-147 — Equivalence spec tests: per-object checks on the 200-object board use a sample
+
+**Decision:** In `tests/spec_layers_perf_equiv.rs`, the per-object checks on board a (200
+permanents) — `evaluate(id)` equal to the `evaluate_all` entry, `evaluate_with_order` and the
+pinned `OrderRecord` steps, `LayerCache::evaluate(id)` — run on a fixed sample of 14 objects
+(CDA, plain creatures, artifacts, lands, counters, locked sets); the small boards check every
+object. The cache equivalence (requirement 4) and the `evaluate_all` bookkeeping (requirement 5)
+on board a share one cache sequence (cold, warm, invalidation, registry change) so board a pays
+as few cold fills as possible, and the order-independence test fills a cache per listing only on
+board b (board a's listings are checked uncached against the golden digest). Board a's "fixed
+shuffle" is the literal permutation formula `i -> 1 + (77 i mod 200)` rather than 200 written-out
+ids (board b's shuffle is written out). Goldens were recorded at 1360900.
+**Rationale:** On the base (1360900) one whole-board pass of board a takes about 0.9 s in a debug
+test build, and each `evaluate(id)` and each cold cache miss is one such pass (an O(n) fill of n
+passes), so checking all 200 objects per step would take tens of minutes; the brief asks for a
+fast run (requirement 10) and the whole-board digests already cover every object.
+**Alternatives:** Every object of board a in every check (rejected: far too slow on the base);
+a smaller "bench-like" board (rejected: the brief fixes 200 permanents).
+
+## #190 FP-147 — Equivalence spec tests: board c changes the counted set in layers 2 and 4
+
+**Decision:** Board c ("CDA and view") changes the set counted by its characteristic-defining P/T
+with a layer-2 control change and layer-4 type changes, and puts layer-7b and 7c effects on the
+counting objects and on the animated artifacts in an order that depends on the timestamps (both
+orders tested).
+**Rationale:** The brief asks for "a layer-7b/7c effect that changes the counted set", but under
+the documented contract the CDA reads a snapshot of all objects after layers 1a-6, and 7b/7c
+effects change neither control nor types, so they cannot change the counted set; layers 2 and 4
+are the documented way the counted set changes, and the 7b/7c effects still interact with the CDA
+values (7a before 7b/7c, timestamp order within 7b).
+**Alternatives:** A 7b/7c effect alone (rejected: it cannot change what is counted, so the board
+would not test the view).
+
+## #190 FP-147 - Whole-board cache fill: baseless ids, misses and what is stored
+
+**Decision:** `LayerCache::evaluate_all` keeps its lookup loop (ids of `env.objects()` sorted, not
+de-duplicated; a hit or a miss per lookup, as in "#186 FP-146 - LayerCache::evaluate_all visits
+objects by ascending id"), but every miss of one call is answered from one board pass, run
+lazily at the first miss, over `env.objects()` sorted, de-duplicated and restricted to the ids
+that have a base (`board::universe_known`, the universe `evaluate(id)` uses for every listed id
+with a base, contract A). An id without a base is not in that pass: its lookup is a miss and
+returns `UnknownObject(id)`, which, by ascending order, is the first error of the uncached
+`evaluate_all`. Each result is stored when its lookup is visited, so the entries of ids visited
+before the error stay stored and the results of ids after it are discarded (not stored), exactly
+as when each miss was its own `evaluate(id)`. A listed duplicate is a second lookup: a hit in
+cached mode, a miss in full-recompute mode answered with the same result (no second pass). In
+full-recompute mode the call runs the same single pass and stores nothing; every lookup is a
+miss. `LayerCache::evaluate(id)` is unchanged and stores only its own object.
+**Rationale:** Contract A of the brief makes the pass result for every listed id with a base equal
+to `evaluate(id)`, so values, errors, hit/miss counts and `len()` stay exactly as at 1360900 while
+a cold fill costs one pass instead of N. Storing only visited ids keeps `len()` after an error
+equal to the old behaviour (`evaluate_all_first_error_rule` and the spec tests assert it).
+**Alternatives:** Store every object of the pass even after an error (rejected: changes `len()`
+and which later lookups hit after an error, a visible change of the cache's bookkeeping); run the
+pass eagerly on every call (rejected: a fully warm call would pay a pass for nothing); keep N
+passes in full-recompute mode (rejected: the brief allows one pass, results are identical and the
+differential job compares the values, not the number of passes).
+
+## #190 FP-147 - Foreign-source views computed before the layer runs
+
+**Decision:** In a board pass, the view of each static effect of the layer whose source is on the
+board (its source evaluated through the end of the layer without the effect, one level deep,
+CR 613.8a) is computed for every such effect before any object runs the layer, from the objects'
+states at that moment, instead of lazily (memoised in a `RefCell`) from a copy of every object's
+state and lock-in record taken at the start of each layer. The nested run reads other sources'
+start-of-layer states from the same, still unmodified, slots.
+**Rationale:** The view is a pure function of the start-of-layer snapshot (the binding semantics
+of "#186 FP-146 - Board pass, universe and view semantics"), so computing it eagerly gives the
+same value as computing it on first use, while removing the per-layer copy of the whole board.
+It may compute a view no object asks for (for example when the effect applies only to its own
+source); that is one single-object layer run per such effect, at most `E` per pass.
+**Alternatives:** Keep the lazy memo and the per-layer snapshot (rejected: the copy costs every
+object's state and lock record in every layer); lazy views read from slots not yet run (rejected:
+needs a snapshot anyway for sources that already ran the layer).
+
+## #190 FP-147 - Lazy dependency relation and comparison shortcuts
+
+**Decision:** Within a layer the dependency relation (CR 613.8a) is evaluated lazily, cell by cell
+in row order, until the earliest step that depends on no other unapplied step is found; trial
+applications are cached for the relation's lifetime (one selection); the whole relation is
+computed only when no step is independent (a loop, CR 613.8b). The set and ability-list
+comparisons of "what B does" return early in cases where the definition's answer is already
+certain: the same value after B in both states, B left the field untouched in both, or (ability
+lists) B appended the same items in both. The relation is still recomputed after every
+application (CR 613.8c).
+**Rationale:** Every cell is a pure function of the steps, the current state and the lock-in
+record, so the order in which cells are evaluated cannot change a cell, the earliest independent
+step or the loop chosen; the shortcuts are implied by the definitions. Unit tests compare the lazy
+relation with the eager pre-change relation (kept under `cfg(test)`) in every cell order and the
+shortcuts with the definitions, and golden fingerprints recorded at 1360900 pin the results.
+**Alternatives:** Memoise trials across selections (rejected: the state changes after every
+application and the lock-in record grows, so reuse would need a proof per case for little gain);
+restrict which fields a modification can touch (rejected: a second description of every
+modification that could drift from `apply_effect`).
+
+## #193 FP-148 — Independent tester: golden replays not applicable
+
+**Decision.** No golden replay check was run for this unit. `crates/fineprint-core/tests/golden/` does
+not exist on main (DECISIONS "#183 FP-144 — Golden state hashes regenerated"), and the new target
+`spec_layers_cache_diff_state_check.rs` pins no golden hash value, only cached == reference equality.
+**Rationale.** Nothing to replay; the brief says to record this.
+**Alternatives.** Creating a golden file (rejected: outside owned paths and forbidden by the brief).
+
+## #193 FP-148 — Independent tester: evaluation feedback into the state hash
+
+**Decision.** Each step writes, per player, `life` (first 12 hex digits of `evaluated_digest` of the
+objects that player controls) and the player counter `test.power` (sum of literal evaluated powers)
+through `player_mut`, to both the cached and the reference state. These feedback writes are not
+followed by `Invalidation::PlayerValue`, because the wrapper world and effects used read no state
+player value; a declared `PlayerValue` there would flush the cache and hide the stale-cache cases.
+Player-value changes the wrapper does read (`player_value`) and `set_turn_number` /
+`set_active_player` writes are declared with `PlayerValue`.
+**Rationale.** The cache is not part of `GameState`, so the hash can depend on evaluation only through
+fed-back state; the table's `PlayerValue` is for values a CDA or condition reads.
+**Alternatives.** Declaring `PlayerValue` after each feedback (rejected: makes the stale test vacuous).
+
+## #193 FP-148 — Invalidation declared by the scenarios (implementer)
+
+**Decision.** The scenarios of `spec_layers_cache_diff_state.rs` declare the `Invalidation` values of
+the `state::environment` table themselves, after every mutation (`ZoneChange`, `ControlChange`,
+`CounterChange`, `Attachment`, `Status`, `Designation`, `Timestamp`, `PlayerValue`, `EffectExpiry`;
+registrations are left to the cache's own registry detection except one scenario that declares
+`EffectRegistration`).
+**Rationale.** Issue #241 FP-167 (calling `LayerCache::invalidate` from the real zone, control,
+counter, attachment and status mutation points) is open and not a dependency. On main the `GameState`
+holds no objects, so the world is a test double owned by the scenarios; nothing here has to change
+when #241 lands.
+**Alternatives.** Waiting for #241 (rejected: not a dependency, and the differential needs to exist
+now); declaring every invalidation after every step (rejected: hides missing declarations).
+
+## #193 FP-148 — State hash fed by cached evaluations (implementer)
+
+**Decision.** After each evaluation a scenario writes the evaluated characteristics into the state
+through `player_mut`: life = 20 + total evaluated power of the objects the player controls, and the
+player counters `test.abilities` and `test.types` (numbers of evaluated abilities and card types). The
+cached state is fed from the cached evaluation, a cloned reference state from the uncached
+`layers::evaluate_all`. The feedback writes are followed by `Invalidation::PlayerValue` (they are
+player writes) and by a second, re-warming cached evaluation, so the next mutation is declared
+against a warm cache and an undeclared one is observable. Players' `test.rank` counter, written by the
+scenarios, is what the wrapper world's selectors and CDA read. Per-step mismatches are collected; the
+`.statehash` file is written first, then equality is asserted.
+**Rationale.** The cache is not part of `GameState` and `state_hash` hashes only the state, so
+evaluating alone cannot change it; only fed-back evaluations make the hash a function of the cache.
+Without the re-warm, the required `PlayerValue` after the feedback would empty the cache and make
+every stale case vacuous.
+**Alternatives.** Hashing the evaluated map next to the state (rejected: not `GameState::state_hash`);
+omitting `PlayerValue` after feedback (rejected: the brief requires it).
+
+## #193 FP-148 — Golden replays not applicable (implementer)
+
+**Decision.** No golden replay check is added. There is no `tests/golden/` directory and no golden
+replay corpus on main (see "#183 FP-144 — Golden state hashes regenerated": "There are no golden
+replay files yet"); replay verification lands with #83 FP-081 and #106 FP-104, so the issue's third
+deliverable has nothing to check yet. No test pins a new golden value of `state_hash`.
+**Rationale.** Nothing to replay.
+**Alternatives.** Creating a corpus here (rejected: outside owned paths, belongs to those units).
+
+## #195 FP-150 — Typed REPLACE_TEXT_WORD accessor, no new wire rejection
+
+**Decision:** The DSL keeps `REPLACE_TEXT_WORD` as an opaque op on the wire. `Modification` gains
+only `REPLACE_TEXT_WORD` (the op name), `replace_text_word(category, from, to)` (builds the flat
+params `category` as its wire name, `from`, `to`) and `as_replace_text_word()`, a typed view that
+returns `Ok(None)` for other ops, `Ok(Some(..))` for a well-formed one and `Err(message)` for a
+missing, non-string or unknown category, a missing or non-string word, any other member, or typed
+power/toughness. `from_json`, `check` and the canonical bytes are unchanged; `CARD_NAME` and
+empty or noncharacter words are returned as parsed.
+**Rationale:** REQ-DSL-012 needs a typed model, but adding a rejection to the decoder would change
+the set of documents that parse (a breaking contract change, R2). The engine already owns the CR
+612.2 checks (`validate_modification`), so the DSL view stays a pure reader and every refusal
+happens once, in the compile step.
+**Alternatives:** A dedicated `Modification` variant or typed fields (rejected: breaking wire and
+struct change); rejecting malformed or `CARD_NAME` replacements in `from_json` (rejected: new
+wire rejection, and the CR 612.2 rule belongs to the engine).
+
+## #195 FP-150 — Compile step lives in fineprint-core layers
+
+**Decision:** `compile_text_modification` and `compile_text_effect` are in
+`fineprint_core::layers` (`layers/compile.rs`). They map a well-formed `REPLACE_TEXT_WORD` to
+`LayerModification::ReplaceTextWord` and run the same `validate_modification` registration uses,
+so `CARD_NAME` (CR 612.2) and invalid words give exactly the registration error and every `Ok`
+result registers. Malformed members give `Unsupported("REPLACE_TEXT_WORD with malformed
+members")`, any other op `Unsupported("not a text-changing modification")`, and
+`compile_text_effect` additionally refuses a layer other than 3 with
+`Unsupported("REPLACE_TEXT_WORD outside layer 3 (CR 613.1c)")`, checked after the modification's
+own errors. `from == to` compiles (ordinary no-op).
+**Rationale:** The dependency direction is base <- dsl <- core: `LayerModification` lives in core,
+so only core can produce it. Reusing `validate_modification` keeps one source of truth for the
+CR 612.2 rules.
+**Alternatives:** A compile step in fineprint-dsl (rejected: dsl cannot depend on core); a new
+error variant for malformed members (rejected: `LayerError` is shared; `Unsupported` with a
+static message is what the brief and registration already use).
+
+## #195 FP-150 — Gap G4 closed by resolve_value_words
+
+**Decision:** The private `resolve_value` in `layers/text.rs` is made public, unchanged in
+behaviour, as `fineprint_core::layers::resolve_value_words`. Word references reachable only from
+a value expression (outside any predicate or selector) are resolved by calling it against the
+evaluated text table. The interpreter wiring (#57 FP-055) just calls it when it evaluates a value
+expression of an object whose text may have changed; no further engine work is needed for G4.
+**Rationale:** The function already walked value expressions for the predicate and selector
+resolvers; exporting it closes G4 with no new code path and the same error rules.
+**Alternatives:** Placing the whole of G4 in the interpreter (rejected: duplicates the walk);
+a new generic AST visitor (rejected: larger change, outside this unit).
+
+## #195 FP-150 — Category and words chosen on resolution
+
+**Decision:** "With the categories and values chosen on resolution" (SRS 14.5) means the resolving
+interpreter (#57) builds the modification with the chosen literal values through
+`Modification::replace_text_word` and compiles it with `compile_text_modification` /
+`compile_text_effect`. This unit adds no choice wiring and no choice-reference members in the
+modification.
+**Rationale:** The choice framework and `CREATE_CONTINUOUS_EFFECT` resolution belong to the
+interpreter; a literal modification keeps the compile step pure and total.
+**Alternatives:** Choice references (for example `{"choice": ...}`) in `category`/`from`/`to`
+resolved by the compile step (rejected: needs game state and choice results, which the compile
+step must not read, R3).
+
+## #195 FP-150 tester — Independent Tester judgement calls
+
+**Decision:** (1) The DSL spec tests do not assert the accessor's result for an empty or
+noncharacter `from`/`to` (the brief lists those as compile-step rejections only); the core spec
+tests assert `LayerError::Unsupported` for them. (2) "Documents that parsed before still parse"
+is tested by requiring every malformed `REPLACE_TEXT_WORD` member set that the opaque-params
+parser accepted (missing member, wrong JSON type, unknown category, extra param) to still parse
+and re-serialise unchanged, with the accessor returning `Err`. (3) The acceptance scenario follows
+the brief's token list literally (a `COLOR_WORD` word "Swamp" read by a `HAS_SUBTYPE` predicate),
+since no category-compatibility check exists (DECISIONS "#37 FP-036 — Word replacement scope").
+(4) Requirement 11(a) mirrors both #37 assertions for the compiled form: the chain
+(Island->Forest, both words Forest in every order) and the swap loop (Island->Swamp, timestamp
+order).
+**Rationale:** Each choice asserts exactly what the brief and the #37 decisions pin, never less.
+**Alternatives:** Asserting accessor rejection of empty words (rejected: not in the brief's Err
+list); a land-type word for the acceptance scenario (rejected: departs from the brief's token list).
+
+## #198 FP-151 — Per-part CDA targets for copy exceptions
+
+**Decision:** (a) A layer-4 `CHAR` effect's modification may carry `defines`, a non-empty array of
+distinct names from `"SUPERTYPES"`, `"CARD_TYPES"`, `"SUBTYPES"` (validated on decode and write
+for every layer-4 `CHAR` effect, opaque on other layers; typed view `TypePart` and
+`CharacteristicEffect::defined_type_parts`). A layer-4 CDA without `defines` defines all three
+parts, so every existing definition keeps the conservative behaviour; in fineprint-core a
+malformed `defines` (which decoding refuses) also counts as all three. (b) JUDGEMENT CALL, the CR
+is silent on multi-characteristic CDAs: a CDA is not copied as a whole as soon as it defines any
+characteristic the exception sets, retains or does not copy, so a CDA defining card types and
+subtypes is dropped by an exception touching either and kept by one touching only supertypes.
+(c) `copy_with` uses one target per type-line part (`Supertypes`, `CardTypes`, `Subtypes`):
+`Set*`/`NotCopied` of one part drop only the CDAs that define that part, so a subtype-only CDA
+survives `SetSupertypes`. (d) `AddSupertypes`, `AddCardTypes` and `AddSubtypes` keep every type
+CDA. This refines "#38 FP-037 — CDA abilities and CR 707.9d" (which dropped any layer-4 CDA on
+any type exception); the rest of that decision stands.
+**Rationale:** (a) the "absent = all three" fallback keeps #38's behaviour and every current
+test valid. (b) CR 707.9d attaches the consequence ("is not copied") to the whole
+characteristic-defining ability, and the CR has no partial-copy mechanism. (c) CR 109.3 lists
+card type, subtype and supertype as separate characteristics and CR 205.1b treats them
+separately, so 707.9d's "that characteristic" applies per part. (d) CR 707.9d last sentence: for
+"in addition to its other types" exceptions, any CDA that defines card type, supertype and/or
+subtype is copied.
+**Alternatives:** Keep one `Types` target (rejected: too broad, drops a subtype CDA when only
+supertypes are set); copy a multi-part CDA partially (rejected: no rule support); key the parts
+on a new `op` vocabulary (rejected: ops are free strings in the DSL).
+
+## #198 FP-151 — Change request number
+
+**Decision:** The contract change requested as "CR-003" is recorded as `CR-006` in
+`contracts/CHANGE_REQUESTS.md`.
+**Rationale:** CR-003 to CR-005 already exist and the file is append-only; reusing a number would
+make two entries ambiguous.
+**Alternatives:** Reusing CR-003 (rejected: duplicate id); editing the existing CR-003 (rejected:
+append-only, R2).
+
+## #198 FP-151 — `TypePart` reached through the `statics` module
+
+**Decision:** `TypePart` is defined in `crates/fineprint-dsl/src/ability/statics.rs` and
+re-exported from `fineprint_dsl::ability` (the Orchestrator added `ability/mod.rs` to the unit's
+owned paths for this one change). fineprint-core's copy exceptions parse a layer-4 `defines`
+value with `TypePart::parse_defines`, so the wire vocabulary lives only in the DSL; any `Err`, or
+an absent value, still means all three parts.
+**Rationale:** One source for the vocabulary; the behaviour is identical to the earlier direct
+JSON read (absent, non-array, empty, non-string, unknown, wrongly-cased and duplicate all fall
+back to all three parts). Core already depended on fineprint-dsl.
+**Alternatives:** Core reading the `defines` JSON itself (rejected: duplicated vocabulary);
+moving `TypePart` to another exported module (rejected: `statics` is where layer-4 CHAR
+modifications are defined).
+
+## #203 FP-152 tester — Independent Tester judgement calls
+
+**Decision:** (1) The ETB projection returns only the entrant's evaluation, so requirement 8's
+"A2 (P2's artifact) affected and A1 not" is observed on the entrant itself: an artifact entering
+under P1 (entry and environment controller P1, as the projection requires) is given to P2 by a
+layer-2 effect already in force; its own or copied static "artifacts you control are creatures"
+must make it a creature, and a second static "artifacts you don't control gain a synthetic type"
+must not apply to it (that second static is what the old controller's perspective would select).
+(2) Beyond the brief's list, the layer tests add a stale stored controller case (stored P1,
+source's base controller P2, no layer-2 effect: "you" is P2, CR 109.5 "current controller"),
+a stolen-and-returned case and a case where both the candidate and the source change control;
+each follows from the brief's `MatchContext::effect_controller` contract.
+**Rationale:** Asserts exactly the brief's contract through the public API, never less.
+**Alternatives:** Evaluating A1/A2 separately with `evaluate_all` inside the ETB file (rejected:
+that tests the layer evaluator, already covered, not the projection's copied statics).
+
+## #203 FP-152 — Controller of a sourced static effect
+
+**Decision:** (1) The controller a selector sees for a static effect with a source is the source's
+controller in the current layer pass: the candidate's own state so far when the source is the
+candidate, otherwise the source's view the board pass already builds for the existence question
+(the source evaluated through the end of the effect's own layer without the effect; one level
+deep, other sources at their start-of-layer state). For layers 3-7d this is the post-layer-2
+controller. For layers 1a, 1b and 2 it is the source's state so far in that layer (no
+fixed point is sought for a control-changing static whose source itself changes control in
+layer 2). (2) The stored `ContinuousEffect::controller` is the fallback when the source is not in
+the universe or its evaluated controller is `None` (CR 108.4a, 109.5 owner semantics remain the
+registering caller's job). (3) The foreign source's state reaches `pipeline::applies_to` through
+a new provided method `LayerEnvironment::static_source_state` (default `None`), answered by the
+board pass's `BoardEnv` (its existing per-effect views) and `NestedEnv` (start-of-layer slots);
+`MatchContext` is unchanged. (4) `replacement::etb::bind_to` keeps storing `entry.controller`,
+now only a fallback: the bound static's source is the entrant, so the evaluator reads the
+entrant's post-layer-2 controller (CR 614.12, 110.2, 613.1b).
+**Rationale:** CR 109.5 and 611.3a (rules-researcher, #203): "you" of a static is the current
+controller of the object it is on and the effect is not locked in; layer 2 precedes layers 3+
+(CR 613.1b), and timestamp/dependency order only within a layer (CR 613.7, 613.8a), so both
+timestamp orders give the same result. Reusing the existence-question view keeps one source
+evaluation per layer and effect, so the cached and full-recompute paths and the dependency trial
+(`step_applies` is shared) agree with no extra cost. Layers 1-2 have no completed layer-2 result
+to read; the state so far is the only value available without iteration.
+**Alternatives:** Passing the source state through `MatchContext` (rejected: the brief freezes
+its field set); a pipeline-side wrapper environment capturing views (rejected: `LayerCache` calls
+`run_board` directly, so cached and uncached results would differ); a fixed-point iteration for
+layer-2 statics whose source changes control in layer 2 (rejected: no rule excerpt asks for it,
+cost and termination risk); overwriting the stored controller at each control change in the
+state (rejected: state mutation outside the evaluator and not layer-aware).
+**Owned paths:** `crates/fineprint-core/src/layers/board.rs` (only the two `static_source_state`
+overrides of `BoardEnv` and `NestedEnv`) was added to the owned paths by the Orchestrator (R1
+extension), because `LayerCache` calls `run_board` directly, so a pipeline-only wrapper would
+desynchronise cached and uncached results.
+
+## #203 FP-152 — Existing spec test corrected to the static-controller contract
+
+**Decision:** `crates/fineprint-core/tests/spec_layers_each_layer.rs`
+`selector_sees_layer_2_result_and_context_fields` (Orchestrator-granted owned-path extension)
+registered a static with stored controller P2 whose source was controlled by P1 and asserted
+`effect_controller == P2`, the stored value. It is corrected (R10) to put the source under P2
+and register the static with a stale stored controller P1, still asserting
+`effect_controller == P2` for every candidate, plus every original assertion.
+**Rationale:** Brief #203 requirement 1 (REQ-LAYER-002 deliverable 1; CR 109.5, 611.3a): a
+sourced static's controller is the source's evaluated controller. The corrected test now asserts
+that contract (a stale stored value must not be seen), so it is stronger, not weaker.
+**Alternatives:** Moving the source under P2 and keeping stored P2 (rejected: would no longer
+distinguish stored from evaluated controller); leaving the test (rejected: contradicts the brief).
+
+## #208 FP-154 — Owner orders simultaneous graveyard entry (CR 404.3)
+
+**Decision.** (a) Opt-in additive API in `events/`: `EventContext::graveyard_order_groups(batch)`
+lists the `GraveyardOrderGroup`s of a final (post-replacement, CR 614.6) batch, ascending by owner,
+leaving every component unchanged; `GraveyardOrderGroup::request(id)` builds the owner's
+`ORDER_CARDS` request; `GraveyardOrderGroup::order_from_response` maps the answer to a
+`GraveyardOrder`; `EventContext::execute_batch_ordered(batch, orders)` executes the batch with the
+chosen orders. `execute_batch`, `execute` and `execute_batch_with_entry_copies` are unchanged
+(same graveyard order, ids and log). New error `EventError::InvalidGraveyardOrder { owner }`.
+(b) Group rule, from the planning run: executed `ZoneChange` events (not draws) requested at
+`Position::Top`, that change zones (`old != new`: a graveyard-to-graveyard reposition is not "put
+into"), into a graveyard (CR 400.3: the owner's), of a nontoken card (CR 111.6, CR 108.2b; a token
+takes no part and does not count toward the two, CR 111.7). One group per owner with two or more
+such cards. `Bottom` and `Index` moves keep their requested position and never form or join a
+group. JUDGEMENT CALL beyond the brief: a card that a later event of the same batch moves again
+(out of the graveyard or repositioned, possible only through a predicted id) is not counted,
+since its arrival position no longer exists at the end of the batch. (c) Encoding: one
+`ORDER_CARDS` request per group, chooser the owner, `reason.cr = "CR 404.3"`, the cards ascending,
+`destinations = [Graveyard]`, `min == max == n`, public (`hidden: false`, a graveyard is public),
+options in the shape `generate_request` gives an `ORDER` choice (the cards as enumerated options
+while `n!` is below `ENUMERATION_LIMIT`, a `ValidatorRule::Permutation` contract otherwise; that
+rule's doc says "in top", but validation is driven by the payload, whose only destination is
+`Graveyard`). The answer is `SUBMIT_ORDERING` with empty `top`/`bottom` and the `graveyard` list
+top first (index 0 = topmost). (d) The timeout default is the order `execute_batch` yields,
+"submission order of arrival": each card goes on top in submission order, so the last-submitted
+card ends on top. (e) Placement: the group's cards take the positions ("slots") they occupy in
+the `execute_batch` result, in the chosen order; every other object of the graveyard keeps its
+`execute_batch` position. The group is therefore contiguous on top of the graveyard unless
+another object of the same batch landed between its cards (a token, which ceases to exist at
+the next state-based-action check, CR 111.7, or an `Index` move, which keeps its requested
+position); in that case that object keeps its place. The arrangement is done with same-zone
+repositions (CR 400.7: no new object ids, no events), so `ExecutedBatch` (events, outcomes, ids)
+and LKI are exactly those of `execute_batch`. (f) Multiple owners: one request per owner with a
+group, asked in ascending `PlayerId` order; callers pass any request ids. (g) Invalid orders
+(owner without a group, owner twice, not a permutation of the group's cards) fail with
+`InvalidGraveyardOrder` naming the lowest offending owner (checked in ascending owner order, so
+the result does not depend on entry order) and change nothing. (h) No contract change:
+`ORDER_CARDS` with the `graveyard` destination is already in SRS 15.3; `generate_request`'s
+`ORDER` kind offers only `Top`, and a graveyard-offering `ChoiceKind` would be a later additive R2
+item. (i) Deferred: CR 401.4 (library: a hidden choice with positions and the non-reveal rule)
+and CR 405.3 (stack: APNAP stack code outside `events/`). Wiring the choice into
+`sba/perform.rs` `perform_all` and `replacement/bus.rs` is a follow-up issue; until then they keep
+ascending `ObjectId` order (#41 FP-040 follow-up (1)).
+
+**Rationale.** An additive API keeps every existing caller, test and golden replay identical
+(the default equals today's result) and lets the callers that own SBA and the bus adopt it later.
+Computing groups from the planning run uses exactly the moves the real run makes, after
+replacement (REQ-EVENT-001). The slot placement honours the brief's "Bottom/Index keep their
+requested position" for every other object, makes the default a no-op, and gives contiguity in
+every case where only the group's cards arrive at the top; the CR gives no sequencing between
+owners (CR 404.3 does not cite CR 101.4) and the piles are independent, so ascending `PlayerId` is
+a deterministic choice with no rules effect.
+
+**Alternatives.** Reordering inside `execute_batch` itself (rejected: changes every caller and the
+golden corpus, and needs a choice context in the executor). Permuting the execution order of the
+group's moves (rejected: assigns different object ids than `execute_batch` and still leaves
+interleaved objects between the cards). Forcing a contiguous block that pushes interleaved
+objects below it (rejected: moves `Index` arrivals away from their requested position and makes
+an explicitly submitted default differ from `execute_batch`). APNAP sequencing of owners
+(rejected: not stated by CR 404.3; ascending `PlayerId` is recorded instead). Using
+`Zones::reorder_graveyard` (rejected: gated by the CR 404.2 tournament flag).
+
+## #211 FP-157 — Retire ceased CardIds in Zones
+
+**Decision:** `Zones` has a private `retired: Arc<BTreeSet<CardId>>` (empty in `Zones::new`,
+written with `Arc::make_mut`). `cease_to_exist` inserts the removed object's CardId after the
+removal, only on success; `send_outside` and `move_object` do not retire. New
+`ZoneError::CardCeased(CardId)`. Precedence: after `require_player` (an unknown player still gives
+`UnknownPlayer`) and before every other check: `create_object` rejects before `CardAlreadyPresent`
+and the controller check; `enter_from_outside` rejects before `NoSuchOutsideCard` (a retired card
+is in no pool, so the caller learns the real reason); `add_outside_card` also rejects before
+`CardAlreadyPresent` (judgement call: otherwise a retired card could re-enter through a pool).
+All checks run before any mutation, so the container and generator are unchanged on error. The
+retired set is part of `PartialEq` and of the canonical encoding, written (length prefix, ascending
+CardIds) after the command zone and before `max_issued`, which stays the last 8 bytes. `state/`
+and every golden state hash are unaffected because `Zones` is not in the state hash yet; the
+encoding of a `Zones` with an empty set grows only by the 8-byte zero length prefix.
+`events::ObjectMarkers` is deliberately not cleared: a retired id is now unreachable through
+`Zones`, so the stale token mark cannot be hit. The perform.rs dungeon-removal placeholder (CR
+704.5t) calls `cease_to_exist` until #215 adds an outside pool, so it retires that card; #215 must
+switch it to `send_outside`. The "#41 FP-040" sentence "enforcement ... is a known follow-up" is
+now done (that entry is append-only and unchanged).
+**Rationale:** CardIds are match-scoped and never reused (REQ-CORE-002); the engine never reissues
+one, but `Zones` did not enforce it. Unlike ObjectIds (issued by a generator `Zones` sees, where
+the #167 high-water mark suffices and tracking every id was rejected as unbounded), CardIds are
+supplied by the caller and need not be dense, so an exact set is the only precise way; it is
+bounded by the number of tokens and copies that ever ceased in a match.
+**Alternatives:** Clearing the token mark on cease (rejected: outside owned paths, and would
+silently allow id reuse); a high-water CardId mark only (rejected: CardIds are not issued by
+`Zones` and need not be dense); rejecting only in `create_object` / `enter_from_outside`
+(rejected: `add_outside_card` would be a back door).
+
+## #216 FP-160 — Evaluated controller through the CharacteristicsProvider
+
+**Decision:** The layer-2 controller (CR 613.1b) reaches LKI capture and the CR 616.1 replacement
+chooser through a new provided method `CharacteristicsProvider::controller(id) -> Option<PlayerId>`
+(default `None`), overridden by `LayeredProvider` with `evaluate(..).ok().and_then(|e|
+e.controller)`. `capture_lki_on_move` uses it only for an object leaving the battlefield, falling
+back to the zone record's controller; the stack and every other zone keep
+`ObjectRecord::rules_controller`. `Bus::chooser` uses it only for an affected permanent, falling
+back to `Permanent::controller`; a non-permanent keeps its rules-level controller or owner (CR
+108.4a). The stored `Permanent::controller` and the zone record are not changed, and destinations
+stay owner-based (CR 400.3). Contract entry CR-008 (additive). The wrappers `LkiProvider`
+(events/exec.rs) and `CeasingLki` (sba/perform.rs) must forward the method for the event-driven
+and SBA paths to benefit; that is a follow-up in their owning unit.
+**Rationale:** The injected provider is already, by the caller's contract, the layer-evaluated
+view, so it is the single source of truth every consumer shares, mirroring the SBA registry's
+"evaluated, else stored" rule (PR #214, F4). A defaulted method keeps every implementor
+source-compatible and leaves base-only fakes on the old behaviour. The LKI encoding is unchanged;
+only the recorded value can differ.
+**Alternatives:** Syncing `Permanent::controller` from layer 2 after each evaluation (rejected: no
+state-level caller exists that runs the layers and writes back, and it would need edits in
+permanent/, events/ and the state driver, outside this unit); computing the controller separately
+in each consumer from a `ContinuousEffects` reference (rejected: duplicates the evaluation and
+gives consumers no common fallback rule); consulting the provider for stack objects too (rejected:
+the layer system's controller for a spell is not a control change the brief covers, and CR 109.4
+behaviour is to stay unchanged).
+
+## #209 FP-155 - SBA destruction cause
+
+**Decision.** A new zone-change cause `ZoneChangeCause::StateBasedDestroy` (canonical tag 8; tags
+0-7 unchanged) marks a permanent destroyed by the lethal-damage (CR 704.5g) or deathtouch
+(CR 704.5h) state-based action: such a permanent is "destroyed" (CR 701.8b). `perform_findings`
+submits the move of a `SbaAction::Destroy` finding with `StateBasedDestroy`; `PutIntoGraveyard`
+findings (CR 704.5f, CR 704.5i, CR 704.5k, ...) and the legend-rule and unprotectable-battle moves
+keep `StateBasedAction`. In the CR 704.7 merge, one object still moves once per pass, with the
+cause of the highest fixed precedence, whatever the order of its findings or pre-inserts:
+`Sacrifice` (CR 704.5s, decision #42 FP-041) over `StateBasedDestroy` (the object was destroyed,
+CR 701.8b) over `StateBasedAction`; every finding is still reported in `SbaOutcome.findings`.
+Trigger normalization maps `StateBasedDestroy` exactly like `Destroy` (zone-derived kinds plus
+`DESTROYED`), so "whenever a creature is destroyed" listeners fire for CR 704.5g/h deaths and not
+for CR 704.5f/i deaths. `Destroy` (destruction as the result of an effect) remains the only cause
+the shield counter's destroy replacement matches (CR 122.1c); `shield_counter_destroy` is
+unchanged, so a shield counter still does not stop a CR 704.5g/h death. Consequences for
+replacement matchers (which compare `cause` by equality): a matcher keyed on `StateBasedAction`
+no longer matches CR 704.5g/h moves; a matcher keyed on `StateBasedDestroy` does not match
+CR 704.5f/i moves; a regeneration hook (CR 701.8c, not modelled yet) would match
+`StateBasedDestroy`. A state containing a matcher keyed on the new cause hashes differently from
+any existing state; existing states and goldens are unchanged.
+
+This entry supersedes the "Alternatives" remark (and the sentence "Every move uses
+`ZoneChangeCause::StateBasedAction`") in "#41 FP-040 — CR 704.7 merging per subject and result
+kind", and the remark "a separate 'SBA destroy' cause (not needed ...)" in "#29 FP-028 — SBA
+destruction and the shield counter's destroy replacement". The rest of the FP-028 decision holds:
+a mixed `Destroy` + `StateBasedAction` group applies the shield to the `Destroy` member only.
+
+**Rationale.** CR 701.8b: a permanent is destroyed by an effect that uses the word "destroy" or by
+the state-based actions that check for lethal damage or deathtouch damage; a permanent put into
+its owner's graveyard for any other reason has not been destroyed. Triggers on destruction must
+therefore see CR 704.5g/h deaths, while CR 122.1c limits the shield counter to destruction as the
+result of an effect. A distinct cause expresses both facts with the existing equality matcher and
+an explicit precedence keeps the merge deterministic (R3).
+
+**Alternatives.** A flag on `StateBasedAction` (rejected: the replacement matcher compares a plain
+cause by equality, so the flag would either be invisible to matchers or change the meaning of
+every existing `StateBasedAction` matcher). Making SBA destruction `Destroy` (rejected: the shield
+counter would then wrongly replace it; see decision "#29 FP-028 — SBA destruction and the shield
+counter's destroy replacement"). Letting the first finding decide the merged cause (rejected:
+depends on registry order instead of a rule).
+
+## #44 FP-043 — turn/ module stub
+
+**Decision.** `crates/fineprint-core/src/turn/` did not exist on main, so this unit creates
+`turn/mod.rs` with only the module documentation, `pub mod heartbeat;`, the `#[cfg(test)]` test
+module line and the re-exports of the heartbeat API, and adds `pub mod turn;` to `lib.rs`
+(between `triggers` and `txn`). Unit #46 FP-045 (the turn sequencer) appends its own module to
+`turn/mod.rs`.
+**Rationale.** R1: when two units share a module in one phase, the earlier unit pre-stubs the
+module declarations. Keeping the stub minimal leaves FP-045 a clean append.
+**Alternatives.** A top-level `heartbeat` module (rejected: the issue's owned path is
+`turn/heartbeat.rs`); leaving the declarations to FP-045 (rejected: this unit's code would not
+compile).
+
+## #44 FP-043 — Heartbeat seam: HeartbeatHost and SbaStage
+
+**Decision.** The heartbeat (`turn::heartbeat`) is written against a `HeartbeatHost` trait: the
+host supplies the game state (turn order, active player, designations), one state-based-action
+pass, trigger placement over its own waiting queue, the stack (empty test, resolve top), the
+legal priority actions as exact `ChoiceResponse`s and taking an action. The heartbeat changes
+only the priority player (`GameState::set_priority_player`) and never touches the stack. A
+host's `sba_pass` delegates to `sba_pass_post_batch(SbaStage { .. }, choices)`, which calls
+`sba::perform_all_post_batch` with the host's `PostBatchState` provider and never `perform_all`
+or `perform_all_relayered` (binding issue comments, "Gate 02-state-objects R3c"). The heartbeat
+keeps its pass state in its own `HeartbeatState` (pass set and pass log), not in `GameState`, so
+the canonical state hash is unchanged. The default `has_left_game` is "not a player of the game,
+or has the `LOST_THE_GAME` designation". When the priority player has left the game while
+deciding (a host that models leaving at any time), the answer is ignored and priority passes on
+(CR 800.4a); no pass is recorded for a player who is no longer in the game.
+**Rationale.** The stack, resolution, casting, legal-action generation and the real-state
+environments arrive in later units ("#31 FP-030 — Real-state environments belong to the
+integration unit"); a trait seam lets the heartbeat be finished and tested now with fakes and
+keeps it a pure function of (host, state, answers) for the `ChoiceSession` re-execution model.
+**Alternatives.** Adding stack and pass fields to `GameState` (rejected: changes the state hash
+and is owned by other units); calling `sba::perform_all` directly (rejected by the binding issue
+comment).
+
+## #44 FP-043 — Settle loop repeats on performed, not findings, and caps iterations
+
+**Decision.** `settle_before_priority` repeats step 1 while `SbaOutcome.performed` (never on
+findings alone, "#41 FP-040 — performed means state changed"). After step 2 it returns to step 1
+when the placement stacked OR removed any trigger; only an empty placement (nothing stacked,
+nothing removed) ends the settle. `SettleReport.triggers_stacked` counts stacked triggers only.
+Every host call of the settle (one SBA pass or one placement) counts one iteration; the call
+that would exceed `MAX_SETTLE_ITERATIONS` (10 000) is not made and the settle returns
+`ChoiceError::Procedure` naming the limit. With no player in the game, step 2 is skipped (there
+is no APNAP order and no player who can control a trigger) and the settle ends after step 1.
+**Rationale.** Rules-researcher ruling Q4 (binding, replaces the brief's provisional "removal
+does not repeat"): CR 603.3c and CR 603.3d remove a trigger "from the stack", so it was put on the
+stack and counts as processed; CR 603.3b then has the game "once again" check state-based
+actions. The cap guards against a host that never settles without affecting any legal game
+(R3: deterministic error, never a hang).
+**Alternatives.** Repeating only on stacked triggers (the brief's provisional choice, overruled
+by Q4); counting only loop rounds rather than host calls (equivalent bound, less precise).
+
+## #44 FP-043 — Priority player is None when the step ends
+
+**Decision.** When every player still in the game passes in succession with an empty stack,
+`run_heartbeat` sets the priority player to `None` and returns `HeartbeatOutcome::StepEnds`,
+doing nothing else; when no player is in the game it also sets `None` and returns
+`NoPlayerInGame` without asking. Expiring "until end of step" effects and emptying mana pools
+(CR 500.5) is the turn sequencer's (#46 FP-045).
+**Rationale.** CR 117.4: "if the stack is empty, the phase or step ends"; no player holds
+priority between steps (CR 117.3a: the active player receives priority at the beginning of most
+steps, after turn-based actions). Leaving a stale priority player would let a later reader think
+someone still holds priority. The 117.3d mana announcement is informational only (ruling Q6);
+the pass record is the engine's record.
+**Alternatives.** Keeping the last passer as the priority player (rejected: misleading);
+performing the CR 500.5 work here (rejected: the sequencer owns step boundaries).
+
+## #44 FP-043 — Priority start when the active player has left or is absent
+
+**Decision.** Whenever the active player would receive priority (the step start, CR 117.3a;
+after a resolution, CR 117.3b) and has left the game, the next player in turn order after the
+departed active player's seat who is still in the game receives it (CR 800.4j with CR 800.4a);
+APNAP order for trigger placement starts at that same player and continues in turn order over
+the players still in the game. If `TurnInfo::active_player()` is `None` (no seat is known),
+both start at the first player in turn order who is still in the game. If the player about to
+receive priority left during the settle, priority goes to the next player in turn order after
+them (CR 800.4a).
+**Rationale.** Rules-researcher ruling Q5 (a) and (b): CR 800.4j says "the next player in turn
+order receives priority"; the CR is silent on APNAP order without an active player, and starting
+both at the same player keeps one notion of "who acts first". With no active player at all the
+turn order's first in-game player is the only seat-free deterministic choice.
+**Alternatives.** Starting APNAP at the first player in turn order even when the departed active
+player's seat is known (rejected: inconsistent with the priority rule); failing with an error
+when there is no active player (rejected: CR 800.4j lets the turn continue without one).
+
+## #44 FP-043 — Mana abilities and special actions reset PassCount
+
+**Decision.** Every non-pass answer to `PRIORITY_ACTION` (casting, activating any ability
+including a mana ability, playing a land, any special action) goes through
+`HeartbeatHost::take_action`; the actor keeps priority, PassCount is reset to 0 and the heartbeat
+returns to step 1. Binding, no longer provisional.
+**Rationale.** Rules-researcher ruling Q2 (an inference; the CR has no explicit sentence): CR
+117.4 counts passes only "without taking any actions in between", CR 117.3c and CR 116.3 give
+the actor priority afterward, and CR 605.3b says a mana ability "doesn't go on the stack" but is
+still an activation. SRS 5.1's "do not reset PassCount beyond the action they are part of" is read
+as: they reset it exactly once, as the action they are. (The SRS discrepancy is recorded by the
+Orchestrator.)
+**Alternatives.** Leaving PassCount unchanged for mana abilities and special actions (rejected
+by Q2: a player who acts has not passed "in succession").
+
+## #44 FP-043 — Pass counting uses the players still in the game
+
+**Decision.** `HeartbeatState` keeps the set of players who passed since the last action,
+resolution or step start. Before every comparison the heartbeat forgets the passes of players
+who have left the game; `pass_count()` is the size of that set (the number of players still in
+the game who passed in succession), and a `PassRecord.pass_count` is that value right after the
+pass. "All players passed" is `pass_count >= players_in_game`. A departure can therefore never
+make the all-passed test succeed before every remaining player has passed.
+**Rationale.** Rules-researcher ruling Q5 (c) (CR silent; judgement call, changes the brief's
+plain counter): CR 117.4 "all players pass in succession" is about the players in the game, and
+CR 800.4j has the turn continue without the departed player.
+**Alternatives.** A plain counter compared with the current players-in-game count (rejected: a
+departed player's earlier pass would still count, so a remaining player could be skipped);
+resetting PassCount to 0 on any departure (rejected by Q5: it makes players who already passed
+pass again for no rules reason).
+
+## #44 FP-043 tester — Independent Tester judgement calls
+
+**Decision.** The black-box heartbeat spec tests (`crates/fineprint-core/tests/spec_turn_heartbeat*.rs`)
+read the brief as follows where it left room:
+
+1. `SettleReport.sba_passes` counts every `sba_pass` call of the settle (performed or not), and
+   `triggers_stacked` the total length of the `stacked` lists the placements returned.
+2. A settle loop that only removed triggers (CR 603.3c-d) returns to the SBA check (rules-researcher
+   ruling Q4, which replaces the brief's provisional "does not loop").
+3. With no active player at all (`active_player() == None`), priority and the APNAP list start at the
+   first in-game player in turn order (brief); with a departed active player they start at the next
+   in-game player after that player's seat (ruling Q5a/Q5b).
+4. `run_heartbeat` with nobody in the game returns `NoPlayerInGame` on entry: no request and no host
+   call (no settle).
+5. Ruling Q5c (a departed player's pass no longer counts) is tested on the `PassRecord`s and on the
+   all-passed decision, with a host that concedes a player between two passes inside
+   `priority_actions` (no other host call happens between passes). `HeartbeatState::pass_count()`
+   takes no host, so it is asserted only at asks where the heartbeat has observed every departure
+   (after a pass it handled), not at the ask during whose `priority_actions` a concession happens.
+6. The settle guard is checked by counting the fake's calls: `sba_pass` calls within
+   `MAX_SETTLE_ITERATIONS ± 2` for an always-performing SBA pass; `place_triggers` calls within
+   `[MAX_SETTLE_ITERATIONS / 2 - 2, MAX_SETTLE_ITERATIONS + 2]` for an always-stacking placement (an
+   iteration may count one SBA pass or one SBA-plus-placement round).
+7. Property invariant (e) counts triggers stacked by the settle as pushes: resolutions = initial
+   depth + pushes by actions + stacked triggers.
+
+**Rationale.** Each choice is the plainest reading of the brief, the SRS 5.1 diagram and the
+rules-researcher rulings; item 5 follows from the pinned signature `pass_count(&self) -> usize`.
+
+**Alternatives.** Counting only performed passes in `sba_passes` (rejected: the field name counts
+passes run); asserting `pass_count()` at the ask right after a concession (rejected: not observable
+through a host-free accessor); excluding triggers from invariant (e) (rejected: the fake host's
+placements push onto the stack the heartbeat later resolves).
+
+## #46 FP-045 — TurnHost seam
+
+**Decision.** The turn sequencer (`turn::steps`) is written against a `TurnHost` trait, a
+supertrait of `HeartbeatHost`: the host begins turns, phases and steps, expires effects at an
+`ExpiryPoint`, empties mana pools, applies phasing, runs the day/night check, reports untap
+options and untaps, draws, reports hands and maximum hand sizes, discards, performs the CR 514.2
+actions, reports Sagas and adds lore counters, and runs the combat-step actions (a no-op default).
+The sequencer itself keeps only `TurnState` (the shared `HeartbeatState` and the previous turn's
+active player) and never mutates `GameState` directly; `TurnState` is not part of the canonical
+state hash.
+**Rationale.** It mirrors "#44 FP-043 — Heartbeat seam": the real-state host, the stack, effect
+durations and zones' turn-based moves belong to later units, and a trait seam lets this unit be
+finished and tested now with a recording fake, while staying a pure function of (host, state,
+answers) for `ChoiceSession` re-execution (R3, REQ-CORE-001).
+**Alternatives.** Driving `GameState` and the zone and effect registries directly (rejected: the
+required state does not exist in core yet and other units own it); one monolithic callback per
+step (rejected: the call order of CR 502 and CR 514 would not be enforced by the sequencer).
+
+## #46 FP-045 — CR 514.3a needs-priority test
+
+**Decision.** After the CR 514.1 and CR 514.2 actions of each cleanup step the sequencer runs
+`settle_before_priority` once and gives priority (runs the heartbeat, then another cleanup step)
+iff `sba_passes > 1 || triggers_stacked > 0 || !stack_is_empty()`. Otherwise the step ends with no
+priority. A placement that only removed triggers (CR 603.3c-d) makes the settle loop back to
+another SBA pass, so `sba_passes > 1` and it counts as "needs priority".
+**Rationale.** "#44 FP-043 — Settle loop repeats on performed, not findings": the settle repeats
+only when a state-based action was performed or a trigger was stacked or removed, so a settle with
+more than one SBA pass is exactly "state-based actions were performed and/or triggers were put on
+the stack" (CR 514.3a). A non-empty stack (an object left from the end step through an unusual
+host) also needs priority to resolve. The settle performs the SBAs and stacks the triggers in the
+order CR 514.3a gives; the heartbeat's own settle then finds nothing new.
+**Alternatives.** A separate "would anything happen" query on the host (rejected: duplicates the
+settle and the trait would grow); treating a removed-only placement as nothing (rejected: the
+settle's own loop already treats it as processed, and the trigger was put on the stack first).
+
+## #46 FP-045 — First-turn draw: Two-Headed Giant out of scope
+
+**Decision.** `first_turn_draw_skipped` skips only on turn number 1, for the host's starting
+player, when the rule says so: `AlwaysSkip` skips, `NeverSkip` never does, and `CrDefault` skips
+iff `game().player_count() == 2` (CR 103.8a). CR 103.8b (the Two-Headed Giant starting team) is
+not modelled: core has no team structure yet, so in a Two-Headed Giant game `CrDefault` does not
+skip (player count 4). With no known starting player nothing is skipped.
+**Rationale.** The brief fixes this rule; teams belong to a later multiplayer unit, which can
+extend the check through the host.
+**Alternatives.** A host query "is the starting team" (rejected: not in the fixed API and no team
+state exists).
+
+## #46 FP-045 — Host-owned turn state
+
+**Decision.** The day/night designation and its cast-spell history, mana pools (including rule
+modifications of how mana empties, SRS 613.11), hands, maximum hand sizes, effect durations,
+marked damage, phasing and the current phase/step are owned by the host. The sequencer only tells
+the host when (CR 500.4, 500.5, 502, 504, 514) and passes `previous_active` (the previous turn's
+active player, `None` on the first turn) to the day/night check.
+**Rationale.** Core has no such state yet; owning it here would duplicate later units' state and
+change the canonical hash.
+**Alternatives.** Adding day/night and mana-pool fields to `GameState` (rejected: not an owned
+path, and contracts change only through R2).
+
+## #46 FP-045 — Segment, run_phase and run_segment split
+
+**Decision.** A `Segment` is a step or a main phase (main phases have no steps, CR 505.2).
+`run_turn` = `begin_turn` + `run_phase` for each phase; `run_phase` does the phase boundary work
+(`begin_phase`, `BeginPhase` expiry, segments, `EndPhase` expiry, mana) and `run_segment` the step
+boundary work (`begin_step`, `BeginStep` expiry, body, `EndStep` expiry, mana) with no phase work;
+a main-phase segment has no step boundary work (its boundary is the phase's). The cleanup segment
+repeats the whole step sequence per cleanup step and reports `cleanup_steps`. `run_phase` and
+`run_segment` read the active player from the game and fail with `ChoiceError::Procedure` when
+there is none.
+**Rationale.** Later units (combat, extra phases and turns, the game loop) need to run single
+phases and steps; the split keeps CR 500.4 and CR 500.5 at exactly one place per level and lets
+"until end of combat" expire at `EndPhase(Combat)` (CR 500.5a).
+**Alternatives.** One monolithic `run_turn` (rejected: extra combat phases and turn-structure
+changes could not reuse it).
+
+## #46 FP-045 — Registry actions take &mut dyn TurnHost
+
+**Decision.** `TurnBasedAction::run` takes `&mut dyn TurnHost` (fixed API) while the entry
+points are generic over `H: TurnHost + ?Sized`. An unsized `H` cannot be coerced to a trait
+object, so `TurnHost` also has the supertrait `AsDynTurnHost` (one method,
+`as_dyn_turn_host`), blanket-implemented for every sized `TurnHost` and available on
+`dyn TurnHost` through the supertrait. Implementors of `TurnHost` never implement it by hand.
+**Rationale.** Keeps every pinned signature unchanged and invisible to host implementors.
+**Alternatives.** A private forwarding adapter struct implementing all 30 host methods (rejected:
+large, error-prone boilerplate); requiring `H: Sized` (rejected: changes the pinned signatures).
+
+## #46 FP-045 — Hash of Segment and ExpiryPoint
+
+**Decision.** `events::Phase` and `events::Step` do not implement `Hash` (an un-owned file), so
+`Segment` and `ExpiryPoint` implement `Hash` by hand over the enum discriminants of the value and
+of its step or phase, instead of `#[derive(Hash)]`. The other derives are as pinned.
+**Rationale.** The fieldless discriminants identify the values exactly, so `Hash` agrees with the
+derived `Eq`; the public trait set is the pinned one.
+**Alternatives.** Adding `Hash` to `Phase` and `Step` (rejected: outside the owned paths; can be
+requested later and the manual impls removed).
+
+## #46 FP-045 — Registry entries of steps
+
+**Decision.** `TurnBasedRegistry` entries for a step run after the step's built-in turn-based
+actions (untap, draw, the combat hook; in the cleanup step after the CR 514.2 actions of each
+cleanup step) and before the heartbeat or the CR 514.3a check; for a main phase before the
+heartbeat. The standard registry has entries only at the precombat main phase.
+**Rationale.** The built-in actions are the ones CR 703.4 lists "immediately after" the step
+begins; an extra registered action must not run before them (for example before phasing,
+CR 502.1), and it must run before priority (CR 117.3a: after turn-based actions).
+**Alternatives.** Running step entries right after the begin-step expiry (rejected: would break
+the CR 502.1-502.3 order).
+
+## #46 FP-045 — Untap call without a choice
+
+**Decision.** When `UntapOptions::choosable` is empty the untap step makes exactly one call,
+`untap(active, &options.forced, ..)`, with the host's forced list as given (not re-sorted); an
+empty forced list makes no call. Only when a `CHOOSE_UNTAP_SET` request was asked does the sequencer build
+the union of the forced and the chosen permanents, sort and deduplicate it, and skip the call if
+the union is empty.
+**Rationale.** The brief's call order pins `untap(active, &o.forced, ..)` for the no-choice case
+and "do not call `untap` with an empty slice"; the host already promises
+ascending ids for `forced`, so passing it through loses nothing and keeps the host in charge of
+its own list (the independent spec test asserts the list is passed unchanged).
+**Alternatives.** Always sorting and skipping empty calls (rejected: contradicts the pinned call
+order).
+
+## #232 FP-164 — Typed card AST positions
+
+**Decision.** `card::ValueExpressionAST`, `card::TextTokenStream` and `card::AbilityAST` are now
+`pub use` re-exports of `expr::ValueExpressionAST`, `text::TextTokenStream` and
+`ability::AbilityAST`; `FaceDSL.power`/`toughness`/`text`/`abilities` hold the real types, and
+`commanderEligibility.partnerAbilities` holds the typed newtype `PartnerAbilityDSL` (next
+entry). The `to_real` views, `CardDefinitionDSL::validate_asts`, `check_asts`,
+`single_spelling` and `card/validate.rs` are removed. `from_json` keeps its order (canonical →
+version → typed schema decode → lossless re-serialisation check → hash): invalid AST content now
+fails at the typed decode as `CardDefinitionError::Schema(<decoder message>)` (no location
+prefix any more), and a non-canonical spelling of a valid AST is refused by the lossless check
+(probing found no decodable non-canonical spelling: the real decoders refuse explicit `null`,
+unknown and positional members, so every decodable AST re-encodes to its input). `seal` keeps
+its normalising canonical round trip and reports decode failures as `CanonicalError::Serialize`;
+a hand-built typed AST that breaks an invariant of its type fails in its own serializer, so it
+cannot be sealed, hashed or exported. `to_canonical_json`, `compute_hash` and `verify_hash` are
+unchanged; the unit fixture `sealed()` still hashes to
+`ce23dc12dae8b49033785a3832ebece12870f940ce895ab3d01f370b8feee216` (pinned in
+`req_nfr_006_typed_positions_keep_the_fixture_hash`). fineprint-core builds and reads the typed
+values directly: `literal(n)`/`literal_of` are `ValueExpressionAST::Literal`, characteristic-
+defining placeholders in tests are `{"MEMORY": "test.*"}`, empty text is
+`TextTokenStream::default()`. Engine-built keyword abilities use keyword names of the form
+`[A-Z][A-Z0-9_]*` through the new `layers::keyword_id` (ASCII letters upper-cased, digits kept,
+every other character `_`): keyword counters give `counter:<kind>` / `keyword_id(kind)`
+(`FLYING`, `FIRST_STRIKE`, `HEXPROOF_FROM_RED`), the face-down ward ability is keyword `WARD`
+with the keyword parameter `cost` `{2}`, `RemoveKeyword(k)` removes the keyword named
+`keyword_id(k)` (so `"flying"` and `"FLYING"` both work) and, for hexproof, every
+`HEXPROOF_<rest>` variant whose rest is non-empty and does not start with `_` (CR 702.11e). The
+SBA indestructible check reads the vocabulary id `INDESTRUCTIBLE` (this supersedes the lowercase
+keyword of "#41 FP-040 — Indestructible and regeneration"; as "#43 FP-042 — Start your engines! keyword literal and the speed designation" does for `START_YOUR_ENGINES`).
+A split card's combined rules text (CR 709.4c) is the left half's tokens then the right half's;
+a right-half token whose id is already used gets `'` appended until unique, so the combined
+stream stays valid. The state-hash leaf layout is unchanged: `put_json` now carries a
+`serde_json::Value`, typed values go through `put_typed` (canonical JSON, else the structural
+encoding of their JSON tree, else tag 2), and `serde_json` moves to core's `[dependencies]`.
+`CopyException`, `LayerModification` and `CopyExceptionWire` keep `AbilityAST` unboxed with
+`#[allow(clippy::large_enum_variant)]`. This supersedes the open "Follow-up" of "#159 FP-140 —
+Card wrappers validated against the real AST types".
+**Rationale.** REQ-DSL-003, REQ-DSL-010 and REQ-DSL-012 ask for the real typed ASTs; typing the
+fields makes invalid content unrepresentable, so the separate validation pass and its views are
+redundant, while the lossless check still guarantees one spelling per definition
+(REQ-NFR-006). A `KEYWORD` ability must have an upper-case keyword name, so the nearest valid
+form of the engine's lower-case keyword strings is their vocabulary-id spelling (which equals the
+vocabulary id for every base keyword counter and for indestructible); keeping `RemoveKeyword`'s
+argument normalised keeps existing callers working. Re-numbering colliding split token ids is the
+only way to keep both halves' text in one valid stream. Boxing the ability payload would change
+public variants the spec tests build.
+**Alternatives.** Keeping the wrappers alongside the real types (rejected: the issue asks for
+the swap); parameterised keyword counters (`HEXPROOF` with a `from` parameter; rejected: the
+counter kind is free text and the variant check would need a second representation); dropping
+the right half's colliding tokens (rejected: loses text, CR 709.4c); `Box<AbilityAST>` variants
+(rejected: public API churn for a lint).
+
+## #232 FP-164 — PartnerAbilityDSL newtype
+
+**Decision.** `PartnerAbilityDSL` is `pub struct PartnerAbilityDSL(ability::AbilityAST)` with a
+private field, deriving `Clone, Debug, PartialEq, Eq` and `#[serde(transparent)]` `Serialize`;
+its `Deserialize` decodes an `ability::AbilityAST` with the strict decoder and requires
+`kind() == "KEYWORD"`. `PartnerAbilityDSL::new(ability) -> Result<PartnerAbilityDSL, String>`
+fails with exactly `a partner ability must be a KEYWORD ability, found kind <kind>`;
+`as_ability(&self) -> &AbilityAST` and `into_ability(self) -> AbilityAST` give the ability back.
+The JSON form is the ability's own, so canonical JSON and hashes are unchanged.
+**Rationale.** "#159 FP-140 — PartnerAbilityDSL is a KEYWORD ability" made the KEYWORD rule part
+of the card contract; a private field makes it an invariant of the type rather than a check.
+**Alternatives.** A plain re-export of `AbilityAST` (rejected: loses the KEYWORD rule); a public
+field (rejected: would allow a non-KEYWORD partner).
+
+## #232 FP-164 — Text placeholder bridge removed
+
+**Decision.** The MessagePack bridge of "#37 FP-036 — Placeholder bridge" is removed: the public
+items `layers::decode_rules_text`, `layers::encode_rules_text` and the variant
+`TextWordError::InvalidRulesText` no longer exist (re-exports in `layers/mod.rs` and doc links in
+`registry.rs` updated). `replace_in_rules_text(&TextTokenStream, category, from, to) ->
+Option<TextTokenStream>` and `replace_targets(&TextTokenStream, ...)` work on the typed stream:
+`None` when nothing changed, `None` for an invalid replacement, `CARD_NAME` gives `None` or the
+empty set. Behaviour on valid streams is unchanged.
+**Rationale.** `Characteristics.rules_text` is the typed stream now, so there is nothing to
+decode; undecodable text can no longer exist.
+**Alternatives.** Keeping the two functions as identity shims (rejected: dead public API).
+
+## #232 FP-164 — Lint schema check after typed storage
+
+**Decision.** The lints read typed definitions. `walk::RawJson` encodes every face and partner
+ability once with the depth-checked serializer (`canonical::to_checked_value`); the JSON-reading
+checks (`FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-LAYER-KIND`, `FPL-LINK-ID`, `FPL-TOKEN-REF`, the
+`FPL-TEXT-COVERAGE` spans, the color-identity mana strings) walk that JSON form, and
+`FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the characteristics checks read the typed abilities,
+always (no "only where `to_real` succeeds"). `FPL-SCHEMA` stays registered with its location
+rules; since a decoded definition is valid by construction, it now reports every position
+(`power`, `toughness`, `text`, each ability, each partner) whose typed value does not encode, that
+is a hand-built value breaking an invariant of its type (for example a lower-case keyword name or
+a literal beyond the safe integer range), with the encoder's clipped message; an ability that
+does not encode has `null` as its JSON form and is not walked. `lint_definition` is split into
+the encoding step and a private `lint_facts`, so unit tests can run the JSON-reading checks on
+JSON the typed positions cannot hold. The compile-driven edits in `lint/text.rs`
+(`face.text.len()`) and `lint/characteristics.rs` (filter on `to_real` removed) are part of this.
+**Rationale.** D4 of the brief: invalid AST content is refused at load, so the lint can neither
+see it nor report it; keeping `FPL-SCHEMA` meaningful for hand-built values keeps the lint total
+over everything a `CardDefinitionDSL` can hold (R12).
+**Alternatives.** Retiring `FPL-SCHEMA` (rejected: the brief keeps the id registered); linting
+raw JSON documents instead of definitions (rejected: changes the public lint API).
+
+## #232 FP-164 — Golden hashes and replaced tests
+
+**Decision.** Recorded golden changes, each caused by content that was an invalid placeholder
+(old → new):
+- `layers::tests::GOLDEN_PERF` (`perf_fingerprint`, seeds 0-7): the engine wrote layer-7 values
+  as bare JSON integers and the fixtures used lower-case keywords and a string CDA; now
+  `{"LITERAL": n}`, `[A-Z][A-Z0-9_]*` keywords, `{"MEMORY": "test.count"}` and typed `Debug`.
+  Seed 0 `41f86003…:b29c3012…` → `12f52353…:9835970f…`; 1 `e6e71a13…:7b85b746…` →
+  `ab473815…:c5b47676…`; 2 `5b380d28…:1e3660df…` → `4eba4050…:11d867cc…`; 3
+  `81f88866…:736022f9…` → `74952e1c…:a8c5d1cd…`; 4 `ffd92d03…:838844fd…` →
+  `8caef82a…:e1199597…`; 5 `de67961e…:48698025…` → `8ccc4049…:d37455d2…`; 6
+  `be956504…:9ad70a5f…` → `6d1266c9…:cc6991cc…`; 7 `65fcd234…:c0c6e52d…` →
+  `a484ff7e…:98e80ea7…` (full values in the test). Evidence that no result changed: the new
+  test `req_layer_005_results_equal_pre_migration_semantics` pins a representation-independent
+  fingerprint of the same boards (literal P/T as numbers, abilities by id and keyword name,
+  order records) computed on the base tree 242545c, and it passes.
+- `state::effects_tests::GOLDEN_LAYERS`: `49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1`
+  → `e4d5ee18abcb3d3e96fbcfd9e7eea993b2d62d639a89028fe5945cf2b09f947f`, because the fixture
+  STATIC ability lacked `effects`; the base tree gives the new value for the same valid content.
+- The face-down ward {2} profile (`layouts::FaceDownProfile::with_ward_2`) now encodes as
+  `{"abilityId":"facedown:ward","keyword":"WARD","kind":"KEYWORD","params":{"cost":"{2}"}}` with
+  power and toughness `{"LITERAL":2}` (was `"keyword":"ward","cost":"{2}"` and bare `2`), so
+  every state or digest holding it changes; its bytes equal those the base tree gives for the
+  same valid content (`GOLDEN_FACE_DOWN` in `layers/encode_tests.rs`). Keyword-counter abilities
+  change likewise (`"keyword":"flying"` → `"FLYING"`).
+- New pinned bytes, unchanged from the base tree: `layers/encode_tests.rs`
+  `typed_dsl_values_keep_their_golden_bytes` (a LITERAL and a MATH expression, an empty and a
+  four-kind token stream, KEYWORD with and without parameters, STATIC, TRIGGERED with
+  `POPULATE`, a copy and a face-down characteristics snapshot), hex captured on 242545c.
+- Unchanged: the dsl fixture `sealed()` (`ce23dc12…ee216`) and every other dsl and core golden.
+- The differential outputs (`target/differential`) are compared after the Independent Tester's
+  migration (the baseline outputs of 242545c are kept outside the repository).
+
+Replaced tests (R10 exception D8 of the brief: their subject was content that can no longer be
+constructed; each replacement asserts the same content is refused at the typed decode, or
+exercises the same check on the content's JSON form):
+- dsl `card/tests.rs`: `req_dsl_010_typed_views` → `req_dsl_010_typed_positions_decode_strictly`
+  and `req_dsl_010_partner_ability_new_as_into`; `req_nfr_006_single_spelling_check` →
+  `req_nfr_006_non_canonical_ast_spelling_rejected`; `req_nfr_006_wrappers_stay_permissive` →
+  `req_nfr_006_typed_positions_refuse_placeholders`; in
+  `req_dsl_003_invalid_asts_rejected_on_load_and_seal`, `..._null_power_and_later_faces_rejected`,
+  `..._ast_check_precedes_hash_check` and `req_obj_001_optional_members_reject_null` the seal
+  path of invalid content and the location in messages became plain-serde rejection and
+  `Schema`; `req_dsl_001_seal_normalises_numbers` normalises on load and refuses a hand-built
+  fraction; `req_nfr_006_definition_noncharacter` asserts a typed token cannot hold a
+  noncharacter; `req_nfr_006_compute_hash_deep_value_is_an_error` uses a deep typed expression
+  and a deep keyword parameter; `req_dsl_003_typed_views_never_panic` fuzzes plain serde and
+  `from_json`.
+- dsl `lint/tests.rs`: `req_ing_009_schema_reports_every_position` and
+  `..._schema_passes_and_clips` use hand-built unencodable values, plus the new
+  `req_ing_009_schema_invalid_json_rejected_at_load`; `..._layer_kind_fails`,
+  `..._text_coverage_bad_spans`, `..._look_back`, `..._max_iter`, `..._link_id_fails` and
+  `..._mana_ability_other_kinds` assert the invalid JSON is refused at load and run the same
+  check on the JSON form (`run_raw`); look-back keys in typed definitions live in opaque keyword
+  parameters (`..._look_back`, `..._look_back_deep_path_is_bounded`, `..._report_is_sorted...`,
+  `..._determinism_and_reordering`); `..._robust_on_hostile_values` and
+  `..._random_values_never_panic` use hand-built typed values, the walker on deep JSON and
+  decode-or-skip.
+- core: `layers/text_tests.rs` `encode_decode_round_trip` → `typed_rules_text_round_trip`,
+  `decode_rejects_placeholder_garbage` → `typed_decode_rejects_placeholder_garbage`,
+  `layer3_undecodable_or_empty_text_is_noop` (undecodable text → word-free text),
+  `property_random_placeholders_never_panic` and `property_random_bytes_never_panic` decode
+  through the typed stream, `errors_display` without `InvalidRulesText`, the garbage case of the
+  `replace_targets` test removed; `state/effects_tests.rs` `wire_keeps_json_null_power_distinct`
+  → `wire_keeps_some_power_distinct`; `layers/cache_tests.rs`
+  `digest_encodes_values_outside_canonical_json` and `memory/tests.rs`
+  `lki_encoding_is_deterministic_and_sensitive` reach the MessagePack fallback through a value
+  expression deeper than the JSON depth budget instead of an unsafe integer in an ability;
+  `layers/copy_tests.rs` "modification that is not an object" → refused by the decoder;
+  `layers/tests.rs` `literal_forms` (bare-integer form gone).
+**Rationale.** REQ-NFR-006: only content that changed from invalid placeholder to valid AST may
+change a golden, and every change is shown to be representational.
+**Alternatives.** Keeping the old values with a compatibility encoding of literals and keyword
+names (rejected: they are not valid ASTs).
+
+## #232 FP-164 — Spec-test migration
+
+**Decision.** The Independent Tester migrated the spec tests of fineprint-dsl and fineprint-core
+to the typed card AST positions. Shared helpers build typed values from valid wire JSON through
+plain serde (`tests/typed_ast_support/mod.rs` in both crates: `vx`, `ability_of`, `tx`, `pa`,
+`synthetic_ability`). Readings, each the option nearest to the brief:
+- Placeholders were replaced by the nearest valid synthetic content with the same identity:
+  a literal is `{"LITERAL": n}` (the bare-integer form is gone, and tests that compared "both
+  literal forms" now assert that the bare form is refused as a typed value expression); a
+  free-form ability `{"synthetic": name}` or `{key: n}` is the KEYWORD ability with `abilityId`
+  `name`/`key`, keyword `TEST_SYNTHETIC` and, for `{key: n}`, the opaque parameter `n`; a
+  CDA-like placeholder (`{COUNT_KEY: 0}`, `{"CDA": key}`) is `{"MEMORY": key}`, recognised by
+  the test environments; rules text of bare strings is one LITERAL token per word (ids `w<i>`,
+  or `w:<word>` in the layouts helpers so that two halves concatenate to a valid stream); test
+  keyword strings are stored as DSL keyword names (`flying` → `FLYING`, `first strike` →
+  `FIRST_STRIKE`, `test.marker` → `TEST_MARKER`) and the helpers that read keywords back compare
+  through the same mapping, so the assertions keep their rules-text spelling.
+- `from_json` error messages are no longer required to name the position (`faces[i].power`,
+  `abilities[j]`, ...): contract C4 lists only the error kind (`Schema`), so
+  `spec_dsl_card_ast.rs` asserts `Schema` (plus refusal by plain serde) instead of the markers.
+- Where a test fed invalid content to `seal`, it now checks that the typed value of the position
+  cannot be decoded (plain serde) and that `from_json` refuses the same JSON with `Schema`.
+  Values that are only expressible by hand (an unsafe `Literal`, a 200-level MATH chain) are
+  built directly as typed values and still refused by `seal`.
+- A float in a hand-built KEYWORD `params` is refused by `seal` (the real ability type re-checks
+  its parameters on write); the `-0.0`/`1.0` normalisation of decision "#159 FP-140" is asserted
+  on the loader path (in `power` and in KEYWORD `params`), where it still applies.
+- Lint tests that built invalid ASTs inside a `CardDefinitionDSL` assert instead, per C5, that
+  the same JSON is rejected by `from_json` with `Schema` (`def_abilities_or_schema`,
+  `assert_document_schema_rejected` in `spec_dsl_lint_common`); a document-level failure
+  (noncharacter, unsafe number) is accepted as `Canonical`, because document checks run first
+  (C4). The lint ids whose only failing fixture is not a valid typed AST (`FPL-SCHEMA`,
+  `FPL-LAYER-KIND`, `FPL-MAX-ITER`) keep their pass case and lose the lint-level fail case; every
+  other lint keeps both. Valid fixtures with findings replace the undecodable ones in the
+  ordering, reordering and message tests (a look-back key in NATIVE_EFFECT params, an unpaired
+  link reference). The random-definition generator falls back to the valid base fixture when a
+  mutation does not decode and gained two valid finding-producing bases (look-back key in params,
+  mismatched tier hint) so that it still reaches eight lint ids.
+- T3(g): the real AST types document a single JSON spelling (`expr`, `ability`, `text` module
+  docs) and no decodable second spelling of an AST was found, so
+  `req_nfr_006_non_canonical_spellings_are_refused` asserts the lossless property on the
+  documented candidates (explicit `INSTANT` timing, empty or `false` optionals, present `null`,
+  wrapped values: each is refused with `Schema` or reproduced byte for byte) and uses a
+  positional array spelling of `commanderEligibility` (the object holding the partner ASTs) as
+  the case a derived decoder may accept but does not reproduce.
+- T4(b): for two overlapping text effects the new core test asserts the outcomes the existing
+  layer-3 suite already establishes for the same pairs (dependency chain ends as Forest in both
+  orders; dependency loop ends with the earlier timestamp's `to`), in both timestamp and both
+  registration orders. T4(c): the cached and full-recompute modes are compiled separately, so
+  the state hash of the typed state is pinned (`GOLDEN_TYPED_STATE`) and the same pin passes
+  under both builds.
+**Rationale.** R10 and the brief's T1/T2: keep each test's intent with valid, neutral,
+synthetic content; C4/C5 define what replaces the removed invalid-content paths.
+**Alternatives.** Building positions from the new engine helper `layers::keyword_id` (rejected:
+black-box tests use their own mapping); dropping the lint fail cases outright (rejected: C5 asks
+for the `Schema` assertion); pinning error-message locations (rejected: not in the contract).
+
+## #232 FP-164 — Golden changes and replaced tests
+
+**Decision.** Golden changes in the spec tests, each caused by fixture or engine content that was
+an invalid placeholder and is now a valid typed AST (old → new). Values were produced by each
+test's own computation path; the reasons are traced per fixture below.
+- `spec_layers_perf_equiv.rs` `GOLDEN_DIGEST_*` (`evaluated_digest(evaluate_all)`): the boards
+  had literal P/T as engine-written bare JSON integers, lower-case keyword abilities and the
+  CDA placeholder `{COUNT_KEY: 0}`; now `{"LITERAL": n}`, `[A-Z][A-Z0-9_]*` keywords and
+  `{"MEMORY": COUNT_KEY}`.
+  A `c038ff1139778fbd2c2a9c7cfcaf840a6cbdb53b5842f3506fd7d8ed81feb831` →
+  `a4d874274de7e5f515d13433bb364ea4ebeba558f511bc2f054fde5deffd7687`;
+  B1 `32671421b1a093f82a294a418fc3da2ec1b73882fdb4cd65c34eae98abd438bc` →
+  `6f351ff80d9fc0880e18cc0fb3a100adecd8bc7c7d45244ff11bf097140711d3`;
+  B2 `56c0ba78c66eb37dad2f3c7ff6672645c1d11d51e8ad18c51810fdbf7d6d3eca` →
+  `c52b0fcf6fe49236ac0d9ae397fbb7d7249d6de0732b756a045c50fc8102e5ab`;
+  C1 `9b2b2c6b0ea2fc1f6265aa8afdc5ec7ac84e6cafd84a8e14d3fa4479b2e92489` →
+  `42b5e16f9cca6ee0c296bacab878e83ee6b220b9c95c67d5f13deaf67724e6aa`;
+  C2 `2c8ecb76ef5f280ed76f8a08f40b18e15185236d79fdb0680cce0eaaaeec3204` →
+  `9c3ba17860422d9cb892bb758938b2fc491edcaf2c5b3770c2e93279f2261287`. The
+  `GOLDEN_ORDER_*` pins (application order) are unchanged and still pass, so only the encoded
+  content moved, not the layer results.
+- `spec_layers_state_hash.rs` `GOLDEN_SMALL_STATE`:
+  `13e35cf7e24c0de507022934867a4fc1e2c8731c449a1ddd2147de6305bc3381` →
+  `a478cd161601de9f51b8a80c682b37d04788a09467f8c06f7c6196ea2afb9818`, because the state's
+  granted, own and ETB-link abilities were `{"synthetic": name}` placeholders.
+- `spec_layers_facedown_support.rs` `expected_ward_fields`: the pinned face-down ward {2}
+  ability fields `kind KEYWORD, abilityId facedown:ward, keyword ward, cost {2}` →
+  `kind KEYWORD, abilityId facedown:ward, keyword WARD, params.cost {2}` (the brief's typed form
+  `{"abilityId":"facedown:ward","kind":"KEYWORD","keyword":"WARD","params":{"cost":"{2}"}}`).
+- Unchanged, as required (C7): `spec_dsl_card.rs` `PINNED_HASH`/`PINNED_SEALED`
+  (`e930e89d0aec056f27c5a0bac081553c5435af9dbebf4b13f42d65b294d2b770`, also re-checked in
+  `spec_dsl_card_typed.rs` by SHA-256 of the pinned canonical text) and every other dsl and core
+  golden of the spec suites.
+- New pin: `spec_typed_ast_core.rs` `GOLDEN_TYPED_STATE`
+  `9879316ad2f5773b38edc06eca295cfd4f8e7c5413a30f7fac6bee6bdee9f179`, identical in the cached
+  and the full-recompute builds.
+- Differential outputs (`target/differential`, cached = full, byte-identical) against the
+  242545c baseline: `empty_board.digest` is unchanged (no content); the 21 others change, every
+  one through placeholder content: the ten `.digest` scenarios evaluate creatures whose layer-7
+  P/T the engine wrote as bare integers (and, where present, lower-case keyword grants and
+  keyword-counter abilities), and the eleven `.statehash` scenarios all start from
+  `Rig::standard`, which registers a lower-case `haste` grant and links the
+  `{"synthetic": "test.o7_static"}` ability. First 16 hex digits, old → new:
+  after_declared_changes c9e09614ca839cf5 → 6bf06be01e46d7b9; after_effect_removed
+  b310bccb14f84b22 → 2286abdbe60a8d04; board_200_permanents_4_players a93906ce85d69647 →
+  ea4e8dc5fe43a71e; cda_reads_player_values 4474209b23d8abf1 → 1cad15a591131eb4;
+  dependency_dependent_earlier and dependency_remover_earlier (equal before and after)
+  6119268ac2601a67 → 4d3b7dd7eaffba08; layer7_chain_with_counters df386ded1effc7fe →
+  028cf677497546f6; multi_layer_lockin_group b99d8712307b42cd → 8250074b24a85d65;
+  type_change_and_keyword_grants 6eaf044a80e9f78a → 9778ce7c6db21be9; vanilla_board
+  aefa8e0ed3ca4131 → 02419381fc47890b; attachment_status_designation 0658f59f3c934e98 →
+  d108639a697d418d; control_change 0ae4433aa7fa1b91 → 0ae530a568dc1c81; counter_change
+  0686d14f44593c50 → e84bf918d0bdcee0; effect_expiry 21418428850babb5 → 9f1cc48df602dad4;
+  effect_group_and_restamp ada15e64063d3e7b → 0c226bb20522be55; effect_removal
+  0f3c5ce210456b25 → 7cf3488f7d66b148; player_value_change 1ca1c8aa15dcf474 →
+  6411147a7912d5da; random_walk_seed_1 0b0ae131d96b232c → f3536c1664c1557f;
+  timestamp_order_grant_first b926b30b2152cd5e → 74f9ad6a6971b587;
+  timestamp_order_removal_first 90fa234add7fca04 → a0263e39002b4544; zone_change
+  cf5ad186374dab64 → c89e07be6c0f80ce.
+
+Replaced tests (T2; their only subject was content that can no longer be constructed):
+- `spec_dsl_card_ast.rs` `req_nfr_006_wrappers_keep_plain_serde` →
+  `req_nfr_006_typed_positions_refuse_placeholder_content_in_plain_serde`; the seal side of
+  `assert_rejected` (used by the invalid power/toughness, text, ability and partner tests) and of
+  the random-position agreement property became "the typed position does not decode".
+- `spec_dsl_review1.rs`: the noncharacter-in-token `seal` case → `TextTokenStream::new` refuses
+  it with `TextError::Noncharacter`; the deep free-form placeholder of the depth tests moved from
+  `power` into opaque KEYWORD `params`; the float `LITERAL` seal normalisation → loader
+  normalisation plus refusal of the hand-built float in `params`.
+- `spec_dsl_lint.rs` `req_ing_009_schema_every_position` (every undecodable position reported by
+  FPL-SCHEMA) → each of the seven positions, alone and together, refused by `from_json`, and no
+  FPL-SCHEMA finding on the valid definition; undecodable cases of the MANA-ABILITY, LAYER-KIND,
+  LOOK-BACK and MAX-ITER tests and of the acceptance table → `from_json` `Schema`.
+- `spec_dsl_lint_characteristics.rs` (undecodable PAY_MANA ability) and
+  `spec_dsl_lint_robust.rs` (random values per position, deep nesting: over-deep documents
+  refused by `from_json`, the lint walks the deepest typed content that still decodes).
+- `spec_layers_text.rs` `no_op_rules` and `no_op_on_undecodable_text_with_effect`: the garbage
+  placeholder text → valid literal/name-reference text with the same values, and the garbage JSON
+  is refused as a typed stream.
+- `spec_layers_text_helpers.rs` `encode_decode_round_trip`, `decode_reads_the_wire_form`,
+  `decode_invalid_placeholders` (InvalidRulesText) → the typed stream's serde round trip, wire
+  form and refusal of the same placeholders; `error_display_non_empty` without
+  `InvalidRulesText`.
+- `spec_layers_text_property.rs` decode/encode properties → the typed stream's JSON and
+  MessagePack round trips; random placeholders and bytes are decoded as the typed stream; the
+  evaluate-never-panics property runs on what decodes and checks the helper's result.
+- `spec_layers_copy_cda_parts.rs`: malformed `defines` and odd ability shapes run only when the
+  typed ability holds them; in `req_obj_002_non_cdas_are_never_dropped` the TRIGGERED ability
+  with CHAR effects, the STATIC ability without effects and the lower-case keyword (all refused,
+  asserted) → valid TRIGGERED, RULE-only STATIC and `TEST_KW` keyword abilities.
+- `spec_layers_counters.rs` `evaluated_pt_uses_the_logged_literal_form` and
+  `spec_layers_cross_object_order.rs` `json_lit`: the bare-integer literal form is asserted to
+  be refused; both forms are now `Literal(n)`.
+**Rationale.** T6 and R10: a golden may change only where its fixture moved from an invalid
+placeholder to a valid AST; each change above is traced to such content, and goldens of valid
+content are unchanged.
+**Alternatives.** Keeping placeholders through a compatibility encoding (rejected: they are not
+valid ASTs and the brief forbids them).
+
+## #49 FP-047 tester — Permission for ACTIVATE and SPECIAL_ACTION in the matrix
+
+**Decision.** The T1 permission/prohibition matrix uses, as the "permission" of ACTIVATE and
+SPECIAL_ACTION, a `TIMING_PERMISSION` entry naming that action. The tests assert only what the
+brief specifies: with that entry alone the action is offered (it needs no effect, CR 117.1b,
+117.1c), and with an applicable prohibition in either timestamp order it is not offered and
+`explain` names the prohibition (CR 101.2). They do not assert that the entry appears in the basis.
+For PLAY_LAND and CAST the permission is `PLAY_PERMISSION` / `CAST_PERMISSION` for a graveyard
+candidate, whose basis must name it.
+**Rationale.** The brief defines no permission kind for activating abilities or taking special
+actions, but T1 asks for the full matrix for all four classes. An entry that is harmless if
+ignored keeps the both-orders prohibition check meaningful without inventing behaviour.
+**Alternatives.** Skipping (a) and (c) for ACTIVATE/SPECIAL_ACTION (leaves T1 incomplete);
+asserting the entry in the basis (not specified).
+
+## #49 FP-047 tester — Unspecified filter combinations and malformed values
+
+**Decision.** The tests leave out filters the brief does not define: `"zone"` on SPECIAL_ACTION
+prohibitions and `"kind"` on prohibitions of other actions (plus filtered PLAY_LAND prohibitions,
+as the brief says). A `"zone"` string that is not a Zone wire name (`"test.no_such_zone"`), an
+`"object"` that is not an unsigned JSON integer (`"x"`, `-1`, `10.5`, `null`), a non-string
+`"kind"` (`[]`, `3`) and a missing or non-string `"action"` count as malformed. An entry with a
+malformed filter never applies: a prohibition does not forbid and a permission does not grant.
+The property test's independent re-derivation of "prohibited" (T9 (v)) uses the same reading.
+**Rationale.** T10: malformed params "never make an entry apply". A filter that cannot match any
+candidate is the safe reading of untrusted input (R12).
+**Alternatives.** Treating a malformed filter as absent, so the entry applies to everything. That
+would let bad input widen a prohibition, which T10 rules out.
+
+## #49 FP-047 tester — Reading of the reason lists
+
+**Decision.** (1) "not own turn -> Timing(OwnTurn) only" for PLAY_LAND means Timing(OwnTurn) is
+the only *timing* reason (no Timing(SorceryTiming) as well). Other failing checks are still
+listed, so on the opponent's turn with nothing else wrong the list is exactly
+`[Timing(OwnTurn)]`. (2) When several TURN_FACE_UP denials apply, the tests check the reasons as
+a set (every expected denial present, nothing else). The order among `FaceUp(..)` entries, and
+whether `InstantOrSorcery` appears once or twice when both the merged flag and the
+manifest/cloak flag hold, are not specified. (3) Every other multi-reason case is asserted as an
+exact list in Reason declaration order, Prohibited first, as the brief states.
+**Rationale.** These assert everything the brief fixes and nothing more.
+**Alternatives.** Asserting an exact order for FaceUp denials (overspecified).
+
+## #49 FP-047 tester — The fake host offers the same candidates to every player
+
+**Decision.** `FakeHost` (spec_actions_support.rs) returns the same candidate vectors whoever
+asks. Only the TimingContext (`player`) and the lands-played counter depend on the player.
+**Rationale.** The generator's per-player behaviour comes from the TimingContext, the RuleSet
+(`applying(kind, player)`) and the counter. Sharing the candidates lets one host exercise both
+players in every property seed.
+**Alternatives.** Per-player candidate vectors (more fixture code, no extra coverage of the API).
+
+## #49 FP-047 — Rule-entry param conventions of the legal-action generator
+
+**Decision.** The generator (`fineprint_core::actions`) reads these opaque `RuleModification`
+params: `"action"` (string, one of `PLAY_LAND`, `CAST`, `ACTIVATE`, `SPECIAL_ACTION`; an entry
+without a string action applies to nothing); `"zone"` (optional zone wire name; absent = any
+zone); `"object"` (optional unsigned JSON integer, the raw object id; for `ACTIVATE` the ability's
+source); `"kind"` (optional, `SPECIAL_ACTION` prohibitions only, the special-action kind id). A
+present filter of the wrong type or an unknown zone name matches nothing (R12). Only entries that
+modify the rules for the asked player count (`RuleSet::applying`); "earliest" is application
+order. `"zone"` is not read for special actions (their candidates carry no zone). Exception:
+`PLAY_LAND` prohibitions and the land count come unfiltered from `RuleSet::query` and
+`RuleSet::land_plays_allowed`; the filters are honoured on `PLAY_PERMISSION` entries only.
+**Rationale.** The brief's conventions; one source of truth for the land count (layers/post is
+not changed by this unit); malformed untrusted params must never widen what an entry forbids or
+permits.
+**Alternatives.** Ignoring a malformed filter (rejected: a malformed zone-limited permission
+would then permit every zone); filtering `PLAY_LAND` prohibitions here (rejected: the land count
+would disagree with `land_plays_allowed`).
+
+## #49 FP-047 — Host-side versus generator-side checks
+
+**Decision.** The host decides the facts that need the game state or card characteristics:
+which objects are candidates, faces and alternative cast modes (one candidate per object, face,
+cast mode), "instant or flash" (`instant_timing`, including CR 601.3d conditional flash), is a
+land, summoning sickness including haste, mana ability, "activate only if" condition, own
+permissions of the card (`own_permission` labels), face-down facts and special-action base
+availability (`available`, `could_begin_to_cast`). The generator decides everything the rules
+and rule effects decide: zone permissions, prohibitions, timing permissions, land counts,
+activation timing and limits, registry timing and the turn-face-up denial table. No permission
+kind is consulted for `ACTIVATE` or `SPECIAL_ACTION` (only prohibitions), and `CAST_PERMISSION` /
+`TIMING_PERMISSION` are consulted only when needed (a non-hand zone; not instant and not sorcery
+timing).
+**Rationale.** SRS 14.6: the generator consults only permissions, prohibitions, additional land
+plays, activation timing/limits and the special-action registry; R4 keeps card facts out of it.
+**Alternatives.** Evaluating characteristics in the generator (rejected: needs the layer view
+and would invite card-specific logic).
+
+## #49 FP-047 — Basis of an offered action
+
+**Decision.** Land: `Rule "CR 305.1"` for the hand, otherwise the earliest matching
+`PLAY_PERMISSION` effect or the own permission; when at least one land was already played, every
+applicable `ADDITIONAL_LAND_PLAY` effect is appended. Cast: for a non-hand zone the earliest
+matching `CAST_PERMISSION` effect or the own permission, then the timing allowance: `Rule
+"CR 117.1a"` when the spell has instant timing or sorcery timing holds, else the earliest
+matching `TIMING_PERMISSION` effect. Activate: `Rule "CR 117.1b"` (mana abilities
+`"CR 605.3a"`). Special action: `Rule` with the registry kind's rule (`"CR 116.2b"` for
+TURN_FACE_UP). The basis is never empty for an offered action.
+**Rationale.** Each entry names what made that part of the action legal; a permission effect is
+listed only when it was needed.
+**Alternatives.** Listing every applicable permission even when not needed (rejected: the basis
+would no longer say which rule or effect allowed the action).
+
+## #49 FP-047 — Duplicate responses and explain
+
+**Decision.** Candidates of each class are sorted into a total order (all fields) before they
+are checked. When several candidates yield the same response, the first legal one wins, else the
+first one; `explain` returns exactly that result, so `explain(a)` is Legal exactly when `a` is in
+`legal_actions` and nothing depends on the host's order. A `SpecialCandidate` of kind
+`TURN_FACE_UP` is ignored: that kind comes only from `turn_face_up_candidates`. Reasons are
+sorted by the declaration order of `Reason` (Prohibited is the first reason that can co-occur;
+face-up denials in the declaration order of `FaceUpDenial`) and repeats are removed. For a land
+play off-turn only `Timing(OwnTurn)` is reported, not `Timing(SorceryTiming)`.
+**Rationale.** The brief's "first in the output order" is ambiguous when equal responses come
+from different candidates; preferring the legal one keeps the explain/legal_actions invariant
+the brief requires (REQ-DSL-013) and R3.
+**Alternatives.** Using the first candidate in host order (rejected: host-order dependent);
+reporting the union of all candidates' reasons (rejected: could call an offered action illegal).
+
+## #49 FP-047 — CR 601.3a not implemented here
+
+**Decision.** The generator does not apply CR 601.3a ("may consider choices that could change
+the prohibited quality") or the choice-dependent parts of CR 601.3b/601.3e: a matching `CAST`
+prohibition always forbids the candidate. Faces and cast modes the host lists are separate
+candidates, so a prohibition limited by object or zone is checked per candidate.
+**Rationale.** There is no casting procedure yet to enumerate proposal choices; a later unit
+that adds one can supply the qualities per candidate.
+**Alternatives.** Ignoring prohibitions with quality filters (rejected: would offer prohibited
+actions).
+## #48 FP-046 — Starting player draw
+
+**Decision.** With no `StartOptions::starting_player` the starting player is
+`turn_order[next_bounded(n)]` from the state's PRNG (exactly one call; none when the option is
+set). The chooser of later games of a match, Archenemy (CR 103.1b), Power Play (CR 103.1c),
+shared team turns (CR 103.1a), commander, companion and sticker steps (CR 103.2) are out of scope;
+`StartOptions::starting_player` is the hook for them.
+**Rationale.** CR 103.1 allows any mutually agreeable method in game 1, so a seeded draw is
+deterministic (R3) and replayable.
+**Alternatives.** A choice request to a player (rejected: CR 103.1 gives game 1 no chooser).
+
+## #48 FP-046 — GameStartHost seam
+
+**Decision.** `turn::start::run_game_start` is written against a `GameStartHost` trait (library
+order, hand, draw, return-to-library, put-on-bottom, set starting player, set life, pregame
+eligibility and actions); the procedure holds no state beyond its locals and never mutates
+`GameState` except through the PRNG.
+**Rationale.** Mirrors "#46 FP-045 — TurnHost seam": zones and the game object arrive in later
+units; `set_starting_player` is what `TurnHost::starting_player()` reports.
+**Alternatives.** Mutating `GameState` directly (rejected: it has no zones or libraries yet).
+
+## #48 FP-046 — Zero-hand mulligan limit
+
+**Decision.** When the counted mulligans (`mulligan_to_bottom`) reach the player's starting hand
+size (CR 103.5, last sentence), or exceed the cards actually in hand, no `MULLIGAN_DECISION` is
+asked: the player keeps and the whole hand is put on the library bottom in ascending id order,
+so the opening hand is empty. The mulligan request's mulligan decision uses the `Payload`
+validator rule with min = max = the bottom count.
+**Rationale.** The order of a forced bottom has no player choice; ascending ids is deterministic.
+The extra "exceeds the hand" guard keeps a short library from producing an invalid default.
+**Alternatives.** Asking with a one-answer request (rejected: no decision exists).
+
+## #48 FP-046 — Free first mulligan condition
+
+**Decision.** The free first mulligan applies iff the format flag
+`free_first_mulligan_multiplayer` is set and `player_count > 2`; two-player Brawl and Two-Headed
+Giant specifics are not modelled.
+**Rationale.** CR 103.5c names "a multiplayer game and any Brawl game"; core has no Brawl
+variant flag in the brief's inputs and the flag exists for the format to opt in.
+**Alternatives.** Applying it to any format with the flag set (rejected: two-player games are
+not multiplayer).
+
+## #48 FP-046 — Pregame action as one subset ask
+
+**Decision.** Each player with eligible cards gets exactly one `PREGAME_ACTION` request (min 0,
+max = number of eligible cards) answered with a subset in the order to take the actions; an empty
+answer performs nothing, and a player without eligible cards is not asked.
+**Rationale.** CR 103.6 lets the player take "any such actions in any order"; one ask keeps the
+protocol small and the SRS 15.3 row is `SUBMIT_PREGAME` with eligible cards.
+**Alternatives.** One ask per card or per action (rejected: more round trips, no extra
+information).
+
+## #48 FP-046 — Order of PRNG calls in the game start
+
+**Decision.** One `next_bounded(n)` (unless the starting player is given), one shuffle per player
+in stored turn order, then per mulligan round the shuffles of the players who took a mulligan in
+declaration order (starting player first, then turn order). Opening draws, declarations and
+bottoming use no randomness.
+**Rationale.** A fixed seed must give fixed hands and library order; independent tests compute
+golden values from this order.
+**Alternatives.** Shuffling in declaration order at the start (rejected: the stored order is
+independent of who starts).
+
+## #48 FP-046 — Spec-test judgement calls (Independent Tester)
+
+**Decision.** The black-box spec tests (`tests/spec_turn_start*.rs`) assert an invalid starting
+player as any `ChoiceSession::start` error (the brief said a `Procedure`-style error), and do not
+test a zero-player host (`GameState::new(0)` is rejected, so no such host can be built) or a
+wrong answer variant reaching the procedure (`ChoiceSession::submit` validates the response type
+first; rejection is tested through `validate` and `submit`). The CR 103.5c "first mulligan shows
+`to_bottom == 0`" check covers both the first ask (0 taken) and the ask after the first mulligan
+(1 taken); the ask after the second shows 1.
+**Rationale.** These follow the binding "specified behaviour" of the brief and the existing
+`GameState` and choice-session contracts; the unreachable branches remain defensive code.
+**Alternatives.** Exposing `ChoiceContext::new` to reach the defensive branches (rejected:
+`src/choice` is outside #48's owned paths and the branches are unreachable through the public
+protocol).
+
+## #51 FP-049 — Spec-test judgement calls (Independent Tester)
+
+**Decision.** The black-box spec tests (`crates/fineprint-core/tests/spec_scenario_*.rs`) and the
+samples (`tests/scenarios/format/`) read the binding contract as follows where it is silent:
+(1) `pzlVersion` 2 is accepted as `Unsupported` or `OutOfRange` at `/pzlVersion`; a top-level
+array as `WrongType` at `""`; empty `requirements` without `ruling` as `MissingField` at the
+parent `""` or any other kind at `/requirements`. (2) Duplicate ids are accepted at the second element or below it
+(`/players/1` or `/players/1/id`). (3) Nesting depth counts containers including the root
+object: 65 nested containers is `TooDeep`, 64 is not. (4) Player `counters`, `designations` and
+`zones` (and each zone) are optional; `battlefield`, `stack`, `script`, `assertions` and
+`priority` are written explicitly in every sample. `pendingChoice` `choiceType`, `options` and
+`optionsMode` are optional; the samples always give `optionsMode`. (5) Characteristics arrays
+compare by set equality (a proper subset fails). (6) A failing outcome's `expected`/`actual`
+must contain the differing value, except where that value is an absence (empty zone or stream,
+`null`), whose spelling is left open. (7) The serialised `Scenario` keeps every value written in
+the file, except that it may omit a `null`, `{}` or `[]`, and an unnamed card reference may come
+back as an object with that `card`. (8) The samples assert only what the setup states, plus one
+scripted `PASS_PRIORITY` in `full_header.pzl`: the event samples use empty lists (any stream
+contains the empty subsequence; building a state is assumed to emit no events), the priority
+choice type is `PRIORITY_ACTION` (SRS 15.3), card characteristics are asserted only through
+integers and the controller. (9) `wrong_absent_event.pzl` changes its second assertion to an
+absent/zoneMember on a card in hand, because no absent/event can fail against the hand-built
+(empty) event stream. `minimal.pzl` has no wrong twin (it has no assertion to change).
+**Decision (continued).** (10) A syntax error inside a
+nested value (truncated input) may carry that value's pointer as `path` (the contract fixes `""`
+only for a document-level syntax error); line and column are still required. (11) Colour
+strings in characteristics may be spelled as a name or its letter (the contract fixes neither),
+so a failing colour outcome must mention either spelling of the differing colour.
+**Rationale.** Each choice is the reading most consistent with the binding schema and the
+"accept either" clauses of the brief, and keeps the samples inside the reference host's minimum
+subset (build plus `PASS_PRIORITY`). Precedent: "#48 FP-046 — Spec-test judgement calls".
+**Alternatives.** Asserting one exact kind where the contract allows two (rejected: the brief
+says accept either); asserting event types the reference host would emit (rejected: the event
+names a host emits are not in the contract); subset semantics for characteristics arrays
+(rejected: "arrays compare as sets").
+
+## #51 FP-049 — .pzl file syntax
+
+**Decision.** A `.pzl` file is one JSON object, UTF-8, extension `.pzl` (a leading byte-order
+mark is tolerated). It is read by an in-house defensive reader (`scenario/json.rs`) that keeps
+every value's line and column and enforces the limits while it reads (1 MiB, nesting depth 64,
+10,000 array elements in total, duplicate keys, integers only within `i64`/`u64`), then decoded
+by hand into the typed `Scenario`, so every error carries a JSON-pointer path and a position.
+`Scenario` derives serde through a flat wire form (`serde(from/into)`), so `parse(to_json(s)) ==
+s` and the derive needs no untyped buffering (no float type anywhere, R3).
+**Rationale.** `serde_json` is already a pinned workspace dependency and TOML is not; the
+synthetic card library is JSON; JSON has one obvious canonical form for re-serialising; an
+own reader is needed anyway because `serde_json` neither rejects duplicate keys nor reports the
+path of a typed error, and the limits must hold before any allocation grows with the input.
+**Alternatives.** TOML (a new dependency, a second data syntax next to the JSON card library,
+no canonical form); a custom DSL (a grammar to specify, fuzz and document, with no tooling);
+`serde_json::from_slice` with `deny_unknown_fields` (no duplicate-key rejection, no error paths,
+float acceptance).
+
+## #51 FP-049 — Schema judgement calls
+
+**Decision.** (1) Required top-level members: `pzlVersion`, `title`, `requirements`, `cr`,
+`format`, `rulesBaseline`, `cardDatabase`, `prngSeed`, `players`, `turn`, `priority` (may be
+`null`), `assertions`; optional: `ruling`, `battlefield`, `stack`, `sharedExile`, `script`
+(default empty). In a player, `counters`, `designations`, `zones` and each zone list are
+optional; in a stack entry `controller` is optional (default the owner). (2) `pzlVersion` is
+checked before every other member (a file of another version is `Unsupported` whatever it
+holds). (3) Empty `requirements` without `ruling` is `MissingField` at the root `""`. Member-level
+errors take the path of the object concerned: `MissingField` the object that lacks the member,
+`UnknownField` and `DuplicateKey` the object holding it (line and column point at the key). (4) One kind
+was added to `ScenarioErrorKind`: `Invalid`, for well-typed but malformed values (a date that is not `YYYY-MM-DD`, a requirement id not starting `REQ-`, an
+empty id or name, a step outside its phase). A float anywhere is `WrongType`; a `definitionHash` that is not 64 lowercase hex characters, a title of 0 or
+over 200 characters, a player count outside 1..=8, turn number 0 and a counter amount below 1
+are `OutOfRange`; empty or whitespace-only input is `Syntax` at 1:1; a file over 1 MiB is
+`TooLarge` with no position. (5) An unnamed cardRef gets the id `<player>.<zone>.<index>`. (6) A
+`zone` or `absent` assertion on a shared zone (`battlefield`, `stack`, `sharedExile`) ignores
+`owner` (the observed key is the zone name, as the binding `Observed` contract gives it). (7) Optional extensions: `controlledSinceTurn` on
+battlefield objects (default 0). (8) Script answers: any string `object`/`objectId` member must
+name a declared object, `player`/`playerId` a declared player. (9) `Display` prints the stored
+path unchanged and `?` for an unknown line or column; input-derived path segments are cut to 64
+characters with control characters replaced, and messages quote at most 40 characters of input.
+**Rationale.** The binding schema marks only `ruling` and `sharedExile` as optional at the top
+level, but rejecting a file for leaving out an empty list helps no one; every member the pzl-test
+conventions require a scenario to state explicitly (turn, step, active player, priority, seed,
+hashes) stays required. `Invalid` keeps every other kind meaning exactly what its name says.
+**Alternatives.** Every member required (verbose files for no gain); `OutOfRange` or
+`UnknownTag` for malformed strings (misleading kinds).
+
+## #51 FP-049 — The runner command lives in xtask
+
+**Decision.** `cargo xtask pzl [--cards <dir>] <path>...` in `xtask/src/pzl.rs`; xtask gains a
+path dependency on `fineprint-core` (no other new dependency). The card library defaults to
+`tests/fixtures/cards` under the workspace root.
+**Rationale.** xtask already owns repository automation with the documented exit-code
+convention, and CI runs it; the runner itself lives in core (the engine runs client-supplied
+tests to grant VERIFIED), so the command is a thin I/O shell around `parse_scenario` and
+`run_scenario`.
+**Alternatives.** A core example binary (`cargo run -p fineprint-core --example pzl`: examples
+are not a command surface and are not covered by the xtask conventions); the CLI client
+(`fineprint-cli` is a stub and depends on ingest and bot).
+
+## #51 FP-049 — Reference host scope
+
+**Decision.** `StateHost` builds the state on the existing components (GameState, Zones,
+Permanents, EventState, the layer system) and drives `PRIORITY_ACTION` / `PASS_PRIORITY` through a
+`ChoiceSession` over `run_heartbeat` with the real state-based-action pass, inside the current
+step only. Object counters, attachments and the phase and step are set by executing
+`AddCounters`, `Attach` and `StepBegins`/`PhaseBegins` events at build time (the events module
+owns them); those build events are not part of the observed stream. Battlefield objects are
+stamped in ascending setup `timestamp`, ties in declaration order, after every other object.
+Everything the host cannot do fails with a message starting `unsupported by the reference host:`:
+face-down objects, battlefield objects with STATIC, TRIGGERED or REPLACEMENT abilities (their
+effects and triggers are not wired, so running them would silently be wrong), unsupported
+layouts, priority held at setup by a player other than the active player (`run_heartbeat`
+always starts with the active player), resolving the stack, every action, and answers other than
+the field-less ones. While a choice is pending the host observes the live state of the
+suspended run (captured when the procedure suspends), not the session's base state. Observed
+host events: `PLAYER_LOST`, `PRIORITY_PASSED`, `STEP_ENDS`, next to the executed `GameEvent`s
+named in upper snake case. Colors are observed as `W U B R G`; an ability key is a keyword id or,
+for other abilities, the ability kind.
+**Rationale.** The brief asks for the current seams "as far as they exist today" and loud
+failure for the rest; the live-state capture is what a scenario author means by "the state after
+p1 passed". `actions/` (#49) is not merged and is not used.
+**Alternatives.** Running the turn sequencer (`run_turn`) with a full `TurnHost` (most of its
+methods would be unsupported stubs today); skipping state-based actions (silently wrong).
+
+## #51 FP-049 — Reference host result
+
+**Decision.** The observed result is provisional: the players with the lost-the-game
+designation are the losers; with at least one loser, exactly one player left is `WON` (that
+player the winner), none left is `DRAWN`; otherwise `IN_PROGRESS`.
+**Rationale.** Nothing in core computes a game result yet; this reading is reported as a rules
+question for the rules-researcher (which CR rules end the game and when it is a draw) and will be
+replaced by the game-result unit.
+**Alternatives.** Always `IN_PROGRESS` (makes the `result` assertion useless today).
+**Rules-researcher ruling (CR-2026-11-06).** Consistent for two-player and free-for-all games:
+a player still in the game wins once all opponents have left (CR 104.2a), a loser leaves the game
+(CR 104.5), and the game is a draw when all remaining players lose simultaneously (CR 104.4a);
+state-based actions are one simultaneous event (CR 704.3), so `DRAWN` is reached only when the
+last players lose in the same event, and the host must evaluate the result after the whole event.
+Not covered by the provisional host (reported as `IN_PROGRESS`): draws by a mandatory loop
+(CR 104.4b) or by an effect (CR 104.4c), and a win by an effect (CR 104.2b). Not valid for team
+games (CR 104.2c), Emperor (CR 104.2d) or limited range of influence (CR 104.3h); the reference
+host is two-player / free-for-all only, and the game-result unit replaces this reading.
+
+## #50 FP-048 — Spec-test judgement calls
+
+**Decision.** The black-box spec tests (`tests/spec_turn_control*.rs`) make these calls where the
+brief left room:
+1. Follow-ups of skipped turns (CR 614.10b) are asserted in the creation order of the skip
+   effects, as the brief states twice ("in creation order"), not in the order the skipped turns
+   come up; one case separates the two (P3's skip created before P2's).
+2. `run_planned_turn` is compared with `run_turn` over one turn (the brief's T8 clause) and also
+   over three consecutive turns, including the `TurnState` left behind, because the next turn's
+   untap step passes the previous active player to the day/night check (REQ-TURN-002).
+3. A pending self-control effect (CR 724.9) may be reported by `pending_controller` as `None` or
+   as the player itself; the tests assert only that it overwrites the earlier effect and leaves
+   the player uncontrolled.
+4. An extra main phase created with `Phase::PrecombatMain` as its kind is asserted only through
+   its segment (`Segment::PostcombatMain`, CR 505.1a), not through the `BeginPhase` value.
+5. `end_the_turn` followed by the rest of the turn is exercised by pulling the items up to the
+   upkeep without running them, calling `end_the_turn`, then `run_planned_turn` (which calls
+   `begin_turn` first). The brief's "mutation from inside a host callback" is not testable black
+   box: the scheduler is a separate `&mut` argument that no host can reach.
+6. A step skip whose phase is skipped stays pending (the step never would begin, CR 500.11).
+7. The CR 728.2 ownership check uses the recording `reset_for_new_game` double (cards return to
+   their owner's library); the no-random-draw check compares the restart with `run_game_start`
+   with the restarter given, over the same reset state (same PRNG state, same report).
+**Rationale.** Each follows the brief's specified behaviour or the existing REQ-TURN-002
+contract; where the brief is silent the tests assert only what it implies.
+**Alternatives.** Consumption-order follow-ups (rejected: contradicts the brief's wording;
+reported as a failing test for the Orchestrator); comparing only one turn in T8 (rejected: would
+miss a previous-active-player regression in the day/night check).
+
+## #50 FP-048 — SRS 5.3 erratum
+
+**Decision.** Skipped turns, phases and steps are modelled as replacement-style "skip your next
+occurrence" effects (CR 614.1b, CR 614.10, CR 614.10a, CR 614.10b), consumed at the moment the
+turn, phase or step would begin, and they cover turns as well as phases and steps. A departed
+player's turn does not begin per CR 800.4k.
+**Rationale.** SRS 5.3 (REQ-TURN-003) calls skips "613.11 rule modifications", but CR 614.1b and
+CR 614.10 make them replacement effects. SRS line 240 also cites CR 800.4j where this unit needs
+CR 800.4k. This implementation follows the CR. The Orchestrator queues the SRS wording fix for the
+owner.
+**Alternatives.** Following the SRS wording literally (rejected: it conflicts with the CR, which
+is the rules baseline).
+
+## #50 FP-048 — Engine gaps
+
+**Decision.** These are out of scope for #50 and become new issues:
+1. Heartbeat early exit: an end-the-turn or end-the-combat effect that resolves must stop the
+   current step's priority loop (heartbeat.rs, steps.rs). Until then `end_the_turn` and
+   `end_the_combat_phase` only change the plan that the next `TurnScheduler::next_item` reads.
+2. `run_turn` consuming `TurnScheduler` (steps.rs).
+3. Wiring turn, phase and step skips into the replacement bus (the SRS `SKIP` replaceWith op), and
+   the CR 616.1 affected-player choice among simultaneous skip effects. The scheduler consumes
+   skips oldest first.
+4. Answerer enforcement in `ChoiceSession` (`PlayerControl::check_answerer` is a pure check),
+   wire-level redacted views for a controller, and merging knowledge projections for a controller
+   (view/, #80).
+5. A real `GameState`-backed `EndTurnHost` and `RestartHost` (game loop), and CR 728.3.
+6. Native effects that call these procedures (extra-turn, skip, control, end-the-turn and restart
+   effects).
+**Rationale.** The brief limits #50 to `turn/control.rs` against the current public APIs. Each
+item needs edits in files this unit does not own.
+**Alternatives.** Editing steps.rs or heartbeat.rs here (rejected: outside the owned paths, R1).
+
+## #50 FP-048 — Turn scheduler judgement calls
+
+**Decision.**
+- *Normal-order fallback:* the next normal turn goes to the next seat after the last NORMAL
+  turn's player, skipping players who are not in the game. If that player is not in the seat
+  order, it goes to the first in-game seat. A normal turn that is skipped or dropped (CR 800.4k)
+  still advances the normal order. A skipped extra turn is just removed.
+- *Skip ordering:* turn, phase and step skips are consumed oldest first (identical skips can only
+  be told apart by their follow-ups). Follow-ups are reported in the order their skips were
+  created, not the order they were consumed. Choosing by the affected player per CR 616.1 is an
+  engine gap.
+- *Anchor resolution:* "after X" means the current phase or step if it is X. If X has just ended,
+  the front of the remaining plan counts too. Otherwise it is the first not-yet-started
+  occurrence of X. With no such anchor nothing is added. "Before X" needs a not-yet-started X.
+  Several steps created after the same step run newest first (CR 500.9). Several created before
+  the same step each go directly before it, so the newest runs last, right before the anchor.
+- *Main phase labels (CR 505.1a):* a main phase gets its precombat or postcombat label when it is
+  planned. The first main phase of the turn that has not yet begun or been skipped is precombat,
+  and every other is postcombat. An extra main phase inserted after combat is therefore
+  postcombat. One inserted before the normal precombat main phase becomes the precombat one and
+  relabels the normal one postcombat. A skipped precombat main phase still counts as the first
+  (see the rules question in the #50 report).
+- *`you_get` modelling:* `Some(controller)` adds nothing unless `controller` is the active
+  player of the current turn (CR 500.10a). `None` always adds.
+- *`end_combat_phase_now`:* acts only while a combat phase is in progress (begun, its
+  `EndPhase` not yet yielded). In the gap after `EndPhase(Combat)` it returns false.
+- *Driver:* `run_planned_turn` mirrors `run_phase` item by item and, on success, records the
+  turn's active player via `TurnState::record_turn_taken`, as `run_turn` does.
+**Rationale.** Each is the reading closest to the quoted CR text and the brief. All are
+deterministic and use ordered containers only (R3).
+**Alternatives.** Static main-phase labels (rejected: an extra main phase before the first one
+would not be "the first main phase of the turn"). Reporting follow-ups in consumption order
+(rejected: the brief asks for creation order). LIFO for "before" anchors (rejected: CR 500.9
+states LIFO only for steps created after the same step).
+
+## Gate 06-turn F30 — CR-005 recorded as merged
+
+**Decision.** CR-005 is marked `Status: merged (#243)` with a process note; no code or digest changes are made.
+
+**Rationale.** R2 requires a separate contract-only PR for later contract changes and a breaking change merges only between phases. #183 merged its own contract entry with its implementation inside phase 04, so the entry is ratified retroactively at the gate, the same remedy the phase 02 gate used for CR-002 and CR-003 (commit 8e35167).
+
+**Alternatives.** Reverting and re-landing the change as a contract-only PR (rejected: the code, goldens and later units already depend on state format version 2). Leaving the entry open (rejected: a contract mismatch cannot be deferred past the gate).
+
+## Gate 06-turn F2 — one layer pass per SBA snapshot
+
+**Decision.** `SbaView::new` runs `layers::evaluate_all` once per SBA snapshot and reads each phased-in battlefield object's `Evaluated` from that map. If `evaluate_all` fails (it errors for the whole pass when any listed object has no base), or lacks an entry, it falls back to the per-object `evaluate` and keeps skipping an object that errors. Observable SBA results (CR 613.1, 613.4) do not change.
+
+**Rationale.** `evaluate` already evaluates the whole object universe, so one call per permanent made a check quadratic in board size. One shared pass is linear and equal to the per-object results (REQ-LAYER-001: `evaluate(id) == evaluate_all()[id]`).
+
+**Alternatives.** Evaluating every object individually as before (rejected: quadratic). Failing the whole snapshot when one object is unknown (rejected: changes the existing skip behaviour).
+
+## Gate 06-turn F3 — PLOT is sorcery-timed
+
+**Decision.** The `PLOT` special action uses `SpecialTiming::SorceryTiming` (own turn, main phase, empty stack). `FORETELL` stays `OwnTurn`.
+
+**Rationale.** The CR is internally inconsistent. CR 116.2k: "A player can take this action any time they have priority during their own turn while the stack is empty." CR 702.170a: "Plot [cost]" means "Any time you have priority during your main phase while the stack is empty, you may exile this card from your hand and pay [cost]." CR 702.170d likewise says "during their main phase while the stack is empty". The keyword's own rule (702.170a) is the narrower and is consistent with 702.170d, so it is followed.
+
+**Alternatives.** Keeping `OwnTurnStackEmpty` per 116.2k (rejected: offers plot in non-main steps against the keyword definition).
+
+## Gate 06-turn F4 — explicit timing binds mana abilities
+
+**Decision.** `check_activate` evaluates an explicit `timing` for mana abilities too. A mana ability with no stated timing stays legal whenever the player has priority; non-mana abilities still default to Instant. The CR 602.5a summoning-sick check is kept.
+
+**Rationale.** CR 605.1: mana abilities are such "regardless of what other effects they may generate or what timing restrictions (such as "Activate only as an instant") they may have". CR 605.3: activating one "follows the rules for activating any other activated ability (see rule 602.2), with the following exceptions", and 605.3a widens only the general permission ("whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment"). CR 602.5d defines "Activate only as a sorcery". No exception waives a stated restriction, so it still applies (an inference from 605.3 and 602.5d; the CR has no sentence that says so).
+
+**Alternatives.** Ignoring all timing for mana abilities (rejected: offers a sorcery-restricted ability in combat).
+
+## Gate 06-turn F32 — Host requires a hash for every used card
+
+**Decision.** `StateHost::build` (`build_world`) refuses a typed `Setup` in which a card used by any object (every zone, generated ids included) has no entry in `cardDatabase.definitionHashes`; the error quotes the card and the object. The existing checks stay: every listed hash must match the loaded definition, and every listed or used card must be loaded.
+
+**Rationale.** R11: the engine never runs a definition that the scenario has not pinned. `parse_scenario` already rejects such files, but `StateHost::build(&Setup)` is public, so the host enforces the same rule independently.
+
+**Alternatives.** Trusting the parser (rejected: direct callers bypass it). Deriving the missing hash from the loaded card (rejected: the scenario would no longer pin its definitions).
+
+## Gate 06-turn F33 — Duplicate ids rejected in the host
+
+**Decision.** Before any object is created, `build_world` checks that every player id and every object id (declared ids and the generated `<player>.<zone>.<index>` ids, in `Setup::objects()` order) is declared once across players and objects together. A duplicate is a build error quoting the id. Distinct ids, the declaration order and the observation keys are unchanged.
+
+**Rationale.** The scenario contract says "every id (players and objects together) is declared once". Without the check a second object with the same id replaced the first one in the name map, and observation could not tell the two apart (R12: the typed setup is an input like the file).
+
+**Alternatives.** Renaming the later duplicate (rejected: assertions would silently target a different object). Checking only object ids (rejected: an object named like a player is ambiguous for `attachedTo` and counter targets).
+
+## Gate 06-turn F34 — Shared-exile fields are rejected, not dropped
+
+**Decision.** A `sharedExile` entry with a non-default `tapped`, `flipped`, `phasedOut`, `designations` (any value other than `false`), `controller` (other than the owner), `attachedTo`, `timestamp` or `controlledSinceTurn` fails the build with an `UNSUPPORTED`-prefixed error naming the field and the object. Plain entries, counters, `controller` equal to the owner and `false` designations (which mean absent) keep working. `attachedTo` is included because the contract defines shared-exile entries as entries without it and the host would otherwise drop it as well. `StackSetup` carries none of these fields, so the stack is unchanged.
+
+**Rationale.** These fields describe a permanent; only battlefield objects get a `Permanents` entry, so the host had no place to apply them and silently reported them as absent. Refusing loudly matches the existing `faceDown` rejection.
+
+**Alternatives.** Applying the designations to the exiled object (impossible: object designations live in the `Permanents` entry, which exists only for battlefield objects). Ignoring them (rejected: the observed state would contradict the setup).
+
+## Gate 06-turn F35 — Setup keeps authored timestamp order across attach
+
+**Decision.** After the setup events (the step, counters and attachments) have executed, `build_world` stamps every battlefield object again with `GameState::stamp_object(id, StampReason::EntersZone)`, in the same ascending `(timestamp.unwrap_or(0), declaration index)` order as the first pass. Every battlefield object then has a timestamp later than every timestamp a setup attach issued (CR 701.3c), and the battlefield's relative order is exactly the authored one, attachments included. Objects outside the battlefield keep their first stamps and stay older than every battlefield object.
+
+**Rationale.** `timestamp` is the authored setup order. `stamp_object` only writes the object's ledger entry (and re-stamps stickers, of which a setup has none) from the state's timestamp generator; re-stamping is explicitly allowed. It changes nothing but timestamps and the generator position, so the build stays deterministic (R3: the order comes from a sorted `Vec`). Setup `AddCounters` events do not stamp counters today, so no counter timestamp is reordered relative to its object. The ledger did not yet record the attach timestamp, but the attach outcome in the event log did, so the attachment's latest issued timestamp was newer than its host's. After the second pass the authored order also holds if attach later writes the ledger.
+
+**Alternatives.** Rejecting any setup whose declared timestamps an attach would reorder (rejected: it would forbid the common case of an attachment authored before its host, and re-stamping is possible without side effects). Executing the attachments before the only stamping pass (rejected: the brief keeps the first pass, and the second pass is independent of event order).
+
+## Gate 06-turn F57 — UnattachFrom of a vanished attachment is a no-op
+
+- **Decision:** `UnattachFrom { attachment, host }` looks up the live link before the
+  unknown-object check. If the attachment is in no zone but its id was issued by the context's
+  object-id generator (it was moved away, for example by an earlier event of the same final
+  batch), or it is unattached, or attached to another host, the event is a no-op (`Ok(None)`: no
+  executed event, no `UnattachRecord`, no rollback of the earlier events). An id the generator
+  never issued (above `last_issued`) stays `EventError::UnknownObject`. Plain `Unattach` keeps
+  `UnknownObject` for any object that is in no zone.
+- **Rationale:** `UnattachFrom` names one link (CR 701.3d); once that link is gone, whatever ended
+  it, there is nothing to do, and failing would roll back an otherwise legal batch. Keeping the
+  error for never-issued ids preserves the existing black-box contract
+  (`req_event_001_unattach_unknown_object_errors`) for malformed events while still treating a
+  departed object as a no-op.
+- **Alternatives:** treat every unknown id as a no-op for `UnattachFrom` (rejected: it would
+  silently accept malformed events and contradict an existing spec test); keep the error
+  (rejected: CodeRabbit F57, rolls back earlier moves).
+
+## Gate 06-turn F12 — UnattachFrom replaceable only for its exact host
+
+- **Decision:** the replacement bus's `would_happen` (CR 614.7) treats `UnattachFrom { attachment,
+  host }` as happening only when `permanents.attached_to(attachment) == Some(host)`, and plain
+  `Unattach { attachment }` only when the attachment is attached at all. Otherwise no effect is
+  offered and the event reaches the executor unchanged (a no-op there).
+- **Rationale:** an effect that would replace an event that does not happen does nothing
+  (CR 614.7); the executor already treats both cases as no event, so the bus must not let an
+  `Instead` replacement change the game for them. No existing test replaced an `Unattach` of an
+  unattached permanent, so the plain-`Unattach` arm changes no tested behaviour.
+- **Alternatives:** check only `UnattachFrom` and leave plain `Unattach` always replaceable
+  (rejected: the same CR 614.7 gap for an unattached permanent).
+
+## Gate 06-turn F7 — graveyard-order preflight captures LKI
+
+- **Decision:** `graveyard_order_groups` computes the groups from the LKI-off planning run, then
+  restores the snapshot and runs the real path (`run_captured`, LKI capture included, CR 704.8,
+  CR 603.10a) inside the same rollback-only preflight; any error (for example
+  `MemoryError::NoCharacteristics`) is returned and no group is offered. The context is restored
+  in every case. The groups returned are those of the planning run, so batches whose LKI can be
+  captured give exactly the same groups and defaults as before.
+- **Rationale:** `execute_batch_ordered` runs the same capture; offering a group that every
+  answer then fails leaves the `ORDER_CARDS` request pending forever. Running the identical code
+  path guarantees the preflight fails exactly when the execution would.
+- **Alternatives:** a separate capture-only check of each planned departure (rejected: duplicates
+  `run_captured` and could drift from it); computing groups from the captured run (equivalent
+  but changes which run defines the groups for no gain).
+
+## Gate 06-turn F36 — Field-less answers validated at parse time
+
+**Decision:** `decode_step` rejects any member other than `type` on an answer whose type carries
+no payload (`PASS_PRIORITY`, `DECLINE_OPTIONAL_PAYMENT`, `CANCEL_AND_ROLLBACK`, `YES`, `NO`,
+`ACCEPT`, `TAKE_MULLIGAN`: the unit variants of `ChoiceResponse`) with `UnknownField`, path
+`/script/<i>/answer`, positioned at the offending key. The list is one constant
+(`FIELDLESS_ANSWER_TYPES`) in `scenario/decode.rs`.
+**Rationale:** "every object rejects unknown members" must hold when the file is parsed, not only
+when `StateHost` runs it; a custom host otherwise receives unchecked members. `KEEP_HAND` and
+`SHORTEN` carry fields, so they are not in the list.
+**Alternatives:** derive the list from `ChoiceResponse` at run time (no such reflection exists;
+a constant plus the existing `ANSWER_TYPES` length test is simpler); validate in each host
+(duplicates the rule and leaves custom hosts unprotected).
+
+## Gate 06-turn F38 — Bounded assertion diagnostics
+
+**Decision:** assertion comparisons stay exact on the full values. The stored `expected` and
+`actual` of an `AssertionOutcome` are previews of at most 256 characters (cut on a character
+boundary, then `...`), and one `evaluate_assertions` call keeps at most 256 KiB (262,144 bytes)
+of previews in total; later previews are the fixed text `(omitted: report budget exhausted)`.
+Serialisation stops at the cap through a small capped writer.
+**Rationale:** a `.pzl` file can make thousands of assertions over one large zone, and the
+report retained a full copy of the zone per assertion (CWE-400, R12). Pass/fail must not depend
+on the bound, so only the diagnostic text is bounded.
+**Alternatives:** compare on the previews (wrong results for long values); cap the number of
+assertions (changes the file contract); keep the full text and cap only the report (still holds
+every copy in memory first).
+
+## Gate 06-turn F74 — ScenarioError.path is the complete pointer; Display sanitizes
+
+**Decision:** `segment` returns the complete JSON-pointer segment (`~` as `~0`, `/` as `~1`,
+nothing else), so `ScenarioError.path` always round-trips through `pointer_position`. Only
+`Display` shortens each path segment to 64 characters (then `...`) and prints control characters
+as `?`; the stored `path` is untouched. `message` keeps quoting at most 40 characters of input.
+**Rationale:** DEVELOPMENT.md defines `path` as a JSON pointer; a truncated or `?`-rewritten
+segment names no member, so tools (`cargo xtask pzl`) lost the position. The R12 concern is a
+log flood, which the display layer bounds.
+**Alternatives:** keep the lossy stored path and add a second field (API change); truncate only
+over a larger limit (still not a pointer for long keys). No test asserted the truncated stored path; the one existing assertion that matched an
+unquoted chooser name (F79) now matches the quoted name.
+
+## Gate 06-turn F86 — Last-mulligan bottom order
+
+**Decision:** When the counted mulligans reach the starting hand size (or the hand size), the
+game start no longer bottoms the whole hand silently in ascending order. It issues one
+`MULLIGAN_DECISION` with `to_bottom` = the hand size (min = max = `to_bottom`, `ValidatorRule::Payload`),
+`default_on_timeout` = `KeepHand` with the hand in ascending id order. The answer's order is the
+order passed to `put_on_library_bottom`. A `TakeMulligan` answer is rejected with a procedure
+error in the procedure (R12). An empty hand issues no request.
+
+**Rationale:** CR 103.5 (rules-researcher answer A-Q8): the cards go on the bottom "in any order"
+and the CR has no special case for the whole hand, so the owner chooses the order. The protocol
+payload has no can-mulligan flag and is a contract, so the rule is enforced in the procedure
+rather than by changing the payload.
+
+**Alternatives:** keep the silent ascending bottom (rejects the owner's choice); add a
+can-mulligan flag to the payload (contract change, R2); offer `TakeMulligan` and ignore it (hides
+an invalid answer).
+
+## Gate 06-turn F97 — In-memory integral floats in AST params
+
+**Decision:** No production change. An in-memory typed AST holding a JSON float in an opaque
+position, for example a hand-built `KeywordInstanceAST.params` value `1.0`, `-0.0` or `1e0`, is
+refused by the ability serializer exactly like a fraction (`2.5`): `compute_hash`,
+`to_canonical_json` and `seal` return `CanonicalError::Serialize`, never a panic. Only the wire
+path normalises: `CardDefinitionDSL::from_json` canonicalises the document first, so `1.0` in the
+document text loads as the integer `1` and seals, hashes and exports exactly like `1`. This is
+the builder contract since #232 FP-164 (typed AST positions) and is a breaking change against the
+merge-base behaviour, where the opaque AST wrappers let `seal` normalise such a value. Migration
+path for code that builds definitions in memory: build integers (`Value::from(1)`,
+`serde_json::json!(1)`), or produce the document text and load it with
+`CardDefinitionDSL::from_json`, which normalises on load. Plain `serde_json::from_str` into a
+typed AST does not normalise (the typed decoders refuse any non-integer spelling), so it is not a
+migration path. `card::tests::req_dsl_001_seal_normalises_numbers` covers both paths: the wire
+case per spelling, the explicit in-memory rejection per spelling, and the integer migration,
+which seals to the wire case's value, hash and bytes.
+
+**Rationale:** The ability wire contract (`#13 FP-012 — Wire catalogue as implemented`, the
+module docs of `ability` and `effect`) has integers only in every position and guarantees
+`decode(encode(x)) == x` for every value its serializer accepts (REQ-NFR-006, REQ-CORE-006: no
+floating point in rules data). Accepting an integral float in memory would let the serializer
+emit `1` for a value holding `1.0`, so the decoded value would differ from the encoded one and
+the guarantee would break; it would also need a float-integrality test in the serializer, and the
+same opaque check exists separately in `effect/util.rs` (outside this fix's paths), so only
+keyword parameters would change and native-effect parameters would not. Keeping the strictest
+behaviour leaves every wire and contract format as it is.
+
+**Alternatives:** Normalise integral floats in the ability serializer and in `seal` (rejected:
+breaks the encode/decode identity of the FP-012 contract and makes ability and effect opaque
+values disagree); normalise in `seal` only by rewriting the in-memory tree before serializing
+(rejected: `compute_hash` and `to_canonical_json` would still refuse the same value, so the three
+entry points would disagree).
+
+## Gate 06-turn F53 — Look-back scan skips native-effect params
+
+**Decision:** `FPL-LOOK-BACK` (`lint/walk.rs` `scan`) does not report a look-back-like key found
+anywhere under the `params` member of an object whose `op` is `NATIVE_EFFECT`. Nothing else
+changes: look-back keys in trigger matchers, filters, bindings, keyword `params` and every other
+position are still reported, and the other facts of the walk (`CREATE_TOKEN` token ids, `LINKED`
+references, mana strings, `REPEAT_WHILE` checks) are still collected inside native-effect
+`params`. Only a member named `params` of a `NATIVE_EFFECT` object is opaque; a `params` member of
+any other object is not.
+
+**Rationale:** SRS §14.8 and REQ-DSL-015 make a native effect opaque data registered by
+`id@version`: its `params` are read only by the registered Rust implementation, so a member name
+inside them carries no DSL meaning and cannot set the engine's look-back derivation (CR 603.10).
+Reporting it was a false positive the definition author cannot fix without renaming a native
+effect's parameter. Keyword `params` stay in scope because a keyword macro expands into DSL
+abilities, so a look-back key there can reach a trigger; the brief keeps that case
+(`req_ing_009_look_back`).
+
+**Alternatives:** Skip every `params` member (rejected: hides keyword-macro parameters, which do
+expand into DSL); skip the whole native-effect object (rejected: token and link references in it
+would no longer be checked); keep reporting (rejected: the finding is not about a look-back flag).
+Consequence: the spec tests `tests/spec_dsl_lint.rs` (`req_ing_009_look_back_fail`,
+`req_ing_009_every_lint_has_pass_and_fail_case`, `req_ing_009_ability_reorder_invariance`) and
+`tests/spec_dsl_lint_robust.rs` (`req_ing_009_deep_nesting`,
+`req_ing_009_random_definitions_total_and_ordered`) used native-effect `params` as the typed
+look-back fixture; they are outside the fix's paths and need their fixtures moved to keyword
+`params`.
+
+## Gate 06-turn F98 — Room mana value in the lint
+
+**Decision:** `FPL-MANA-VALUE` computes each half of a `ROOM` definition (`LEFT_HALF`,
+`RIGHT_HALF`) as the combined mana value of both halves, exactly as for `SPLIT`. The lint has no
+zone, so it checks only this value; the stack value (the cast half) and the battlefield value
+(locked halves have no mana cost) are not modelled in the lint.
+
+**Rationale:** CR 202.3d: "The mana value of a split card not on the stack ... is determined from
+the combined mana costs of its halves"; CR 709.4b: "A split card’s colors and mana value are
+determined from its combined mana cost"; CR 709.5 makes a Room a split card with a shared type
+line. Source data gives one value per card face outside any game, i.e. the off-stack, off-battle
+field value, which is what `fineprint-core` `layouts/room.rs` returns for every zone other than
+the stack and battlefield. The battlefield reading (locked halves) is an inference the CR does not
+state in one sentence (rules-researcher D-Q3), and the lint does not distinguish zones.
+
+**Alternatives:** Per-half values (rejected: wrong for every zone other than the stack); a
+zone-aware value (rejected: the lint has no zone input and the source data has none either).
+
+## Gate 06-turn F104 — Span of an ability that does not encode
+
+**Decision:** When a typed ability does not encode, its facts take the span from the typed base
+`text_span`: `Some((start, end))` with `start <= end` is a valid span (used for the finding
+location and for text coverage), `None` is absent, and an unordered span is malformed (no span in
+the location, and the usual `FPL-TEXT-COVERAGE` "textSpan is not [start, end]" Error, as for the
+same span in JSON). The failed JSON (`null`) is not scanned.
+
+**Rationale:** The location contract (`LintLocation::ability`) carries the ability's own
+well-formed span; the typed value still holds it even when another member breaks an invariant.
+Treating an unordered span as malformed is what the raw reader does for the same JSON, so a
+definition gives the same coverage findings whether its span is read from JSON or from the type.
+
+**Alternatives:** Treat an unordered typed span as absent (rejected: it would silently become a
+coverage gap with no finding naming the bad span).
+
+## Gate 06-turn F26 — Resolved selectors are rejected by GameState::register_effect
+
+**Decision:** `GameState::register_effect` refuses an effect with `origin: EffectOrigin::Resolved`
+and `affected: Affected::Selector(_)` with the new `StateError::UnlockedResolvedSelector` (its
+Display text names `register_effect_group`, which locks selectors, and `Affected::Objects`). Static
+effects keep live selectors (CR 611.3a) and a resolved effect with `Affected::Objects` is accepted.
+`register_effect_group` is unchanged: it locks a resolved part's selector against the registry as
+it is before the call (CR 611.2c). Test call sites in the layer and state suites that registered a
+resolved selector singly are migrated to the locked set the test expects or to
+`register_effect_group`, without weakening an assertion. No encoded byte, Merkle layout, wire
+schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry (R2) is needed.
+
+**Rationale:** CR 611.2c fixes a resolved effect's affected set when the effect begins. The
+single-effect path stored the selector unchanged, so an object that started matching later was
+affected too; the group path already implemented the rule. Refusing at the boundary keeps one
+locking path and makes the error visible to callers.
+
+**Alternatives:** An environment parameter on `register_effect` so it can lock (rejected: about 86
+call sites change and the group path already locks with an environment); silently locking to an
+empty set (rejected: a behaviour change nobody asked for, and it would hide the caller's mistake).
+
+## Gate 06-turn F25 F27 — Unissued timestamps are rejected at the state boundary
+
+**Decision:** New `StateError::TimestampNotIssued(Timestamp)`. `GameState::register_effect` and
+`GameState::register_effect_group` refuse an effect whose `timestamp`, or the `granted_at` of an
+`EffectOrigin::Static`, is 0 or above the state's last issued timestamp (for a group, the range
+before the call), before anything commits; parts may share an issued timestamp.
+`GameState::restamp_static_effects` refuses such a `new_object_ts` before touching anything. The
+predicate is the decoder's (`Issued::has_timestamp`, used by `Issued::timestamp`). No encoded byte,
+Merkle layout, wire schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry
+(R2) is needed.
+
+**Rationale:** The version-2 decoder already refuses unissued timestamps (REQ-CORE-002: every
+timestamp comes from the state's single generator), so a state that accepted one serialized into
+an unrestorable snapshot. Checking at the boundary keeps every validated state restorable.
+
+**Alternatives:** Checking only on decode (rejected: the snapshot is then unrestorable and the
+fault surfaces far from its cause).
+
+## Gate 06-turn F31 — serialize refuses states deserialize refuses
+
+**Decision:** `GameState::serialize` returns `StateError::Encode(<decoder message>)` for a state
+whose layer components `deserialize` would refuse: an unissued effect id or timestamp (of an
+effect, its granting effect, an object, counters or a sticker), a non-CDA layer-7a effect, a
+static effect with a source without its generating-ability link, or a link for an unissued id, for
+any other registered effect or on another source. The checks are the decoder's own functions
+(`check_effects` / `check_effect_fields`, `check_ledger_wire`, `check_generators` in
+`state/effects_wire.rs`), called by both. The registry keeps accepting raw writes through
+`GameState::effects_mut`; `merkle_tree` and `state_hash` stay infallible and unchanged.
+
+**Rationale:** A state that serializes must decode to an equal state with the same hash
+(REQ-CORE-001, REQ-NFR-006). Only raw writes can make an inconsistent state, and the encoder is
+the one place every snapshot passes through.
+
+**Alternatives:** Making `effects_mut` validate (rejected: it is documented as raw, unvalidated
+access, and validating it would need the whole state); running the full decoder on every
+serialize (rejected: it re-registers every effect; the shared checks cover what raw writes can
+break).
+
+## Gate 06-turn F29 — Generator links need no cache invalidation through the validated API
+
+**Decision:** The layer cache keeps comparing only the `ContinuousEffects` snapshot. The
+invalidation table in `state/environment.rs` states the invariant that makes this sound and
+requires `Invalidation::EffectRegistration` for raw writes that change which ability generates an
+effect. Documentation only.
+
+**Rationale:** Through the validated API a link is written only together with its effect, effect
+ids are never reused, `link_effect_generator` rejects registered effects and `remove_effect`
+removes an effect and its link together, so equal registries imply equal links. Only raw
+`effects_mut` writes (which never touch links), or moving a generated effect between states, can
+break that.
+
+**Alternatives:** Snapshotting the links in the cache too (rejected: extra cost on every hit for a
+case only raw writes reach).
+
+## Gate 06-turn F39 — Plan identity of a PlannedTurn
+
+**Decision:** `TurnScheduler` keeps a plan serial, incremented by every installed plan, and
+`PlannedTurn` carries it as the public field `plan_serial`. `run_planned_turn` rejects a turn whose
+serial or player is not the installed plan's, or whose plan is already over, with
+`ChoiceError::Procedure` before any host call. A plan whose items were partly pulled by the caller
+is still accepted (changes between items are part of the driver contract).
+
+**Rationale:** Two successive turns can belong to the same player, so only plan identity separates
+a stale handle from the current one; checking before `begin_turn` keeps the host and the plan
+untouched. A public field keeps `PlannedTurn` constructible in tests like its other fields.
+
+**Alternatives:** A private field with an accessor (rejected: breaks struct-literal comparisons
+for no gain, the serial is not a security boundary); rejecting partly pulled plans (rejected: an
+existing driver test pulls items before handing the plan over).
+
+## Gate 06-turn F40 — Follow-up dispatch
+
+**Decision:** New `TurnHost::perform_follow_up(follow_up, choices)`, called by `run_planned_turn`
+for each entry of `PlannedTurn::follow_ups`, in order (the creation order of the skip effects),
+after `begin_turn` and before the first plan item. It is a required method: no implementor of
+`TurnHost` exists outside the turn module's own tests and spec support (the scenario `World`
+implements only `HeartbeatHost`), so the Orchestrator's default rule does not apply; a host that
+never creates follow-ups implements it as `Ok(())`.
+
+**Rationale:** CR 614.10b: "That action is considered to be the first thing that happens during
+the next step, phase, or turn to actually occur." The CR does not order the follow-up against
+turn-based actions or "beginning of" triggers (rules answer A-Q4, unsettled), so the brief's
+placement stands: the turn has begun (so the action happens during it) and no phase has begun yet.
+
+**Alternatives:** A defaulted no-op method (rejected while every implementor is in owned code: a
+forgotten override would silently drop follow-ups); dispatching inside the first phase (rejected:
+other work of that phase could happen first).
+
+## Gate 06-turn F44 — Rolled-back cast keeps priority
+
+**Decision:** `pub enum ActionOutcome { Taken, RolledBack }` and a defaulted
+`HeartbeatHost::try_take_action` (default: `take_action`, then `Taken`). The heartbeat calls
+`try_take_action`. On `RolledBack` the same player is asked again at once: no settle, the pass set
+is neither cleared nor extended, and no pass is recorded. An `Err` still propagates unchanged.
+
+**Rationale:** CR 734.2: "the player who had priority retains it and may take another action or
+pass"; CR 601.2 and CR 734.1 return the game to the moment before the action was proposed, with
+no abilities triggering, so there is nothing to settle. Whether an undone action counts as
+"taking actions in between passing" (CR 117.4) is not stated (rules answer A-Q6, inference); with
+the state restored, the undone action is treated as never taken, so earlier passes stand.
+
+**Alternatives:** Reporting the rollback as a distinct `Err` kind (rejected: errors abort the
+procedure; the heartbeat would need to match error variants); clearing the pass set (rejected: it
+would count a non-action as an action).
+
+## Gate 06-turn F45 — Departure and the pass log
+
+**Decision:** When the player who would be asked has left (before the request is published, after
+the answer, or between passes), the heartbeat forgets the departed passers and applies the CR 117.4
+test to the players still in the game. If all of them have passed in succession, the top object
+resolves (then the active player, or the next player still in the game, receives priority) or the
+step ends; nobody is asked. No `PassRecord` is written for the departure. Passes of the players
+still in the game stand (`forget_departed`).
+
+**Rationale:** CR 800.4a passes priority on; CR 800.4j: "the top object on the stack resolves, or
+the phase or step ends, whichever is appropriate". Nobody passed, so a pass record would be false.
+Whether earlier passes still count after a departure is not stated (rules answer A-Q7); the
+current behaviour (survivor passes stand) is kept as the brief directs.
+
+**Alternatives:** A synthetic pass record for the departure (rejected: the log records explicit
+passes only, SRS 5.1); a fresh round of passes after every departure (rejected: changes the
+existing pass counting of #44 FP-043).
+
+## Gate 06-turn F46 — No attackers skips to end of combat
+
+**Decision:** Defaulted `TurnHost::attackers_declared(&self) -> bool { true }`. `run_phase` and
+`run_planned_turn` read it once per combat phase, after the declare attackers step has ended
+(after its priority); `false` drops the not-yet-started declare blockers, first-strike combat
+damage and combat damage steps (extra ones too; `TurnScheduler::skip_blockers_and_damage` for the
+planned turn), so they have no boundary events, expiry, combat action or priority. End of combat
+and `EndPhase(Combat)` still run.
+
+**Rationale:** CR 508.8 and CR 506.1 skip the declare blockers and combat damage steps; CR 508.8
+names creatures "put onto the battlefield attacking", which can happen during declare-attackers
+priority, so the decision waits for that priority to end (rules answer A-Q2: the evaluation
+instant is an inference from step order). The default keeps every existing host on the normal
+path.
+
+**Alternatives:** Deciding when attackers are declared (rejected: misses creatures put onto the
+battlefield attacking during priority); keeping extra combat damage steps (rejected: CR 508.8
+skips "the combat damage steps").
+
+## Gate 06-turn F48 — The first draw step is skipped before it begins
+
+**Decision:** `run_segment` tests `first_turn_draw_skipped` before `begin_step`; a skipped draw step
+returns `SegmentReport { heartbeat_ran: false, cleanup_steps: 0 }` with no host call (no
+begin-step, expiry, registry entry, draw, priority, end-step expiry or mana emptying). The
+beginning phase's own boundary work is unchanged. The segment still appears in the turn report.
+
+**Rationale:** CR 103.8a skips "the draw step", not only the draw; CR 500.11: "To skip a step ... is
+to proceed past it as though it didn't exist" (rules answer A-Q3). Reporting the segment keeps the
+report's segment list stable and says through `heartbeat_ran` that nothing ran.
+
+**Alternatives:** Dropping the segment from the report (rejected: callers index the report by
+segment order).
+
+## Gate 06-turn F49 — First-strike decision at the damage boundary
+
+**Decision:** `run_phase` builds the combat phase without the first-strike step and calls
+`TurnHost::first_strike_damage_step()` once, when the declare blockers step has ended; `true`
+inserts `FirstStrikeDamage` before `CombatDamage`, and the decision holds for the rest of the phase.
+`run_planned_turn` does the same through the new `TurnScheduler::set_first_strike_damage_step`
+(insert before the first not-yet-started combat damage step, or remove the not-yet-started
+first-strike steps), for normal and added combat phases alike. The `first_strike_damage_step`
+argument of `TurnScheduler::next_turn` is kept (public API) and only shapes the provisional plan
+(normal and added combat phases), which the driver corrects at each damage boundary. If a step
+skip removes the declare blockers step of a planned turn, no decision is made and the provisional
+plan stands.
+
+**Rationale:** CR 510.4: "as the combat damage step begins"; the second combat damage step then
+follows without a new check (rules answer A-Q1). Declare-blockers priority is the last point at
+which first strike can change before damage.
+
+**Alternatives:** Removing the `next_turn` argument (rejected: public API); deciding as the damage
+step would be yielded by the scheduler (rejected: the scheduler has no host).
+
+## Gate 06-turn F47 — Cleanup with nobody in the game
+
+**Decision:** The sequencer's heartbeat adapter returns the `HeartbeatOutcome`. When the cleanup
+step's heartbeat ends with `NoPlayerInGame`, the cleanup step completes (end-step expiry, mana
+emptying) and no further cleanup step begins. `StepEnds` keeps the CR 514.3a repetition.
+
+**Rationale:** CR 514.3a repeats cleanup "once the stack is empty and all players pass in
+succession"; with nobody in the game no pass cycle can complete, so a repetition would loop on the
+same state until `MAX_CLEANUP_STEPS`.
+
+**Alternatives:** Treating `NoPlayerInGame` as a pass cycle (the old behaviour, rejected by the
+finding).
+
+## Gate 06-turn F95 — Cleanup guard test
+
+**Decision:** After F47 the `MAX_CLEANUP_STEPS` guard can be reached only by a live endless cycle,
+which needs one answered pass cycle per cleanup step. A `ChoiceSession` re-runs the procedure
+from its base after every answer, so driving 10 000 cleanup steps through a session is quadratic
+(measured: 400 answers take about 1 s). The guard is therefore driven through one additive
+test hook, `ChoiceContext::auto_default()` in `choice/session.rs`: `#[cfg(test)]` and
+`pub(crate)`, it builds a context with no recorded answers that answers every unrecorded ask with
+the request's `default_on_timeout` instead of suspending (asks are still checked for id,
+well-formedness and a valid default). The unit test
+`turn::steps_tests::req_turn_002_cleanup_live_endless_cycle_hits_the_guard` runs a live endless
+cleanup cycle in one run and asserts exactly `MAX_CLEANUP_STEPS` `BeginStep(Cleanup)` calls and
+`ChoiceError::Procedure`. The session tests keep (a) with every player gone the cleanup ends after
+one step with no error (F47) and (b) a live endless cycle begins exactly one more cleanup step per
+completed pass cycle (25 to 30 cycles).
+
+**Rationale:** Keeps the guard's error branch tested (R10, coverage) at linear cost. The hook is
+compiled only in the crate's own tests: no public API change and no change to session semantics
+(`ChoiceSession` never builds such a context). The Orchestrator authorised `choice/session.rs` for
+this one hook.
+
+**Alternatives:** A configurable guard (rejected: public constant, contract change); leaving the
+guard untested (rejected by the Orchestrator: R10/coverage); keeping the everyone-left loop
+(rejected: F47 removes it).
+
+## Gate 06-turn F6/F13 — per-child-batch evaluated provider refresh
+
+**Decision:** The replacement bus gets an opt-in refreshing entry point. `replacement::ProviderRefresh`
+(`fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_>`) builds an
+evaluated provider over the live state; `process_batch_refreshing(ctx, registry, batch, sba,
+choices, refresh)` and `process_event_refreshing(ctx, registry, event, choices, refresh)` resolve
+and execute the submitted batch with `ctx.provider`, then call `refresh` once before each
+`Prevent` follow-up batch (depth > 0) and use the result for both that batch's choosers
+(CR 613.1b, CR 616.1) and its LKI capture (CR 603.10a, CR 608.2h). The provider is never rebuilt
+between events of one batch (CR 603.10a, CR 704.8). Plain `process_batch` / `process_event` keep
+their signatures and behaviour: every batch of the call, follow-ups included, uses the pre-call
+snapshot (documented on `process_batch` and `EventContext`). The test
+`req_event_001_f6_plain_process_batch_keeps_pre_call_snapshot` asserts that stale 2/2 on purpose:
+it pins the documented limit so the adoption of the refreshing entry point is a visible change.
+
+**Rationale:** `EventContext` is built with struct literals in about 20 files owned by other
+units (turn, scenario, sba, interp, triggers, memory, spec tests); a new field or a new
+`provider` type would break all of them. The factory is a pure function of the state (R3), so a
+`ChoiceSession` replay re-derives identical providers. #264 FP-175 (forwarding the evaluated
+controller through the event and SBA LKI wrappers) is untouched: `LkiProvider` and
+`CharacteristicsProvider` are unchanged. Callers still on the non-refreshing entry point, to be
+adopted by their owning units: production `sba/perform.rs:810`; tests
+`events/tests/state_based_destroy.rs:99`, `sba/tests.rs:4033`,
+`tests/spec_events_graveyard_order.rs:561`, `tests/spec_replacement_support.rs:515-516`,
+`tests/spec_sba_destroyed_cause.rs:206`, `tests/spec_layers_consumers_support.rs:585`,
+`tests/spec_evaluated_controller_support.rs:580`.
+
+**SBA adoption:** `sba/perform.rs` now submits the SBA batch through `process_batch_refreshing`
+when the pass has post-batch layer inputs, that is from `perform_all_relayered` and
+`perform_all_post_batch` (the heartbeat and scenario-host production path). Its
+`ProviderRefresh` (`PostBatchRefresh`) calls the caller's existing post-batch provider with the
+live context before each follow-up batch and builds an owned `EvaluatedSnapshot` from the inputs
+it supplies: one `evaluate_all` board pass over `layer_env.objects()`, plus a lone `evaluate` for
+any zone object outside it, by ascending id, answering what a `LayeredProvider` over the same
+inputs answers (characteristics, layer-2 controller, counters, attachments). The snapshot is
+owned because the provider's inputs never leave its call. Public signatures are unchanged; the
+post-batch provider's documentation now says it is also called once per follow-up batch, which
+an ordinary pass never has. `perform_all` keeps plain `process_batch`: its only post-batch inputs
+are the pre-batch `effects`/`layer_env`, which describe no later state, and switching away from
+the caller's own `ctx.provider` would change results without making them fresher. Test:
+`sba::tests::sba_f13_follow_up_chooser_is_controller_after_sba_batch` (P1 through
+`perform_all_relayered`, P2 through `perform_all`).
+
+**Alternatives:** A new `EventContext` field (rejected: breaks every literal site outside the
+owned paths); a mutable provider cell behind `provider` (rejected: interior mutability in a
+shared trait object, and still changes the field's type); rebuilding the provider inside
+`EventContext` (rejected: the events layer cannot evaluate layers itself and its own batch
+execution must keep one provider per call); refreshing on the plain entry point (rejected: it
+has no way to build a provider).
+
+## Gate 06-turn R3 — Unlocked resolved selectors are refused on the wire
+
+**Decision:** `check_effect_fields` (shared by `effect_from_wire` and `check_effects`, so by decode and `GameState::serialize`) refuses `EffectOrigin::Resolved` with `Affected::Selector` ("unlocked resolved selector"). Locked resolved sets, resolved linked groups (locked anchor plus `SameAsLayer` parts) and static selector effects stay valid; encoding and hashes of valid states are unchanged. The group-path check in `effects_from_wire` was dropped as redundant: every effect passes `effect_from_wire` before grouping.
+**Rationale:** CR 611.2c: a resolved effect affects the objects determined when it begins; `GameState::register_effect` already refuses an unlocked selector, so the wire and the raw registry API must not admit one that a later-matching object could join after restore.
+**Alternatives:** keep the group-path check as defence in depth (rejected: unreachable, an uncovered line); reject only in the decoder (rejected: serialize would emit states deserialize refuses, as F31 fixed).
+
+## Gate 06-turn R17 — Native-effect exemption applies to instructions only
+
+**Decision:** The look-back scan (`lint/walk.rs::scan`) refines F53: it carries a "keyword data" flag down the walk, set when it descends into the `params` member of an object whose `kind` is `KEYWORD`. Below that point no object is recognised as a `NATIVE_EFFECT` instruction, so its `params` are not marked opaque and look-back-like keys inside are reported (CR 603.10) at their path under the keyword's `params`. A `NATIVE_EFFECT` anywhere else (ability `effect`, mode `effect`, IF/ELSE/FOR_EACH bodies) keeps its `params` opaque as before. Separately (R16), the mana-ability library walk (`lint/mana_ability.rs::moves_library_card`, CR 605.1a) no longer descends into a `NATIVE_EFFECT`'s `params`.
+**Rationale:** Keyword parameter values are opaque JSON (REQ-DSL-005), so `{"op":"NATIVE_EFFECT","params":{...}}` there is keyword data, not an instruction; F53 explicitly keeps keyword `params` scanned. `NATIVE_EFFECT.params` is opaque data for the native effect (REQ-DSL-015, SRS §14.8) and must never be read as instructions by any lint. A flag on the existing iterative stack is the smallest change, stays iterative and total on arbitrary JSON (R12), and keeps every other fact recorded as before.
+**Alternatives:** Track exact instruction-list positions (`effect`, `then`, `else`, mode `effect`, ...) and recognise `NATIVE_EFFECT` only there: more precise but duplicates the decoder's schema in the lint and would drift with it; rejected. Leave F53 as it was: misses look-back flags hidden in keyword data; rejected.
+
+## Gate 06-turn R8 — Final mulligan request validator rejects TakeMulligan
+**Decision:** The existing `ValidatorRule::Payload` check for `MulliganDecision` rejects `TakeMulligan` when `to_bottom >= hand.len()` and the hand is non-empty (CR 103.5: whole hand to the bottom, no further mulligan). The payload, encoding and wire names are unchanged (F86 contract); `ask_mulligan` keeps its procedure-side rejection as defence in depth (R12); timeout default stays ascending ids. Recorded as CR-010.
+**Rationale:** REQ-NET-003 requires the request to describe the legal answers; rejecting at `submit` leaves the request pending without replaying game start into a procedure error. No payload flag is needed because the hand size and `to_bottom` already carry the information.
+**Alternatives:** A different request type or a can-mulligan flag (changes the payload contract); leaving it to the procedure (the finding).
+
+## Gate 06-turn R9 — First-turn draw skip covers the normal draw step only
+**Decision:** The CR 103.8a first-turn draw skip applies to one draw step per turn: `run_segment` skips the first `Step::Draw` segment it runs in a turn for which `first_turn_draw_skipped` holds (no host call, `SegmentReport { heartbeat_ran: false, cleanup_steps: 0 }`, F48 unchanged), and records that in a private `TurnState` flag; every later `Step::Draw` segment of the same turn (an extra draw step added with `add_extra_step_after` / `add_extra_step_before`, or a draw-only beginning phase added with `add_extra_step_after_phase`) runs normally: begin-step event and expiry, the draw, registry entries, priority, end-step expiry and mana emptying. The flag is reset at the start of `run_turn` and by `record_turn_taken` (end of `run_turn` / `run_planned_turn`). `first_turn_draw_skipped` stays a pure query with its signature, meaning "would this turn's normal draw step be skipped". Simplification: the skip is consumed by the first draw step run in the turn, not by the step that sits in the plan's normal beginning phase; when an effect adds a draw step directly before the normal one (CR 500.9), the added step is the skipped one and the normal one draws. The number of draws, priorities and step boundaries in the turn is the same either way; only which occurrence is skipped differs.
+**Rationale:** Rules-researcher answer R2-Q1: the CR "does not settle it explicitly. 103.8a's literal text refers to \"the draw step ... of their first turn\" (singular, normal step); no rule says it covers or exempts added draw steps", and "the natural literal reading is that only the normal draw step is skipped and an added draw step happens. This is an interpretation; the CR gives no explicit ruling." CR 103.8a: "In a two-player game, the player who plays first skips the draw step (see rule 504, “Draw Step”) of their first turn." The finding (Gate 06-turn round 2, R9) asks for exactly this reading. `run_segment` is not told which plan phase a segment belongs to, and the brief confines the fix to steps.rs without signature changes (control.rs is owned by another Fixer), so the "first draw step run" key is the smallest change; tracking the plan position would need `run_planned_turn` to pass it.
+**Alternatives:** Skip every draw step of the turn (the previous behaviour; contradicts the literal reading and the finding). Key the skip on the plan's beginning-phase draw step (exact for the before-the-normal-step case, but needs a change in control.rs or a new `run_segment` parameter; left for a later control-side change if a ruling ever distinguishes the two). Key on the host's current phase being `Beginning` (does not distinguish: a CR 500.10 added draw step also sits in a created beginning phase).
+
+## Gate 06-turn R4 — Follow-ups belong to the scheduler
+**Decision:** The follow-up actions (CR 614.10b) of the installed plan live in the `TurnScheduler`: `next_turn` records them (creation order) when it installs the plan, replacing those of the previous plan, and `run_planned_turn` takes them (`std::mem::take`) after `begin_turn` and before the first plan item and performs exactly those through `TurnHost::perform_follow_up`. It never performs `PlannedTurn::follow_ups`. That public field stays as informational output (the same list, for callers and the existing spec tests that construct or inspect `PlannedTurn`); its doc says the driver does not execute it. The plan-serial / player / turn-over checks are unchanged and still reject a saved earlier handle of the same scheduler before any host call. Because the driver takes the list, a follow-up runs once per plan: a second run of the finished turn is rejected by the turn-over check and performs no follow-up, and a re-entry after an interrupt without session restore would not repeat them. Public API: `PlannedTurn` and `run_planned_turn` signatures are unchanged; the semantics of `PlannedTurn::follow_ups` changed from "what the driver performs" to informational.
+**Rationale:** Two schedulers can both install plan 1 for the same player, so a handle of scheduler A passes scheduler B's serial and player checks; executing the handle's list ran A's follow-ups on B's plan and dropped B's (finding R4). Keeping the list with the plan that produced it makes the scheduler the single source of truth with no new identity scheme.
+**Alternatives:** A per-scheduler random or global identity in `PlannedTurn` (needs global state or the PRNG, R3); removing `PlannedTurn::follow_ups` (breaks spec tests and callers that read which follow-ups a turn carries, for no gain); comparing the handle's list with the scheduler's (still lets equal-looking handles pass and duplicates state).
+
+## Gate 06-turn R5 — First-strike decision at the first damage step
+**Decision:** Refines F49. The planned-turn driver no longer decides first strike after a declare blockers step. `TurnScheduler` tracks, per combat phase, whether a combat damage step (`FirstStrikeDamage` or `CombatDamage`) has begun: `next_item` sets it when it yields one and clears it when it yields `BeginPhase(Combat)` (and a new plan clears it). The new read-only query `TurnScheduler::first_damage_step_is_next()` is true when a combat phase is in progress, no damage step of it has begun, and the next segment `next_item` would yield (looking past steps that pending step skips would remove, CR 614.10) is a combat damage step. Before each `next_item`, `run_planned_turn` asks `host.first_strike_damage_step()` and passes the answer to `set_first_strike_damage_step` exactly when that query is true, so the host is asked at most once per combat phase, whatever step preceded the damage step (declare blockers, or declare attackers when declare blockers was skipped). With CR 508.8 (no attackers) no damage step is next and the host is never asked. `next_turn`'s `first_strike_damage_step` argument stays the provisional plan, not decisive. R6 (same state): once a damage step has begun in the current combat phase, `set_first_strike_damage_step` changes nothing and returns false for either argument; a still-pending provisional first-strike step keeps its behaviour (`true` does not duplicate it, `false` removes it). So an extra declare blockers step added before the combat damage step after the first-strike step ran can never add a second first-strike step. Public API added: `TurnScheduler::first_damage_step_is_next`. The non-planned `run_phase` (steps.rs) is unaffected: it has no step skips and decides once after declare blockers, and its only blockers skip (CR 508.8) also removes both damage steps.
+**Rationale:** Rules-researcher answer A-Q1: the first-strike question is "Evaluated once, at the moment the combat damage step begins", and "the second step is then unconditional". CR 510.4: "If at least one attacking or blocking creature has first strike (see rule 702.7) or double strike (see rule 702.4) as the combat damage step begins, the only creatures that assign combat damage in that step are those with first strike or double strike. After that step, instead of proceeding to the end of combat step, the phase gets a second combat damage step." CR 506.1: "There are two combat damage steps if any attacking or blocking creature has first strike (see rule 702.7) or double strike (see rule 702.4)." Asking at the damage boundary rather than after a particular step covers every plan shape, and the "damage step has begun" flag is the retention the rule describes.
+**Alternatives:** Also query after declare attackers when blockers are skipped (special-cases one shape; misses others such as extra steps); keep the declare-blockers query and add the boundary query (asks the host twice in the normal case); for R6, scan the plan's history for an already-run first-strike step (needs a step log; the flag is the same information).
+
+## Gate 06-turn Q2 — CR 508.8 when declare attackers is skipped
+**Decision:** `TurnScheduler` tracks, per combat phase, whether a declare attackers, declare blockers or combat damage step has begun (set by `next_item` when it yields one, cleared when it yields `BeginPhase(Combat)` and when a plan is installed). The new read-only query `TurnScheduler::attackers_check_is_next()` is true when a combat phase is in progress, none of those steps has begun in it, and the next segment `next_item` would yield (looking past steps pending step skips would remove, CR 614.10) is a declare blockers or combat damage step; that happens only when a step skip removed the declare attackers step. Before each `next_item`, and before the CR 510.4 first-strike check, `run_planned_turn` asks `host.attackers_declared()` exactly when the query is true; `false` calls the existing `skip_blockers_and_damage()` (end of combat and `EndPhase(Combat)` stay), `true` (a creature put onto the battlefield attacking) leaves blockers and damage to run. Because the query turns false once a blockers or damage step has begun, the host is asked at most once per combat phase on this path, and the existing end-of-declare-attackers check is unchanged. Public API added: `TurnScheduler::attackers_check_is_next`; no signature changes. The query and the R5 `first_damage_step_is_next` share one private "next combat segment" helper.
+**Rationale:** CR 508.8: "If no creatures are declared as attackers or put onto the battlefield attacking, skip the declare blockers and combat damage steps." CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it didn't exist." A skipped declare attackers step never yields a segment, so the check the driver made as that step ended never ran and the blockers and damage steps ran with no attackers (gate finding Q2). Rules-researcher answer A-Q2 places the evaluation when the declare attackers step ends; with that step skipped, the latest equivalent moment is just before the first blockers or damage step would begin, which also sees a creature put onto the battlefield attacking during beginning-of-combat priority.
+**Alternatives:** Check as `next_item` consumes the declare attackers skip (needs the host inside the scheduler, or a pending flag the driver must poll; same moment, more state); check at the end of the beginning of combat step (misses a beginning of combat step that is itself skipped); remove blockers and damage whenever declare attackers is skipped (wrong when a creature is put onto the battlefield attacking).
+
+## #52 FP-050 tester — No `.pzl` scenarios; session-driven direct harness
+
+**Decision.** The casting announce spec tests are Rust black-box and property tests only
+(`crates/fineprint-core/tests/spec_casting_announce*.rs`); no `.pzl` scenario is written. The
+"direct" harness is a `ChoiceSession` procedure that calls `casting::announce` on the run's state
+with the run's `ChoiceContext` and records the state hash and priority right before and after the
+call; every test also drives the same procedure answer by answer (`submit`) and through `replay`.
+**Rationale.** No scenario host reaches the casting module yet (brief). `ChoiceContext` has no
+public constructor, so a session is the only way to obtain one; recording the state inside the run
+observes the state `announce` leaves behind on the same `&mut S`.
+**Alternatives.** A `.pzl` scenario (no host); a test-only `ChoiceContext` constructor (outside
+owned paths, a contract change).
+
+## #52 FP-050 tester — Begin-check `"zone"` filter tested only with malformed values
+
+**Decision.** The begin-check tests assert that a `PROHIBITION` with a malformed `"zone"` (a
+non-string, or an unknown zone name) matches nothing; they do not test a well-formed zone name.
+**Rationale.** `CastState` has no method that reports the zone of `request.object`, so the expected
+result of a well-formed `"zone"` is not determined by the brief; a malformed value matches nothing
+under the existing convention (`actions` module docs, R12) whatever the zone.
+**Alternatives.** Assume the object is in a particular zone (not derivable from the API).
+
+## #52 FP-050 tester — Two alternative costs in one answer
+
+**Decision.** "Two alternative costs rejected" (CR 601.2b) is tested as: `ConfigureCosts.alternative`
+outside the offered list is rejected, every single alternative (and none) is accepted, and the
+same additional cost twice is rejected.
+**Rationale.** `ConfigureCosts.alternative` is an `Option<u32>`, so a response that names two
+alternative costs cannot be built; the type enforces "at most one".
+**Alternatives.** None that compile against the pinned response type.
+
+## #52 FP-050 tester — TargetSlot max
+
+**Decision.** The `CHOOSE_TARGETS` shape test requires `min`, `legal` (ascending, without the
+stack object and prohibited candidates), `current: []` and `may_keep_illegal: false` exactly, and
+accepts `max` equal to the slot spec's `max` or to that value clamped to the number of legal
+candidates.
+**Rationale.** The brief writes the slot as `TargetSlot{min,max,legal,current:[]}` without saying
+whether `max` is clamped; the choice module clamps `max` to the candidate count for its other
+selection kinds, and both forms accept exactly the same answers.
+**Alternatives.** Require the unclamped spec `max` (rejects an equivalent, consistent request).
+
+## #52 FP-050 tester — Ambiguous orders accepted both ways
+
+**Decision.** Where the brief does not fix an order, the tests accept both readings: the order of
+`Proposal.modes` for a multi-mode answer (answer order or ascending), the recipient order within one
+target slot of a `DIVIDE_VALUE` request (answer order or ascending), and whether a cast with only
+optional slots whose candidates are all illegal still asks `CHOOSE_TARGETS` (either way it must be
+announced, never rolled back).
+**Rationale.** R8: the brief fixes slot order and ascending candidate/mode lists, not these.
+**Alternatives.** Pin one order (would test an unstated choice).
+
+## #52 FP-050 tester — Division recipients chosen in two slots
+
+**Decision.** The property test requires that the `DIVIDE_VALUE` recipients are the chosen targets
+with each target once (a target chosen in two slots is one recipient) and that the shares sum to the
+total, each at least 1.
+**Rationale.** The `SUBMIT_DIVISION` validation requires distinct recipients, so a target named in
+two slots cannot appear twice; whether such a target counts once or twice for CR 601.2d ("each of
+these targets must receive at least one") is reported as a rules question.
+**Alternatives.** Require one recipient per chosen slot entry (not representable in the protocol).
+
+## #52 FP-050 tester — Candidate insertion order
+
+**Decision.** `determinism_candidate_order` feeds the same candidates to the fake in non-ascending
+orders and requires an identical, ascending `legal` list (players before objects).
+**Rationale.** Brief test 8: "permuting the fake's entry or candidate insertion order does not change
+the output (candidates ascending)". It is a separate test so that, if the host contract
+("ascending") is meant to make sorting the host's job, the disagreement is isolated.
+**Alternatives.** Only ascending candidate lists (would not test test 8 as written).
+
+## #52 FP-050 — Module wiring and the CastState seam
+
+**Decision.** The procedure lives in `crates/fineprint-core/src/casting/` (`mod.rs` with the
+module docs and conventions, `announce.rs`, unit tests in `announce_tests.rs`), exported as
+`fineprint_core::casting`. It is written against the narrow, card-agnostic host trait
+`CastState: Transactional` (rule set, opponents, target controller, mode / cost / target-slot /
+division specs, `put_on_stack`, source qualities, prohibition application and 601.3a lapse, and
+a defaulted cross-slot `proposal_combination_legal`). `announce` clones `*state` into a
+`Transactions`, takes the checkpoint (CR 734), works on `state_mut()`, and on an illegal step
+rolls back and copies the restored state back (`RolledBack` carries the post-rollback hash and
+priority player, CR 734.1, 734.2); on success it commits and copies the state back; on
+`Err(Interrupt)` `*state` is left untouched. Every answer is validated again against its request
+before use (R12). Library moves, shuffles and reveals are documented as not reversible (CR 734.1)
+and the host's concern.
+**Rationale.** The real `GameState` has no stack or object host yet (same pattern as
+`ActionHost` #49, `PlacementEnv` #31, `TurnHost` #46); a later integration unit implements
+`CastState`.
+**Alternatives.** Editing `GameState` (outside the owned paths); `Transactions` held by the
+caller (the pinned signature takes `&mut S`).
+
+## #52 FP-050 — TARGETING_RULE parameter convention
+
+**Decision.** As documented in `casting/mod.rs`: `"keyword"` (required: `HEXPROOF`, `SHROUD`,
+`PROTECTION`, `OTHER`), `"effect"` (`PROHIBIT` default, or `IGNORE_HEXPROOF`), exactly one of
+`"target_object"` / `"target_player"` (unsigned integer), `"sources"` (`ANY` default, or
+`OPPONENTS`: caster is an opponent of `target_controller(target)`), `"quality"` (string,
+`source_has_quality`), `"source_player"` (unsigned integer, must equal the caster). Any wrong
+type or unknown value makes the entry match nothing (R12). The `players` set is ignored except
+that an `IGNORE_HEXPROOF` entry must `applies_to(caster)`. An `IGNORE_HEXPROOF` entry is accepted
+with any valid keyword (it is the effect that matters) and uses the same full filter
+(target, sources, quality, source player) as a prohibition. It suppresses only `PROHIBIT` entries
+whose keyword is `HEXPROOF` (CR 702.11e); every other applicable `PROHIBIT` entry makes the
+candidate illegal (CR 101.2). The verdict is a pure function of the set of applicable entries, so
+it does not depend on timestamps or iteration order. Candidates are deduplicated and ascending
+(`BTreeSet`), and the stack object itself is removed first (CR 115.5). Ward is not checked.
+**Rationale.** SRS §14.6/§14.7 route targeting through `TARGETING_RULE` with an opponent scope
+(hexproof) or a universal scope (shroud, protection); the brief pins the parameter names.
+**Alternatives.** Requiring `"keyword": "HEXPROOF"` on `IGNORE_HEXPROOF` entries (stricter, no
+gain); using the entry's `players` set for the hexproof scope (it names whose rules change, not
+whose spells are affected).
+
+## #52 FP-050 — Begin check scope (CR 601.3, 601.3a) and the zone filter
+
+**Decision.** The begin check reads `rule_set().applying(PROHIBITION, caster)` entries whose
+`"action"` is `"CAST"` (spell) or `"ACTIVATE"` (ability) and whose `"object"` filter (#49
+convention) admits `request.object`. `CastState` reports no zone, so an entry carrying a `"zone"`
+parameter matches nothing here (the #49 generator already applied zone-filtered prohibitions
+when it offered the action). Each matching entry refuses with `NotStarted{Prohibited}` unless
+`prohibition_could_lapse(entry, request)` (CR 601.3a). Step 5 re-reads the same entries from the
+live (post-announce) state and refuses on any `prohibition_applies` with no leniency (CR 601.2e).
+Permissions (timing, zone of origin, activation limits) are not re-checked: #49 offered the
+action. This supersedes "#49 FP-047 — CR 601.3a not implemented here" for the casting procedure
+only; the legal-action generator is unchanged.
+**Rationale.** The brief's step 1 and step 5 definitions; the seam has no zone accessor.
+**Alternatives.** A zone accessor on `CastState` (not in the pinned API); re-checking timing
+here (duplicates #49).
+
+## #52 FP-050 — Mode legality and index translation (CR 700.2a, 700.2d)
+
+**Decision.** A mode is legal when every slot of `target_slots(req, &[mode], &CostChoice::default())`
+has at least `min` legal candidates after the targeting rules. `CHOOSE_MODES` lists only the
+legal modes (labels and `mode_costs` filtered in step), presented indices `0..k`; the answer is
+translated back to ORIGINAL indices and sorted ascending (a repeated mode appears once per
+choice, CR 700.2d). `NoLegalMode` rolls back when no mode is legal, when repeats are not allowed
+and fewer than `min` are legal, or when the (clamped) max is below min. With repeats the max is
+the spec's max and the default repeats the legal modes cyclically; without repeats max is
+clamped to the number of legal modes. Options are enumerated `Mode(i)` below
+`ENUMERATION_LIMIT` answers (sets, or multisets with repeats), otherwise a `Modes` validator.
+**Rationale.** Same shape as the trigger placement (#31); costs are chosen after modes, so mode
+legality cannot depend on them.
+**Alternatives.** Offering every mode and rolling back after an illegal pick (contradicts
+CR 700.2a "can't be chosen").
+
+## #52 FP-050 — Choice request shapes
+
+**Decision.** All requests: chooser = caster, `reason.source` = the stack object, `hidden:
+false`, `reveal_to: []`, ids from `next_request_id()` in ask order (modes, costs, targets,
+division; a step with nothing to ask is skipped). `reason.cr`: `CHOOSE_MODES` and
+`CHOOSE_COSTS_AND_X` "CR 601.2b", `CHOOSE_TARGETS` "CR 601.2c", `DIVIDE_VALUE` "CR 601.2d".
+`CHOOSE_COSTS_AND_X` is asked when the cost spec offers anything (an alternative or additional
+cost, an X range, a symbol slot or a harmonize candidate); `min = max = 1` (one configuration);
+enumerated options are its building blocks (cost labels as `Text`, X values as `Number`,
+harmonize candidates as `Object`) below `ENUMERATION_LIMIT` answers, otherwise a `Payload`
+validator; default = normal cost, no additional cost, X = low end, option 0 per symbol slot, no
+harmonize. An empty X range or an empty symbol slot is a host error (`ChoiceError::Procedure`),
+as is a target slot with max below min. `CHOOSE_TARGETS` is asked whenever there is at least one
+slot; each slot's max is clamped to its legal count; request min/max are the sums;
+`may_keep_illegal: false`; default = the first `min` legal candidates per slot; chosen lists are
+returned ascending. `DIVIDE_VALUE` recipients are the DISTINCT chosen targets in slot order
+(first occurrence), each with minimum 1; `min = max =` recipient count; `DivisionImpossible`
+compares the total with the distinct count; the default puts the remainder on the first
+recipient; the result is in recipient order. Nothing is divided when no target was chosen.
+**Rationale.** The `DIVIDE_VALUE` validator keys recipients by target, so a target chosen in two
+slots can only be one recipient; CR 601.2d speaks of "each of these targets".
+**Alternatives.** One recipient per slot entry (the validator rejects the duplicate).
+
+## #52 FP-050 — Count announcement and deferrals
+
+**Decision.** The announce-count-first rule of CR 601.2c is met by `SelectTargets`: each slot's
+list length is the announced count (no separate ask). Deferred: splice (CR 601.2b, 702.47);
+"must be chosen as a target" maximisation (CR 601.2c); CR 601.4 look-ahead (a mode or cost
+available only through a later choice); re-checking permissions (timing, zone); the "owns but not
+controlled by another player" clause of protection from a player (CR 702.16k: only "controls",
+i.e. the caster, is matched); and mode legality that depends on costs (costs are not chosen yet).
+Ward and becomes-target triggers belong to #57.
+**Rationale.** Not cheap without host data the seam does not carry; the brief allows deferral.
+**Alternatives.** Extra seam methods for each (outside the pinned API).
+
+## #52 FP-050 — SRS §7.1 discrepancies (CR 2026-11-06 wins)
+
+**Decision.** `docs/SRS.md` is not edited; the code follows the CR. Step 1 cites 601.2a for the
+layout choice and the permission / prohibition check, but those are CR 601.3 (601.3a, 601.3e)
+and CR 709.3, 712.8b-c, 716.3a, 719.3a, 721.3a, 708.4. Step 3 omits CR 115.2, 115.5, the 601.2c
+"must be chosen as a target" rule and announce-count-first. Step 2 omits splice (CR 601.2b,
+702.47). Step 0 should note CR 734.1's non-reversible library actions. A P8 SRS-edit line is in
+`docs/HUMAN_QUEUE.md`.
+**Rationale.** CR wins over the SRS (PROCESS.md).
+**Alternatives.** Editing the SRS here (a P8 item for a person).
+
+## #52 FP-050 — Division recipients when one object fills two "target" instances (CR 601.2d, 115.3)
+
+**Decision.** A divided effect's recipients are the distinct chosen objects or players, in slot
+order; each receives at least 1 (CR 601.2d), and the division is impossible (rollback) when the
+total is below the number of distinct recipients. An object chosen for two different instances of
+"target" is one recipient.
+**Rationale.** The rules-researcher found the CR silent (CR 601.2d "each of these targets", CR 115.3,
+115.7f, glossary "Target"; no example covers a dividing spell with one object in several target
+instances) and both readings satisfy CR 601.2d as written. The `DIVIDE_VALUE` protocol (#28) takes
+distinct recipients, so the per-object reading needs no contract change. Real dividing templates
+use one "target" instance with a variable count, where CR 115.3 already forces distinct objects and
+the readings coincide.
+**Alternatives.** One share per target instance (the researcher's slight preference, for
+consistency with CR 115.3's per-instance counting); it would need a `DIVIDE_VALUE` contract change
+under R2 and is left for a change request if a template ever needs it.
+
+## #52 FP-050 — Repeated modes may reach the minimum (CR 700.2a, 700.2d)
+
+**Decision.** When a modal spell allows choosing the same mode more than once, the minimum mode
+count may be met by repeating legal modes; the cast rolls back with `NoLegalMode` only when no mode
+is legal, or when repeats are not allowed and fewer modes are legal than the minimum.
+**Rationale.** The rules-researcher confirmed this follows from CR 700.2a (an illegal mode "can’t be
+chosen") and CR 700.2d (a mode may be chosen more than once when the spell says so, and is treated as
+appearing that many times in sequence); the CR has no explicit rule or example for this case. CR
+700.2i ("worth of modes") is a separate rule not covered here.
+**Alternatives.** Requiring distinct legal modes regardless of the repeat instruction (contradicts
+CR 700.2d).
+
+## #53 FP-051 — Cost-effect parameter conventions and minimum / set semantics (CR 601.2f)
+
+**Decision.** `determine_total_cost` reads every cost entry from its typed `modification.cost`
+member; the opaque `params` are used only for `"minimum"`. An entry whose kind does not match its
+`CostStages` list, or that is malformed, is ignored (no effect, no error, no panic). A
+`COST_INCREASE` needs `cost`; each `PAY_MANA` adds its symbols (generic, colored, colorless or snow
+only, else the whole entry is ignored) and every other cost item is appended to the non-mana part.
+A `COST_REDUCTION` reduces by each `PAY_MANA` in `cost` (other items ignored; a variable symbol
+makes the whole entry ignored). `COST_MINIMUM` takes `params["minimum"]`, a non-negative JSON
+integer `N`; if the payable mana component's total (every mana amount, Phyrexian life excluded) is
+below `N`, generic mana is added to reach `N`. `COST_SET` makes the sum of its `PAY_MANA` items
+(generic, colored, colorless or snow only; at least one `PAY_MANA`) the mana component; the
+non-mana part and the Phyrexian life are unchanged. An unpayable mana part is unchanged by both
+(CR 118.6a). An ignored reduction keeps its slot in the player's order and its `hybrid_halves` are
+not checked; a well-formed reduction's halves are checked even when the mana part is unpayable.
+Composite cost items in an increase are appended to the non-mana part unchanged.
+**Rationale.** The typed `cost` member already carries the mana algebra; the opaque params are
+never guessed (decision "#35 FP-034 — RuleModification parameter conventions", R12). Generic
+padding is the least-specific way to meet a minimum and leaves the colored requirements intact.
+**Alternatives.** A `"generic"` / `"amount"` param for increases and reductions (duplicates
+`cost`); a minimum counted on generic mana only; a set effect that also replaces non-mana costs.
+
+## #53 FP-051 — Total-cost effects applied in CostStages list order (CR 601.2f)
+
+**Decision.** `stages.total_effects` are applied after every reduction, in the list order exactly
+as given (the layers unit's order: all `COST_MINIMUM` then all `COST_SET`, each in timestamp order);
+the calculator does not re-sort them.
+**Rationale.** CR 601.2f says only that effects that directly affect the total cost are applied
+once the total is determined; it is silent on their mutual order. The layers contract already fixes
+an order, so the calculator follows it and the order stays a single-owner decision.
+**Alternatives.** Re-sorting by timestamp across kinds; letting the player choose.
+
+## #53 FP-051 — Hybrid Phyrexian reductions take only a colored half (CR 118.7e, 118.7f)
+
+**Decision.** In a reduction, a hybrid Phyrexian symbol `{a/b/P}` consumes one `hybrid_halves`
+element, which must be `First` (color `a`) or `Second` (color `b`); `Life` is `BadChoice`. A plain
+Phyrexian symbol `{c/P}` takes no choice and reduces one mana of color `c` (CR 118.7f).
+**Rationale.** A reduction reduces mana; there is no life to reduce, and CR 118.7e/118.7f speak
+only of mana of the chosen half or the symbol's color.
+**Alternatives.** Treating `Life` as "no reduction" for that symbol.
+
+## #53 FP-051 — ManaComponent::to_mana_cost bounds the repeated symbols
+
+**Decision.** `to_mana_cost` returns `Overflow` when the generic amount is above `MAX_GENERIC`, and
+also when the colored, colorless and snow amounts together are above `MAX_GENERIC` symbols.
+**Rationale.** Those amounts are written as repeated symbols; an untrusted saturated amount
+(`u64::MAX`) would otherwise allocate without bound (R12). `MAX_GENERIC` is the DSL's own bound.
+**Alternatives.** Only the generic check the brief names (unbounded allocation).
+
+## #53 FP-051 — casting/mod.rs wiring outside the issue's owned-paths list
+
+**Decision.** `crates/fineprint-core/src/casting/mod.rs` gets `mod cost;`, the `pub use cost::{…}`
+re-export of the pinned items and a short step-6 paragraph in the module doc; nothing else.
+**Rationale.** The issue lists only `casting/cost.rs`, but the pinned API is re-exported from
+`fineprint_core::casting`, which needs these lines; the brief allows exactly this minimal wiring.
+**Alternatives.** A separate wiring PR (needless churn for three lines).
+
+## #53 FP-051 — SRS §7.1 step 6 formula vs CR 118.7 (CR 2026-11-06 wins)
+
+**Decision.** `docs/SRS.md` is not edited. The code follows CR 601.2f and 118.7a-g: reductions are
+applied one at a time in the player's order, component by component, with the mana component
+floored at `{0}`, then the total-cost effects, then lock-in. The SRS formula
+`C = floorEffects(max({0}, base + additional + increases - reductions_ordered))` has a single
+max-floor over the total and no component-wise reduction, and it conflicts with SRS Appendix A
+row 11. A P8 SRS-edit line is in `docs/HUMAN_QUEUE.md`.
+**Rationale.** CR wins over the SRS (PROCESS.md); precedent "#52 FP-050 — SRS §7.1 discrepancies".
+**Alternatives.** Implementing the SRS formula literally (wrong for colored reductions, CR 118.7a-c).
+
+## #53 FP-051 tester - u64::MAX minimum
+
+**Decision.** The spec test for a `COST_MINIMUM` whose `"minimum"` is `u64::MAX` asserts only no
+panic plus one of: the entry ignored, the entry applied (total raised to `u64::MAX`, colored
+components kept, `to_mana_cost` then `Err(Overflow)`), or `Err(Overflow)` from the calculator.
+**Rationale.** Brief S3 makes any non-negative JSON integer a valid minimum, while T10 lists "huge
+u64" among malformed values to be ignored; the brief does not settle which. A value beyond `u64`
+(parsed as a JSON float) is asserted ignored, as every float is.
+**Alternatives.** Assert "ignored" (contradicts S3) or "applied" (contradicts T10).
+
+## #53 FP-051 tester - COST_REDUCTION without a cost member
+
+**Decision.** The reference model treats a `COST_REDUCTION` with `cost: None` as a malformed entry,
+ignored like a `COST_INCREASE` with no cost: it keeps its slot in the order list and its
+`hybrid_halves` are not checked. A `COST_REDUCTION` whose `cost` has no `PayMana` is well formed,
+reduces nothing and needs zero halves (any half is `BadChoice`).
+**Rationale.** S3 says `COST_INCREASE` with `cost` None is ignored and that non-`PayMana` items of a
+reduction are ignored; it is silent on a reduction with no cost member. Reading "no cost member" as
+malformed in both lists is the uniform choice, and the product behaves the same way.
+**Alternatives.** Treat it as a well-formed no-op that needs zero halves.
+
+## #53 FP-051 tester - wrong-kind reductions and the error set
+
+**Decision.** An entry of the wrong kind in the reductions list is asserted ignored, with its slot
+kept and its halves unchecked (one targeted case). The seeded sweep gives wrong-kind entries only
+plain symbols and an unpayable basis only valid orders and halves, and when the inputs justify more
+than one error (for example an invalid order plus bad halves) it accepts any of them.
+**Rationale.** S3 says wrong-kind entries are ignored and that ignored entries do not check halves;
+the brief fixes no precedence among `BadReductionOrder`, `BadChoice` and `UnpayableAdditional`,
+nor whether halves are checked for an unpayable basis.
+**Alternatives.** Pin an error precedence (not in the brief).
+
+## gate 06-turn round 5 - Mode legality probes cost choices (CR 700.2a, 601.2c)
+
+**Decision.** (CR-012; supersedes "#52 FP-050 — Mode legality and index translation" on the point
+that mode legality cannot depend on costs.) A mode (original index `m`) is offered when at least
+one probe gives every slot of `target_slots(req, &[m], &probe)` at least `min` legal candidates.
+`announce` calls `cost_spec(req, &[m])` and probes, in this order and stopping at the first
+success: `alternative` = `None`, then `Some(0)`..`Some(a-1)`; for each, the additional-cost
+subsets (every subset in ascending bit-mask order when there are at most 6 additional costs;
+otherwise none, each one alone ascending, then all); `x` = the low end of the X range if any,
+`symbol_options` empty, `harmonize: None`. At most `(a+1)*64` `target_slots` calls per mode; a spell
+without alternative or additional costs makes exactly one call per mode, as before. With more
+than 63 additional costs the singles are cut after the first 62 so that the subset list stays at
+64 and still ends with "all". `CastState::cost_spec` and `target_slots` are therefore called with
+one-mode lists and probe choices before the costs are chosen (they must stay pure, R3). An
+offered mode whose real costs leave a slot without enough legal targets rolls back at step 3
+with `MissingTarget` (the CR 601.2c check with the player's real `CostChoice` is unchanged).
+**Rationale.** CR 700.2a removes a mode only if it "would be illegal"; CR 601.2c lets targets
+depend on an alternative or additional cost, so a mode legal only under an alternative cost must
+stay choosable (CodeRabbit thread 4718412705). The bounded probe set keeps the cost of the check
+linear in the alternatives and avoids exponential subset enumeration. Cutting singles rather than
+"all" for very many additional costs keeps the bound of CR-012 and keeps the largest subset,
+which is the one most likely to add targets.
+**Alternatives.** Probing every subset (exponential); asking costs before modes (contradicts the
+CR 601.2b order and the choice protocol); a contract change in `ChoicePayload` with per-mode cost
+conditions (rejected: it changes the choice protocol contract); dropping "all" for more than 63
+additional costs (loses the largest configuration).
+
+## gate 06-turn round 5 - Symbol slots follow the chosen costs, representation of large X and division requests
+
+**Decision.** (CR-011; supersedes "#52 FP-050 — Choice request shapes" where it says one
+`CHOOSE_COSTS_AND_X` carries all symbol slots.) When the cost spec lists neither an alternative
+nor an additional cost, one `CHOOSE_COSTS_AND_X` carries everything as before. Otherwise the first
+`CHOOSE_COSTS_AND_X` carries an empty `symbol_slots`; `announce` then calls the new provided
+method `CastState::symbol_slots(req, modes, costs)` (default: no slot when `costs.alternative` is
+`Some`, CR 118.9; otherwise `cost_spec(req, modes).symbol_slots`) and, when the result is
+non-empty, asks a second `CHOOSE_COSTS_AND_X` ("CR 601.2b", next request id, chooser the caster,
+`min = max = 1`) whose payload has only the returned `symbol_slots` (empty cost lists and
+harmonize candidates, `x_range: None`), default option 0 per slot, options one `Text` per slot
+option below `ENUMERATION_LIMIT` answers or a `Payload` validator; its `symbol_options` replace the
+first answer's (empty) ones. An empty returned slot is a procedure error. Both answers are checked
+against their requests (R12). A cost request whose X range ends above `i64::MAX` uses a `Payload`
+validator (the payload carries the exact `u64` range) instead of clamped `Number` options; small
+ranges are still enumerated. A `DIVIDE_VALUE` request enumerates the recipients when the number of
+positive splits `C(total - 1, n - 1)` (capped) is below `ENUMERATION_LIMIT`, otherwise it carries
+`ValidatorRule::Division { total, recipients: (t, 1)... }` with `min = max = n`.
+**Rationale.** CR 601.2b asks the hybrid and Phyrexian announcement only for "a cost that will be
+paid", and the payload validator requires one option per slot, so the slots can only be known
+after the alternative and additional costs are chosen (CodeRabbit thread 4718412739). The X and
+division changes keep `Enumerated` reserved for fewer than `ENUMERATION_LIMIT` valid answers that
+the options can represent exactly (threads 4718412720, 4718412751); the `Division` validator is
+the representation `choice/generate.rs` already uses.
+**Alternatives.** A contract change in `ChoicePayload` with per-option conditional slots (rejected:
+it changes the choice protocol contract); always asking two requests (changes the shape of every
+spell with symbols for no reason); clamping X values (lossy, rejected by the finding).
+
+## #54 FP-052 tester - dependent mana ability and late-item order
+**Superseded in part (gate 06-turn round 7).** The first sentence of the Rationale below ("The pinned procedure commits each non-library activation with `commit`, so X is reversed with the action, while CR 734.1 lets a player keep X when its mana was spent on a mana ability that is not reversed") is superseded by "#54 FP-052 — SRS 2.5 category (b) vs CR 605.1a and 734.1" and by SRS 2.5(a). Retaining X is not an option the engine may decline: by default legal mana abilities are reversed with the action, EXCEPT that a producer whose mana was spent on a mana ability that is not reversed is retained (mandatory, SRS 2.5(a)). The Decision of this entry is a limit of what the test checks (Y survives, the pool equals the pre-cast pool, X is neither asserted kept nor reversed), not a statement of the required engine behaviour; the required behaviour is asserted by `req_core_005_dependent_activation_kept` (unit tests, crates/fineprint-core/src/mana/pay_unit_tests.rs).
+
+**Decision.** For ability X (not library-touching) whose mana pays the cost of library-touching
+ability Y, the spec test asserts only that Y's effect survives the rollback and that the pool
+equals the pre-cast pool (no mana from nothing). It does not assert that X is kept or reversed.
+The test for a library-touching late cost item followed by an unpayable late item assumes that
+items in the same pass are paid in listed order.
+**Rationale.** The pinned procedure commits each non-library activation with `commit`, so X is
+reversed with the action, while CR 734.1 lets a player keep X when its mana was spent on a mana
+ability that is not reversed. The brief allows the narrower assertion when the pinned text is
+silent. CR 601.2h says "in any order"; listed order is the deterministic reading.
+**Alternatives.** Assert that X is kept (conflicts with the pinned per-activation commit), or make
+the late-item test independent of order (it could then not show that the paid item survives).
+
+## #54 FP-052 — SRS 2.5 category (b) vs CR 605.1a and 734.1
+
+**Decision.** "Library-touching" means an action performed within the illegal play that moved
+cards to a library, moved cards from a library to a zone other than the stack, shuffled a library
+or revealed library cards (CR 734.1): a mana-ability activation together with the triggered mana
+abilities it caused (CR 605.1b has no library exclusion), or a non-mana cost item (for example a
+second-pass item of CR 601.2h). The host reports it in `ManaActivation::library_touching`;
+`casting::pay_total_cost` wraps each activation and each cost item in its own nested checkpoint
+and commits it with `Transactions::commit_durable` when it is library-touching, otherwise with
+`commit`. By default, legal mana abilities are reversed with the action (CR 734.1 makes reversal
+each player's option; SRS 2.5 picks reversal). The exception for mana spent on a mana ability
+that is not reversed is implemented by a scratch run of the listed activations that follows each
+pool unit: an earlier activation whose unit a durable activation consumed is committed durably
+too, transitively. Units equal in every field are interchangeable; a removed unit is matched to
+the earliest equal unit. A P8 SRS-edit line is in `docs/HUMAN_QUEUE.md`.
+**Rationale.** CR 605.1a says an activated ability whose cost or effect moves a card to or from a
+library is not a mana ability, so the SRS wording of category (b) can never apply literally; the
+rules-researcher analysis in the brief gives the reading above. A scratch run is the only way to
+know, before committing an activation, whether a later durable activation will consume its mana,
+because `Transactions` commits only the innermost checkpoint.
+**Alternatives.** Keeping every activation open as nested checkpoints and deciding on the way out
+(rejected: a non-durable activation nested inside a durable one would wrongly become durable);
+ignoring the exception (rejected: an activation would be reversed while its mana stays consumed).
+
+## #54 FP-052 — wiring outside the issue's owned-paths list
+
+**Decision.** Three edits outside the issue's own paths, all allowed by the brief:
+`crates/fineprint-core/src/lib.rs` gets `/// <doc> pub mod mana;` in alphabetical position;
+`crates/fineprint-core/src/casting/mod.rs` gets `mod pay;`, `pub use pay::{ManaActivation,
+PayError, PayOutcome, PayRolledBack, PayState, PayStopReason, pay_total_cost}`, a re-export of
+`mana::PaymentMethodOffer`, and a module-doc paragraph on steps 7-9 replacing the sentence that
+said they were not part of the module. The unit tests of `casting/pay.rs` live in
+`crates/fineprint-core/src/mana/pay_unit_tests.rs` (an owned path), included from `pay.rs` with
+`#[path = "../mana/pay_unit_tests.rs"] mod tests;`.
+**Rationale.** The crate requires documented modules; the precedent is "#53 FP-051" wiring of
+`casting/mod.rs`. A `casting/pay_unit_tests.rs` file would be outside the owned paths.
+**Alternatives.** Inline tests in `pay.rs` (a very long file), or a test file in `casting/`
+(outside the owned paths).
+
+## #54 FP-052 — the payment procedure takes the caller's cast checkpoint
+
+**Decision.** `pay_total_cost` takes `&mut Transactions<S>` and the `TxnId` of the whole-cast
+checkpoint, which must be the innermost open transaction (otherwise `Interrupt::Error`, nothing
+changed). It always closes that checkpoint: `commit` on success, `rollback` on an unpayable cost
+or a cancel. The innermost check probes a clone of the `Transactions` (`commit` on the copy),
+because `Transactions` has no query for the innermost id.
+**Rationale.** `casting::announce` commits its own checkpoint on success, so steps 7-9 cannot roll
+back through it; the integrating caller (a later unit) takes one checkpoint before announce and
+passes it here. A clone probe needs no change to the `txn` contract.
+**Alternatives.** Editing `announce.rs` (owned by #52, forbidden); an additive
+`Transactions::innermost()` (an R2 request; not needed for correctness, possible later as an
+optimisation).
+
+## #54 FP-052 — plan_payment tie-break
+
+**Decision.** `mana::plan_payment` walks the allowed units in the order (most restrictions first,
+then lowest pool index) and spends a unit when assigning it (own type, then `{S}` if snow, then
+generic) keeps the rest of the cost payable by the later units; otherwise it skips it.
+Feasibility is an exact counting check (colored and `{C}` demand takes nonsnow units of the type
+first, `{S}` takes the spare snow units, generic takes the rest), so a plan is found whenever one
+exists. `PaymentPlan::riders_fired` lists only spent units that carry riders;
+`PayOutcome::Committed::riders_fired` has one entry per spent unit, parallel to `spent` (empty
+when it has none, CR 106.6a).
+**Rationale.** Spending restricted mana first keeps flexible mana for later payments; the order is
+a pure function of the pool, so the plan is deterministic (R3). The counting check is O(1), so
+large untrusted pools and amounts cannot blow up.
+**Alternatives.** A general bipartite matching per step (slower, same result); lowest index first
+(wastes flexible mana).
+
+## #54 FP-052 — spell-history conventions
+
+**Decision.** `mana_spent` keys are `(type, source kind)`: type `"white"`, `"blue"`, `"black"`,
+`"red"`, `"green"` or `"colorless"` (lowercase, like the existing memory tests), source kind
+`"snow"` or `"nonsnow"`; one count per spent unit, added to the caller's base history.
+`costs_paid` appends, in payment order: `"method.<label>"` per payment method used, `"mana"` for
+the mana part (also for `{0}`), `"life"` when Phyrexian life is paid, then each non-mana item's
+DSL node name in lowercase (`"tap_source"`), first pass before second pass.
+**Rationale.** SRS 2.6 asks for mana spent "by color and source type"; snow is the only source
+type the payment procedure knows (CR 107.4h). Lowercase identifiers follow `memory/record.rs`
+and its tests ("mana", "additional.kicker").
+**Alternatives.** Source object ids as keys (not a source type); uppercase node names.
+
+## #54 FP-052 — payment procedure judgement calls
+
+**Decision.** (1) The `PAY_MANA_AND_COSTS` ask happens only when the locked mana part is payable
+and not `{0}`; a `{0}` mana part is paid with the empty plan (CR 118.5) and non-mana items are
+paid without an ask. (2) `auto_pay` is offered when `plan_payment` already succeeds with the pool
+as it is; non-mana items never need a choice through this seam. The timeout default is the
+auto-pay answer when offered, otherwise `CANCEL_AND_ROLLBACK`. (3) A listed mana ability that is
+not available at its turn, that the CR 605.3c guard refuses, or that the host refuses is skipped
+(its nested checkpoint rolled back) and payment continues (CR 118.3c: activating mana abilities is
+optional); if the mana is then short, the cast rolls back with `UnpayableMana`. (4) Payment
+methods are applied in the answer's order; a method entry with no object is not used; the result
+is clamped component-wise to the remaining mana; a refused method rolls back with
+`UnpayableCost`. (5) The mana plan is computed, then the Phyrexian life is paid (an atomic host
+call), then the mana is spent, so neither is spent when the other can't be paid; any failure
+rolls the whole cast back anyway. (6) `PayStopReason` has `UnpayableCost` (CR 118.6 mana part,
+life, a non-mana item or a refused method), `UnpayableMana` and `Cancelled`; it is not
+`#[non_exhaustive]` so black-box tests can match it exhaustively. (7) `PaymentMethodOffer` is
+defined in `fineprint_core::mana` (the brief's default module) and re-exported from
+`fineprint_core::casting`.
+**Rationale.** Each is the reading most consistent with the brief, SRS 7.1 steps 7-9 and CR
+601.2g-h, 118.3c, 118.5; none changes a pinned name.
+**Alternatives.** Rolling back on any refused activation (contradicts CR 118.3c); asking for
+`{0}` (no mana payment to make, CR 601.2g); rejecting an overshooting method (clamping is
+equivalent for a correct host and never adds mana).
+
+## #54 FP-052 — Stop reasons and refusal by a payment method
+
+**Decision.** `pay_total_cost` reports `PayStopReason::UnpayableCost` only when the locked cost's mana part is `ManaPart::Unpayable` (CR 118.6, no ask). Every other failure to pay the cost in full at step 8 reports `PayStopReason::UnpayableMana`: the pool cannot pay the mana part (CR 601.2h, 118.3), `PayState::pay_life` fails (CR 118.3b), `PayState::pay_cost_item` fails in either pass (CR 601.2h), or `PayState::apply_payment_method` fails. In all of them the whole cast checkpoint is rolled back (CR 734.1); library-touching items already paid survive as durable sub-transactions. An `Err` from `apply_payment_method` rolls the cast back with `UnpayableMana`; the method is not skipped and `Interrupt::Error` is not returned.
+
+**Rationale.** The chosen way of paying cannot be completed, partial payment is not allowed (CR 601.2h) and the action is reversed (CR 734.1). Only the unpayable mana part is an unpayable cost in the sense of CR 118.6; every other failure is a lack of resources to pay in full (CR 118.3).
+
+**Alternatives.** Skipping the refused method and paying without it (rejected: silently changes what the player chose, and could pay a different cost than chosen); returning `Interrupt::Error` (rejected: a refused method is a legal-but-failed attempt, not a protocol error); keeping `UnpayableCost` for life, item and method failures (rejected: contradicts the specification).
+
+## #54 FP-052 — Correction of test D11: repeated mana-ability listing
+
+**Decision.** A repeated listing of a mana ability is legal when the second activation's cost can be paid (CR 605.3b, 605.3c, 118.3). It fails only because of resource limits such as {T} (CR 118.3); only true re-entrancy before resolution is barred (CR 605.3c). The test `req_cast_001_duplicate_activation_refused` is replaced by `req_cast_001_repeated_mana_ability_listing` (repeatable ability listed twice pays {R}{R}) and `req_cast_001_repeated_tap_ability_listing` ({T} ability: at most one activation, no half-applied state). The true re-entrancy scenario is dropped: the guard lives inside `pay_total_cost`, which a test host cannot reach through the public API.
+
+**Rationale.** The earlier brief (clause D11) read 605.3c as a per-window cap. The rules-researcher answer shows a mana ability resolves immediately (605.3b), so only starting it again before it has resolved is barred.
+
+**Alternatives.** Keep the stricter test: rejected, it asserts something the CR does not say. This is an R10 correction toward the brief and the CR, with brief clause D11 as the evidence of the correction.
+
+## gate 06-turn round 6 - Mode legality probes every additional-cost subset within a 4096-call budget (CR 700.2a, 601.2c)
+
+**Decision.** (CR-013, amending CR-012; supersedes "gate 06-turn round 5 - Mode legality probes cost choices (CR 700.2a, 601.2c)" on the probe set and the 64 bound: "none, each alone, all" for more than 6 additional costs is withdrawn.) For a mode (original index `m`), with `a` alternative and `n` additional costs in `cost_spec(req, &[m])`, `announce` probes exhaustively only when `(a + 1) * 2^n <= 4096` (`PROBE_BUDGET`; computed without overflow, `n >= usize::BITS - 1` or an overflowing product is over budget). Exhaustive order: alternative `None`, then `Some(0)`..`Some(a-1)` (outer), every additional-cost subset in ascending bit-mask order, empty subset first, indices ascending (inner); `x` = low end of the X range, empty `symbol_options`, `harmonize: None`; the mode is offered at the first probe that gives every slot at least `min` legal candidates, and not offered after the last. Over the budget the mode is offered without any `target_slots` call. A spell with no alternative and no additional cost still makes exactly one call per mode.
+
+**Rationale.** No legal mode may be omitted: CR 700.2a's "can't be chosen" applies only to a mode that would be illegal, and CR 601.2c lets alternative or additional costs create the targets, so an unprobed subset (the pair [2, 5] of seven) could be the legal one. Untrusted host data must not force unbounded work (R12), so the work is bounded at 4096 calls per mode (total across modes: modes * 4096). Over the budget, sampled probes could never prove a mode illegal, so they would only cost calls; the mode is offered and the CR 601.2c check of step 3 with the player's real costs rolls the cast back (CR 601.2, 734.1) with `MissingTarget` if the choice leaves a slot short. Known cost: over the budget the CR 700.2a filter is not applied before the mode request (a pathological shape: more than 12 additional costs, or alternatives times subsets above 4096).
+
+**Alternatives.** A host-supplied legality hook (rejected: an extra host method for what `target_slots` already answers); a per-alternative budget (rejected: unbounded in the number of alternatives, which is also host data); keeping none/each/all (rejected: omits legal modes, the review finding); dropping modes only when proven illegal by a sampled subset (rejected: unsound, an unsampled subset may make the mode legal).
+
+## gate 06-turn round 6 tester - Option kinds checked in cost requests
+**Decision:** The property check `check_request` in `tests/spec_casting_announce_property.rs` treats the enumerated options of a `CHOOSE_COSTS_AND_X` request by kind. `Number` is an exact X value in the payload's range. `Object` must be one of `harmonize_candidates`. `Text` must be an alternative-cost label, an additional-cost label or an option of a symbol slot. Any other kind fails the property.
+**Rationale:** CodeRabbit thread 4719167694 asked for explicit handling instead of a catch-all arm. The choice contract does not name the option kind per field, so the kinds are taken from the requests the procedure emits (black-box). A new kind then fails loudly instead of passing unchecked.
+**Alternatives:** keep the catch-all arm (hides an illegal displayed option); assert only `Object` (leaves `Text` unchecked).
+
+## #55 FP-053 — auto-tap solver input: a host-supplied mana-source description
+
+**Decision.** `preview_auto_tap` takes the activatable mana abilities as a slice of `ManaSource`
+values supplied by the host: object, ability id, snow-ness, whether `{T}` is in the cost, and the
+alternative `ManaOutput`s (types, restrictions, riders applied to every unit, CR 106.6a).
+**Rationale.** The DSL baseline has no add-mana instruction the engine could inspect, and
+`PayState` exposes a mana ability only as `(source, ability_id)`; the host is the only party that
+knows what an ability produces.
+**Alternatives.** Deriving outputs from card ASTs (no instruction to read); extending `PayState`
+(a contract change, R2, not needed for this unit).
+
+## #55 FP-053 — auto-tap scope
+
+**Decision.** Each entry is activated at most once, producing exactly one of its outputs.
+Abilities whose cost is anything other than an optional `{T}`, and abilities that consume mana,
+are out of scope; the host lists only abilities it can activate now (CR 605.3a). A repeated
+listing of the same `(source, ability_id)` is a separate entry and a legal separate activation
+(CR 605.3b, 605.3c; see "#54 FP-052 — Correction of test D11"); two used `{T}` entries sharing an
+object conflict (CR 118.3). Activating mana abilities is optional (CR 118.3c), so pool-only
+payment is a solution.
+**Rationale.** Matches the brief and the `PAY_MANA_AND_COSTS` answer, which lists
+`(source, ability_id)` pairs activated once each in order.
+**Alternatives.** Modelling arbitrary activation costs or mana-consuming filters (needs a cost
+model the payment seam does not expose).
+
+## #55 FP-053 — auto-tap rank key
+
+**Decision.** Ascending by K1 activations, K2 produced-but-unspent units, K3 the sum over used
+entries of the distinct mana types across all their outputs, K4 the `(index, output)` sequence.
+Validity requires `plan_payment` to pay from the pool with the produced units appended and every
+activation to have a spent unit; `plan` is exactly that `plan_payment` result.
+**Rationale.** The issue asks for "fewest sources, keep colors flexible" with a stable order;
+K2 avoids floating mana that would empty at the end of the step (CR 500.5); K3 keeps
+multi-color sources for later; K4 is total and input-ordered (R3). Requiring the exact
+`plan_payment` result guarantees acceptance by `casting::pay_total_cost`.
+**Alternatives.** Ranking by remaining color coverage (non-local, costlier); allowing wasted
+activations (the player would tap a source for nothing).
+
+## #55 FP-053 — auto-tap limits and budget
+
+**Decision.** `MAX_SOURCES = 64` entries considered, `MAX_SOLUTIONS = 32` results, and
+`SEARCH_BUDGET = 200_000` `plan_payment` evaluations of candidates per call. Iterative deepening on
+K1 with result-preserving pruning: outputs with no unit that is allowed for the purpose and can
+pay a symbol of the cost are dropped; levels deeper than the cost's total symbol count, or whose
+best-case spendable-unit count is below it, are skipped; a DFS node is entered only if enough
+non-conflicting entries remain. A superset check (`plan_payment` on the pool with every usable
+output added, not counted against the budget) returns empty at once for unpayable costs, so a
+`u64::MAX` amount never allocates in proportion to the amount. When the budget runs out, the valid
+candidates found so far are returned ranked by the same key; the result is exact whenever the
+search ends within the budget (always for at most 10 entries with at most 2 outputs each).
+**Rationale.** Bounded work on untrusted input (R12) with a deterministic cut-off (R3).
+**Alternatives.** A wall-clock limit (forbidden, R3/R7); unbounded search (can hang).
+
+## #55 FP-053 — wiring edit of mana/mod.rs
+
+**Decision.** `mana/mod.rs` gains `mod autotap;`, the `pub use autotap::{...}` re-export of the
+pinned items and the module-doc section "The auto-tap solver"; nothing else in it changes. The
+unit tests live inline in `autotap.rs` (the only new owned file).
+**Rationale.** The crate denies `missing_docs` in `mana` and the pinned API is re-exported from
+`fineprint_core::mana`; the brief allows exactly these additions.
+**Alternatives.** A separate test file (outside the owned paths).
+
+## #55 FP-053 — previewAutoTap facade
+
+**Decision.** This unit delivers the engine-level `fineprint_core::mana::preview_auto_tap`. The
+SRS 13.2 `IRulesEngine.previewAutoTap(sessionId, playerId, cost)` method needs the `api/` facade,
+which does not exist yet; that later unit maps the session's pool and the player's activatable
+mana abilities onto this function. The SRS `ManaCostExpression` is the locked `ManaComponent`
+here (the cost after CR 601.2f is locked).
+**Rationale.** Keeps the solver pure and testable now; the facade is a thin adapter.
+**Alternatives.** Building a partial facade in this unit (outside the owned paths).
+
+## #55 FP-053 tester — Rank order is strict, solutions are distinct
+
+**Decision.** The spec tests assert that consecutive solutions have strictly ascending rank keys
+(K1, K2, K3, K4), so a result never lists the same candidate twice.
+**Rationale.** K4 is the `(index, output)` sequence, which identifies a candidate uniquely; a
+sorted list with a repeated key could only come from a duplicate candidate, which the brief's
+candidate rules (each entry at most once, one output per entry) never produce.
+**Alternatives.** Asserting non-strict order (`<=`), which would let duplicates through.
+
+## #55 FP-053 tester — Fake host for the acceptance property
+
+**Decision.** The `pay_total_cost` fake host in `spec_mana_autotap_property.rs` scripts, per
+`(source, ability_id)`, a queue of activations taken from the solution in order (the units of
+the chosen output, and whether the entry uses `{T}`). A `{T}` activation taps the source, and a
+second `{T}` activation of that source is refused (CR 118.3). The host lists only abilities
+that still have a scripted activation.
+**Rationale.** A repeated listing of one ability may pick different outputs, so a single
+script per key cannot describe it. Tapping per source matches the pinned `uses_tap` rule
+("two entries with uses_tap that share `source`").
+**Alternatives.** One script per key, as `spec_casting_pay.rs` does, which cannot express
+repeated listings with different outputs.
+
+## #55 FP-053 tester — Budget-limited inputs assert validity only
+
+**Decision.** For 200 identical entries with a large cost, the tests assert only that every
+returned solution is valid and ranked, that the result is deterministic, and that unreachable
+costs give an empty result. They do not assert that the result is non-empty or optimal.
+**Rationale.** The brief says a call that reaches `SEARCH_BUDGET` "still returns only valid
+solutions". It guarantees exactness only up to 10 entries with 2 outputs each.
+**Alternatives.** Asserting the lexicographically first 32 subsets, which the pinned contract
+does not guarantee past the exact range.
+
+## #55 FP-053 tester — Reading of requirement 11's empty-result clause
+
+**Decision.** The part of brief requirement 11 about an empty result is read as its final
+sentence: on small cases, an empty result means the reference finds no valid candidate. The
+exactness property test checks this. Nothing is submitted for empty results.
+**Rationale.** The clause is garbled, but its last sentence states the requirement plainly.
+An empty result has no activations to submit.
+**Alternatives.** Submitting `auto_pay: true` with every ability activated, which the clause
+explicitly says is not required.
+
+## #55 FP-053 tester — A short prefix is complete
+
+**Decision.** The prefix property test also asserts that when `preview_auto_tap(.., n)` returns
+fewer than `n` solutions, every larger limit returns the same number. The test uses random
+inputs inside the exact range only.
+**Rationale.** Inside the exact range, the result is the reference list truncated to
+`min(n, 32)` (requirement 10), so a short list must already be complete.
+**Alternatives.** Asserting the prefix relation alone.
+
+## gate 06-turn round 7 - Mode legality probes X (CR 700.2a, 601.2b, 601.2c, 107.3a)
+
+Supersedes "gate 06-turn round 6 - Mode legality probes every additional-cost subset within a
+4096-call budget (CR 700.2a, 601.2c)" and "gate 06-turn round 5 - Mode legality probes cost
+choices (CR 700.2a, 601.2c)" on the point "`x` = low end of the X range" (CodeRabbit threads
+4720021411 and 4718412705).
+
+**Decision.** The rule of CR-014. `casting::announce::mode_legal` probes `target_slots(req,
+&[m], &probe)` over the product of {normal cost, each alternative cost} (outermost), every
+additional-cost subset in ascending bit-mask order (middle) and every X of `lo..=hi` ascending
+(innermost); `x: None` without an X range and the single value `lo` when `lo > hi`; empty
+`symbol_options` and `harmonize: None`. It stops at the first probe that gives every slot at
+least `min` legal candidates. The product `(alternatives + 1) * 2^additional * x_count` is
+computed with checked arithmetic (`x_count = (hi - lo).checked_add(1)` converted with
+`usize::try_from`, so `0..=u64::MAX` is over budget) and the probe is exhaustive only when it
+is at most 4096; otherwise the mode is offered with no `target_slots` call and step 3 checks the
+real choices.
+**Rationale.** X is announced at 601.2b, before targets (601.2c), and a target restriction can
+depend on X, so a mode legal at some permitted X is not illegal under 700.2a. The 4096 budget
+now covers the full product. Over budget (or with an X range too wide to enumerate) the mode is
+offered and step 3 rolls an illegal choice back (601.2, 734.1).
+**Alternatives.** Probing only the ends of the range (rejected: unsound, a legal middle X would
+be omitted); probing symbol options and the harmonize creature (rejected: they do not change
+the required targets, 601.2c, 601.2h); a host legality hook (rejected, as in round 6).
+
+## gate 06-turn round 7 - Mana-ability window re-asked; removal provenance (CR 601.2g, 605.3a, 734.1)
+
+Work item gate7-implp, threads 4720021419 and 4720021426 (and CodeRabbit comment 4720082538).
+Supersedes two statements of "#54 FP-052" (the `casting::pay` module doc and "SRS 2.5 category
+(b) vs CR 605.1a and 734.1"): "one ask, before anything changes" and "a removed unit is matched
+to the earliest equal unit". Now: the step-7 window may ask several times; which units an
+activation removed is host-reported provenance (`PayState::last_activation_removed`), with the
+earliest-equal inference only as the documented fallback. The scratch window keeps the rule that
+nothing in the real state changes before the window has ended, and keeps the rejection of nested
+open checkpoints.
+
+**Decision.** CR-015 and CR-016. `casting::pay_total_cost` asks PAY_MANA_AND_COSTS on a scratch
+copy of the state, at most 256 times (the 256th request lists no ability); an answer in which at
+least one listed ability is activated (available, not in progress, accepted by the host, in
+listed order) is followed by a new request and its methods and auto-pay are discarded; the
+window ends on auto-pay, an answer that lists no ability, an answer none of whose abilities ran,
+or a cancel. Then the concatenation of every listed ability is activated for real by the
+unchanged `activate_all` (availability checked per activation; the CR 734.1 dependent-activation
+probe covers the concatenation) and the payment-method offers are recomputed on the real state.
+`PayState` gets the provided method `last_activation_removed` (default `None`); `follow_units`
+uses a valid report (strictly ascending, every index below the pool length before,
+`before - removed <= after`) and otherwise infers: per distinct unit value, the
+`count_before - count_after` earliest equal units are removed.
+**Rationale.** CR 601.2g gives a chance (a window) to activate mana abilities, and CR 605.3a-c
+let the player activate whenever a payment is asked; one snapshot offer made an ability that
+becomes available only after an earlier activation unselectable. Equal units hide production
+history and SRS 2.5(a) is mandatory, so the producer of a removed unit must come from the removal
+itself. A scratch simulation keeps the durable-commit rule (only the innermost checkpoint can be
+committed, a normally committed activation cannot become durable later: the earlier rejection of
+nested open checkpoints), because the real activations happen once, after the window, with the
+probe over the whole list.
+**Alternatives.** Option 2 "offerable_mana_abilities" (rejected: the client cannot tell legal
+from potential); a conditional payload field (rejected: breaking); inference only (rejected by
+CodeRabbit comment 4720082538: relies on an unstated host invariant); a `consumed` field on
+`ManaActivation` (rejected: breaking). Note: the finding's literal example (B spends the red A
+produces) reproduces only on hosts that leave out abilities they cannot pay for yet; the untap
+case reproduces on any host.

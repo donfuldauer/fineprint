@@ -22,7 +22,7 @@ use crate::events::{
     AppliedEffects, EventBatch, EventContext, EventError, EventInstance, EventState, ExecutedBatch,
     GameEvent,
 };
-use crate::memory::{LkiStore, MemoryTable};
+use crate::memory::{CharacteristicsProvider, LkiStore, MemoryTable};
 use crate::permanent::Permanents;
 use crate::state::GameState;
 use crate::zones::{ZoneKind, Zones};
@@ -95,6 +95,14 @@ pub struct BusReport {
 /// follow-up events once per recipient per batch (CR 122.1c, CR 615.13). At most
 /// [`MAX_BUS_EVENTS`] event instances are taken up in one call.
 ///
+/// **Provider snapshot (limit of this entry point).** `ctx.provider` is a per-batch snapshot
+/// (see [`EventContext`]): this entry point uses it for EVERY batch of the call, the submitted
+/// batch and every `Prevent` follow-up batch alike. A follow-up batch therefore sees the
+/// evaluated characteristics and controllers from before the call (CR 613.1-613.4,
+/// CR 613.1b): its chooser and its last known information (CR 603.10a, CR 608.2h) do not
+/// reflect what earlier batches of the call changed. Use [`process_batch_refreshing`] to have
+/// the bus rebuild the provider over the live state before each follow-up batch.
+///
 /// # Errors
 /// [`BusInterrupt::Pending`] when a player must choose (propagate it to the
 /// [`ChoiceSession`](crate::choice::ChoiceSession)); [`BusInterrupt::Error`] on a failure. In
@@ -106,6 +114,87 @@ pub fn process_batch(
     batch: &EventBatch,
     sba: bool,
     choices: &mut ChoiceContext<'_>,
+) -> Result<BusReport, BusInterrupt> {
+    process(ctx, registry, batch, sba, choices, None)
+}
+
+/// Builds the evaluated characteristics provider a `Prevent` follow-up batch is resolved and
+/// executed with (REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003); see
+/// [`process_batch_refreshing`].
+///
+/// [`ProviderRefresh::refresh`] is called with the context as it stands after the previous
+/// batch executed (the live game state, zones, permanents, object markers and memories) and
+/// must return a provider answering with the characteristics and controllers evaluated
+/// through layers 1a-7d over THAT state (CR 613.1-613.4, CR 613.1b, CR 608.2h), for example a
+/// [`LayeredProvider`](crate::layers::LayeredProvider) over an owned clone of the state the
+/// returned value carries. It must not read `ctx.provider` (that is the previous snapshot).
+///
+/// Determinism (R3): the result must be a pure function of the context it is given, so that a
+/// [`ChoiceSession`](crate::choice::ChoiceSession) replay re-derives identical providers.
+pub trait ProviderRefresh {
+    /// The evaluated provider over the live state of `ctx` (CR 613.1-613.4). The returned
+    /// provider may borrow `self` but not `ctx`.
+    fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_>;
+}
+
+/// [`process_batch`], with the evaluated provider refreshed before each `Prevent` follow-up
+/// batch (REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003).
+///
+/// The submitted batch is resolved and executed with `ctx.provider`, exactly as
+/// [`process_batch`] does. Before each follow-up batch (child depth 1 and deeper) the bus
+/// calls `refresh` once over the live state left by the previous batch and resolves AND
+/// executes that batch with the returned provider: its replacement choosers see the
+/// controllers in effect after the previous batch (CR 613.1b, CR 616.1), and the last known
+/// information it captures holds the characteristics evaluated after the previous batch
+/// (CR 603.10a, CR 608.2h, CR 613.1-613.4). The provider is never refreshed between the
+/// events of one batch: all simultaneous departures of a batch share one snapshot
+/// (CR 603.10a, CR 704.8). `refresh` is called once per follow-up batch and never for the
+/// submitted batch.
+///
+/// # Errors
+/// As [`process_batch`]; the registry and every component of `ctx` are restored on
+/// [`BusInterrupt::Pending`] and on [`BusInterrupt::Error`].
+pub fn process_batch_refreshing(
+    ctx: &mut EventContext<'_>,
+    registry: &mut ReplacementRegistry,
+    batch: &EventBatch,
+    sba: bool,
+    choices: &mut ChoiceContext<'_>,
+    refresh: &dyn ProviderRefresh,
+) -> Result<BusReport, BusInterrupt> {
+    process(ctx, registry, batch, sba, choices, Some(refresh))
+}
+
+/// Processes one event (`sba` false) through the bus with the provider refreshed before each
+/// follow-up batch (REQ-EVENT-001); see [`process_batch_refreshing`].
+///
+/// # Errors
+/// As [`process_batch_refreshing`].
+pub fn process_event_refreshing(
+    ctx: &mut EventContext<'_>,
+    registry: &mut ReplacementRegistry,
+    event: GameEvent,
+    choices: &mut ChoiceContext<'_>,
+    refresh: &dyn ProviderRefresh,
+) -> Result<BusReport, BusInterrupt> {
+    process_batch_refreshing(
+        ctx,
+        registry,
+        &EventBatch::from_events(vec![event]),
+        false,
+        choices,
+        refresh,
+    )
+}
+
+/// The shared body of [`process_batch`] and [`process_batch_refreshing`].
+fn process(
+    ctx: &mut EventContext<'_>,
+    registry: &mut ReplacementRegistry,
+    batch: &EventBatch,
+    sba: bool,
+    choices: &mut ChoiceContext<'_>,
+    refresh: Option<&dyn ProviderRefresh>,
 ) -> Result<BusReport, BusInterrupt> {
     let registry_before = registry.clone();
     let world = WorldSnapshot::take(ctx);
@@ -121,6 +210,8 @@ pub fn process_batch(
         work: 0,
         allotments: BTreeMap::new(),
         retired: BTreeSet::new(),
+        refresh,
+        fresh: None,
     };
     let result = match bus.charge(batch.events().len()) {
         Ok(()) => bus.run(batch.events().to_vec(), sba, 0),
@@ -298,6 +389,11 @@ struct Bus<'r, 'c, 'h> {
     /// The old ids of the objects an executed batch of this call moved to another zone
     /// (CR 400.7); see [`Bus::impossible`].
     retired: BTreeSet<ObjectId>,
+    /// The provider factory of [`process_batch_refreshing`]; `None` for [`process_batch`].
+    refresh: Option<&'r dyn ProviderRefresh>,
+    /// The provider the current follow-up batch is resolved and executed with (built by
+    /// `refresh` before that batch, CR 613.1-613.4); `None` while `ctx.provider` is in use.
+    fresh: Option<Box<dyn CharacteristicsProvider + 'r>>,
 }
 
 impl Bus<'_, '_, '_> {
@@ -315,12 +411,23 @@ impl Bus<'_, '_, '_> {
     /// executes its final events, `Instead` lineages included, as ONE batch (CR 704.3), then
     /// processes its `Prevent` follow-up events as one child batch. The events were charged
     /// against the work budget when they were submitted or queued.
+    ///
+    /// With a provider factory ([`process_batch_refreshing`]), a child batch (`depth` > 0) is
+    /// resolved and executed with a provider built once, before it, over the live state the
+    /// previous batch left (CR 613.1-613.4, CR 613.1b; its LKI, CR 603.10a, CR 608.2h); never
+    /// between the events of one batch (CR 603.10a, CR 704.8: one snapshot for every
+    /// simultaneous departure).
     fn run(
         &mut self,
         events: Vec<EventInstance>,
         sba: bool,
         depth: usize,
     ) -> Result<(), BusInterrupt> {
+        if depth > 0
+            && let Some(refresh) = self.refresh
+        {
+            self.fresh = Some(refresh.refresh(&*self.ctx));
+        }
         let plan = self.resolve_batch(events, sba, depth)?;
         self.execute(plan.events)?;
         if plan.after.is_empty() {
@@ -554,9 +661,26 @@ impl Bus<'_, '_, '_> {
             entry_copies.extend(plan.into_iter().map(|copied| (position, copied)));
             events.push(instance);
         }
-        let executed = self
-            .ctx
-            .execute_batch_with_entry_copies(&EventBatch::new(events), &entry_copies)?;
+        let batch = EventBatch::new(events);
+        let executed = if let Some(fresh) = self.fresh.as_deref() {
+            // A follow-up batch of `process_batch_refreshing`: the same context with the
+            // provider built over the state after the previous batch (CR 603.10a, CR 608.2h).
+            let ctx = &mut *self.ctx;
+            let mut child = EventContext {
+                game: &mut *ctx.game,
+                zones: &mut *ctx.zones,
+                ids: &mut *ctx.ids,
+                permanents: &mut *ctx.permanents,
+                memories: &mut *ctx.memories,
+                lki: &mut *ctx.lki,
+                events: &mut *ctx.events,
+                provider: fresh,
+            };
+            child.execute_batch_with_entry_copies(&batch, &entry_copies)?
+        } else {
+            self.ctx
+                .execute_batch_with_entry_copies(&batch, &entry_copies)?
+        };
         // CR 400.7: a moved object is a new object; its old id is retired for later batches.
         for ev in &executed.events {
             if let crate::events::Outcome::ZoneChange(m) = &ev.outcome
@@ -571,10 +695,21 @@ impl Bus<'_, '_, '_> {
         Ok(())
     }
 
+    /// The evaluated provider of the batch being processed (CR 613.1-613.4): the one built for
+    /// the current follow-up batch by [`process_batch_refreshing`], else `ctx.provider`.
+    fn provider(&self) -> &dyn CharacteristicsProvider {
+        match self.fresh.as_deref() {
+            Some(fresh) => fresh,
+            None => self.ctx.provider,
+        }
+    }
+
     /// The chooser of `event` (CR 616.1): the controller of the affected object (CR 112.2,
     /// CR 109.4: a permanent's or a stack object's controller), its owner if it has no
-    /// controller, else the affected player; for a token creation the controller it would
-    /// enter under; with neither, the active player.
+    /// controller (CR 108.4a), else the affected player; for a token creation the controller it
+    /// would enter under; with neither, the active player. A permanent's controller is the
+    /// layer-evaluated one (CR 613.1b) from the batch's provider ([`Bus::provider`]), falling
+    /// back to the stored controller when the provider names none.
     fn chooser(&self, event: &GameEvent) -> Result<PlayerId, BusError> {
         // CR 616.1
         if let GameEvent::CreateToken {
@@ -585,7 +720,11 @@ impl Bus<'_, '_, '_> {
         }
         if let Some(object) = affected_object(event) {
             if let Some(permanent) = self.ctx.permanents.get(object) {
-                return Ok(permanent.controller());
+                // CR 613.1b, CR 616.1: the controller after layer 2, else the stored one.
+                return Ok(self
+                    .provider()
+                    .controller(object)
+                    .unwrap_or_else(|| permanent.controller()));
             }
             // CR 109.4, CR 112.2: a spell on the stack has a controller; elsewhere the owner.
             return self
@@ -710,7 +849,9 @@ impl Bus<'_, '_, '_> {
     /// that never happens does nothing. CR 614.7a, CR 120.8: a source that would deal 0 damage
     /// deals no damage. CR 701.26b: only tapped permanents can be untapped (so CR 122.1d's
     /// stun counter replaces only a real untap). CR 701.26a: only untapped permanents can be
-    /// tapped. Such an event offers no effect and reaches the executor unchanged (a no-op).
+    /// tapped. CR 701.3d: an `Unattach` happens only for an attached permanent, an
+    /// `UnattachFrom` only for one attached to exactly that host. Such an event offers no
+    /// effect and reaches the executor unchanged (a no-op).
     fn would_happen(&self, event: &GameEvent) -> bool {
         match event {
             GameEvent::Damage { amount, .. } => *amount > 0,
@@ -726,6 +867,15 @@ impl Bus<'_, '_, '_> {
                 .permanents
                 .get(*object)
                 .is_some_and(|p| p.status().tapped),
+            // CR 701.3d, CR 614.7: only an attached permanent can become unattached.
+            GameEvent::Unattach { attachment } => {
+                self.ctx.permanents.attached_to(*attachment).is_some()
+            }
+            // CR 701.3d, CR 614.7: only the exact link to `host` is cleared, so an attachment
+            // that is unattached or attached to another host does not become unattached.
+            GameEvent::UnattachFrom { attachment, host } => {
+                self.ctx.permanents.attached_to(*attachment) == Some(*host)
+            }
             _ => true,
         }
     }
@@ -1442,4 +1592,690 @@ fn modify(event: &mut GameEvent, m: Modification) -> bool {
         _ => {}
     }
     true
+}
+
+#[cfg(test)]
+mod evaluated_chooser_tests {
+    // Unit tests of the replacement chooser with the layer-evaluated controller: REQ-REPL-*
+    // (CR 616.1, CR 108.4a), REQ-LAYER-001 (CR 613.1b), REQ-EVENT-001 (the bus). Synthetic ids
+    // and synthetic characteristics only.
+
+    use std::collections::BTreeSet;
+
+    use fineprint_base::encode::encode_to_vec;
+    use fineprint_base::hash::{Digest, leaf_digest};
+    use fineprint_base::ids::{CardId, EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
+    use fineprint_dsl::ability::Layer;
+    use fineprint_dsl::card::{ColorBitmask, TextTokenStream};
+    use fineprint_dsl::expr::ObjectSelectorAST;
+
+    use super::*;
+    use crate::choice::{ChoicePayload, ChoiceResponse, ChoiceSession, Interrupt, Status};
+    use crate::events::{EventBatch, EventContext, EventState, GameEvent, ZoneChangeCause};
+    use crate::layers::{
+        Affected, ContinuousEffect, ContinuousEffects, EffectOrigin, LayerEnvironment,
+        LayerModification, LayeredProvider, MatchContext, ObjectBase,
+    };
+    use crate::memory::{LkiStore, MemoryTable};
+    use crate::objects::Characteristics;
+    use crate::permanent::Permanents;
+    use crate::replacement::{Action, BusEventKind, EventMatcher, ReplacementEffect};
+    use crate::state::GameState;
+    use crate::txn::Transactional;
+    use crate::zones::{MoveRequest, ZoneKind, Zones, ZonesConfig};
+
+    fn p(n: u64) -> PlayerId {
+        PlayerId::new(n)
+    }
+
+    fn chars() -> Characteristics {
+        Characteristics {
+            names: BTreeSet::from(["test.vanilla_2_2".to_owned()]),
+            mana_cost: None,
+            color_indicator: None,
+            colors: ColorBitmask::NONE,
+            supertypes: BTreeSet::new(),
+            card_types: BTreeSet::from(["Creature".to_owned()]),
+            subtypes: BTreeSet::new(),
+            rules_text: TextTokenStream::default(),
+            abilities: Vec::new(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            hand_modifier: None,
+            life_modifier: None,
+        }
+    }
+
+    /// The layer environment of the world's zones: every object with its zone record's
+    /// rules-level controller as its base controller.
+    struct Env<'a> {
+        zones: &'a Zones,
+    }
+
+    impl LayerEnvironment for Env<'_> {
+        fn objects(&self) -> Vec<ObjectId> {
+            let mut all: Vec<ObjectId> = self.zones.all_object_ids();
+            all.sort_unstable();
+            all
+        }
+
+        fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+            self.zones.object(id).map(|r| ObjectBase {
+                characteristics: chars(),
+                controller: r.rules_controller(),
+                on_battlefield: r.zone.kind() == ZoneKind::Battlefield,
+            })
+        }
+
+        fn matches(&self, _selector: &ObjectSelectorAST, _ctx: &MatchContext<'_>) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct World {
+        game: GameState,
+        zones: Zones,
+        ids: IdGenerator<ObjectId>,
+        permanents: Permanents,
+        memories: MemoryTable,
+        lki: LkiStore,
+        events: EventState,
+        registry: ReplacementRegistry,
+        layer_effects: ContinuousEffects,
+    }
+
+    impl World {
+        /// Two players, turn 1, active player 1, two competing `Skip` effects on `kind`.
+        fn new(kind: BusEventKind) -> World {
+            let mut game = GameState::new(7, 2, 20).unwrap();
+            game.set_turn_number(1);
+            game.set_active_player(Some(p(1))).unwrap();
+            let mut registry = ReplacementRegistry::new();
+            for id in [1, 2] {
+                registry
+                    .add(ReplacementEffect::new(
+                        EffectId::new(id),
+                        EventMatcher::new(kind),
+                        Action::Skip,
+                    ))
+                    .unwrap();
+            }
+            World {
+                game,
+                zones: Zones::new(&[p(1), p(2)], ZonesConfig::default()),
+                ids: IdGenerator::new(),
+                permanents: Permanents::new(),
+                memories: MemoryTable::new(),
+                lki: LkiStore::new(),
+                events: EventState::new(),
+                registry,
+                layer_effects: ContinuousEffects::new(),
+            }
+        }
+
+        /// A new object owned by `owner` in a zone of `kind`; on the battlefield it is a
+        /// permanent stored as controlled by `stored`.
+        fn create(&mut self, card: u64, owner: u64, stored: u64, kind: ZoneKind) -> ObjectId {
+            let mut req = MoveRequest::new(kind);
+            if kind == ZoneKind::Battlefield {
+                req.controller = Some(p(stored));
+            }
+            let id = self
+                .zones
+                .create_object(&mut self.ids, CardId::new(card), p(owner), req)
+                .unwrap();
+            if kind == ZoneKind::Battlefield {
+                self.permanents.enter(id, p(stored), 1).unwrap();
+            }
+            id
+        }
+
+        /// A resolved layer-2 control effect giving `object` to `to` (CR 613.1b).
+        fn give_control(&mut self, effect: u64, object: ObjectId, to: u64) {
+            self.layer_effects
+                .register(
+                    EffectId::new(effect),
+                    ContinuousEffect {
+                        source: None,
+                        controller: p(to),
+                        timestamp: Timestamp::new(effect),
+                        layer: Layer::L2,
+                        is_cda: false,
+                        origin: EffectOrigin::Resolved,
+                        affected: Affected::Objects([object].into_iter().collect()),
+                        modification: LayerModification::SetController(p(to)),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    impl Transactional for World {
+        fn state_hash(&self) -> Digest {
+            let mut bytes = encode_to_vec(&self.game.state_hash());
+            bytes.extend(encode_to_vec(&self.zones));
+            bytes.extend(encode_to_vec(&self.permanents));
+            bytes.extend(encode_to_vec(&self.memories));
+            bytes.extend(encode_to_vec(&self.lki));
+            bytes.extend(encode_to_vec(&self.events));
+            bytes.extend(encode_to_vec(&self.registry));
+            leaf_digest(&bytes)
+        }
+
+        fn priority_player(&self) -> Option<PlayerId> {
+            None
+        }
+
+        fn carry_durable(restored: Self, _before: &Self, _after: &Self) -> Self {
+            restored
+        }
+    }
+
+    /// Runs `event` through the bus with the layer-evaluated provider and returns the first
+    /// replacement request's chooser, its effects, and the final state hash (answering index 0).
+    fn chooser_of(w: &World, event: GameEvent) -> (PlayerId, Vec<String>, Digest) {
+        let batch = EventBatch::from_events(vec![event]);
+        let procedure = move |s: &mut World, ch: &mut crate::choice::ChoiceContext<'_>| {
+            let World {
+                game,
+                zones,
+                ids,
+                permanents,
+                memories,
+                lki,
+                events,
+                registry,
+                layer_effects,
+            } = s;
+            let snapshot = zones.clone();
+            let env = Env { zones: &snapshot };
+            let provider = LayeredProvider::new(layer_effects, &env);
+            let mut ctx = EventContext {
+                game,
+                zones,
+                ids,
+                permanents,
+                memories,
+                lki,
+                events,
+                provider: &provider,
+            };
+            match process_batch(&mut ctx, registry, &batch, false, ch) {
+                Ok(r) => Ok(Ok(r)),
+                Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+                Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+            }
+        };
+        let mut session = ChoiceSession::start(w.clone(), procedure).unwrap();
+        let Status::Pending(request) = session.status() else {
+            panic!("no replacement choice was asked");
+        };
+        let request = request.clone();
+        let ChoicePayload::ChooseReplacementEffect { effects, .. } = &request.payload else {
+            panic!("not a replacement request");
+        };
+        assert_eq!(request.reason.cr, "CR 616.1");
+        session
+            .submit(
+                request.request_id,
+                ChoiceResponse::SelectReplacement { index: 0 },
+            )
+            .unwrap();
+        let Status::Done { output, .. } = session.status() else {
+            panic!("more than one request");
+        };
+        assert!(output.is_ok(), "bus failed: {output:?}");
+        (request.chooser, effects.clone(), session.state_hash())
+    }
+
+    fn tap(object: ObjectId) -> GameEvent {
+        GameEvent::Tap { object }
+    }
+
+    /// REQ-REPL-*, REQ-LAYER-001, REQ-EVENT-001; CR 616.1, CR 613.1b: a creature stored as
+    /// controlled by P1 under a layer-2 effect giving it to P2 sends the choice to P2.
+    #[test]
+    fn req_repl_cr_616_1_chooser_is_evaluated_controller() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        w.give_control(1, x, 2);
+        let (chooser, effects, _) = chooser_of(&w, tap(x));
+        assert_eq!(chooser, p(2));
+        assert_eq!(effects.len(), 2);
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; CR 616.1: with no layer-2 effect the stored controller P1
+    /// chooses.
+    #[test]
+    fn req_repl_cr_616_1_chooser_without_control_effect() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        assert_eq!(chooser_of(&w, tap(x)).0, p(1));
+    }
+
+    /// REQ-REPL-*, REQ-LAYER-001; CR 616.1, CR 613.1b: stored controller P2, evaluated P1
+    /// (owned by P2): P1 chooses.
+    #[test]
+    fn req_repl_cr_616_1_chooser_evaluated_back_to_p1() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 2, 2, ZoneKind::Battlefield);
+        w.give_control(1, x, 1);
+        assert_eq!(chooser_of(&w, tap(x)).0, p(1));
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; CR 616.1, CR 108.4a: a card in a graveyard has no
+    /// controller, so its owner chooses, even if a layer-2 effect names another player.
+    #[test]
+    fn req_repl_cr_108_4a_non_permanent_owner_chooses() {
+        let mut w = World::new(BusEventKind::ZoneChange);
+        let card = w.create(1, 2, 2, ZoneKind::Graveyard);
+        w.give_control(1, card, 1);
+        let event = GameEvent::ZoneChange {
+            object: card,
+            request: MoveRequest::new(ZoneKind::Exile),
+            cause: ZoneChangeCause::Other,
+        };
+        assert_eq!(chooser_of(&w, event).0, p(2));
+    }
+
+    /// REQ-REPL-*, REQ-EVENT-001; R3 (determinism): repeated runs from the same state ask the
+    /// same player for the same choice and end in the same state.
+    #[test]
+    fn req_repl_cr_616_1_chooser_is_deterministic() {
+        let mut w = World::new(BusEventKind::Tap);
+        let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+        w.give_control(1, x, 2);
+        let first = chooser_of(&w, tap(x));
+        for _ in 0..4 {
+            assert_eq!(chooser_of(&w, tap(x)), first);
+        }
+    }
+
+    /// Gate 06-turn F6/F13: the evaluated provider is rebuilt before each `Prevent` follow-up
+    /// batch by [`process_batch_refreshing`] (REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003,
+    /// REQ-REPL-*). Synthetic ids and synthetic characteristics only.
+    mod refresh {
+        use std::cell::Cell;
+        use std::collections::BTreeMap;
+
+        use super::*;
+        use crate::choice::PendingChoiceRequest;
+        use crate::events::{CounterTarget, DamageTarget, ObjectMarkers};
+        use crate::layers::{literal, literal_of};
+
+        /// A synthetic 2/2 creature (base characteristics of every object here).
+        fn creature_2_2() -> Characteristics {
+            Characteristics {
+                power: Some(literal(2)),
+                toughness: Some(literal(2)),
+                ..chars()
+            }
+        }
+
+        /// An owned layer environment over a copy of the zones and the object markers: every
+        /// object is a 2/2 with its zone record's rules-level controller; P/T counters come
+        /// from the markers (CR 613.4); a static effect exists while its source is on the
+        /// battlefield (an old id of a moved source is unknown, CR 400.7).
+        struct LiveEnv {
+            zones: Zones,
+            markers: ObjectMarkers,
+        }
+
+        impl LiveEnv {
+            fn of(zones: &Zones, events: &EventState) -> LiveEnv {
+                LiveEnv {
+                    zones: zones.clone(),
+                    markers: events.markers().clone(),
+                }
+            }
+        }
+
+        impl LayerEnvironment for LiveEnv {
+            fn objects(&self) -> Vec<ObjectId> {
+                let mut all: Vec<ObjectId> = self.zones.all_object_ids();
+                all.sort_unstable();
+                all
+            }
+
+            fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+                self.zones.object(id).map(|r| ObjectBase {
+                    characteristics: creature_2_2(),
+                    controller: r.rules_controller(),
+                    on_battlefield: r.zone.kind() == ZoneKind::Battlefield,
+                })
+            }
+
+            fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+                self.markers
+                    .counters(id)
+                    .into_iter()
+                    .filter(|&(_, n)| n >= 1)
+                    .collect()
+            }
+
+            fn generating_ability_exists(
+                &self,
+                _effect: EffectId,
+                source: ObjectId,
+                _source_view: Option<&crate::layers::Evaluated>,
+            ) -> bool {
+                self.zones
+                    .object(source)
+                    .is_some_and(|r| r.zone.kind() == ZoneKind::Battlefield)
+            }
+
+            fn matches(&self, _selector: &ObjectSelectorAST, _ctx: &MatchContext<'_>) -> bool {
+                false
+            }
+        }
+
+        /// A layer-evaluated provider owning its environment (CR 613.1-613.4).
+        struct Owned<'a> {
+            effects: &'a ContinuousEffects,
+            env: LiveEnv,
+        }
+
+        impl CharacteristicsProvider for Owned<'_> {
+            fn characteristics(&self, id: ObjectId) -> Option<Characteristics> {
+                LayeredProvider::new(self.effects, &self.env).characteristics(id)
+            }
+
+            fn controller(&self, id: ObjectId) -> Option<PlayerId> {
+                LayeredProvider::new(self.effects, &self.env).controller(id)
+            }
+        }
+
+        /// The factory: a fresh [`Owned`] over the live zones and markers, counting its calls.
+        struct Refresh<'a> {
+            effects: &'a ContinuousEffects,
+            calls: &'a Cell<usize>,
+        }
+
+        impl ProviderRefresh for Refresh<'_> {
+            fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_> {
+                self.calls.set(self.calls.get() + 1);
+                Box::new(Owned {
+                    effects: self.effects,
+                    env: LiveEnv::of(ctx.zones, ctx.events),
+                })
+            }
+        }
+
+        /// What one bus call through a [`ChoiceSession`] produced.
+        struct Run {
+            request: Option<PendingChoiceRequest>,
+            state: World,
+            output: Result<BusReport, BusError>,
+            hash: Digest,
+        }
+
+        /// Runs `submitted` as one batch (`sba` false) through the bus from `w`, the root
+        /// provider built over the state before the call; through
+        /// [`process_batch_refreshing`] when `refreshing`, else [`process_batch`]. A
+        /// replacement request, if any, is answered with index 0. `calls` counts the
+        /// factory's calls over every run of the procedure.
+        fn drive_bus(
+            w: &World,
+            submitted: Vec<GameEvent>,
+            refreshing: bool,
+            calls: &Cell<usize>,
+        ) -> Run {
+            let batch = EventBatch::from_events(submitted);
+            let procedure = |s: &mut World, ch: &mut crate::choice::ChoiceContext<'_>| {
+                let World {
+                    game,
+                    zones,
+                    ids,
+                    permanents,
+                    memories,
+                    lki,
+                    events,
+                    registry,
+                    layer_effects,
+                } = s;
+                let effects: &ContinuousEffects = layer_effects;
+                let root = Owned {
+                    effects,
+                    env: LiveEnv::of(zones, events),
+                };
+                let refresh = Refresh { effects, calls };
+                let mut ctx = EventContext {
+                    game,
+                    zones,
+                    ids,
+                    permanents,
+                    memories,
+                    lki,
+                    events,
+                    provider: &root,
+                };
+                let result = if refreshing {
+                    process_batch_refreshing(&mut ctx, registry, &batch, false, ch, &refresh)
+                } else {
+                    process_batch(&mut ctx, registry, &batch, false, ch)
+                };
+                match result {
+                    Ok(r) => Ok(Ok(r)),
+                    Err(BusInterrupt::Pending(r)) => Err(Interrupt::Pending(r)),
+                    Err(BusInterrupt::Error(e)) => Ok(Err(e)),
+                }
+            };
+            let mut session = ChoiceSession::start(w.clone(), procedure).unwrap();
+            let request = match session.status() {
+                Status::Pending(request) => Some(request.clone()),
+                Status::Done { .. } => None,
+            };
+            if let Some(request) = &request {
+                session
+                    .submit(
+                        request.request_id,
+                        ChoiceResponse::SelectReplacement { index: 0 },
+                    )
+                    .unwrap();
+            }
+            let hash = session.state_hash();
+            let Status::Done { state, output } = session.status() else {
+                panic!("more than one request");
+            };
+            Run {
+                request,
+                state: state.clone(),
+                output: output.clone(),
+                hash,
+            }
+        }
+
+        fn damage_player(player: u64) -> GameEvent {
+            GameEvent::Damage {
+                source: None,
+                source_controller: None,
+                target: DamageTarget::Player(p(player)),
+                amount: 1,
+                combat: false,
+            }
+        }
+
+        fn to_graveyard(object: ObjectId) -> GameEvent {
+            GameEvent::ZoneChange {
+                object,
+                request: MoveRequest::new(ZoneKind::Graveyard),
+                cause: ZoneChangeCause::Other,
+            }
+        }
+
+        fn plus_one(object: ObjectId) -> GameEvent {
+            GameEvent::AddCounters {
+                target: CounterTarget::Object(object),
+                kind: "+1/+1".to_owned(),
+                amount: 1,
+            }
+        }
+
+        /// Registers a shield-less effect (id 3) preventing damage and queueing `then` as the
+        /// follow-up batch (CR 615.6).
+        fn prevent_damage_then(w: &mut World, then: Vec<GameEvent>) {
+            w.registry
+                .add(ReplacementEffect::new(
+                    EffectId::new(3),
+                    EventMatcher::new(BusEventKind::Damage),
+                    Action::Prevent { then },
+                ))
+                .unwrap();
+        }
+
+        /// The LKI power, toughness and counters recorded for `id`.
+        fn lki_of(w: &World, id: ObjectId) -> (Option<i64>, Option<i64>, BTreeMap<String, i64>) {
+            let record = w.lki.get(id).expect("no LKI record");
+            let c = record.characteristics();
+            (
+                c.power.as_ref().and_then(literal_of),
+                c.toughness.as_ref().and_then(literal_of),
+                record.counters().clone(),
+            )
+        }
+
+        fn one_counter() -> BTreeMap<String, i64> {
+            BTreeMap::from([("+1/+1".to_owned(), 1)])
+        }
+
+        /// F6 world: P1's 2/2 `x` (and 2/2 `y`); the root batch puts a +1/+1 counter on `x`
+        /// and deals damage that is prevented, queueing `then` as the follow-up batch.
+        fn f6_world(
+            then: impl Fn(ObjectId, ObjectId) -> Vec<GameEvent>,
+        ) -> (World, ObjectId, ObjectId) {
+            // The two `Skip` effects of `World::new` match only `Tap`, which never occurs here.
+            let mut w = World::new(BusEventKind::Tap);
+            let x = w.create(1, 1, 1, ZoneKind::Battlefield);
+            let y = w.create(2, 1, 1, ZoneKind::Battlefield);
+            prevent_damage_then(&mut w, then(x, y));
+            (w, x, y)
+        }
+
+        /// REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003; CR 613.4, CR 603.10a, CR 608.2h (gate
+        /// 06-turn F6): a follow-up batch executed through `process_batch_refreshing` records
+        /// the LKI evaluated after the root batch: the 2/2 that got a +1/+1 counter is 3/3
+        /// with one counter.
+        #[test]
+        fn req_event_001_f6_follow_up_lki_is_evaluated_after_root_batch() {
+            let (w, x, _) = f6_world(|x, _| vec![to_graveyard(x)]);
+            let calls = Cell::new(0);
+            let run = drive_bus(&w, vec![plus_one(x), damage_player(1)], true, &calls);
+            let report = run.output.expect("bus failed");
+            assert_eq!(report.executed.len(), 2);
+            assert_eq!(lki_of(&run.state, x), (Some(3), Some(3), one_counter()));
+            assert_eq!(calls.get(), 1);
+        }
+
+        /// REQ-EVENT-001, REQ-LAYER-001; CR 603.10a (gate 06-turn F6, documented limit): plain
+        /// `process_batch` keeps the pre-call snapshot for the follow-up batch, so the same
+        /// scenario records the stale 2/2 with the live counter.
+        #[test]
+        fn req_event_001_f6_plain_process_batch_keeps_pre_call_snapshot() {
+            let (w, x, _) = f6_world(|x, _| vec![to_graveyard(x)]);
+            let calls = Cell::new(0);
+            let run = drive_bus(&w, vec![plus_one(x), damage_player(1)], false, &calls);
+            run.output.expect("bus failed");
+            assert_eq!(lki_of(&run.state, x), (Some(2), Some(2), one_counter()));
+            assert_eq!(calls.get(), 0);
+        }
+
+        /// REQ-EVENT-001, REQ-LAYER-001; CR 603.10a, CR 704.8: the factory is called once per
+        /// follow-up batch and never between the events of one batch: two simultaneous
+        /// departures in the follow-up batch share one snapshot (both evaluated after the
+        /// root batch), and the root batch never calls it.
+        #[test]
+        fn req_event_001_refresh_once_per_child_batch() {
+            let (w, x, y) = f6_world(|x, y| vec![to_graveyard(x), to_graveyard(y)]);
+            let calls = Cell::new(0);
+            let run = drive_bus(&w, vec![plus_one(x), damage_player(1)], true, &calls);
+            run.output.expect("bus failed");
+            assert_eq!(calls.get(), 1);
+            assert_eq!(lki_of(&run.state, x), (Some(3), Some(3), one_counter()));
+            assert_eq!(lki_of(&run.state, y), (Some(2), Some(2), BTreeMap::new()));
+
+            // A root batch with two simultaneous departures and no follow-up batch: no call.
+            let (w, x, y) = f6_world(|_, _| Vec::new());
+            let calls = Cell::new(0);
+            let run = drive_bus(&w, vec![to_graveyard(x), to_graveyard(y)], true, &calls);
+            run.output.expect("bus failed");
+            assert_eq!(calls.get(), 0);
+            assert_eq!(lki_of(&run.state, x), (Some(2), Some(2), BTreeMap::new()));
+            assert_eq!(lki_of(&run.state, y), (Some(2), Some(2), BTreeMap::new()));
+        }
+
+        /// F13 world: P1 owns `t`, stored as controlled by P1; P2's `s` is the source of a
+        /// static layer-2 effect giving `t` to P2 (CR 613.1b). The root batch moves `s` to the
+        /// graveyard and deals damage that is prevented, queueing `Tap(t)`; the two `Skip`
+        /// effects of `World::new` compete for that tap (CR 616.1).
+        fn f13_world() -> (World, ObjectId, ObjectId) {
+            let mut w = World::new(BusEventKind::Tap);
+            let t = w.create(1, 1, 1, ZoneKind::Battlefield);
+            let s = w.create(2, 2, 2, ZoneKind::Battlefield);
+            w.layer_effects
+                .register(
+                    EffectId::new(4),
+                    ContinuousEffect {
+                        source: Some(s),
+                        controller: p(2),
+                        timestamp: Timestamp::new(4),
+                        layer: Layer::L2,
+                        is_cda: false,
+                        origin: EffectOrigin::Static { granted_at: None },
+                        affected: Affected::Objects([t].into_iter().collect()),
+                        modification: LayerModification::SetController(p(2)),
+                    },
+                )
+                .unwrap();
+            prevent_damage_then(&mut w, vec![tap(t)]);
+            (w, t, s)
+        }
+
+        /// REQ-REPL-*, REQ-LAYER-001, REQ-EVENT-001; CR 613.1b, CR 616.1 (gate 06-turn F13):
+        /// through `process_batch_refreshing`, the replacement choice for the follow-up
+        /// `Tap(t)` goes to P1, who controls `t` once the root batch removed the control
+        /// effect's source; plain `process_batch` still routes it to the pre-call controller
+        /// P2. Both are deterministic (R3: a replay asks the same request and ends in the same
+        /// state).
+        #[test]
+        fn req_repl_f13_child_chooser_is_controller_after_root_batch() {
+            let (w, t, s) = f13_world();
+            let submitted = vec![to_graveyard(s), damage_player(1)];
+            // Sanity: before the call the evaluated controller of `t` is P2.
+            let before = Owned {
+                effects: &w.layer_effects,
+                env: LiveEnv::of(&w.zones, &w.events),
+            };
+            assert_eq!(before.controller(t), Some(p(2)));
+
+            let calls = Cell::new(0);
+            let fresh = drive_bus(&w, submitted.clone(), true, &calls);
+            let request = fresh
+                .request
+                .clone()
+                .expect("no replacement choice was asked");
+            assert!(matches!(
+                request.payload,
+                ChoicePayload::ChooseReplacementEffect { .. }
+            ));
+            assert_eq!(request.reason.cr, "CR 616.1");
+            assert_eq!(request.chooser, p(1));
+            fresh.output.as_ref().expect("bus failed");
+            // One refresh per run of the procedure: the first run and the replay on submit.
+            assert_eq!(calls.get(), 2);
+
+            let again = drive_bus(&w, submitted.clone(), true, &Cell::new(0));
+            assert_eq!(again.request, fresh.request);
+            assert_eq!(again.hash, fresh.hash);
+
+            let calls = Cell::new(0);
+            let stale = drive_bus(&w, submitted, false, &calls);
+            let request = stale.request.expect("no replacement choice was asked");
+            assert_eq!(request.chooser, p(2));
+            stale.output.expect("bus failed");
+            assert_eq!(calls.get(), 0);
+        }
+    }
 }

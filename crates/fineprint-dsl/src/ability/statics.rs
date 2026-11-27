@@ -7,7 +7,7 @@
 //! [`RuleModification`] (pass B, 613.11, one kind from the closed [`RuleKind`] set), so every
 //! static effect declares its layer or RuleSet kind, its selector and its modification.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
@@ -22,6 +22,7 @@ use crate::expr::json::{
     ser_check, str_of, tagged, wire_enum,
 };
 use crate::expr::{ObjectSelectorAST, PlayerSelectorAST, ValueExpressionAST};
+use crate::text::RewritableCategory;
 
 wire_enum! {
     /// A layer of the layer system (REQ-DSL-008): 1a, 1b, 2–6, 7a–7d.
@@ -233,6 +234,74 @@ impl Modification {
         }
     }
 
+    /// The op name of the layer 3 text-changing effect (REQ-DSL-012, SRS §14.5; CR 612.1,
+    /// 613.1c): `{"op":"REPLACE_TEXT_WORD","category","from","to"}`.
+    pub const REPLACE_TEXT_WORD: &'static str = "REPLACE_TEXT_WORD";
+
+    /// A `REPLACE_TEXT_WORD` modification (REQ-DSL-012, SRS §14.5): every rewritable word of
+    /// `category` whose value is `from` reads `to`. The members are the flat params
+    /// `category` (its wire name), `from` and `to`; the wire shape is the one an opaque op
+    /// already has, so a built modification serializes, parses back equal and is byte-stable in
+    /// canonical JSON. The category and words are the literal values chosen on resolution; no
+    /// check is made here (`CARD_NAME` and empty or noncharacter words are refused by the
+    /// engine's compile step, CR 612.2).
+    #[must_use]
+    pub fn replace_text_word(
+        category: RewritableCategory,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Modification {
+        let mut m = Modification::new(Modification::REPLACE_TEXT_WORD);
+        m.params.insert(
+            "category".to_owned(),
+            Value::String(category.as_str().to_owned()),
+        );
+        m.params
+            .insert("from".to_owned(), Value::String(from.into()));
+        m.params.insert("to".to_owned(), Value::String(to.into()));
+        m
+    }
+
+    /// The typed view of a `REPLACE_TEXT_WORD` modification (REQ-DSL-012, SRS §14.5):
+    /// `Ok(None)` for any other op; `Ok(Some((category, from, to)))` for a well-formed one.
+    /// `CARD_NAME` is returned as parsed (its rejection, CR 612.2, belongs to the compile
+    /// step); words are free strings. Never panics, whatever the members hold (R12). This view
+    /// is additive: parsing and serializing a document never consults it.
+    ///
+    /// # Errors
+    /// A message when the op is `REPLACE_TEXT_WORD` and `category` is missing, not a string or
+    /// not a known [`RewritableCategory`] wire name; `from` or `to` is missing or not a
+    /// string; a member other than `category`, `from` and `to` is present; or typed power or
+    /// toughness is set.
+    pub fn as_replace_text_word(
+        &self,
+    ) -> Result<Option<(RewritableCategory, String, String)>, String> {
+        if self.op != Modification::REPLACE_TEXT_WORD {
+            return Ok(None);
+        }
+        if self.power.is_some() || self.toughness.is_some() {
+            return Err("REPLACE_TEXT_WORD takes no power or toughness".to_owned());
+        }
+        if let Some(extra) = self
+            .params
+            .keys()
+            .find(|k| !matches!(k.as_str(), "category" | "from" | "to"))
+        {
+            return Err(format!("REPLACE_TEXT_WORD has unknown member {extra:?}"));
+        }
+        let text = |key: &str| -> Result<String, String> {
+            match self.params.get(key) {
+                None => Err(format!("REPLACE_TEXT_WORD is missing member {key:?}")),
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(_) => Err(format!("REPLACE_TEXT_WORD member {key:?} must be a string")),
+            }
+        };
+        let name = text("category")?;
+        let category = RewritableCategory::from_wire(&name)
+            .ok_or_else(|| format!("unknown REPLACE_TEXT_WORD category {name:?}"))?;
+        Ok(Some((category, text("from")?, text("to")?)))
+    }
+
     /// Whether `op` has typed power and toughness.
     fn is_pt(&self) -> bool {
         PT_OPS.contains(&self.op.as_str())
@@ -326,6 +395,115 @@ pub struct CharacteristicEffect {
     pub is_cda: Option<bool>,
 }
 
+/// One part of the type line a layer-4 characteristic-defining ability can define
+/// (REQ-OBJ-002, REQ-DSL-008). Card type, subtype and supertype are separate characteristics
+/// (CR 109.3, 205.1b), so a copy exception touching one part drops only the CDAs that define
+/// that part (CR 707.9d). The order (supertypes, card types, subtypes) is the type-line order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypePart {
+    /// The supertypes (wire `"SUPERTYPES"`).
+    Supertypes,
+    /// The card types (wire `"CARD_TYPES"`).
+    CardTypes,
+    /// The subtypes (wire `"SUBTYPES"`).
+    Subtypes,
+}
+
+impl TypePart {
+    /// Wire name of [`TypePart::Supertypes`].
+    pub const SUPERTYPES: &'static str = "SUPERTYPES";
+    /// Wire name of [`TypePart::CardTypes`].
+    pub const CARD_TYPES: &'static str = "CARD_TYPES";
+    /// Wire name of [`TypePart::Subtypes`].
+    pub const SUBTYPES: &'static str = "SUBTYPES";
+    /// Every part, in order.
+    pub const ALL: [TypePart; 3] = [
+        TypePart::Supertypes,
+        TypePart::CardTypes,
+        TypePart::Subtypes,
+    ];
+
+    /// The wire name (case-sensitive).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TypePart::Supertypes => TypePart::SUPERTYPES,
+            TypePart::CardTypes => TypePart::CARD_TYPES,
+            TypePart::Subtypes => TypePart::SUBTYPES,
+        }
+    }
+
+    /// The part with wire name `s` (exact, case-sensitive match), if any.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<TypePart> {
+        TypePart::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+
+    /// Parses the value of a layer-4 `defines` member (REQ-OBJ-002, REQ-DSL-008): a non-empty
+    /// JSON array of distinct wire names. Never panics, whatever `v` holds (R12).
+    ///
+    /// # Errors
+    /// A message when `v` is not an array, is empty, or has an element that is not a string,
+    /// not a known wire name (exact case) or a duplicate.
+    pub fn parse_defines(v: &Value) -> Result<BTreeSet<TypePart>, String> {
+        let Value::Array(items) = v else {
+            return Err("CHAR layer 4 member \"defines\" must be an array".to_owned());
+        };
+        if items.is_empty() {
+            return Err("CHAR layer 4 member \"defines\" must not be empty".to_owned());
+        }
+        let mut out = BTreeSet::new();
+        for item in items {
+            let Value::String(name) = item else {
+                return Err("CHAR layer 4 \"defines\" elements must be strings".to_owned());
+            };
+            let part = TypePart::from_wire(name)
+                .ok_or_else(|| format!("unknown CHAR layer 4 \"defines\" part {name:?}"))?;
+            if !out.insert(part) {
+                return Err(format!("duplicate CHAR layer 4 \"defines\" part {name:?}"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl CharacteristicEffect {
+    /// The flat modification param that lists the type-line parts a layer-4 effect defines
+    /// (REQ-OBJ-002; SRS §14.4.3).
+    pub const DEFINES: &'static str = "defines";
+
+    /// The type-line parts this effect defines (REQ-OBJ-002; CR 707.9d): `None` unless the
+    /// layer is 4; otherwise the parts listed by the modification's `defines` param, or all
+    /// three parts when `defines` is absent (the conservative default). A hand-built effect with
+    /// a malformed `defines` (which decoding and writing refuse) also gives all three parts.
+    /// Reads the effect data only; `isCDA` is not consulted.
+    #[must_use]
+    pub fn defined_type_parts(&self) -> Option<BTreeSet<TypePart>> {
+        if self.layer != Layer::L4 {
+            return None;
+        }
+        Some(
+            self.modification
+                .params
+                .get(CharacteristicEffect::DEFINES)
+                .and_then(|v| TypePart::parse_defines(v).ok())
+                .unwrap_or_else(|| TypePart::ALL.into_iter().collect()),
+        )
+    }
+
+    /// Checks the modification and, in layer 4, the `defines` param (REQ-OBJ-002); on every
+    /// other layer `defines` is an ordinary opaque param.
+    fn check(&self) -> JResult<()> {
+        self.modification.check()?;
+        if self.layer == Layer::L4
+            && let Some(v) = self.modification.params.get(CharacteristicEffect::DEFINES)
+        {
+            TypePart::parse_defines(v)?;
+        }
+        Ok(())
+    }
+}
+
 /// An effect on players applied in pass A (REQ-DSL-008, 613.10): `{"type":"PLAYER","affected",
 /// "modification"}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -388,7 +566,7 @@ impl StaticEffect {
     /// Checks the effect-level rules.
     fn check(&self) -> JResult<()> {
         match self {
-            StaticEffect::Char(c) => c.modification.check(),
+            StaticEffect::Char(c) => c.check(),
             StaticEffect::Player(p) => p.modification.check(),
             StaticEffect::Rule(r) => r.check(),
         }
@@ -451,7 +629,7 @@ impl FromJson for StaticEffect {
 
 impl Members for CharacteristicEffect {
     fn members<M: SerializeMap>(&self, m: &mut M) -> Result<(), M::Error> {
-        ser_check(self.modification.check())?;
+        ser_check(self.check())?;
         m.serialize_entry("type", "CHAR")?;
         m.serialize_entry("layer", &self.layer)?;
         m.serialize_entry("affected", &self.affected)?;

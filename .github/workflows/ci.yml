@@ -8,7 +8,8 @@
 # its pull_request event; see docs/DECISIONS.md "CI — PR load"). On a pull request whose changes
 # are documentation only (job `changes`), fmt, clippy and test still report success but skip
 # their steps, and coverage is skipped; pushes to main always run everything.
-# Jobs `differential` (cached versus full-recompute layer results, REQ-LAYER-005) and `bench`
+# Jobs `differential` (cached versus full-recompute layer results and GameState state hashes,
+# REQ-LAYER-005) and `bench`
 # (layer recompute benchmark, REQ-NFR-009; not a required check) follow the same gating as test.
 # Third-party actions: actions/checkout, actions/cache and actions/upload-artifact only, all
 # first-party, pinned to exact version tags (checkout v4.2.2, cache v4.2.0, upload-artifact
@@ -177,6 +178,41 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         run: cargo test --workspace --locked
 
+  pzl:
+    name: pzl (ubuntu-latest)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-pzl-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-pzl-
+      - name: cargo xtask pzl tests/scenarios
+        if: needs.changes.outputs.code == 'true'
+        run: cargo xtask pzl tests/scenarios
+
   coverage:
     name: coverage (ubuntu-latest)
     needs: changes
@@ -268,8 +304,8 @@ jobs:
       # Keep incremental compiler state for the two feature modes out of the archived target.
       CARGO_INCREMENTAL: "0"
     # REQ-LAYER-005: the whole suite also runs in full-recompute mode (the cached mode is the
-    # test job), and the layer results of the differential scenarios must be byte-identical in
-    # both modes. Linux only: the comparison is platform-independent. FINEPRINT_DIFF_DIR is
+    # test job), and the layer results (`.digest`) and GameState state hashes (`.statehash`) of
+    # the differential scenarios must be byte-identical in both modes. Linux only: the comparison is platform-independent. FINEPRINT_DIFF_DIR is
     # absolute because cargo runs a test binary in its package directory.
     steps:
       - name: Keep line endings as committed
@@ -300,17 +336,21 @@ jobs:
       - name: cargo test (full-recompute mode)
         if: needs.changes.outputs.code == 'true'
         run: cargo test --workspace --locked --features fineprint-core/full-recompute
-      - name: Scenario digests (cached mode)
+      - name: Clear restored differential outputs
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: rm -rf target/differential
+      - name: Scenario digests and state hashes (cached mode)
         if: needs.changes.outputs.code == 'true'
         env:
           FINEPRINT_DIFF_DIR: ${{ github.workspace }}/target/differential/cached
-        run: cargo test --locked -p fineprint-core --test spec_layers_cache_diff
-      - name: Scenario digests (full-recompute mode)
+        run: cargo test --locked -p fineprint-core --test spec_layers_cache_diff --test spec_layers_cache_diff_state
+      - name: Scenario digests and state hashes (full-recompute mode)
         if: needs.changes.outputs.code == 'true'
         env:
           FINEPRINT_DIFF_DIR: ${{ github.workspace }}/target/differential/full
-        run: cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff
-      - name: Compare digests
+        run: cargo test --locked -p fineprint-core --features full-recompute --test spec_layers_cache_diff --test spec_layers_cache_diff_state
+      - name: Compare digests and state hashes
         if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
@@ -323,6 +363,12 @@ jobs:
             echo "error: expected at least 5 *.digest files in $cached, found $count"
             exit 1
           fi
+          shcount=$(find "$cached" -maxdepth 1 -type f -name '*.statehash' | wc -l)
+          echo "cached-mode state hash files: $shcount"
+          if [ "$shcount" -lt 7 ]; then
+            echo "error: expected at least 7 *.statehash files in $cached, found $shcount"
+            exit 1
+          fi
           names_cached=$(cd "$cached" && ls -1 | sort)
           names_full=$(cd "$full" && ls -1 | sort)
           if [ "$names_cached" != "$names_full" ]; then
@@ -331,13 +377,13 @@ jobs:
             exit 1
           fi
           if ! diff -r "$cached" "$full" > /dev/null; then
-            echo "error: cached and full-recompute digests differ for:"
+            echo "error: cached and full-recompute digests or state hashes differ for:"
             for f in $names_cached; do
               cmp -s "$cached/$f" "$full/$f" || echo "  $f"
             done
             exit 1
           fi
-          echo "all $count scenario digests are identical in both modes"
+          echo "all $count scenario digests and $shcount state hashes are identical in both modes"
 
   bench:
     name: bench (ubuntu-latest)

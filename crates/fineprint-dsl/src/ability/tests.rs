@@ -21,6 +21,7 @@ use crate::expr::{
 use crate::mana::ManaCostDSL;
 
 mod props;
+mod replace_text;
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -1970,4 +1971,219 @@ fn req_dsl_009_shield_uses_codecs_enforce_positive_count() {
         serde_json::to_string(&ShieldUses::CounterBacked).expect("ser"),
         r#""COUNTER_BACKED""#
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Layer-4 `defines` (REQ-OBJ-002, REQ-DSL-008; CR 707.9d)
+
+/// A layer-`layer` CHAR effect whose modification carries `"defines": <defines>` (raw JSON),
+/// characteristic-defining when `cda` is `Some(true)`.
+fn char_defines(layer: &str, defines: &str, cda: &str) -> String {
+    format!(
+        r#"{{"type":"CHAR","layer":"{layer}","affected":{{"ref":"SELF"}},"modification":{{"op":"ANY_OP","defines":{defines}}}{cda}}}"#
+    )
+}
+
+/// The parts named by `names`, as a set.
+fn parts(names: &[statics::TypePart]) -> std::collections::BTreeSet<statics::TypePart> {
+    names.iter().copied().collect()
+}
+
+/// REQ-OBJ-002, REQ-DSL-008; CR 707.9d, 109.3, 205.1b: `TypePart` wire names are the three
+/// case-sensitive constants, in type-line order.
+#[test]
+fn req_obj_002_type_part_wire_names() {
+    use statics::TypePart;
+    assert_eq!(TypePart::SUPERTYPES, "SUPERTYPES");
+    assert_eq!(TypePart::CARD_TYPES, "CARD_TYPES");
+    assert_eq!(TypePart::SUBTYPES, "SUBTYPES");
+    assert_eq!(CharacteristicEffect::DEFINES, "defines");
+    assert_eq!(
+        TypePart::ALL,
+        [
+            TypePart::Supertypes,
+            TypePart::CardTypes,
+            TypePart::Subtypes
+        ]
+    );
+    for p in TypePart::ALL {
+        assert_eq!(TypePart::from_wire(p.as_str()), Some(p));
+    }
+    for bad in [
+        "",
+        "supertypes",
+        "Subtypes",
+        "SUBTYPE",
+        "TYPES",
+        " SUBTYPES",
+    ] {
+        assert_eq!(TypePart::from_wire(bad), None, "{bad:?}");
+    }
+    assert!(TypePart::Supertypes < TypePart::CardTypes);
+    assert!(TypePart::CardTypes < TypePart::Subtypes);
+}
+
+/// REQ-OBJ-002, REQ-DSL-008, REQ-NFR-006; CR 707.9d: a valid layer-4 `defines` decodes (with or
+/// without `isCDA`), re-serializes byte-identically in canonical form (array order kept) and
+/// is read by `defined_type_parts`; absent means all three parts.
+#[test]
+fn req_obj_002_layer4_defines_accepted_and_round_trips() {
+    use statics::TypePart::{CardTypes, Subtypes, Supertypes};
+    let cases: [(&str, &[statics::TypePart]); 6] = [
+        (r#"["SUPERTYPES"]"#, &[Supertypes]),
+        (r#"["CARD_TYPES"]"#, &[CardTypes]),
+        (r#"["SUBTYPES"]"#, &[Subtypes]),
+        (r#"["SUBTYPES","CARD_TYPES"]"#, &[CardTypes, Subtypes]),
+        (r#"["CARD_TYPES","SUPERTYPES"]"#, &[Supertypes, CardTypes]),
+        (
+            r#"["SUBTYPES","SUPERTYPES","CARD_TYPES"]"#,
+            &[Supertypes, CardTypes, Subtypes],
+        ),
+    ];
+    for (defines, want) in cases {
+        for cda in [r#","isCDA":true"#, r#","isCDA":false"#, ""] {
+            let doc = char_defines("4", defines, cda);
+            let c: CharacteristicEffect = accept(&doc);
+            assert_eq!(c.defined_type_parts(), Some(parts(want)), "{doc}");
+            accept::<StaticEffect>(&doc);
+            accept::<AbilityAST>(&format!(
+                r#"{{"abilityId":"a","kind":"STATIC","effects":[{doc}]}}"#
+            ));
+        }
+    }
+    let plain: CharacteristicEffect = accept(
+        r#"{"type":"CHAR","layer":"4","affected":{"ref":"SELF"},"modification":{"op":"ANY_OP"},"isCDA":true}"#,
+    );
+    assert_eq!(
+        plain.defined_type_parts(),
+        Some(parts(&[Supertypes, CardTypes, Subtypes]))
+    );
+}
+
+/// REQ-OBJ-002, REQ-DSL-008, REQ-NFR-006; CR 707.9d: a layer-4 `defines` that is empty, has a
+/// duplicate, an unknown or wrongly-cased name, or is not an array of strings is rejected on
+/// decode (as an effect, inside an ability) and on write (W3), with or without `isCDA`.
+#[test]
+fn req_obj_002_layer4_defines_malformed_rejected() {
+    for defines in [
+        "[]",
+        r#"["SUBTYPES","SUBTYPES"]"#,
+        r#"["CARD_TYPES","SUBTYPES","CARD_TYPES"]"#,
+        r#"["subtypes"]"#,
+        r#"["Subtypes"]"#,
+        r#"["SUBTYPE"]"#,
+        r#"["TYPES"]"#,
+        r#"[""]"#,
+        r#"["SUBTYPES","COLORS"]"#,
+        r#""SUBTYPES""#,
+        "[1]",
+        "[true]",
+        r#"[["SUBTYPES"]]"#,
+        r#"[{"SUBTYPES":true}]"#,
+        r#"{"SUBTYPES":true}"#,
+        "3",
+        "true",
+        "null",
+    ] {
+        for cda in [r#","isCDA":true"#, r#","isCDA":false"#, ""] {
+            let doc = char_defines("4", defines, cda);
+            reject::<StaticEffect>(&doc);
+            reject::<CharacteristicEffect>(&doc);
+            reject::<AbilityAST>(&format!(
+                r#"{{"abilityId":"a","kind":"STATIC","effects":[{doc}]}}"#
+            ));
+        }
+        if defines == "null" {
+            continue;
+        }
+        // A hand-built effect with the same value is refused on write and, read through the
+        // accessor, counts as all three parts.
+        let mut modification = Modification::new("ANY_OP");
+        modification.params.insert(
+            CharacteristicEffect::DEFINES.to_owned(),
+            serde_json::from_str(defines).expect("json"),
+        );
+        let c = CharacteristicEffect {
+            layer: Layer::L4,
+            affected: Affected::Selector(ObjectSelectorAST::Ref(ReferenceAST::SelfRef)),
+            modification,
+            is_cda: Some(true),
+        };
+        no_encode(&c);
+        no_encode(&StaticEffect::Char(c.clone()));
+        assert_eq!(c.defined_type_parts(), Some(parts(&statics::TypePart::ALL)));
+    }
+}
+
+/// REQ-OBJ-002, REQ-DSL-008: on any layer but 4, `defines` stays an opaque param: any non-null
+/// value decodes and round-trips, and `defined_type_parts` is `None`.
+#[test]
+fn req_obj_002_defines_opaque_off_layer_4() {
+    for layer in ["1a", "3", "5", "6", "7a"] {
+        for defines in ["[]", r#"["subtypes"]"#, r#""x""#, "[1]", r#"["SUBTYPES"]"#] {
+            let doc = char_defines(layer, defines, r#","isCDA":true"#);
+            let c: CharacteristicEffect = accept(&doc);
+            assert_eq!(c.defined_type_parts(), None, "{doc}");
+            assert!(c.modification.params.contains_key("defines"));
+        }
+    }
+    // A bare modification does not know its layer: `defines` is opaque there too.
+    accept::<Modification>(r#"{"op":"ANY_OP","defines":[]}"#);
+    // PLAYER and RULE effects keep it opaque as well.
+    accept::<StaticEffect>(
+        r#"{"type":"PLAYER","affected":{"ref":"CONTROLLER"},"modification":{"op":"X","defines":[]}}"#,
+    );
+    accept::<StaticEffect>(r#"{"type":"RULE","kind":"SKIP","defines":[]}"#);
+}
+
+/// REQ-OBJ-002, REQ-NFR-006: `TypePart::parse_defines` on bounded random JSON (fixed seed)
+/// never panics and agrees with a reference model: accepted exactly when the value is a
+/// non-empty array of distinct known names.
+#[test]
+fn req_obj_002_parse_defines_random_values() {
+    use fineprint_base::prng::Pcg64Dxsm;
+    use statics::TypePart;
+    const POOL: [&str; 7] = [
+        "SUPERTYPES",
+        "CARD_TYPES",
+        "SUBTYPES",
+        "subtypes",
+        "",
+        "COLORS",
+        "\u{1F600}",
+    ];
+    let mut rng = Pcg64Dxsm::from_u64_seed(0x0f15_1000_0001);
+    let mut pick = |n: u64| rng.next_bounded(n).expect("n > 0");
+    for _ in 0..2000 {
+        let len = pick(5);
+        let mut items = Vec::new();
+        for _ in 0..len {
+            items.push(match pick(10) {
+                0 => json!(1),
+                1 => Value::Null,
+                2 => json!(["SUBTYPES"]),
+                k => json!(POOL[usize::try_from(k % 7).expect("small")]),
+            });
+        }
+        let v = if pick(8) == 0 {
+            json!({"SUBTYPES": true})
+        } else {
+            Value::Array(items.clone())
+        };
+        let got = TypePart::parse_defines(&v);
+        let model = (|| {
+            let a = v.as_array()?;
+            if a.is_empty() {
+                return None;
+            }
+            let mut out = std::collections::BTreeSet::new();
+            for i in a {
+                if !out.insert(TypePart::from_wire(i.as_str()?)?) {
+                    return None;
+                }
+            }
+            Some(out)
+        })();
+        assert_eq!(got.ok(), model, "{v}");
+    }
 }

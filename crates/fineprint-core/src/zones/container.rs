@@ -43,7 +43,7 @@ struct PlayerZones {
 /// **Omniscient state.** `Zones` is the omniscient engine state. [`Zones::contents`],
 /// [`Zones::object`], [`Zones::object_of_card`], [`Zones::all_object_ids`] and the canonical
 /// encoding expose hidden information: library order, hand membership and the `CardId` of
-/// face-down objects. It must stay behind the redacted per-player view and the determinized-fork
+/// face-down objects, and the retired-card set. It must stay behind the redacted per-player view and the determinized-fork
 /// boundary (REQ-CORE-004, REQ-API-004) and is never handed to a client directly.
 ///
 /// **Stack scope.** In this unit the stack holds only card-backed objects (spells, and copies
@@ -71,6 +71,9 @@ pub struct Zones {
     cards: Arc<BTreeMap<CardId, ObjectId>>,
     /// Where every outside-the-game card is.
     outside_index: Arc<BTreeMap<CardId, (PlayerId, OutsidePool)>>,
+    /// Every card that ceased to exist ([`Zones::cease_to_exist`]); such a `CardId` is never
+    /// accepted again (REQ-CORE-002). Part of equality and of the canonical encoding.
+    retired: Arc<BTreeSet<CardId>>,
     /// The highest `ObjectId` raw value this container has ever issued or accepted (0 when none):
     /// the high-water mark that keeps retired ids from being issued again (REQ-CORE-002). Part
     /// of equality and of the canonical encoding.
@@ -113,6 +116,7 @@ impl Zones {
             objects: Arc::default(),
             cards: Arc::default(),
             outside_index: Arc::default(),
+            retired: Arc::default(),
             max_issued: 0,
         }
     }
@@ -264,6 +268,7 @@ impl Zones {
     ///
     /// # Errors
     /// [`ZoneError::UnknownPlayer`] if `owner` (or the requested controller) is unknown,
+    /// [`ZoneError::CardCeased`] if `card` ceased to exist earlier in the match (REQ-CORE-002),
     /// [`ZoneError::CardAlreadyPresent`] if `card` is in a zone or pool,
     /// [`ZoneError::ControllerNotApplicable`] if a controller is requested outside the
     /// battlefield and the stack, [`ZoneError::IdExhausted`] if `ids` is exhausted,
@@ -278,6 +283,9 @@ impl Zones {
         req: MoveRequest,
     ) -> Result<ObjectId, ZoneError> {
         self.require_player(owner)?;
+        if self.retired.contains(&card) {
+            return Err(ZoneError::CardCeased(card));
+        }
         if self.card_present(card) {
             return Err(ZoneError::CardAlreadyPresent(card));
         }
@@ -423,14 +431,16 @@ impl Zones {
     /// does that before calling).
     ///
     /// The returned `CardId` is RETIRED: card ids are never reused within a match
-    /// (REQ-CORE-002), so a caller must not create another object for it. `Zones` does not yet
-    /// enforce this (it would accept such an object); enforcement is a known follow-up.
+    /// (REQ-CORE-002). The container records it, and [`Zones::create_object`],
+    /// [`Zones::enter_from_outside`] and [`Zones::add_outside_card`] reject it with
+    /// [`ZoneError::CardCeased`].
     ///
     /// # Errors
-    /// [`ZoneError::UnknownObject`]; the container is then unchanged.
+    /// [`ZoneError::UnknownObject`]; the container is then unchanged (nothing is retired).
     pub fn cease_to_exist(&mut self, id: ObjectId) -> Result<CardId, ZoneError> {
         let record = self.record(id)?;
         self.remove_object(record);
+        Arc::make_mut(&mut self.retired).insert(record.card);
         Ok(record.card)
     }
 
@@ -452,8 +462,9 @@ impl Zones {
     /// that is behind it (stale, saved or fresh) is rejected.
     ///
     /// # Errors
-    /// [`ZoneError::UnknownPlayer`], [`ZoneError::NoSuchOutsideCard`] if the card is not in that
-    /// pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`],
+    /// [`ZoneError::UnknownPlayer`], [`ZoneError::CardCeased`] if the card ceased to exist
+    /// earlier in the match (REQ-CORE-002), [`ZoneError::NoSuchOutsideCard`] if the card is not
+    /// in that pool, [`ZoneError::ControllerNotApplicable`], [`ZoneError::IdExhausted`],
     /// [`ZoneError::IdCollision`] if `ids` issues an id that is not above the highest id this
     /// container has issued or accepted (a high-water rejection: it can reject an id the
     /// container never held). The container and `ids` are then unchanged.
@@ -466,6 +477,10 @@ impl Zones {
         req: MoveRequest,
     ) -> Result<ObjectId, ZoneError> {
         self.require_player(owner)?;
+        // A retired card is in no pool; check first so the caller learns why (REQ-CORE-002).
+        if self.retired.contains(&card) {
+            return Err(ZoneError::CardCeased(card));
+        }
         if self.outside_index.get(&card) != Some(&(owner, pool)) {
             return Err(ZoneError::NoSuchOutsideCard(card));
         }
@@ -491,8 +506,9 @@ impl Zones {
     /// CR 400.11a).
     ///
     /// # Errors
-    /// [`ZoneError::UnknownPlayer`], [`ZoneError::CardAlreadyPresent`] if the card is in any
-    /// zone or pool. The container is then unchanged.
+    /// [`ZoneError::UnknownPlayer`], [`ZoneError::CardCeased`] if the card ceased to exist
+    /// earlier in the match (REQ-CORE-002), [`ZoneError::CardAlreadyPresent`] if the card is in
+    /// any zone or pool. The container is then unchanged.
     pub fn add_outside_card(
         &mut self,
         owner: PlayerId,
@@ -500,6 +516,9 @@ impl Zones {
         card: CardId,
     ) -> Result<(), ZoneError> {
         self.require_player(owner)?;
+        if self.retired.contains(&card) {
+            return Err(ZoneError::CardCeased(card));
+        }
         if self.card_present(card) {
             return Err(ZoneError::CardAlreadyPresent(card));
         }
@@ -686,8 +705,9 @@ impl CanonicalEncode for Zones {
     /// graveyard, outside pools); then the battlefield, stack, exile and command zones. Each
     /// zone is a kind tag, a length and, in contents order, each object's id, card, owner,
     /// controller and face-down flag. Each player's pools are a count and, in ascending pool
-    /// order, a pool tag and the ascending card set; last the id high-water mark as 8 bytes
-    /// little-endian (REQ-NFR-006, REQ-CORE-002).
+    /// order, a pool tag and the ascending card set; then the retired-card set (a length prefix and
+    /// the ascending `CardId`s of every card that ceased to exist); last the id high-water mark
+    /// as 8 bytes little-endian (REQ-NFR-006, REQ-CORE-002).
     fn encode_canonical(&self, out: &mut Vec<u8>) {
         self.config.free_graveyard_reorder.encode_canonical(out);
         put_len(out, self.players.len());
@@ -706,6 +726,7 @@ impl CanonicalEncode for Zones {
         self.encode_zone(ZoneKind::Stack, self.stack.iter(), out);
         self.encode_zone(ZoneKind::Exile, self.exile.iter(), out);
         self.encode_zone(ZoneKind::Command, self.command.iter(), out);
+        self.retired.encode_canonical(out);
         self.max_issued.encode_canonical(out);
     }
 }

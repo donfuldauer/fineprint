@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_dsl::ability::Layer;
-use fineprint_dsl::card::{self, AbilityAST, ColorBitmask};
+use fineprint_dsl::card::{AbilityAST, ColorBitmask};
 use fineprint_dsl::expr::{
     Cmp, DistinctAttr, HistoryQuery, MathOp, ObjectSelectorAST, PlayerAttr, PlayerGroup,
     PlayerSelectorAST, PredicateAST, ReferenceAST, SelectorFilter, ValueExpressionAST, WordRef,
@@ -233,7 +233,6 @@ fn errors_display() {
     let all = [
         TextWordError::UnknownToken("t1".to_owned()),
         TextWordError::NotAWord("t1".to_owned()),
-        TextWordError::InvalidRulesText("x".to_owned()),
         TextWordError::InvalidWord,
         TextWordError::UnsupportedCategory,
     ];
@@ -247,48 +246,41 @@ fn errors_display() {
 // decode / encode
 // ---------------------------------------------------------------------------------------------
 
-// REQ-DSL-012: decode(encode(s)) == s; the empty stream and the empty placeholder correspond.
+// REQ-DSL-012, REQ-NFR-006 (#232: replaces the placeholder encode/decode round trip):
+// `Characteristics.rules_text` is the typed stream; its JSON form round-trips, and the empty
+// stream is the default.
 #[test]
-fn encode_decode_round_trip() {
+fn typed_rules_text_round_trip() {
     let s = sample();
-    assert_eq!(decode_rules_text(&encode_rules_text(&s)).unwrap(), s);
-    let empty = TextTokenStream::default();
-    assert_eq!(encode_rules_text(&empty), card::TextTokenStream(Vec::new()));
+    let json = serde_json::to_value(&s).unwrap();
+    assert_eq!(serde_json::from_value::<TextTokenStream>(json).unwrap(), s);
+    let c = object("test.bear_1", &[], TextTokenStream::default());
+    assert!(c.rules_text.is_empty());
     assert_eq!(
-        decode_rules_text(&card::TextTokenStream(Vec::new())).unwrap(),
-        empty
+        serde_json::to_value(TextTokenStream::default()).unwrap(),
+        serde_json::json!([])
     );
 }
 
-/// A placeholder element: a JSON object with these string members, in this order.
-fn element<V: FromIterator<(String, V)> + From<String>>(members: &[(&str, &str)]) -> V {
-    members
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), V::from((*v).to_owned())))
-        .collect()
-}
-
-// REQ-DSL-012, R12: placeholder content that is not a valid stream is InvalidRulesText.
+// REQ-DSL-012, R12 (#232: replaces "placeholder content that is not a valid stream is
+// InvalidRulesText"): the same placeholder content is refused by the typed decode, so it can
+// no longer reach an object's rules text.
 #[test]
-fn decode_rejects_placeholder_garbage() {
+fn typed_decode_rejects_placeholder_garbage() {
     let garbage = [
-        card::TextTokenStream(vec!["test.word".into()]),
-        card::TextTokenStream(vec![7_i64.into()]),
-        card::TextTokenStream(vec![element(&[
-            ("id", "t1"),
-            ("kind", "WORD"),
-            ("category", "BASIC_LAND_TYPE"),
-        ])]),
+        serde_json::json!(["test.word"]),
+        serde_json::json!([7]),
+        serde_json::json!([{"id": "t1", "kind": "WORD", "category": "BASIC_LAND_TYPE"}]),
         // A duplicate id.
-        card::TextTokenStream(vec![
-            element(&[("id", "t1"), ("kind", "LITERAL"), ("text", "x")]),
-            element(&[("id", "t1"), ("kind", "LITERAL"), ("text", "y")]),
+        serde_json::json!([
+            {"id": "t1", "kind": "LITERAL", "text": "x"},
+            {"id": "t1", "kind": "LITERAL", "text": "y"}
         ]),
     ];
     for g in garbage {
         assert!(
-            matches!(decode_rules_text(&g), Err(TextWordError::InvalidRulesText(m)) if !m.is_empty()),
-            "{g:?}"
+            serde_json::from_value::<TextTokenStream>(g.clone()).is_err(),
+            "{g}"
         );
     }
 }
@@ -647,7 +639,7 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 }
 
 /// A synthetic creature `name` with `subtypes` and the given rules text.
-fn object(name: &str, subtypes: &[&str], text: card::TextTokenStream) -> Characteristics {
+fn object(name: &str, subtypes: &[&str], text: TextTokenStream) -> Characteristics {
     Characteristics {
         names: set(&[name]),
         mana_cost: None,
@@ -768,19 +760,17 @@ fn registry(list: Vec<(u64, ContinuousEffect)>) -> ContinuousEffects {
 }
 
 fn text_of(r: &ContinuousEffects, env: &Env, id: ObjectId) -> TextTokenStream {
-    decode_rules_text(&evaluate(r, env, id).unwrap().characteristics.rules_text).unwrap()
+    evaluate(r, env, id)
+        .unwrap()
+        .characteristics
+        .rules_text
+        .clone()
 }
 
 fn two_objects() -> Env {
     Env::default()
-        .with(
-            o(1),
-            object("test.bear_1", &["Bear"], encode_rules_text(&swamp_text())),
-        )
-        .with(
-            o(2),
-            object("test.wall_2", &["Wall"], encode_rules_text(&swamp_text())),
-        )
+        .with(o(1), object("test.bear_1", &["Bear"], swamp_text()))
+        .with(o(2), object("test.wall_2", &["Wall"], swamp_text()))
 }
 
 // REQ-DSL-012, REQ-LAYER-001; CR 612.1, 612.2, 613.1c, 201.5: the evaluated table is
@@ -796,10 +786,7 @@ fn layer3_rewrites_the_table() {
     expected[1] = word("t2", BLT, "Island");
     assert_eq!(text_of(&r, &env, o(1)).tokens(), expected.as_slice());
     // The base is never mutated.
-    assert_eq!(
-        env.bases[&o(1)].characteristics.rules_text,
-        encode_rules_text(&swamp_text())
-    );
+    assert_eq!(env.bases[&o(1)].characteristics.rules_text, swamp_text());
 }
 
 // REQ-DSL-012, REQ-LAYER-001; CR 611.2c: the effect leaves objects outside its locked set
@@ -844,12 +831,13 @@ fn layer3_selector_affected() {
     assert_eq!(value_of(&text_of(&r, &env, o(2)), "t2"), "Swamp");
 }
 
-// REQ-DSL-012, R12; CR 612.1: undecodable and empty rules text are no-ops and evaluation is Ok.
+// REQ-DSL-012, R12; CR 612.1: empty rules text and text without a word are no-ops and
+// evaluation is Ok (#232: the undecodable placeholder of this test cannot be built any more).
 #[test]
 fn layer3_undecodable_or_empty_text_is_noop() {
     for text in [
-        card::TextTokenStream(vec!["test.word".into()]),
-        card::TextTokenStream(Vec::new()),
+        stream(vec![lit("t1", "test.word")]),
+        TextTokenStream::default(),
     ] {
         let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], text.clone()));
         let r = registry(vec![(
@@ -862,16 +850,16 @@ fn layer3_undecodable_or_empty_text_is_noop() {
 }
 
 // REQ-DSL-012; CR 612.2: with no matching word (and with from == to) the text is left
-// byte-identical, not re-encoded (members deliberately not in wire order).
+// unchanged (decoded from JSON whose members are deliberately not in wire order).
 #[test]
 fn layer3_no_change_leaves_text_identical() {
-    let text = card::TextTokenStream(vec![element(&[
-        ("value", "Swamp"),
-        ("kind", "WORD"),
-        ("id", "t1"),
-        ("category", "BASIC_LAND_TYPE"),
-    ])]);
-    assert!(decode_rules_text(&text).is_ok());
+    let text: TextTokenStream = serde_json::from_value(serde_json::json!([{
+        "value": "Swamp",
+        "kind": "WORD",
+        "id": "t1",
+        "category": "BASIC_LAND_TYPE",
+    }]))
+    .unwrap();
     let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], text.clone()));
     for m in [
         replace(BLT, "Forest", "Island"),
@@ -886,19 +874,22 @@ fn layer3_no_change_leaves_text_identical() {
     }
 }
 
-/// A placeholder ability whose content mentions the replaced word.
+/// A synthetic keyword ability whose content mentions the replaced word (in its keyword
+/// parameters).
 fn ability_mentioning(word_value: &str) -> AbilityAST {
-    AbilityAST(element(&[
-        ("kind", "test.ability"),
-        ("category", "BASIC_LAND_TYPE"),
-        ("value", word_value),
-    ]))
+    serde_json::from_value(serde_json::json!({
+        "abilityId": "test.ability",
+        "kind": "KEYWORD",
+        "keyword": "TEST_KEYWORD",
+        "params": {"category": "BASIC_LAND_TYPE", "value": word_value},
+    }))
+    .unwrap()
 }
 
 // REQ-DSL-012; CR 612.3: the effect never changes abilities, printed or granted in layer 6.
 #[test]
 fn layer3_never_touches_abilities() {
-    let mut c = object("test.bear_1", &["Bear"], encode_rules_text(&swamp_text()));
+    let mut c = object("test.bear_1", &["Bear"], swamp_text());
     c.abilities = vec![ability_mentioning("Swamp")];
     let env = Env::default().with(o(1), c);
     let r = registry(vec![
@@ -918,10 +909,7 @@ fn layer3_never_touches_abilities() {
         got.abilities,
         vec![ability_mentioning("Swamp"), ability_mentioning("Swamp")]
     );
-    assert_eq!(
-        value_of(&decode_rules_text(&got.rules_text).unwrap(), "t2"),
-        "Island"
-    );
+    assert_eq!(value_of(&got.rules_text.clone(), "t2"), "Island");
 }
 
 // REQ-DSL-012, REQ-LAYER-001; CR 613.1c: the modification belongs to layer 3 only.
@@ -1042,10 +1030,7 @@ fn register_accepts_supported_categories() {
 
 /// A shared scene: three objects and several text effects.
 fn scene() -> (Vec<(u64, ContinuousEffect)>, Env) {
-    let env = two_objects().with(
-        o(3),
-        object("test.elf_3", &["Elf"], encode_rules_text(&swamp_text())),
-    );
+    let env = two_objects().with(o(3), object("test.elf_3", &["Elf"], swamp_text()));
     let list = vec![
         (1, l3(5, only(&[1, 3]), replace(BLT, "Swamp", "Island"))),
         (2, l3(3, only(&[2]), replace(BLT, "Swamp", "Mountain"))),
@@ -1135,10 +1120,7 @@ fn cache_equals_uncached() {
 // the Swamp word ends as Forest in both timestamp orders.
 #[test]
 fn chained_effects_follow_dependency_in_both_orders() {
-    let env = Env::default().with(
-        o(1),
-        object("test.bear_1", &["Bear"], encode_rules_text(&swamp_text())),
-    );
+    let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], swamp_text()));
     for (ta, tb) in [(1, 2), (2, 1)] {
         let r = registry(vec![
             (1, l3(ta, only(&[1]), replace(BLT, "Swamp", "Island"))),
@@ -1157,10 +1139,7 @@ fn chained_effects_follow_dependency_in_both_orders() {
 // timestamp order, so the earlier timestamp's `to` wins, in both orders.
 #[test]
 fn mutually_dependent_effects_apply_in_timestamp_order() {
-    let env = Env::default().with(
-        o(1),
-        object("test.bear_1", &["Bear"], encode_rules_text(&swamp_text())),
-    );
+    let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], swamp_text()));
     for (ta, tb, expected) in [(1, 2, "Island"), (2, 1, "Forest")] {
         let r = registry(vec![
             (1, l3(ta, only(&[1]), replace(BLT, "Swamp", "Island"))),
@@ -1182,11 +1161,11 @@ fn set_text_applies_before_replace_in_both_orders() {
         object(
             "test.bear_1",
             &["Bear"],
-            encode_rules_text(&stream(vec![word("x1", BLT, "Swamp")])),
+            stream(vec![word("x1", BLT, "Swamp")]),
         ),
     );
     // SetText at 1, replacement at 2: the new text is rewritten.
-    let with_swamp = encode_rules_text(&swamp_text());
+    let with_swamp = swamp_text();
     let r = registry(vec![
         (1, l3(1, only(&[1]), LayerModification::SetText(with_swamp))),
         (2, l3(2, only(&[1]), replace(BLT, "Swamp", "Island"))),
@@ -1200,16 +1179,12 @@ fn set_text_applies_before_replace_in_both_orders() {
         (1, l3(1, only(&[1]), replace(BLT, "Swamp", "Island"))),
         (
             2,
-            l3(
-                2,
-                only(&[1]),
-                LayerModification::SetText(encode_rules_text(&swamp_text())),
-            ),
+            l3(2, only(&[1]), LayerModification::SetText(swamp_text())),
         ),
     ]);
     assert_eq!(text_of(&r, &env, o(1)).tokens(), expected.as_slice());
     // Replacement at 1, SetText at 2 with no Swamp word: the SetText text is left unchanged.
-    let forest = encode_rules_text(&stream(vec![word("t2", BLT, "Forest")]));
+    let forest = stream(vec![word("t2", BLT, "Forest")]);
     let r = registry(vec![
         (1, l3(1, only(&[1]), replace(BLT, "Swamp", "Island"))),
         (
@@ -1268,11 +1243,8 @@ fn set_text_keeping_matched_word_applies_before_replace_in_both_orders() {
         for (t_set, t_rep) in [(1, 2), (2, 1)] {
             let ctx = format!("variant {variant}, SetText at {t_set}, replace at {t_rep}");
             let (text, order) = run_two(
-                encode_rules_text(&stream(base.clone())),
-                (
-                    t_set,
-                    LayerModification::SetText(encode_rules_text(&stream(set.clone()))),
-                ),
+                stream(base.clone()),
+                (t_set, LayerModification::SetText(stream(set.clone()))),
                 (t_rep, replace(BLT, "Swamp", "Island")),
             );
             assert_eq!(text.tokens(), want.as_slice(), "{ctx}");
@@ -1295,7 +1267,7 @@ fn set_text_keeping_matched_word_applies_before_replace_in_both_orders() {
 // and undecodable text, and category CARD_NAME, give the empty set.
 #[test]
 fn replace_targets_lists_matching_words_only() {
-    let text = encode_rules_text(&stream(vec![
+    let text = stream(vec![
         lit("l0", "Swamp"),
         word("a", BLT, "Swamp"),
         word("b", RewritableCategory::ColorWord, "Swamp"),
@@ -1305,7 +1277,7 @@ fn replace_targets_lists_matching_words_only() {
         word("f", BLT, "swamp"),
         word("g", BLT, "Swamp"),
         word("h", BLT, "Island"),
-    ]));
+    ]);
     assert_eq!(
         super::text::replace_targets(&text, BLT, "Swamp"),
         vec![(1, "a".to_owned()), (7, "g".to_owned())]
@@ -1320,27 +1292,22 @@ fn replace_targets_lists_matching_words_only() {
     );
     assert!(super::text::replace_targets(&text, BLT, "Forest").is_empty());
     assert!(super::text::replace_targets(&text, RewritableCategory::CardName, "Swamp").is_empty());
-    assert!(
-        super::text::replace_targets(&card::TextTokenStream(Vec::new()), BLT, "Swamp").is_empty()
-    );
-    let garbage = card::TextTokenStream(vec![element(&[("kind", "WORD")])]);
-    assert!(decode_rules_text(&garbage).is_err());
-    assert!(super::text::replace_targets(&garbage, BLT, "Swamp").is_empty());
+    assert!(super::text::replace_targets(&TextTokenStream::default(), BLT, "Swamp").is_empty());
 }
 
 /// Rules text [literal, Swamp word m1, Island word m2] (former gap G6).
-fn mixed_land_text() -> card::TextTokenStream {
-    encode_rules_text(&stream(vec![
+fn mixed_land_text() -> TextTokenStream {
+    stream(vec![
         lit("m0", "Choose "),
         word("m1", BLT, "Swamp"),
         word("m2", BLT, "Island"),
-    ]))
+    ])
 }
 
 /// The evaluated text and the layer-3 order of `mixed_land_text()` under effect 1 = `a` at
 /// `ta` and effect 2 = `b` at `tb`; the cache and `evaluate` must agree (REQ-LAYER-005).
 fn run_two(
-    text: card::TextTokenStream,
+    text: TextTokenStream,
     (ta, a): (u64, LayerModification),
     (tb, b): (u64, LayerModification),
 ) -> (TextTokenStream, Vec<(OrderItem, Selection)>) {
@@ -1355,10 +1322,7 @@ fn run_two(
         .filter(|s| s.layer == Layer::L3)
         .map(|s| (s.item.clone(), s.selection))
         .collect();
-    (
-        decode_rules_text(&out.characteristics.rules_text).unwrap(),
-        order,
-    )
+    (out.characteristics.rules_text.clone(), order)
 }
 
 fn items(order: &[(OrderItem, Selection)]) -> Vec<OrderItem> {
@@ -1442,10 +1406,10 @@ fn no_op_replacement_creates_no_dependency() {
 // dependency either way, plain timestamp selection in both orders, both words rewritten.
 #[test]
 fn change_outside_matching_tokens_creates_no_dependency() {
-    let text = encode_rules_text(&stream(vec![
+    let text = stream(vec![
         word("c1", RewritableCategory::ColorWord, "Red"),
         word("c2", BLT, "Swamp"),
-    ]));
+    ]);
     for (ta, tb) in [(5, 6), (6, 5)] {
         let (out, order) = run_two(
             text.clone(),
@@ -1507,19 +1471,15 @@ fn acceptance_text_change_changes_what_dependent_ability_applies_to() {
     let env = Env::default()
         .with(
             o(1),
-            object("test.lord_1", &["Wizard"], encode_rules_text(&source_text)),
+            object("test.lord_1", &["Wizard"], source_text.clone()),
         )
         .with(
             o(2),
-            object(
-                "test.goblin_2",
-                &["Goblin"],
-                card::TextTokenStream(Vec::new()),
-            ),
+            object("test.goblin_2", &["Goblin"], TextTokenStream::default()),
         )
         .with(
             o(3),
-            object("test.elf_3", &["Elf"], card::TextTokenStream(Vec::new())),
+            object("test.elf_3", &["Elf"], TextTokenStream::default()),
         );
     let dependent = filter(PredicateAST::And(vec![
         PredicateAST::IsCreature,
@@ -1571,7 +1531,8 @@ fn property_rewrite_and_round_trip() {
     let mut rng = Lcg(612);
     for _ in 0..500 {
         let s = random_stream(&mut rng);
-        assert_eq!(decode_rules_text(&encode_rules_text(&s)).unwrap(), s);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(serde_json::from_value::<TextTokenStream>(json).unwrap(), s);
         let category = *rng.pick(&SUPPORTED);
         let from = *rng.pick(&WORDS);
         let to = *rng.pick(&WORDS);
@@ -1711,10 +1672,10 @@ where
     }
 }
 
-/// A random placeholder biased towards near-valid tokens.
-fn random_placeholder(rng: &mut Lcg) -> card::TextTokenStream {
+/// A random placeholder (a JSON array) biased towards near-valid tokens.
+fn random_placeholder(rng: &mut Lcg) -> serde_json::Value {
     let n = rng.below(4);
-    let mut text = card::TextTokenStream(Vec::new());
+    let mut text = Vec::new();
     for _ in 0..n {
         let v = if rng.below(2) == 0 {
             random_value(rng, 3)
@@ -1722,13 +1683,14 @@ fn random_placeholder(rng: &mut Lcg) -> card::TextTokenStream {
             // An object whose members are all from the token vocabulary.
             random_value(rng, 1)
         };
-        text.0.push(v);
+        text.push(v);
     }
-    text
+    serde_json::Value::Array(text)
 }
 
-// REQ-DSL-012, R12: decode_rules_text and layer 3 application never panic on bounded random
-// placeholder content, and evaluation stays Ok; undecodable text is left unchanged.
+// REQ-DSL-012, R12: the typed decode of bounded random placeholder content and layer 3
+// application never panic, and evaluation stays Ok; content that decodes is rewritten exactly
+// as `rewrite_text_words` says (#232: undecodable content can no longer reach an object).
 #[test]
 fn property_random_placeholders_never_panic() {
     let mut rng = Lcg(1206);
@@ -1737,18 +1699,19 @@ fn property_random_placeholders_never_panic() {
         l3(1, only(&[1]), replace(BLT, "Swamp", "Island")),
     )]);
     for i in 0..1500 {
-        let text = random_placeholder(&mut rng);
-        let decoded = decode_rules_text(&text);
+        let Ok(text) = serde_json::from_value::<TextTokenStream>(random_placeholder(&mut rng))
+        else {
+            continue;
+        };
         let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], text.clone()));
         let got = evaluate(&r, &env, o(1)).unwrap().characteristics.rules_text;
-        if decoded.is_err() {
-            assert_eq!(got, text, "case {i}");
-        }
+        let want = rewrite_text_words(&text, BLT, "Swamp", "Island").unwrap();
+        assert_eq!(got, want, "case {i}");
     }
 }
 
-// REQ-DSL-012, R12: random bytes decoded as a MessagePack placeholder never make
-// decode_rules_text or layer 3 panic.
+// REQ-DSL-012, R12: random bytes decoded as a MessagePack token stream never make the typed
+// decoder or layer 3 panic.
 #[test]
 fn property_random_bytes_never_panic() {
     let mut rng = Lcg(42);
@@ -1766,10 +1729,9 @@ fn property_random_bytes_never_panic() {
         if rng.below(2) == 0 {
             bytes.insert(0, 0x91);
         }
-        let Ok(text) = rmp_serde::from_slice::<card::TextTokenStream>(&bytes) else {
+        let Ok(text) = rmp_serde::from_slice::<TextTokenStream>(&bytes) else {
             continue;
         };
-        let _ = decode_rules_text(&text);
         let env = Env::default().with(o(1), object("test.bear_1", &["Bear"], text));
         assert!(evaluate(&r, &env, o(1)).is_ok());
     }
