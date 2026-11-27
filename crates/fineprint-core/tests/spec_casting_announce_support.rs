@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
@@ -381,6 +381,46 @@ impl PartialEq for CallCounter {
 
 impl Eq for CallCounter {}
 
+/// One recorded `CastState::target_slots` call: the modes and the cost choice it was asked
+/// with (CR-013, CR-014 probe order).
+pub type ProbeCall = (Vec<u32>, CostChoice);
+
+/// Records every `CastState::target_slots` call in call order (CR-013, CR-014). Like
+/// [`CallCounter`] it is shared by every clone of the fake it belongs to and is NOT part of the
+/// observable state: its `Debug` text is constant and any two logs compare equal.
+#[derive(Clone, Default)]
+pub struct CallLog(Arc<Mutex<Vec<ProbeCall>>>);
+
+impl CallLog {
+    /// The calls so far, in call order.
+    pub fn get(&self) -> Vec<ProbeCall> {
+        self.0.lock().expect("call log lock").clone()
+    }
+
+    /// Empties the log.
+    pub fn reset(&self) {
+        self.0.lock().expect("call log lock").clear();
+    }
+
+    fn push(&self, call: ProbeCall) {
+        self.0.lock().expect("call log lock").push(call);
+    }
+}
+
+impl fmt::Debug for CallLog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CallLog")
+    }
+}
+
+impl PartialEq for CallLog {
+    fn eq(&self, _other: &CallLog) -> bool {
+        true
+    }
+}
+
+impl Eq for CallLog {}
+
 /// A toy game state implementing [`Transactional`] and [`CastState`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fake {
@@ -409,6 +449,13 @@ pub struct Fake {
     /// `mode_slots[mode]` when exactly those costs are announced (CR 601.2c: "a spell may
     /// require alternative targets only if an alternative or additional cost was chosen").
     pub mode_cost_slots: BTreeMap<(u32, Option<u32>, Vec<u32>), Vec<TargetSlotSpec>>,
+    /// Per original mode: a slot "target object with mana value X" (CR 107.3a, 601.2b, 601.2c)
+    /// that REPLACES `mode_slots[mode]` (but not a matching `mode_cost_slots` entry): its
+    /// candidates are the template's candidates whose entry in `mana_values` equals the
+    /// announced X; with no X (or no mana value) a candidate never matches.
+    pub mode_x_slots: BTreeMap<u32, TargetSlotSpec>,
+    /// Object raw id -> mana value, read by `mode_x_slots`.
+    pub mana_values: BTreeMap<u64, u64>,
     /// `symbol_slots` (CR-011).
     pub symbols: SymbolHost,
     /// `division_total`.
@@ -421,6 +468,8 @@ pub struct Fake {
     pub marker: u64,
     /// The `target_slots` call counter (not observable state, see [`CallCounter`]).
     pub target_slots_calls: CallCounter,
+    /// The `target_slots` call log (not observable state, see [`CallLog`]).
+    pub target_slots_log: CallLog,
 }
 
 impl Default for Fake {
@@ -444,13 +493,22 @@ impl Fake {
             mode_slots: Vec::new(),
             additional_slots: Vec::new(),
             mode_cost_slots: BTreeMap::new(),
+            mode_x_slots: BTreeMap::new(),
+            mana_values: BTreeMap::new(),
             symbols: SymbolHost::Default,
             division: None,
             qualities: BTreeSet::new(),
             combination_legal: true,
             marker: 0,
             target_slots_calls: CallCounter::default(),
+            target_slots_log: CallLog::default(),
         }
+    }
+
+    /// Resets the `target_slots` counter and log (shared with every clone).
+    pub fn reset_probes(&self) {
+        self.target_slots_calls.reset();
+        self.target_slots_log.reset();
     }
 
     /// With one base slot.
@@ -527,6 +585,7 @@ impl CastState for Fake {
         costs: &CostChoice,
     ) -> Vec<TargetSlotSpec> {
         self.target_slots_calls.bump();
+        self.target_slots_log.push((modes.to_vec(), costs.clone()));
         let mut out = self.base_slots.clone();
         let mut additional = costs.additional.clone();
         additional.sort_unstable();
@@ -536,6 +595,23 @@ impl CastState for Fake {
                     .get(&(m, costs.alternative, additional.clone()))
             {
                 out.extend(replaced.iter().cloned());
+            } else if let Some(template) = self.mode_x_slots.get(&m) {
+                // CR 107.3a, 601.2c: "target object with mana value X" reads the announced X.
+                let candidates = template
+                    .candidates
+                    .iter()
+                    .copied()
+                    .filter(|t| match (t, costs.x) {
+                        (ChoiceTarget::Object(o), Some(x)) => {
+                            self.mana_values.get(&o.get()) == Some(&x)
+                        }
+                        _ => false,
+                    })
+                    .collect();
+                out.push(TargetSlotSpec {
+                    candidates,
+                    ..template.clone()
+                });
             } else if let Some(extra) = self.mode_slots.get(m as usize) {
                 out.extend(extra.iter().cloned());
             }
@@ -1011,4 +1087,98 @@ pub fn announced(run: &Run, base: &Fake) -> (ObjectId, Proposal) {
     assert_eq!(run.state.stack.len(), base.stack.len() + 1);
     assert_eq!(run.state.priority, base.priority);
     (*stack_object, proposal.clone())
+}
+
+// ---------------------------------------------------------------------------------------------
+// probe model (CR-013, CR-014)
+// ---------------------------------------------------------------------------------------------
+
+/// One mode-legality probe as `(alternative, additional, x)`.
+pub type Triple = (Option<u32>, Vec<u32>, Option<u64>);
+
+/// The probe budget of CR-013 / CR-014 (calls of `target_slots` per mode).
+pub const PROBE_BUDGET: u64 = 4096;
+
+/// The X values CR-014 probes for an `x_range`: `None` -> `[None]`; `lo > hi` -> `[Some(lo)]`;
+/// otherwise `lo..=hi` ascending. Only call this for ranges that are small enough to list.
+pub fn x_values(x_range: Option<(u64, u64)>) -> Vec<Option<u64>> {
+    match x_range {
+        None => vec![None],
+        Some((lo, hi)) if lo > hi => vec![Some(lo)],
+        Some((lo, hi)) => (lo..=hi).map(Some).collect(),
+    }
+}
+
+/// The full CR-014 probe product for one mode, in the contract's order: alternative-major (the
+/// normal cost first, then each alternative ascending), additional-cost subsets in the middle
+/// (ascending bit mask, empty subset first, indices ascending) and X innermost (ascending).
+pub fn expected_probes(alts: usize, adds: usize, xs: &[Option<u64>]) -> Vec<Triple> {
+    let alternatives: Vec<Option<u32>> = std::iter::once(None)
+        .chain((0..alts as u32).map(Some))
+        .collect();
+    let mut out = Vec::new();
+    for alternative in alternatives {
+        for mask in 0u64..(1u64 << adds) {
+            let subset: Vec<u32> = (0..adds as u32).filter(|i| mask >> i & 1 == 1).collect();
+            for x in xs {
+                out.push((alternative, subset.clone(), *x));
+            }
+        }
+    }
+    out
+}
+
+/// The `(alternative, additional, x)` triples of the logged calls made for mode `m` (the calls
+/// whose modes are exactly `[m]`), in call order.
+pub fn probes_for_mode(log: &[ProbeCall], m: u32) -> Vec<Triple> {
+    log.iter()
+        .filter(|(modes, _)| modes.as_slice() == [m])
+        .map(|(_, c)| (c.alternative, c.additional.clone(), c.x))
+        .collect()
+}
+
+/// Every logged probe announces no symbol choice and no harmonize creature (CR-012, CR-013,
+/// CR-014: those are not probed dimensions) and asks about exactly one mode.
+pub fn assert_probe_shape(log: &[ProbeCall], label: &str) {
+    for (modes, c) in log {
+        assert_eq!(modes.len(), 1, "{label}: a probe with modes {modes:?}");
+        assert!(
+            c.symbol_options.is_empty(),
+            "{label}: probe with symbol options {c:?}"
+        );
+        assert_eq!(
+            c.harmonize, None,
+            "{label}: probe with a harmonize creature"
+        );
+    }
+}
+
+/// Asserts a mode that no probe makes legal was probed over exactly the full product `want`:
+/// (i) the call count equals `want.len()`, (ii) the observed triples, as a set, equal the
+/// expected product and none repeats, (iii) the order is the contract's order.
+pub fn assert_exhaustive(got: &[Triple], want: &[Triple], label: &str) {
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{label}: number of target_slots calls"
+    );
+    let got_set: BTreeSet<&Triple> = got.iter().collect();
+    let want_set: BTreeSet<&Triple> = want.iter().collect();
+    assert_eq!(
+        got_set.len(),
+        got.len(),
+        "{label}: a configuration was probed twice"
+    );
+    assert!(
+        got_set == want_set,
+        "{label}: probed configurations differ from the product (missing {:?}, extra {:?})",
+        want_set.difference(&got_set).take(5).collect::<Vec<_>>(),
+        got_set.difference(&want_set).take(5).collect::<Vec<_>>()
+    );
+    if let Some(i) = got.iter().zip(want).position(|(g, w)| g != w) {
+        panic!(
+            "{label}: probe {i} is {:?}, the contract's order gives {:?}",
+            got[i], want[i]
+        );
+    }
 }

@@ -965,3 +965,169 @@ fn prop_prohibit_is_monotone() {
         }
     }
 }
+
+/// A random modal fake for the probe model: 1-3 modes (choose exactly one), 0-2 alternative and
+/// 0-3 additional costs, X absent, a small range or `lo > hi`; each mode's only slot (min 1) is
+/// plain legal, plain illegal (object 30 has shroud), "mana value X" on its own object (maybe
+/// shrouded) or legal only with one random (alternative, additional) configuration (possibly
+/// one the spec does not have). Also returns the shrouded objects.
+fn random_probe_case(rng: &mut Pcg64Dxsm) -> (Fake, BTreeSet<ChoiceTarget>) {
+    let n = between(rng, 1, 3) as usize;
+    let alts = below(rng, 3) as usize;
+    let adds = below(rng, 4) as usize;
+    let x_range = match below(rng, 3) {
+        0 => None,
+        1 => {
+            let lo = below(rng, 3);
+            Some((lo, lo + below(rng, 4)))
+        }
+        _ => Some((between(rng, 3, 6), below(rng, 3))),
+    };
+    let mut f = Fake {
+        mode_spec: Some(modes_spec(n, 1, 1, false)),
+        cost_spec: CostSpec {
+            alternative_costs: (0..alts).map(|i| format!("test.alt_{i}")).collect(),
+            additional_costs: (0..adds).map(|i| format!("test.add_{i}")).collect(),
+            x_range,
+            symbol_slots: vec![vec!["test.sym_a".to_owned(), "test.sym_b".to_owned()]],
+            harmonize_candidates: vec![oid(31)],
+        },
+        ..Fake::new()
+    };
+    let mut items = vec![tr(1, shroud_obj(30), 1)];
+    let mut shrouded = BTreeSet::from([to(30)]);
+    for m in 0..n as u32 {
+        let own = 10 + u64::from(m);
+        match below(rng, 4) {
+            0 => f.mode_slots.push(vec![slot(1, 1, &[to(own)])]),
+            1 => f.mode_slots.push(vec![slot(1, 1, &[to(30)])]),
+            2 => {
+                f.mode_slots.push(Vec::new());
+                f.mode_x_slots.insert(m, slot(1, 1, &[to(own)]));
+                f.mana_values.insert(own, below(rng, 7));
+                if coin(rng) {
+                    items.push(tr(2 + u64::from(m), shroud_obj(own), 2));
+                    shrouded.insert(to(own));
+                }
+            }
+            _ => {
+                f.mode_slots.push(vec![slot(1, 1, &[to(30)])]);
+                let alternative = match below(rng, alts as u64 + 2) {
+                    0 => None,
+                    k => Some((k - 1) as u32),
+                };
+                let additional: Vec<u32> = (0..adds as u32 + 1).filter(|_| coin(rng)).collect();
+                f.mode_cost_slots
+                    .insert((m, alternative, additional), vec![slot(1, 1, &[to(own)])]);
+            }
+        }
+    }
+    (f.with_rules(&items), shrouded)
+}
+
+/// REQ-CAST-001 (step 2), REQ-CORE-005, REQ-TEST-001; CR 107.3a, 601.2b, 601.2c, 700.2a, 734.1
+/// (CR-014 model): for random small modal fakes, each mode is probed in exactly the CR-014 order
+/// (alternative-major, additional subsets by ascending mask, X ascending innermost; one value
+/// for no X or `lo > hi`) up to and including its first legal configuration, or over the whole
+/// product when none is legal, and nothing else calls `target_slots` before the modes request;
+/// every probe has empty symbol options and no harmonize creature; a mode is offered exactly
+/// when some probed configuration is legal; with no mode offered the cast rolls back at Choices
+/// with NoLegalMode to the identical hash and priority.
+#[test]
+fn prop_mode_probes_follow_the_cr014_product() {
+    let mut offered_some = 0;
+    let mut offered_none = 0;
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_0140_0000 + seed);
+        let (f, shrouded) = random_probe_case(&mut rng);
+        let req = if coin(&mut rng) {
+            spell(P1)
+        } else {
+            ability(P1)
+        };
+        let spec = f.cost_spec.clone();
+        let n = f.mode_spec.as_ref().map_or(0, |s| s.labels.len()) as u32;
+        let product = expected_probes(
+            spec.alternative_costs.len(),
+            spec.additional_costs.len(),
+            &x_values(spec.x_range),
+        );
+        // The model: a configuration is legal when every slot keeps at least `min` candidates
+        // that are not shrouded (CR 702.18a). Computed before the log is reset.
+        let mut want_probes = Vec::new();
+        let mut want_offered = Vec::new();
+        for m in 0..n {
+            let mut probes = Vec::new();
+            for (alternative, additional, x) in &product {
+                probes.push((*alternative, additional.clone(), *x));
+                let costs = CostChoice {
+                    alternative: *alternative,
+                    additional: additional.clone(),
+                    x: *x,
+                    symbol_options: Vec::new(),
+                    harmonize: None,
+                };
+                let slots = f.target_slots(&req, &[m], &costs);
+                if slots.iter().all(|s| {
+                    s.candidates
+                        .iter()
+                        .filter(|t| !shrouded.contains(t))
+                        .count() as u64
+                        >= s.min
+                }) {
+                    want_offered.push(m);
+                    break;
+                }
+            }
+            want_probes.push(probes);
+        }
+
+        f.reset_probes();
+        let session = start(&f, &req);
+        let log = f.target_slots_log.get();
+        let label = format!("seed {seed}");
+        assert_probe_shape(&log, &label);
+        for m in 0..n {
+            assert_eq!(
+                probes_for_mode(&log, m),
+                want_probes[m as usize],
+                "{label}: probes of mode {m} ({spec:?})"
+            );
+        }
+        assert_eq!(
+            log.len(),
+            want_probes.iter().map(Vec::len).sum::<usize>(),
+            "{label}: calls other than the probes"
+        );
+        match session.status() {
+            Status::Pending(p) => {
+                offered_some += 1;
+                let ChoicePayload::ChooseModes { labels, .. } = &p.payload else {
+                    panic!("{label}: expected ChooseModes, got {:?}", p.payload);
+                };
+                let all = mode_labels(n as usize);
+                let want: Vec<String> = want_offered
+                    .iter()
+                    .map(|&m| all[m as usize].clone())
+                    .collect();
+                assert_eq!(labels, &want, "{label}: offered modes");
+            }
+            Status::Done { state, output } => {
+                offered_none += 1;
+                assert!(want_offered.is_empty(), "{label}: {:?}", output.outcome);
+                let AnnounceOutcome::RolledBack(rb) = &output.outcome else {
+                    panic!("{label}: expected NoLegalMode, got {:?}", output.outcome);
+                };
+                assert_eq!(rb.step, CastStep::Choices, "{label}");
+                assert_eq!(rb.reason, StopReason::NoLegalMode, "{label}");
+                assert_eq!(rb.state_hash, f.state_hash(), "{label}");
+                assert_eq!(rb.priority_player, f.priority, "{label}");
+                assert_eq!(state, &f, "{label}");
+            }
+        }
+    }
+    assert!(
+        offered_some > 0 && offered_none > 0,
+        "{offered_some} / {offered_none}"
+    );
+}

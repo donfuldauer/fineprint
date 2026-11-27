@@ -1811,11 +1811,12 @@ fn modes_seven_additional_costs_probe_every_subset() {
     }
 }
 
-/// REQ-CAST-001 (step 2), REQ-CORE-005; CR 700.2a, 601.2, 734.1 (CR-013): with 7 additional
-/// costs and 1 alternative cost (2 * 128 probes, within the budget) the only mode is legal under
-/// no probed configuration (its gated slots need an alternative or additional cost index the
-/// spec does not have) -> no request, rolled back at Choices with NoLegalMode to the identical
-/// hash and priority.
+/// REQ-CAST-001 (step 2), REQ-CORE-005; CR 700.2a, 601.2, 734.1 (CR-013, CR-014): with 7
+/// additional costs, 1 alternative cost and X in 1..=3 (2 * 128 * 3 = 768 probes, within the
+/// budget) the only mode is legal under no probed configuration (its gated slots need an
+/// alternative or additional cost index the spec does not have) -> no request, rolled back at
+/// Choices with NoLegalMode to the identical hash and priority, after exactly the 768 probes of
+/// the CR-014 product in its order.
 #[test]
 fn modes_no_probe_legal_rolls_back() {
     for (label, req) in both_kinds(P1) {
@@ -1832,12 +1833,24 @@ fn modes_no_probe_legal_rolls_back() {
                 mode_spec: Some(modes_spec(1, 1, 1, false)),
                 ..cost_gated_fake(costs, alternative, &additional)
             };
+            f.reset_probes();
             let run = drive(&f, &req, &[]);
             assert!(
                 run.requests.is_empty(),
                 "{label}: {alternative:?} {additional:?}"
             );
             assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+            // CR-014: X is a probed dimension, so the product is 2 * 128 * 3 = 768 (within the
+            // budget) and every configuration is probed exactly once, X innermost.
+            let case = format!("{label}: {alternative:?} {additional:?}");
+            assert_eq!(f.target_slots_calls.get(), 768, "{case}");
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, &case);
+            assert_exhaustive(
+                &probes_for_mode(&log, 0),
+                &expected_probes(1, 7, &x_values(Some((1, 3)))),
+                &case,
+            );
         }
     }
 }
@@ -1899,8 +1912,10 @@ fn assert_offered_then_rolled_back_at_targets(f: &Fake, req: &CastRequest, label
 /// and the step-3 check rolls a bad final choice back at Targets (13 additional; 1 alternative +
 /// 12 additional; 64 and 100 additional, no panic, no hang). At exactly 4096 the product is
 /// exhaustive: the same unsatisfiable mode is not offered (3 alternatives + 10 additional; 12
-/// additional), at most 4096 `target_slots` calls per mode, and a mode legal only for all 12
-/// additional costs is offered.
+/// additional; 1 alternative + 11 additional) after exactly 4096 `target_slots` calls, which are
+/// the full product with no configuration repeated, alternative-major and mask-minor (thread
+/// 4720021433); a mode legal only for all 12 additional costs is offered after at most 4096
+/// calls.
 #[test]
 fn modes_above_probe_budget_are_offered_and_rolled_back_at_targets() {
     for (label, req) in both_kinds(P1) {
@@ -1913,11 +1928,13 @@ fn modes_above_probe_budget_are_offered_and_rolled_back_at_targets() {
                 &format!("{label}: {alts} alternative(s) + {adds} additional"),
             );
         }
-        // Exactly the budget: exhaustive, so the unsatisfiable mode is not offered.
+        // Exactly the budget: exhaustive, so the unsatisfiable mode is not offered. No probe
+        // finds a legal target, so CR-013 requires every one of the (alts + 1) * 2^adds = 4096
+        // distinct configurations exactly once, alternative-major and mask-minor (thread
+        // 4720021433): exact count, the set equals the full product with no repeat, and order.
         for (alts, adds) in [(3, 10), (0, 12), (1, 11)] {
             let f = unsatisfiable_fake(alts, adds);
-            let calls = f.target_slots_calls.clone();
-            calls.reset();
+            f.reset_probes();
             let run = drive(&f, &req, &[]);
             assert!(
                 run.requests.is_empty(),
@@ -1925,10 +1942,19 @@ fn modes_above_probe_budget_are_offered_and_rolled_back_at_targets() {
                 run.requests
             );
             assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
-            let n = calls.get();
-            assert!(
-                n > 0 && n <= 4096,
-                "{label}: {alts} + {adds}: {n} target_slots calls for one mode"
+            let case = format!("{label}: {alts} + {adds}");
+            assert_eq!(
+                f.target_slots_calls.get(),
+                (alts as u64 + 1) << adds,
+                "{case}: target_slots calls for one mode"
+            );
+            assert_eq!(f.target_slots_calls.get(), PROBE_BUDGET, "{case}");
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, &case);
+            assert_exhaustive(
+                &probes_for_mode(&log, 0),
+                &expected_probes(alts, adds, &[None]),
+                &case,
             );
         }
         // Exactly the budget, the mode legal only for the full set of 12.
@@ -1937,14 +1963,24 @@ fn modes_above_probe_budget_are_offered_and_rolled_back_at_targets() {
             mode_spec: Some(modes_spec(1, 1, 1, false)),
             ..cost_gated_fake(add_costs(12), None, &all)
         };
-        let calls = f.target_slots_calls.clone();
-        calls.reset();
+        f.reset_probes();
         let p = pending_of(&f, &req, &[]);
         assert_eq!(modes_payload(&p).0, mode_labels(1), "{label}: all 12");
-        let n = calls.get();
+        // This mode can stop early: only the upper bound is required.
+        let n = f.target_slots_calls.get();
         assert!(
-            n > 0 && n <= 4096,
+            n > 0 && n <= PROBE_BUDGET,
             "{label}: all 12: {n} target_slots calls for one mode"
+        );
+        // The probes it did make are a duplicate-free prefix of the product in the contract's
+        // order, ending at the first legal configuration (the full set).
+        let got = probes_for_mode(&f.target_slots_log.get(), 0);
+        let want = expected_probes(0, 12, &[None]);
+        assert_eq!(got.as_slice(), &want[..got.len()], "{label}: all 12 order");
+        assert_eq!(
+            got.last().map(|t| t.1.clone()),
+            Some(all.clone()),
+            "{label}"
         );
         let chosen = CostChoice {
             additional: all.clone(),
@@ -2031,6 +2067,388 @@ fn modes_offered_through_alternative_but_not_chosen_rolls_back() {
                 CastStep::Targets,
                 StopReason::MissingTarget { slot: 0 },
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 9b. Mode legality probes X (CR-014)
+// ---------------------------------------------------------------------------------------------
+
+/// Modes whose only slot is "target object with mana value X" (CR 107.3a, 601.2b, 601.2c):
+/// mode `i` targets object `20 + i` only, whose mana value is `mvs[i]` (`None`: no mana value,
+/// it never matches). `costs` is the cost spec.
+fn x_modal_fake(mvs: &[Option<u64>], costs: CostSpec) -> Fake {
+    let mut f = Fake {
+        mode_spec: Some(modes_spec(mvs.len(), 1, 1, false)),
+        cost_spec: costs,
+        ..Fake::new()
+    };
+    for (i, mv) in mvs.iter().enumerate() {
+        let n = 20 + i as u64;
+        f.mode_x_slots.insert(i as u32, slot(1, 1, &[to(n)]));
+        if let Some(mv) = mv {
+            f.mana_values.insert(n, *mv);
+        }
+    }
+    f
+}
+
+/// A cost spec with `alts` alternative costs, `adds` additional costs and `x_range`, plus a
+/// symbol slot and harmonize candidates (neither of which is a probed dimension, CR-014).
+fn x_cost_spec(alts: usize, adds: usize, x_range: Option<(u64, u64)>) -> CostSpec {
+    CostSpec {
+        alternative_costs: alternatives(alts),
+        additional_costs: additional(adds),
+        x_range,
+        symbol_slots: vec![strs(&["test.sym_a", "test.sym_b"])],
+        harmonize_candidates: vec![oid(30), oid(31)],
+    }
+}
+
+/// The probes of one mode with only an X range: `(None, [], Some(x))` for `x` in `xs`.
+fn x_only_probes(xs: impl IntoIterator<Item = u64>) -> Vec<Triple> {
+    xs.into_iter()
+        .map(|x| (None, Vec::new(), Some(x)))
+        .collect()
+}
+
+/// Casts original mode `m` of `f` (every mode offered, so the offered index is `m`) with
+/// `costs`: when `legal` the cast announces with target `20 + m`; otherwise the step-3 check
+/// rolls it back at Targets with MissingTarget{slot: 0} to the original hash and priority
+/// (CR 601.2c, 601.2, 734.1).
+fn cast_x_mode(f: &Fake, req: &CastRequest, m: u32, costs: &CostChoice, legal: bool, label: &str) {
+    let label = format!("{label}: mode {m} with {costs:?}");
+    if legal {
+        let target = to(20 + u64::from(m));
+        let run = drive(
+            f,
+            req,
+            &[
+                select_modes(&[m]),
+                configure(costs),
+                select_targets(&[&[target]]),
+            ],
+        );
+        assert_eq!(run.requests.len(), 3, "{label}");
+        assert_eq!(
+            target_slots_of(&run.requests[2])[0].legal,
+            vec![target],
+            "{label}"
+        );
+        let (_, prop) = announced(&run, f);
+        assert_eq!(prop.modes, vec![m], "{label}");
+        assert_eq!(prop.costs, *costs, "{label}");
+        assert_eq!(prop.targets, vec![vec![target]], "{label}");
+    } else {
+        let run = drive(f, req, &[select_modes(&[m]), configure(costs)]);
+        assert_eq!(run.requests.len(), 2, "{label}");
+        assert_rolled_back(
+            &run,
+            f,
+            CastStep::Targets,
+            StopReason::MissingTarget { slot: 0 },
+        );
+    }
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005, REQ-TEST-001; CR 107.3a, 601.2b, 601.2c, 700.2a,
+/// 601.2, 734.1 (CR-014, thread 4720021411, the finding's case): mode 0 is "target creature
+/// with mana value X", X in 0..=3, and the only such object has mana value 1, so mode 0 is legal
+/// ONLY at X = 1. It is offered (X is probed: X = 0, then X = 1, which stops the probing); X = 1
+/// with that object announces; X = 0 is rolled back at Targets with MissingTarget to the same
+/// hash and priority player. Mode 1 (an ordinary legal target) is offered after one probe.
+#[test]
+fn modes_legal_only_at_one_x_are_offered() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let mut f = Fake {
+                priority: Some(caster),
+                ..x_modal_fake(&[Some(1)], x_costs(0, 3))
+            };
+            f.mode_spec = Some(modes_spec(2, 1, 1, false));
+            f.mode_slots = vec![Vec::new(), vec![slot(1, 1, &[to(12)])]];
+            f.reset_probes();
+            let p = pending_of(&f, &req, &[]);
+            assert_eq!(
+                modes_payload(&p).0,
+                mode_labels(2),
+                "{label}: mode 0 offered"
+            );
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, label);
+            assert_eq!(probes_for_mode(&log, 0), x_only_probes(0..=1), "{label}");
+            assert_eq!(probes_for_mode(&log, 1), x_only_probes([0]), "{label}");
+            assert_eq!(log.len(), 3, "{label}: target_slots calls");
+
+            let x = |x| CostChoice {
+                x: Some(x),
+                ..no_choice()
+            };
+            cast_x_mode(&f, &req, 0, &x(1), true, label);
+            let run = drive(&f, &req, &[select_modes(&[0]), with_x(0)]);
+            assert_eq!(run.requests.len(), 2, "{label}");
+            assert_rolled_back(
+                &run,
+                &f,
+                CastStep::Targets,
+                StopReason::MissingTarget { slot: 0 },
+            );
+            for bad in [2, 3] {
+                cast_x_mode(&f, &req, 0, &x(bad), false, label);
+            }
+        }
+    }
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005, REQ-TEST-001; CR 107.3a, 601.2b, 601.2c, 700.2a,
+/// 734.1 (CR-014): with X in 0..=3, a mode legal only at X = 1, one legal only at X = 3 (the
+/// high end) and one legal only at X = 2 (the middle) are all offered; a mode whose object's
+/// mana value (9) is outside the range is not. Each mode is probed with X ascending from 0 and
+/// stops at its legal X (the out-of-range mode is probed at every X once); each offered mode
+/// announces at its X and rolls back at Targets at every other X.
+#[test]
+fn modes_legal_only_at_the_high_end_or_middle_x_are_offered() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let f = Fake {
+                priority: Some(caster),
+                ..x_modal_fake(&[Some(1), Some(3), Some(2), Some(9)], x_costs(0, 3))
+            };
+            f.reset_probes();
+            let p = pending_of(&f, &req, &[]);
+            let labels = mode_labels(4);
+            assert_eq!(modes_payload(&p).0, labels[..3].to_vec(), "{label}");
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, label);
+            for (m, last) in [(0u32, 1u64), (1, 3), (2, 2), (3, 3)] {
+                assert_eq!(
+                    probes_for_mode(&log, m),
+                    x_only_probes(0..=last),
+                    "{label}: mode {m}"
+                );
+            }
+            assert_eq!(log.len(), 2 + 4 + 3 + 4, "{label}: target_slots calls");
+            for (m, legal_x) in [(0u32, 1u64), (1, 3), (2, 2)] {
+                for x in 0..=3 {
+                    let c = CostChoice {
+                        x: Some(x),
+                        ..no_choice()
+                    };
+                    cast_x_mode(&f, &req, m, &c, x == legal_x, label);
+                }
+            }
+        }
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-CORE-005, REQ-TEST-001; CR 700.2a, 601.2, 734.1 (CR-014): no X in
+/// 0..=3 makes the only mode legal (its object's mana value is 9; or it is 2 but the object has
+/// shroud), with 1 alternative and 2 additional costs: no request, NoLegalMode at Choices with
+/// the same hash and priority, after exactly 2 * 4 * 4 = 32 `target_slots` calls whose
+/// (alternative, additional, x) triples are the full product, alternative-major,
+/// additional-mask in the middle (ascending) and X innermost (ascending).
+#[test]
+fn modes_no_x_legal_probes_the_full_product_then_rolls_back() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let out_of_range = x_modal_fake(&[Some(9)], x_cost_spec(1, 2, Some((0, 3))));
+            let shrouded = x_modal_fake(&[Some(2)], x_cost_spec(1, 2, Some((0, 3))))
+                .with_rules(&[tr(1, shroud_obj(20), 1)]);
+            for (case, f) in [("mana value 9", out_of_range), ("shroud", shrouded)] {
+                let f = Fake {
+                    priority: Some(caster),
+                    ..f
+                };
+                let case = format!("{label}: {case}");
+                f.reset_probes();
+                let run = drive(&f, &req, &[]);
+                assert!(run.requests.is_empty(), "{case}: {:?}", run.requests);
+                assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+                assert_eq!(f.target_slots_calls.get(), 32, "{case}");
+                let log = f.target_slots_log.get();
+                assert_probe_shape(&log, &case);
+                let want = expected_probes(1, 2, &x_values(Some((0, 3))));
+                assert_eq!(want.len(), 32);
+                assert_exhaustive(&probes_for_mode(&log, 0), &want, &case);
+            }
+        }
+    }
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005, REQ-TEST-001, R12; CR 700.2a, 601.2c, 601.2, 734.1
+/// (CR-014 budget with X, `(alternatives + 1) * 2^additional * x_count <= 4096`, no overflow):
+/// - X in 0..=3 and 10 additional costs (4096): exhaustive, the unsatisfiable mode is not
+///   offered after exactly 4096 calls (the full product in order);
+/// - X in 0..=3 and 11 additional costs (8192): offered with ZERO calls; a bad final choice rolls
+///   back at Targets, the right one (X = 2 for a mode legal only at X = 2) announces;
+/// - X in 0..=4095 and no other cost (4096): a mode legal only at X = 4095 is offered after
+///   exactly 4096 calls and announces at X = 4095; an unsatisfiable one is not offered;
+/// - X in 0..=4096 (4097), 1..=u64::MAX and 0..=u64::MAX (2^64, not representable): offered with
+///   zero calls, no panic, no hang;
+/// - the 4096 X values ending at u64::MAX: exhaustive; the 4097 ending there: zero calls;
+/// - 3 alternatives + 10 additional with a one-value range (`(5, 5)`, and `(7, 3)` which is the
+///   single value 7): exhaustive (4096); with a two-value range (8192): zero calls;
+/// - overflowing products (63 additional with X in 0..=1; 3 alternatives + 62 additional with X
+///   in 0..=3; 64 additional with one X value): zero calls.
+#[test]
+fn modes_x_probe_budget_boundaries() {
+    for (label, req) in both_kinds(P1) {
+        // Exhaustive and unsatisfiable: (alts, adds, x_range, x values).
+        let exhaustive: [(usize, usize, (u64, u64)); 5] = [
+            (0, 10, (0, 3)),
+            (0, 0, (0, 4095)),
+            (0, 0, (u64::MAX - 4095, u64::MAX)),
+            (3, 10, (5, 5)),
+            (3, 10, (7, 3)),
+        ];
+        for (alts, adds, range) in exhaustive {
+            let case = format!("{label}: {alts} + {adds} + X {range:?}");
+            let f = x_modal_fake(&[None], x_cost_spec(alts, adds, Some(range)));
+            f.reset_probes();
+            let run = drive(&f, &req, &[]);
+            assert!(run.requests.is_empty(), "{case}: {:?}", run.requests);
+            assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+            assert_eq!(f.target_slots_calls.get(), PROBE_BUDGET, "{case}");
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, &case);
+            assert_exhaustive(
+                &probes_for_mode(&log, 0),
+                &expected_probes(alts, adds, &x_values(Some(range))),
+                &case,
+            );
+        }
+
+        // Over the budget: offered without any call, rolled back at Targets.
+        let over: [(usize, usize, (u64, u64)); 9] = [
+            (0, 11, (0, 3)),
+            (0, 0, (0, 4096)),
+            (0, 0, (1, u64::MAX)),
+            (0, 0, (0, u64::MAX)),
+            (0, 0, (u64::MAX - 4096, u64::MAX)),
+            (3, 10, (5, 6)),
+            (0, 63, (0, 1)),
+            (3, 62, (0, 3)),
+            (0, 64, (5, 5)),
+        ];
+        for (alts, adds, range) in over {
+            // No symbol slot and no harmonize candidate: the default cost answer is the only
+            // cost request (CR-011), as the helper expects.
+            let f = x_modal_fake(&[None], add_x_costs(adds, range.0, range.1));
+            let f = Fake {
+                cost_spec: CostSpec {
+                    alternative_costs: alternatives(alts),
+                    ..f.cost_spec.clone()
+                },
+                ..f
+            };
+            assert_offered_then_rolled_back_at_targets(
+                &f,
+                &req,
+                &format!("{label}: {alts} + {adds} + X {range:?}"),
+            );
+        }
+
+        // Over the budget with X: a mode legal only at X = 2 is offered with zero calls and the
+        // player's final choice decides at step 3.
+        let f = x_modal_fake(&[Some(2)], add_x_costs(11, 0, 3));
+        f.reset_probes();
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(1), "{label}: 11 + X 0..=3");
+        assert_eq!(f.target_slots_calls.get(), 0, "{label}: 11 + X 0..=3");
+        let with = |x, additional: &[u32]| CostChoice {
+            x: Some(x),
+            additional: additional.to_vec(),
+            ..no_choice()
+        };
+        cast_x_mode(&f, &req, 0, &with(2, &[3, 10]), true, label);
+        cast_x_mode(&f, &req, 0, &with(0, &[3, 10]), false, label);
+        cast_x_mode(&f, &req, 0, &with(3, &[]), false, label);
+
+        // Exactly the budget with X only: a mode legal only at the last X.
+        for (lo, hi) in [(0, 4095), (u64::MAX - 4095, u64::MAX)] {
+            let case = format!("{label}: X {lo}..={hi}, legal only at {hi}");
+            let f = x_modal_fake(&[Some(hi)], x_costs(lo, hi));
+            f.reset_probes();
+            let p = pending_of(&f, &req, &[]);
+            assert_eq!(modes_payload(&p).0, mode_labels(1), "{case}");
+            assert_eq!(f.target_slots_calls.get(), PROBE_BUDGET, "{case}");
+            let log = f.target_slots_log.get();
+            assert_probe_shape(&log, &case);
+            assert_eq!(probes_for_mode(&log, 0), x_only_probes(lo..=hi), "{case}");
+            let c = |x| CostChoice {
+                x: Some(x),
+                ..no_choice()
+            };
+            cast_x_mode(&f, &req, 0, &c(hi), true, &case);
+            cast_x_mode(&f, &req, 0, &c(hi - 1), false, &case);
+        }
+    }
+}
+
+/// A cost spec with `adds` additional costs and X in `lo..=hi` (no symbols, no harmonize).
+fn add_x_costs(adds: usize, lo: u64, hi: u64) -> CostSpec {
+    CostSpec {
+        additional_costs: additional(adds),
+        x_range: Some((lo, hi)),
+        ..no_costs()
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-TEST-001; CR 700.2a, 601.2b (CR-014, CR-013): with no alternative
+/// cost, no additional cost and `x_range` None, `Some((2, 2))` or `Some((5, 3))` (lo > hi: the
+/// single probe X = 5) there is exactly one `target_slots` call per mode, with `x` None,
+/// `Some(2)` or `Some(5)`; every probe carries empty `symbol_options` and `harmonize: None`
+/// although the spec has a symbol slot and harmonize candidates. The same holds when every
+/// mode is illegal (NoLegalMode after one call per mode).
+#[test]
+fn modes_one_probe_per_mode_without_cost_dimensions() {
+    for (label, req) in both_kinds(P1) {
+        for (range, x) in [
+            (None, None),
+            (Some((2, 2)), Some(2)),
+            (Some((5, 3)), Some(5)),
+        ] {
+            for all_illegal in [false, true] {
+                let case = format!("{label}: x_range {range:?}, all illegal {all_illegal}");
+                let mut f = Fake {
+                    mode_spec: Some(modes_spec(3, 1, 1, false)),
+                    mode_slots: vec![
+                        vec![slot(1, 1, &[to(10)])],
+                        vec![slot(1, 1, &[to(11)])],
+                        vec![slot(1, 1, &[to(12)])],
+                    ],
+                    cost_spec: x_cost_spec(0, 0, range),
+                    ..Fake::new()
+                };
+                if all_illegal {
+                    f = f.with_rules(&[
+                        tr(1, shroud_obj(10), 1),
+                        tr(2, shroud_obj(11), 2),
+                        tr(3, shroud_obj(12), 3),
+                    ]);
+                }
+                f.reset_probes();
+                if all_illegal {
+                    let run = drive(&f, &req, &[]);
+                    assert!(run.requests.is_empty(), "{case}");
+                    assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+                } else {
+                    let p = pending_of(&f, &req, &[]);
+                    assert_eq!(modes_payload(&p).0, mode_labels(3), "{case}");
+                }
+                assert_eq!(f.target_slots_calls.get(), 3, "{case}");
+                let log = f.target_slots_log.get();
+                assert_eq!(log.len(), 3, "{case}: target_slots calls");
+                assert_probe_shape(&log, &case);
+                for m in 0..3 {
+                    assert_eq!(
+                        probes_for_mode(&log, m),
+                        vec![(None, Vec::new(), x)],
+                        "{case}: mode {m}"
+                    );
+                }
+            }
         }
     }
 }
