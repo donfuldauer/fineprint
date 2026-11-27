@@ -280,3 +280,119 @@ hook was rejected: it would add a required or defaulted host method for a check 
 Consumers affected: `casting::announce`; `CastState::target_slots` implementors (up to 4096 calls per
 mode before the costs are chosen, instead of at most 64 per alternative); the spec tests that asserted
 the omission.
+
+## CR-014 — CastState (REQ-CAST-001): mode legality probes X (amends CR-012 and CR-013)
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021411 and re-opened thread 4718412705)   Kind: additive   Status: open
+Change: no signature or type changes. Amends the probe set of CR-013: X is a probed dimension. For a
+mode (original index `m`), `casting::announce` probes the host over the Cartesian product of {the
+normal cost, each alternative cost `i` of `cost_spec(req, &[m])`} (outermost), EVERY subset of the
+additional costs of that spec (ascending bit-mask order, empty subset first, indices ascending;
+middle) and EVERY X value of the spec's X range (ascending; innermost), calling
+`target_slots(req, &[m], &probe)` with `probe.x = Some(value)` and, as in CR-012 and CR-013, empty
+`symbol_options` and `harmonize: None`, and stops at the first probe that gives every target slot at
+least `min` legal candidates (mode offered). The X values are `lo..=hi` when `cost_spec` gives
+`x_range: Some((lo, hi))` with `lo <= hi`; when `x_range` is `None` the probe has `x: None` (one
+value); when `x_range` is `Some((lo, hi))` with `lo > hi` it is the single value `x = Some(lo)`
+(as before). The exhaustive product is used only when
+`(alternatives + 1) * 2^additional * x_count <= 4096` (`x_count` = `hi - lo + 1`, or 1 as above;
+computed without overflow: `hi - lo + 1` of 2^64 or more, an overflowing product, or
+`additional >= 64` exceeds the bound). That is still at most 4096 calls of `target_slots` per mode (the
+budget of CR-013 now covers the full product). When the product exceeds the budget, including an X
+range too wide to enumerate, the mode is OFFERED without calling `target_slots` at all, exactly as
+CR-013 says: the CR 601.2c check of step 3 with the costs and X the player actually chose rolls the
+cast back (CR 734.1) with `MissingTarget` if that choice leaves a slot without enough legal
+candidates. A spell with no alternative cost, no additional cost and no X range (or a one-value X
+range) still makes exactly one call per mode. Hybrid and Phyrexian symbol choices and the harmonize
+creature are NOT probed dimensions: they do not change which targets a spell requires (CR 601.2c lists
+the mode and alternative or additional costs), and the harmonize creature is tapped in payment
+(601.2h), after targets. `CastState::target_slots` must stay pure (R3).
+Why: REQ-CAST-001; CR 601.2b: "...If the spell has a variable cost that will be paid as it’s being
+cast (such as an {X} in its mana cost; see rule 107.3), the player announces the value of that
+variable." and CR 601.2c (targets are announced after 601.2b, so X is known): a target restriction can
+refer to X (for example a target whose mana value equals X), so a mode with no legal target at the low
+end of the X range and legal targets at a higher X is NOT illegal under CR 700.2a: "If one of the modes
+would be illegal (due to an inability to choose legal targets, for example), that mode can’t be
+chosen." and was omitted by CR-013, whose check at step 3 runs only after the costs are chosen and
+cannot recover a mode that was never offered. CR 107.3a: "...the controller of that spell or ability
+chooses and announces the value of X as part of casting the spell or activating the ability."
+Alternatives rejected: probing only the low and high end of the X range (unsound: a legal middle X would
+be omitted); a host-supplied legality hook (extra host method for what `target_slots` already answers).
+Gate 06-turn round 7.
+Consumers affected: `casting::announce`; `CastState::target_slots` implementors (up to 4096 calls per
+mode before the costs are chosen, now including calls with different `x`); the unit and spec tests that
+asserted a single low-end X probe.
+
+## CR-015 — PAY_MANA_AND_COSTS (REQ-CAST-001): the mana-ability window is asked again after each answer that activates abilities
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021419)   Kind: additive   Status: open
+Change: no type, field, `ValidatorRule`, validator or canonical-encoding change (`ChoicePayload::PayManaAndCosts`
+and `ChoiceResponse::PayCosts` are unchanged); only the request SEQUENCE of step 7 changes, as CR-011
+changed the sequence of CHOOSE_COSTS_AND_X. `casting::pay_total_cost` asks PAY_MANA_AND_COSTS one or more
+times while the locked mana part is payable and not {0}. Each request lists `mana_abilities` = the abilities
+available NOW (`PayState::available_mana_abilities`, ascending, deduplicated) on a state in which the
+activations of the earlier answers of this window have been applied, and `methods` and `auto_pay`
+computed from that state. An answer that lists at least one ability and in which at least one listed
+ability is actually activated (it is available at that moment, not already in progress, and the host
+accepts it; abilities are tried in listed order, CR 605.3c) is followed by a NEW request; the `methods`
+of such an answer are discarded and its `auto_pay` is ignored (the player chooses them in the request that
+ends the window). The window ends with the first answer that is `auto_pay: true`, or lists no ability, or
+lists abilities none of which was activated, and on CANCEL_AND_ROLLBACK (which reverses the cast; nothing
+has changed in the real state). At most 256 requests are asked per window: the 256th lists no
+`mana_abilities`, so it ends the window. Nothing in the real state changes until the window has ended:
+the earlier rounds are simulated on a copy of the state, then the concatenation of all listed abilities is
+activated for real, in order, exactly as if one answer had listed them (the CR 734.1 dependent-activation
+probe covers the concatenation, so an activation of an early round whose mana a library-touching
+activation of a later round consumed is committed durably). A request still rejects by membership any
+ability not in its own list (R12). `activate_all` keeps checking availability at each activation. An answer
+that lists no ability gives the single request of before.
+Why: REQ-CAST-001 (SRS 7.1 step 7); CR 601.2g: "If the total cost includes a mana payment, the player
+then has a chance to activate mana abilities (see rule 605, "Mana Abilities"). Mana abilities must be
+activated before costs are paid."; CR 605.3a: "A player may activate an activated mana ability whenever
+they have priority, whenever they are casting a spell or activating an ability that requires a mana
+payment, ..."; CR 605.3b: "...it resolves immediately after it is activated."; CR 605.3c: "Once a player
+begins to activate a mana ability, that ability can’t be activated again until it has resolved." A single
+snapshot offer made an ability that becomes available only after an earlier activation of the same window
+(for example one whose source an earlier ability untaps, or whose mana cost needs the mana an earlier
+ability produced) unselectable, so the cast rolled back. Alternatives rejected: a host method listing
+abilities that could become activatable (the client could not tell which are legal now); a payload field of
+conditional abilities (changes `ChoicePayload` and its canonical encoding: breaking); dropping the
+membership check (weakens R12). Gate 06-turn round 7.
+Consumers affected: `casting::pay` and its unit tests; every client of PAY_MANA_AND_COSTS (an answer that
+activates abilities is now followed by another request; no replay with such a request exists: no
+integrating host yet).
+
+## CR-016 — PayState (REQ-CAST-001, REQ-CORE-005): the host reports which pool units the last mana-ability activation removed
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021426 and comment 4720082538)   Kind: additive   Status: open
+Change: new provided method on `casting::PayState`:
+`fn last_activation_removed(&self, player: PlayerId) -> Option<Vec<usize>>`, default `None`.
+After a successful `activate_mana_ability(player, ..)`, `Some(v)` lists every unit of
+`mana_pool(player)` that this call removed (its cost payment and the triggered mana abilities it caused,
+together), as indices into that pool as it was immediately BEFORE the call, strictly ascending, without
+duplicates. The units that were not removed keep their relative order and the units the call added come
+after them, in the order added. A unit the call removed and an equal unit the call added are reported as
+removed and added respectively (the pool may be identical before and after). The value is transient
+bookkeeping of the last call: it must not enter the state hash or any canonical encoding, it must survive
+`Clone`, and it is read only directly after a successful call on the same value (the scratch copy of the
+dependent-activation probe). `None` means the host does not report. `casting::pay` uses `Some(v)` when
+it is valid (every index below the pool length before the call, strictly ascending, and
+`before.len() - v.len() <= after.len()`); otherwise, and for `None`, it infers the removal from the pool
+before and after: the removed units are the multiset difference, each credited to the earliest equal unit
+(lowest pool index among equal units), the survivors keep their order and the extra units at the end are
+new. The inference is sound exactly when (1) the host removes, among equal units, the lowest-index one
+(the tie-break of `plan_payment`) and (2) the activation does not both remove a unit and add an equal unit.
+Documented host requirement (added to the `PayState::activate_mana_ability` documentation): a host that
+cannot guarantee both MUST override `last_activation_removed`. `ManaActivation` (adding a field is
+breaking: it is not `#[non_exhaustive]` and hosts build it as a struct literal), `ManaUnit` equality,
+`ChoicePayload` and all encodings are unchanged.
+Why: REQ-CORE-005; CR 734.1: "...Each player may also reverse any legal mana abilities that player
+activated while making the illegal play, unless mana from those abilities or from any triggered mana
+abilities they caused to trigger was spent on another mana ability that wasn’t reversed." and SRS 2.5(a)
+(the exception is mandatory). `ManaUnit` equality ignores production history, so a before/after pool
+comparison cannot tell which of two equal units an activation removed, and sees nothing when a durable
+activation spends a unit produced by an earlier activation and produces an equal one (the pool is
+identical): the dependency is missed and the earlier activation is reversed although its mana was spent
+on an activation that is not reversed. Alternatives rejected: a `consumed` field on `ManaActivation`
+(breaking); a production id on `ManaUnit` (breaking: equality, canonical encoding, state hash; very-high
+blast radius); inference only (relies on host invariants the contract did not state). Gate 06-turn round 7.
+Consumers affected: `casting::pay::probe_activations`; every `PayState` implementor (source-compatible: the
+method is provided; hosts that spend and reproduce equal units, or remove other than the lowest-index equal
+unit, must override it).
