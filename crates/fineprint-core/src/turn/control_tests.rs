@@ -2543,3 +2543,83 @@ fn req_turn_002_cr_614_10_first_damage_step_query_honours_pending_step_skips() {
     assert!(!s.first_damage_step_is_next());
     assert_eq!(s.next_item(), Some(seg(Step::EndOfCombat)));
 }
+
+#[test]
+fn req_turn_002_cr_508_8_skipped_declare_attackers_without_attackers_skips_blockers_and_damage() {
+    // REQ-TURN-002, REQ-TURN-003, CR 508.8, CR 614.10: a step skip removes the declare
+    // attackers step, so its end-of-step check never runs; with no creature put onto the
+    // battlefield attacking, the declare blockers and combat damage steps are still skipped,
+    // the end of combat step stays, and the first-strike question is never asked.
+    for provisional in [false, true] {
+        let (steps, reads) = combat_run(provisional, |w| {
+            let active = w.sched.active_player().unwrap();
+            w.host.attackers = false;
+            w.host.first_strike = true;
+            w.sched.add_step_skip(active, Step::DeclareAttackers);
+        });
+        assert_eq!(
+            steps,
+            [Step::BeginningOfCombat, Step::EndOfCombat],
+            "provisional: {provisional}"
+        );
+        assert!(reads.is_empty(), "{reads:?}");
+    }
+}
+
+#[test]
+fn req_turn_002_cr_508_8_skipped_declare_attackers_with_attackers_keeps_blockers_and_damage() {
+    // REQ-TURN-002, REQ-TURN-003, CR 508.8, CR 614.10, CR 510.4: declare attackers skipped,
+    // but a creature was put onto the battlefield attacking (`attackers_declared` true): the
+    // declare blockers and combat damage steps run, and the first-strike decision is made as
+    // the first damage step begins (after declare blockers).
+    let (steps, reads) = combat_run(false, |w| {
+        let active = w.sched.active_player().unwrap();
+        w.host.attackers = true;
+        w.host.first_strike = true;
+        w.sched.add_step_skip(active, Step::DeclareAttackers);
+    });
+    assert_eq!(
+        steps,
+        [
+            Step::BeginningOfCombat,
+            Step::DeclareBlockers,
+            Step::FirstStrikeDamage,
+            Step::CombatDamage,
+            Step::EndOfCombat
+        ]
+    );
+    assert_eq!(reads, [Some(Step::DeclareBlockers)]);
+}
+
+#[test]
+fn req_turn_002_cr_508_8_attackers_check_query_only_when_declare_attackers_is_skipped() {
+    // REQ-TURN-002, CR 508.8, CR 614.10: the "attackers check is next" query is true only
+    // when the next combat step is declare blockers or combat damage and no declare attackers,
+    // declare blockers or combat damage step has begun in the combat phase; it is checked
+    // afresh in each combat phase and is false outside combat.
+    let order = seats(2);
+    let mut s = TurnScheduler::new(order[0]);
+    assert!(!s.attackers_check_is_next());
+    let t = take(&mut s, &order);
+    assert!(!s.attackers_check_is_next());
+    assert!(s.add_extra_phase(Phase::Combat, Phase::Combat, None));
+    // First combat phase: declare attackers runs, so the driver's end-of-step check applies.
+    advance_to(&mut s, seg(Step::BeginningOfCombat));
+    assert!(!s.attackers_check_is_next());
+    advance_to(&mut s, seg(Step::DeclareAttackers));
+    assert!(!s.attackers_check_is_next());
+    // Second combat phase: declare attackers skipped.
+    s.add_step_skip(t.player, Step::DeclareAttackers);
+    advance_to(&mut s, PlanItem::BeginPhase(Phase::Combat));
+    assert!(!s.attackers_check_is_next());
+    assert_eq!(s.next_item(), Some(seg(Step::BeginningOfCombat)));
+    assert!(s.attackers_check_is_next());
+    assert_eq!(s.next_item(), Some(seg(Step::DeclareBlockers)));
+    assert!(
+        !s.attackers_check_is_next(),
+        "checked once per combat phase"
+    );
+    assert!(s.skip_blockers_and_damage());
+    assert_eq!(s.next_item(), Some(seg(Step::EndOfCombat)));
+    assert!(!s.attackers_check_is_next());
+}

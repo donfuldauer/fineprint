@@ -497,6 +497,9 @@
         "crates/fineprint-core/tests/spec_turn_steps.rs:536",
         "crates/fineprint-core/tests/spec_turn_steps.rs:601",
         "crates/fineprint-core/tests/spec_turn_steps.rs:93",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:153",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:227",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:8",
         "crates/fineprint-core/tests/spec_turn_steps_support.rs:940",
         "docs/SRS.md:1452",
         "docs/SRS.md:253",
@@ -525,6 +528,8 @@
         "crates/fineprint-core/tests/spec_turn_steps.rs:1639",
         "crates/fineprint-core/tests/spec_turn_steps.rs:536",
         "crates/fineprint-core/tests/spec_turn_steps.rs:601",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:203",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:9",
         "docs/SRS.md:253"
       ]
     },
@@ -5434,9 +5439,9 @@
         "crates/fineprint-core/src/turn/control.rs:12",
         "crates/fineprint-core/src/turn/control.rs:177",
         "crates/fineprint-core/src/turn/control.rs:184",
-        "crates/fineprint-core/src/turn/control.rs:262",
-        "crates/fineprint-core/src/turn/control.rs:269",
-        "crates/fineprint-core/src/turn/control.rs:390",
+        "crates/fineprint-core/src/turn/control.rs:268",
+        "crates/fineprint-core/src/turn/control.rs:275",
+        "crates/fineprint-core/src/turn/control.rs:396",
         "crates/fineprint-core/src/turn/control.rs:82",
         "crates/fineprint-core/src/turn/control_tests.rs:123",
         "crates/fineprint-core/src/turn/control_tests.rs:141",
@@ -5462,8 +5467,8 @@
       "sha256": "86b7d056728b27e23dd3ac085f4ea05ba00618bef5b98b130c5babe5cce3a4e9",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:12",
-        "crates/fineprint-core/src/turn/control.rs:658",
-        "crates/fineprint-core/src/turn/control.rs:669",
+        "crates/fineprint-core/src/turn/control.rs:703",
+        "crates/fineprint-core/src/turn/control.rs:714",
         "crates/fineprint-core/src/turn/control_tests.rs:1484",
         "crates/fineprint-core/src/turn/control_tests.rs:514",
         "crates/fineprint-core/src/turn/control_tests.rs:535",
@@ -5484,9 +5489,9 @@
       "sha256": "8714d15e47f89a9db832dbe607d52220b3bec831031977b10477fb70ee4419fe",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:12",
-        "crates/fineprint-core/src/turn/control.rs:711",
-        "crates/fineprint-core/src/turn/control.rs:737",
-        "crates/fineprint-core/src/turn/control.rs:760",
+        "crates/fineprint-core/src/turn/control.rs:756",
+        "crates/fineprint-core/src/turn/control.rs:782",
+        "crates/fineprint-core/src/turn/control.rs:805",
         "crates/fineprint-core/src/turn/control_tests.rs:2453",
         "crates/fineprint-core/src/turn/control_tests.rs:634",
         "crates/fineprint-core/src/turn/control_tests.rs:665",
@@ -5498,26 +5503,35 @@
         "crates/fineprint-core/tests/spec_turn_control.rs:921",
         "crates/fineprint-core/tests/spec_turn_control.rs:934",
         "crates/fineprint-core/tests/spec_turn_control.rs:974",
-        "crates/fineprint-core/tests/spec_turn_control_driver.rs:515"
+        "crates/fineprint-core/tests/spec_turn_control_driver.rs:515",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:15",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:156",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:158",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:17",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:37",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:39"
       ]
     },
     "500.10": {
       "sha256": "4bce950240026218345057642dfdbe155d86f60db4b93cf92317c6582d3a79f2",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:12",
-        "crates/fineprint-core/src/turn/control.rs:779",
+        "crates/fineprint-core/src/turn/control.rs:824",
         "crates/fineprint-core/src/turn/control_tests.rs:701",
         "crates/fineprint-core/src/turn/steps.rs:742",
         "crates/fineprint-core/tests/spec_turn_control.rs:7",
-        "crates/fineprint-core/tests/spec_turn_control.rs:994"
+        "crates/fineprint-core/tests/spec_turn_control.rs:994",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:157",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:16",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:35"
       ]
     },
     "500.10a": {
       "sha256": "0e1c8088a2203116d1b5b1fc89ef2cb85ecf44ba99bdd3fed9ae5e289b2ffedc",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:617",
-        "crates/fineprint-core/src/turn/control.rs:673",
-        "crates/fineprint-core/src/turn/control.rs:742",
+        "crates/fineprint-core/src/turn/control.rs:662",
+        "crates/fineprint-core/src/turn/control.rs:718",
+        "crates/fineprint-core/src/turn/control.rs:787",
         "crates/fineprint-core/src/turn/control_tests.rs:720",
         "crates/fineprint-core/tests/spec_turn_control.rs:1024",
         "crates/fineprint-core/tests/spec_turn_control.rs:1068",
@@ -5527,9 +5541,10 @@
     "500.11": {
       "sha256": "622ccda50d2a1b2fc6c7331222abc651a0352f0be514cf46185bede62a846168",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:511",
-        "crates/fineprint-core/src/turn/control.rs:529",
-        "crates/fineprint-core/src/turn/control.rs:544",
+        "crates/fineprint-core/src/turn/control.rs:518",
+        "crates/fineprint-core/src/turn/control.rs:536",
+        "crates/fineprint-core/src/turn/control.rs:551",
+        "crates/fineprint-core/src/turn/control.rs:604",
         "crates/fineprint-core/src/turn/control_tests.rs:362",
         "crates/fineprint-core/src/turn/control_tests.rs:418",
         "crates/fineprint-core/src/turn/control_tests.rs:454",
@@ -5551,6 +5566,8 @@
         "crates/fineprint-core/tests/spec_turn_steps.rs:1639",
         "crates/fineprint-core/tests/spec_turn_steps.rs:238",
         "crates/fineprint-core/tests/spec_turn_steps.rs:536",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:11",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:155",
         "crates/fineprint-core/tests/spec_turn_steps_support.rs:941"
       ]
     },
@@ -5558,7 +5575,7 @@
       "sha256": "f0897b8e94fb0cc31ed4b11e98a3b3f6a1c543faf42d617d97fadce9ada000f0",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:177",
-        "crates/fineprint-core/src/turn/control.rs:361",
+        "crates/fineprint-core/src/turn/control.rs:367",
         "crates/fineprint-core/src/turn/control_tests.rs:5"
       ]
     },
@@ -5594,7 +5611,7 @@
     "502.2": {
       "sha256": "78c3bc5133b95a59e63a750ad7f8d5212e2eae1099a9e10ee1cd34866ac4f544",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1348",
+        "crates/fineprint-core/src/turn/control.rs:1393",
         "crates/fineprint-core/src/turn/control_tests.rs:1465",
         "crates/fineprint-core/src/turn/steps.rs:251",
         "crates/fineprint-core/src/turn/steps.rs:27",
@@ -5692,7 +5709,9 @@
         "crates/fineprint-core/tests/spec_turn_steps.rs:148",
         "crates/fineprint-core/tests/spec_turn_steps.rs:1503",
         "crates/fineprint-core/tests/spec_turn_steps.rs:1639",
-        "crates/fineprint-core/tests/spec_turn_steps.rs:536"
+        "crates/fineprint-core/tests/spec_turn_steps.rs:536",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:10",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:155"
       ]
     },
     "504.2": {
@@ -5706,7 +5725,9 @@
         "crates/fineprint-core/src/turn/steps_tests.rs:910",
         "crates/fineprint-core/tests/spec_turn_steps.rs:148",
         "crates/fineprint-core/tests/spec_turn_steps.rs:1639",
-        "crates/fineprint-core/tests/spec_turn_steps.rs:536"
+        "crates/fineprint-core/tests/spec_turn_steps.rs:536",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:156",
+        "crates/fineprint-core/tests/spec_turn_steps_extra_draw.rs:170"
       ]
     },
     "505": {
@@ -5720,12 +5741,12 @@
     "505.1a": {
       "sha256": "8cc9f0e9edc023de3fc5903b56fad7718bec44cf37f48d810031a097bf13d7cb",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:212",
-        "crates/fineprint-core/src/turn/control.rs:446",
-        "crates/fineprint-core/src/turn/control.rs:512",
-        "crates/fineprint-core/src/turn/control.rs:526",
-        "crates/fineprint-core/src/turn/control.rs:674",
-        "crates/fineprint-core/src/turn/control.rs:683",
+        "crates/fineprint-core/src/turn/control.rs:217",
+        "crates/fineprint-core/src/turn/control.rs:453",
+        "crates/fineprint-core/src/turn/control.rs:519",
+        "crates/fineprint-core/src/turn/control.rs:533",
+        "crates/fineprint-core/src/turn/control.rs:719",
+        "crates/fineprint-core/src/turn/control.rs:728",
         "crates/fineprint-core/src/turn/control_tests.rs:484",
         "crates/fineprint-core/src/turn/control_tests.rs:5",
         "crates/fineprint-core/src/turn/control_tests.rs:557",
@@ -5788,9 +5809,9 @@
     "506.1": {
       "sha256": "b669ed32265bb69190cdfbe9110ee3cbd1ca3f640f1f77acc416c7fc881ef95a",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:845",
-        "crates/fineprint-core/src/turn/control.rs:865",
-        "crates/fineprint-core/src/turn/control.rs:868",
+        "crates/fineprint-core/src/turn/control.rs:890",
+        "crates/fineprint-core/src/turn/control.rs:910",
+        "crates/fineprint-core/src/turn/control.rs:913",
         "crates/fineprint-core/src/turn/control_tests.rs:2453",
         "crates/fineprint-core/src/turn/control_tests.rs:2481",
         "crates/fineprint-core/src/turn/steps.rs:342",
@@ -5956,12 +5977,19 @@
     "508.8": {
       "sha256": "87ae592d5be46cbb9854ed0d5823a4a1342279d62c1383736a509f6c571d757e",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1352",
-        "crates/fineprint-core/src/turn/control.rs:1404",
-        "crates/fineprint-core/src/turn/control.rs:841",
+        "crates/fineprint-core/src/turn/control.rs:1397",
+        "crates/fineprint-core/src/turn/control.rs:1438",
+        "crates/fineprint-core/src/turn/control.rs:1457",
+        "crates/fineprint-core/src/turn/control.rs:205",
+        "crates/fineprint-core/src/turn/control.rs:564",
+        "crates/fineprint-core/src/turn/control.rs:605",
+        "crates/fineprint-core/src/turn/control.rs:886",
         "crates/fineprint-core/src/turn/control_tests.rs:2135",
         "crates/fineprint-core/src/turn/control_tests.rs:2245",
         "crates/fineprint-core/src/turn/control_tests.rs:2433",
+        "crates/fineprint-core/src/turn/control_tests.rs:2549",
+        "crates/fineprint-core/src/turn/control_tests.rs:2571",
+        "crates/fineprint-core/src/turn/control_tests.rs:2596",
         "crates/fineprint-core/src/turn/control_tests.rs:930",
         "crates/fineprint-core/src/turn/steps.rs:339",
         "crates/fineprint-core/src/turn/steps.rs:342",
@@ -6106,16 +6134,16 @@
     "510.4": {
       "sha256": "412f12aeb18f20111a97968e10d7527c3334928c6e3ed532104b726c1d840c18",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1352",
-        "crates/fineprint-core/src/turn/control.rs:1390",
+        "crates/fineprint-core/src/turn/control.rs:1400",
+        "crates/fineprint-core/src/turn/control.rs:1443",
         "crates/fineprint-core/src/turn/control.rs:200",
-        "crates/fineprint-core/src/turn/control.rs:224",
-        "crates/fineprint-core/src/turn/control.rs:367",
-        "crates/fineprint-core/src/turn/control.rs:555",
-        "crates/fineprint-core/src/turn/control.rs:570",
-        "crates/fineprint-core/src/turn/control.rs:856",
-        "crates/fineprint-core/src/turn/control.rs:862",
-        "crates/fineprint-core/src/turn/control.rs:868",
+        "crates/fineprint-core/src/turn/control.rs:229",
+        "crates/fineprint-core/src/turn/control.rs:373",
+        "crates/fineprint-core/src/turn/control.rs:562",
+        "crates/fineprint-core/src/turn/control.rs:588",
+        "crates/fineprint-core/src/turn/control.rs:901",
+        "crates/fineprint-core/src/turn/control.rs:907",
+        "crates/fineprint-core/src/turn/control.rs:913",
         "crates/fineprint-core/src/turn/control_tests.rs:2181",
         "crates/fineprint-core/src/turn/control_tests.rs:2245",
         "crates/fineprint-core/src/turn/control_tests.rs:2392",
@@ -6123,6 +6151,7 @@
         "crates/fineprint-core/src/turn/control_tests.rs:2453",
         "crates/fineprint-core/src/turn/control_tests.rs:2481",
         "crates/fineprint-core/src/turn/control_tests.rs:2529",
+        "crates/fineprint-core/src/turn/control_tests.rs:2571",
         "crates/fineprint-core/src/turn/control_tests.rs:932",
         "crates/fineprint-core/src/turn/steps.rs:329",
         "crates/fineprint-core/src/turn/steps.rs:627",
@@ -6229,7 +6258,7 @@
     "514.3a": {
       "sha256": "505c13491f2ae856790f6642d271895ccb26bd1551b0a5f72ca54aa4d77001e8",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:955",
+        "crates/fineprint-core/src/turn/control.rs:1000",
         "crates/fineprint-core/src/turn/control_tests.rs:1346",
         "crates/fineprint-core/src/turn/steps.rs:1007",
         "crates/fineprint-core/src/turn/steps.rs:38",
@@ -11022,23 +11051,29 @@
       "sha256": "218c71a7806784e6aeac660f7e16f07b3b0ce365f0999c3e76e2aedb481ee48d",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:13",
-        "crates/fineprint-core/src/turn/control.rs:1346",
+        "crates/fineprint-core/src/turn/control.rs:1391",
+        "crates/fineprint-core/src/turn/control.rs:1438",
         "crates/fineprint-core/src/turn/control.rs:177",
-        "crates/fineprint-core/src/turn/control.rs:284",
-        "crates/fineprint-core/src/turn/control.rs:304",
-        "crates/fineprint-core/src/turn/control.rs:311",
-        "crates/fineprint-core/src/turn/control.rs:359",
-        "crates/fineprint-core/src/turn/control.rs:399",
-        "crates/fineprint-core/src/turn/control.rs:510",
-        "crates/fineprint-core/src/turn/control.rs:529",
-        "crates/fineprint-core/src/turn/control.rs:544",
-        "crates/fineprint-core/src/turn/control.rs:569",
+        "crates/fineprint-core/src/turn/control.rs:290",
+        "crates/fineprint-core/src/turn/control.rs:310",
+        "crates/fineprint-core/src/turn/control.rs:317",
+        "crates/fineprint-core/src/turn/control.rs:365",
+        "crates/fineprint-core/src/turn/control.rs:405",
+        "crates/fineprint-core/src/turn/control.rs:517",
+        "crates/fineprint-core/src/turn/control.rs:536",
+        "crates/fineprint-core/src/turn/control.rs:551",
+        "crates/fineprint-core/src/turn/control.rs:587",
+        "crates/fineprint-core/src/turn/control.rs:604",
+        "crates/fineprint-core/src/turn/control.rs:620",
         "crates/fineprint-core/src/turn/control.rs:68",
         "crates/fineprint-core/src/turn/control_tests.rs:1484",
         "crates/fineprint-core/src/turn/control_tests.rs:2032",
         "crates/fineprint-core/src/turn/control_tests.rs:2392",
         "crates/fineprint-core/src/turn/control_tests.rs:241",
         "crates/fineprint-core/src/turn/control_tests.rs:2529",
+        "crates/fineprint-core/src/turn/control_tests.rs:2549",
+        "crates/fineprint-core/src/turn/control_tests.rs:2571",
+        "crates/fineprint-core/src/turn/control_tests.rs:2596",
         "crates/fineprint-core/src/turn/control_tests.rs:282",
         "crates/fineprint-core/src/turn/control_tests.rs:303",
         "crates/fineprint-core/src/turn/control_tests.rs:362",
@@ -11072,9 +11107,9 @@
       "sha256": "c79bfdde30fe6d3b0c0ffe6632757e6f9cb3b904db7f728ae897b71803a0932a",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:13",
-        "crates/fineprint-core/src/turn/control.rs:285",
-        "crates/fineprint-core/src/turn/control.rs:360",
-        "crates/fineprint-core/src/turn/control.rs:399",
+        "crates/fineprint-core/src/turn/control.rs:291",
+        "crates/fineprint-core/src/turn/control.rs:366",
+        "crates/fineprint-core/src/turn/control.rs:405",
         "crates/fineprint-core/src/turn/control_tests.rs:1944",
         "crates/fineprint-core/src/turn/control_tests.rs:264",
         "crates/fineprint-core/src/turn/control_tests.rs:402",
@@ -11094,13 +11129,13 @@
       "sha256": "0f04c9ac051af6c2151641da4089af351b089ea6abfbbf438dd89c56d048ca67",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:13",
-        "crates/fineprint-core/src/turn/control.rs:1341",
-        "crates/fineprint-core/src/turn/control.rs:1382",
+        "crates/fineprint-core/src/turn/control.rs:1386",
+        "crates/fineprint-core/src/turn/control.rs:1430",
         "crates/fineprint-core/src/turn/control.rs:170",
-        "crates/fineprint-core/src/turn/control.rs:203",
-        "crates/fineprint-core/src/turn/control.rs:285",
-        "crates/fineprint-core/src/turn/control.rs:361",
-        "crates/fineprint-core/src/turn/control.rs:403",
+        "crates/fineprint-core/src/turn/control.rs:208",
+        "crates/fineprint-core/src/turn/control.rs:291",
+        "crates/fineprint-core/src/turn/control.rs:367",
+        "crates/fineprint-core/src/turn/control.rs:409",
         "crates/fineprint-core/src/turn/control.rs:63",
         "crates/fineprint-core/src/turn/control.rs:87",
         "crates/fineprint-core/src/turn/control_tests.rs:2086",
@@ -18297,7 +18332,7 @@
     "724": {
       "sha256": "313985cded85780f38c597ee87e76e77c175144f319d17a9df8ca1decf448788",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1043",
+        "crates/fineprint-core/src/turn/control.rs:1088",
         "crates/fineprint-core/src/turn/control.rs:18",
         "crates/fineprint-core/src/turn/control_tests.rs:6",
         "crates/fineprint-core/src/turn/heartbeat.rs:72",
@@ -18308,8 +18343,8 @@
     "724.1": {
       "sha256": "a79b7c14c9dfd02ec6b8b0d58556d4e773e1303cb739512e896203116f92a95d",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1112",
-        "crates/fineprint-core/src/turn/control.rs:1120",
+        "crates/fineprint-core/src/turn/control.rs:1157",
+        "crates/fineprint-core/src/turn/control.rs:1165",
         "crates/fineprint-core/src/turn/control_tests.rs:1654",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:5",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:52",
@@ -18319,8 +18354,8 @@
     "724.1a": {
       "sha256": "a560dbde534eabbcec53fa0348b03942a809ad4658da8420166336cb42d62e5d",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1047",
-        "crates/fineprint-core/src/turn/control.rs:1113",
+        "crates/fineprint-core/src/turn/control.rs:1092",
+        "crates/fineprint-core/src/turn/control.rs:1158",
         "crates/fineprint-core/src/turn/control_tests.rs:1628",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:103",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:370",
@@ -18331,7 +18366,7 @@
     "724.1b": {
       "sha256": "9f21346d21b699b7b62d66992803038400a6f46c016a942f6710b6834800c6d7",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1123",
+        "crates/fineprint-core/src/turn/control.rs:1168",
         "crates/fineprint-core/src/turn/control_tests.rs:1654",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:122",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:370"
@@ -18340,8 +18375,8 @@
     "724.3": {
       "sha256": "00bf077c9f31179bca7831b64265952caf680dbe77ebee6c69bf4310395000cd",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1058",
-        "crates/fineprint-core/src/turn/control.rs:1169",
+        "crates/fineprint-core/src/turn/control.rs:1103",
+        "crates/fineprint-core/src/turn/control.rs:1214",
         "crates/fineprint-core/src/turn/control_tests.rs:1586",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:68"
       ]
@@ -18349,9 +18384,9 @@
     "724.4": {
       "sha256": "f20d76ef59bc3e2f08ae4d18f94814eabd747219e6e45fcbbabe4c0ca361c3fa",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1096",
-        "crates/fineprint-core/src/turn/control.rs:1228",
-        "crates/fineprint-core/src/turn/control.rs:1240",
+        "crates/fineprint-core/src/turn/control.rs:1141",
+        "crates/fineprint-core/src/turn/control.rs:1273",
+        "crates/fineprint-core/src/turn/control.rs:1285",
         "crates/fineprint-core/src/turn/control_tests.rs:1695",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:181",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:283",
@@ -18361,11 +18396,11 @@
     "724.5": {
       "sha256": "16ff18c364a74a7a51fb95106929e27c1c3e5ac2ac00c81238d9f7079594aae4",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1053",
-        "crates/fineprint-core/src/turn/control.rs:1068",
-        "crates/fineprint-core/src/turn/control.rs:1147",
-        "crates/fineprint-core/src/turn/control.rs:1168",
-        "crates/fineprint-core/src/turn/control.rs:1185",
+        "crates/fineprint-core/src/turn/control.rs:1098",
+        "crates/fineprint-core/src/turn/control.rs:1113",
+        "crates/fineprint-core/src/turn/control.rs:1192",
+        "crates/fineprint-core/src/turn/control.rs:1213",
+        "crates/fineprint-core/src/turn/control.rs:1230",
         "crates/fineprint-core/src/turn/control_tests.rs:1586",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:181",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:218"
@@ -18374,7 +18409,7 @@
     "724.5a": {
       "sha256": "d5698c99e8ca83b1dd0303284cb8988a0ba6dbf24ce98fcbc2126a017e483bb4",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1220",
+        "crates/fineprint-core/src/turn/control.rs:1265",
         "crates/fineprint-core/src/turn/control_tests.rs:1712",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:274"
       ]
@@ -18382,8 +18417,8 @@
     "724.6": {
       "sha256": "c3e05b9742de547964d904e2580d3defddf0cdaaa9f44932c9fdce4e464b9120",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1206",
-        "crates/fineprint-core/src/turn/control.rs:1213",
+        "crates/fineprint-core/src/turn/control.rs:1251",
+        "crates/fineprint-core/src/turn/control.rs:1258",
         "crates/fineprint-core/src/turn/control_tests.rs:1711",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:260"
       ]
@@ -18391,8 +18426,8 @@
     "724.8": {
       "sha256": "e14cddd5de78daa2c37d52516c56186bb18cdb72cb7ae4117a3663553521318b",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1147",
-        "crates/fineprint-core/src/turn/control.rs:1171",
+        "crates/fineprint-core/src/turn/control.rs:1192",
+        "crates/fineprint-core/src/turn/control.rs:1216",
         "crates/fineprint-core/src/turn/control_tests.rs:1613",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:202",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:243",
@@ -18402,9 +18437,9 @@
     "724.9": {
       "sha256": "d7f80149bbfc21db3bf452e722e0293914f17f36d81e0c1d2c1f33cfd4cb11ce",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1115",
-        "crates/fineprint-core/src/turn/control.rs:1122",
-        "crates/fineprint-core/src/turn/control.rs:1147",
+        "crates/fineprint-core/src/turn/control.rs:1160",
+        "crates/fineprint-core/src/turn/control.rs:1167",
+        "crates/fineprint-core/src/turn/control.rs:1192",
         "crates/fineprint-core/src/turn/control_tests.rs:1642",
         "crates/fineprint-core/tests/spec_turn_control_player.rs:103"
       ]
@@ -18419,8 +18454,8 @@
       "sha256": "78a7ff06e9d878be0c316a6dc73c1cc6e61d419c9ca32275f54225901d802386",
       "locations": [
         "crates/fineprint-core/src/turn/control.rs:15",
-        "crates/fineprint-core/src/turn/control.rs:918",
-        "crates/fineprint-core/src/turn/control.rs:947",
+        "crates/fineprint-core/src/turn/control.rs:963",
+        "crates/fineprint-core/src/turn/control.rs:992",
         "crates/fineprint-core/src/turn/control_tests.rs:6",
         "crates/fineprint-core/src/turn/mod.rs:25",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:5"
@@ -18429,9 +18464,9 @@
     "725.1a": {
       "sha256": "efee2fd1a8abdbe2cb97338f90726d6bf0bf2b14871cf7bcb62c50649bc72912",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:920",
-        "crates/fineprint-core/src/turn/control.rs:949",
-        "crates/fineprint-core/src/turn/control.rs:966",
+        "crates/fineprint-core/src/turn/control.rs:1011",
+        "crates/fineprint-core/src/turn/control.rs:965",
+        "crates/fineprint-core/src/turn/control.rs:994",
         "crates/fineprint-core/src/turn/control_tests.rs:1298",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:224",
         "crates/fineprint-core/tests/spec_turn_control_support.rs:248"
@@ -18440,9 +18475,9 @@
     "725.1b": {
       "sha256": "0d882165c55e709b7f8021af7e9e62928ee7f146808ba728f85b60813e684ded",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:927",
-        "crates/fineprint-core/src/turn/control.rs:949",
-        "crates/fineprint-core/src/turn/control.rs:968",
+        "crates/fineprint-core/src/turn/control.rs:1013",
+        "crates/fineprint-core/src/turn/control.rs:972",
+        "crates/fineprint-core/src/turn/control.rs:994",
         "crates/fineprint-core/src/turn/control_tests.rs:1298",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:224",
         "crates/fineprint-core/tests/spec_turn_control_support.rs:250"
@@ -18451,9 +18486,9 @@
     "725.1c": {
       "sha256": "2de34b22384651a2336136dcfa4f661780564de3222a3bd6f104116ad8ae4572",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:950",
-        "crates/fineprint-core/src/turn/control.rs:970",
-        "crates/fineprint-core/src/turn/control.rs:980",
+        "crates/fineprint-core/src/turn/control.rs:1015",
+        "crates/fineprint-core/src/turn/control.rs:1025",
+        "crates/fineprint-core/src/turn/control.rs:995",
         "crates/fineprint-core/src/turn/control_tests.rs:1298",
         "crates/fineprint-core/src/turn/control_tests.rs:1380",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:224",
@@ -18464,11 +18499,11 @@
     "725.1d": {
       "sha256": "c23419d4951f673e25742923d71aa60bd5fcbd7ccb6442563db768cb9bfde3c7",
       "locations": [
+        "crates/fineprint-core/src/turn/control.rs:1017",
         "crates/fineprint-core/src/turn/control.rs:151",
-        "crates/fineprint-core/src/turn/control.rs:801",
-        "crates/fineprint-core/src/turn/control.rs:933",
-        "crates/fineprint-core/src/turn/control.rs:953",
-        "crates/fineprint-core/src/turn/control.rs:972",
+        "crates/fineprint-core/src/turn/control.rs:846",
+        "crates/fineprint-core/src/turn/control.rs:978",
+        "crates/fineprint-core/src/turn/control.rs:998",
         "crates/fineprint-core/src/turn/control_tests.rs:1298",
         "crates/fineprint-core/src/turn/control_tests.rs:1327",
         "crates/fineprint-core/src/turn/control_tests.rs:792",
@@ -18493,7 +18528,7 @@
     "725.1e": {
       "sha256": "40778ea23204bc1bcf2f589978783d88fd2ef297f5b6022d0befefd9cf135c07",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:809",
+        "crates/fineprint-core/src/turn/control.rs:854",
         "crates/fineprint-core/src/turn/control_tests.rs:1346",
         "crates/fineprint-core/src/turn/control_tests.rs:792",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:43",
@@ -18503,8 +18538,8 @@
     "725.1f": {
       "sha256": "5e1f232a80dfa28670a968c82d37d4782795bf007ac34b17ee0aced24591547c",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:953",
-        "crates/fineprint-core/src/turn/control.rs:955",
+        "crates/fineprint-core/src/turn/control.rs:1000",
+        "crates/fineprint-core/src/turn/control.rs:998",
         "crates/fineprint-core/src/turn/control_tests.rs:1344",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:370",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:428",
@@ -18514,9 +18549,9 @@
     "725.2": {
       "sha256": "3cfb80f7fdc9e3372bf070fc39e0a552113ac4a31fd3d2a44c9618b084061baa",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1003",
+        "crates/fineprint-core/src/turn/control.rs:1048",
         "crates/fineprint-core/src/turn/control.rs:15",
-        "crates/fineprint-core/src/turn/control.rs:918",
+        "crates/fineprint-core/src/turn/control.rs:963",
         "crates/fineprint-core/src/turn/control_tests.rs:6",
         "crates/fineprint-core/src/turn/mod.rs:26"
       ]
@@ -18524,8 +18559,8 @@
     "725.2a": {
       "sha256": "b49db300d723b2b50916c40efb36ceaf1ebe872b3addeddbaac6d0ee5da1734e",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1007",
-        "crates/fineprint-core/src/turn/control.rs:1027",
+        "crates/fineprint-core/src/turn/control.rs:1052",
+        "crates/fineprint-core/src/turn/control.rs:1072",
         "crates/fineprint-core/src/turn/control_tests.rs:1393",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:496"
       ]
@@ -18533,25 +18568,25 @@
     "725.2b": {
       "sha256": "7c15ce61ec47fa06ce82f301d92e95f4550861c2dea683f22672af1bdc47c272",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1007",
-        "crates/fineprint-core/src/turn/control.rs:1029"
+        "crates/fineprint-core/src/turn/control.rs:1052",
+        "crates/fineprint-core/src/turn/control.rs:1074"
       ]
     },
     "725.2c": {
       "sha256": "bb8691a34e5ff61448d9a4b0c03f4ece7c9e32f3b7eaa43bf2bd15f3da12027c",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1008",
-        "crates/fineprint-core/src/turn/control.rs:1031",
-        "crates/fineprint-core/src/turn/control.rs:980"
+        "crates/fineprint-core/src/turn/control.rs:1025",
+        "crates/fineprint-core/src/turn/control.rs:1053",
+        "crates/fineprint-core/src/turn/control.rs:1076"
       ]
     },
     "725.2d": {
       "sha256": "ec9825f738dbf5074c043eacb2b0b6fca77b53725ddb533c25914a305ff5f04a",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1010",
-        "crates/fineprint-core/src/turn/control.rs:1033",
-        "crates/fineprint-core/src/turn/control.rs:901",
-        "crates/fineprint-core/src/turn/control.rs:933",
+        "crates/fineprint-core/src/turn/control.rs:1055",
+        "crates/fineprint-core/src/turn/control.rs:1078",
+        "crates/fineprint-core/src/turn/control.rs:946",
+        "crates/fineprint-core/src/turn/control.rs:978",
         "crates/fineprint-core/src/turn/control_tests.rs:1393",
         "crates/fineprint-core/src/turn/control_tests.rs:877",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:148",
@@ -18563,21 +18598,21 @@
     "725.2e": {
       "sha256": "a3fe3b7c923d0a84fe68b9effe785abfdc3ff0c5981b62fddc516e414bc302a7",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1012"
+        "crates/fineprint-core/src/turn/control.rs:1057"
       ]
     },
     "725.2f": {
       "sha256": "5ee93f6773a3e0ae833cc4d686d55d441f9adf4ac09c10f049e400409ab3d9c7",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1010"
+        "crates/fineprint-core/src/turn/control.rs:1055"
       ]
     },
     "725.2g": {
       "sha256": "1ef5ec5fac23ae3c21e06e24f18e77b10d38698db1c08e00ab0eb52925d30494",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1005",
-        "crates/fineprint-core/src/turn/control.rs:1023",
-        "crates/fineprint-core/src/turn/control.rs:903",
+        "crates/fineprint-core/src/turn/control.rs:1050",
+        "crates/fineprint-core/src/turn/control.rs:1068",
+        "crates/fineprint-core/src/turn/control.rs:948",
         "crates/fineprint-core/src/turn/control_tests.rs:1395",
         "crates/fineprint-core/src/turn/control_tests.rs:877",
         "crates/fineprint-core/tests/spec_turn_control_end.rs:183",
@@ -18676,8 +18711,8 @@
     "728": {
       "sha256": "41c779fa3cedf0338dd0df427506fdf6328fcb932765e0341a925a97ae099a94",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1257",
-        "crates/fineprint-core/src/turn/control.rs:1298",
+        "crates/fineprint-core/src/turn/control.rs:1302",
+        "crates/fineprint-core/src/turn/control.rs:1343",
         "crates/fineprint-core/src/turn/control.rs:21",
         "crates/fineprint-core/src/turn/control_tests.rs:6",
         "docs/SRS.md:295"
@@ -18686,12 +18721,12 @@
     "728.1": {
       "sha256": "9f7d7844e60c04d3a5cbf732d4f5833c1338d28538f940aaed95fb5535e56ca9",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1259",
-        "crates/fineprint-core/src/turn/control.rs:1299",
-        "crates/fineprint-core/src/turn/control.rs:1300",
-        "crates/fineprint-core/src/turn/control.rs:1303",
-        "crates/fineprint-core/src/turn/control.rs:1316",
-        "crates/fineprint-core/src/turn/control.rs:1322",
+        "crates/fineprint-core/src/turn/control.rs:1304",
+        "crates/fineprint-core/src/turn/control.rs:1344",
+        "crates/fineprint-core/src/turn/control.rs:1345",
+        "crates/fineprint-core/src/turn/control.rs:1348",
+        "crates/fineprint-core/src/turn/control.rs:1361",
+        "crates/fineprint-core/src/turn/control.rs:1367",
         "crates/fineprint-core/src/turn/control_tests.rs:1879",
         "crates/fineprint-core/src/turn/mod.rs:27",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:177",
@@ -18703,8 +18738,8 @@
     "728.1a": {
       "sha256": "67b6f3c75734532dfeb4d66f81ce66c80ea998cd2f7db3ec9bfd4d0d61345f33",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1300",
-        "crates/fineprint-core/src/turn/control.rs:1322",
+        "crates/fineprint-core/src/turn/control.rs:1345",
+        "crates/fineprint-core/src/turn/control.rs:1367",
         "crates/fineprint-core/src/turn/control_tests.rs:1879",
         "crates/fineprint-core/src/turn/control_tests.rs:1930",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:199",
@@ -18719,9 +18754,9 @@
     "728.2": {
       "sha256": "af894d8fac214e3588525d55191545a39ca3193776db4faa6b19d23cd608103b",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1269",
-        "crates/fineprint-core/src/turn/control.rs:1300",
-        "crates/fineprint-core/src/turn/control.rs:1320",
+        "crates/fineprint-core/src/turn/control.rs:1314",
+        "crates/fineprint-core/src/turn/control.rs:1345",
+        "crates/fineprint-core/src/turn/control.rs:1365",
         "crates/fineprint-core/src/turn/control_tests.rs:1880",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:155",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:5",
@@ -18731,9 +18766,9 @@
     "728.4": {
       "sha256": "d9e1e96c2810d5447c668fe1a6b162ef8e813da9661764176b6915c1e897e321",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1277",
-        "crates/fineprint-core/src/turn/control.rs:1302",
-        "crates/fineprint-core/src/turn/control.rs:1330",
+        "crates/fineprint-core/src/turn/control.rs:1322",
+        "crates/fineprint-core/src/turn/control.rs:1347",
+        "crates/fineprint-core/src/turn/control.rs:1375",
         "crates/fineprint-core/src/turn/control_tests.rs:1880",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:5",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:57"
@@ -18742,11 +18777,11 @@
     "728.5": {
       "sha256": "5db15801df515374a791e78818f6a9a28161929a4ae11087b42fe1b88113beb6",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:1266",
-        "crates/fineprint-core/src/turn/control.rs:1269",
-        "crates/fineprint-core/src/turn/control.rs:1294",
-        "crates/fineprint-core/src/turn/control.rs:1299",
-        "crates/fineprint-core/src/turn/control.rs:1318",
+        "crates/fineprint-core/src/turn/control.rs:1311",
+        "crates/fineprint-core/src/turn/control.rs:1314",
+        "crates/fineprint-core/src/turn/control.rs:1339",
+        "crates/fineprint-core/src/turn/control.rs:1344",
+        "crates/fineprint-core/src/turn/control.rs:1363",
         "crates/fineprint-core/src/turn/control_tests.rs:1881",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:133",
         "crates/fineprint-core/tests/spec_turn_control_restart.rs:5",
@@ -19296,7 +19331,7 @@
         "crates/fineprint-core/src/sba/tests.rs:5981",
         "crates/fineprint-core/src/sba/tests.rs:5987",
         "crates/fineprint-core/src/sba/tests.rs:6056",
-        "crates/fineprint-core/src/turn/control.rs:1133",
+        "crates/fineprint-core/src/turn/control.rs:1178",
         "crates/fineprint-core/src/turn/control_tests.rs:1674",
         "crates/fineprint-core/src/turn/heartbeat.rs:388",
         "crates/fineprint-core/src/turn/heartbeat.rs:48",
@@ -19429,8 +19464,8 @@
     "800.4k": {
       "sha256": "e71ca3df9e4c89a7202f81a7ab52e355760e3e175673a74d57ab0b1463a3549d",
       "locations": [
-        "crates/fineprint-core/src/turn/control.rs:358",
-        "crates/fineprint-core/src/turn/control.rs:395",
+        "crates/fineprint-core/src/turn/control.rs:364",
+        "crates/fineprint-core/src/turn/control.rs:401",
         "crates/fineprint-core/src/turn/control_tests.rs:155",
         "crates/fineprint-core/src/turn/control_tests.rs:173",
         "crates/fineprint-core/src/turn/control_tests.rs:1944",

@@ -11,9 +11,11 @@
 //! a card." CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it
 //! didn't exist."
 //!
-//! The skip covers the turn's draw step, not every draw step of that turn: a draw step an
-//! effect adds (CR 500.9, CR 500.10) still runs (docs/DECISIONS.md "Gate 06-turn R9 —
-//! First-turn draw skip covers the normal draw step only").
+//! The skip covers one draw step of that turn: the first draw step that runs in it. A draw
+//! step an effect adds after the normal draw step (CR 500.9) or after the precombat main
+//! phase (CR 500.10) runs normally. A draw step added directly before the normal draw step
+//! (CR 500.9) takes the skip, and the normal draw step runs instead (docs/DECISIONS.md
+//! "Gate 06-turn R9 — First-turn draw skip covers the normal draw step only").
 
 #[path = "spec_turn_steps_support.rs"]
 mod support;
@@ -149,10 +151,13 @@ fn host(players: usize, rule: FirstTurnDrawRule) -> TurnFake {
 }
 
 /// REQ-TURN-002, REQ-TURN-003; Gate 06-turn R9. CR 103.8a: in a two-player game the starting
-/// player's first turn skips one draw step (no begin, no draw, no priority; CR 500.11, F48);
-/// the draw step added to that turn (CR 500.9 before or after the draw step, CR 500.10 after
-/// the precombat main phase) draws exactly once (CR 504.1) with its priority (CR 504.2). The
-/// second turn's normal draw step is unaffected.
+/// player's first turn skips one draw step, the first one that runs in it (no begin, no draw,
+/// no priority; CR 500.11, F48); the other draw step draws exactly once (CR 504.1) with its
+/// priority (CR 504.2). With a draw step added after the normal draw step (CR 500.9) or after
+/// the precombat main phase (CR 500.10), the normal draw step takes the skip and the added one
+/// draws; with a draw step added directly before the normal draw step (CR 500.9), the added
+/// one takes the skip and the normal draw step draws. Either way the first draw segment is
+/// skipped and the second draws. The second turn's normal draw step is unaffected.
 #[test]
 fn added_draw_step_draws_on_the_skipped_first_turn() {
     for extra in EXTRAS {

@@ -200,6 +200,11 @@ pub struct TurnScheduler {
     /// begins and when a plan is installed (CR 510.4: the first-strike decision is made as the
     /// first combat damage step begins and is then retained).
     damage_begun: bool,
+    /// Whether a declare attackers, declare blockers or combat damage step has begun in the
+    /// current combat phase: set when [`TurnScheduler::next_item`] yields one, reset when a
+    /// combat phase begins and when a plan is installed (CR 508.8 when declare attackers is
+    /// skipped; see [`TurnScheduler::attackers_check_is_next`]).
+    attack_steps_begun: bool,
     /// The follow-up actions (CR 614.10b) of the installed plan, in creation order, until
     /// [`run_planned_turn`] takes them (R4).
     follow_ups: Vec<FollowUpId>,
@@ -244,6 +249,7 @@ impl TurnScheduler {
             active: None,
             first_strike: false,
             damage_begun: false,
+            attack_steps_begun: false,
             follow_ups: Vec::new(),
             plan: Vec::new(),
             last_item: None,
@@ -433,6 +439,7 @@ impl TurnScheduler {
         self.turn_over = false;
         self.main_seen = false;
         self.damage_begun = false;
+        self.attack_steps_begun = false;
         self.plan_serial = self.plan_serial.wrapping_add(1);
     }
 
@@ -554,10 +561,21 @@ impl TurnScheduler {
 
     /// Records `item` as the last item yielded and returns it. CR 510.4: a combat phase that
     /// begins has no combat damage step begun yet; a yielded combat damage step has begun.
+    /// CR 508.8: likewise for the declare attackers, declare blockers and combat damage steps.
     fn yielded(&mut self, item: PlanItem) -> PlanItem {
         match item {
-            PlanItem::BeginPhase(Phase::Combat) => self.damage_begun = false,
-            PlanItem::Segment(s) if is_damage_step(s) => self.damage_begun = true,
+            PlanItem::BeginPhase(Phase::Combat) => {
+                self.damage_begun = false;
+                self.attack_steps_begun = false;
+            }
+            PlanItem::Segment(s) => {
+                if is_damage_step(s) {
+                    self.damage_begun = true;
+                }
+                if s == Segment::Step(Step::DeclareAttackers) || is_blockers_or_damage(s) {
+                    self.attack_steps_begun = true;
+                }
+            }
             _ => {}
         }
         self.last_item = Some(item);
@@ -573,12 +591,39 @@ impl TurnScheduler {
     /// next item is not a combat damage step.
     #[must_use]
     pub fn first_damage_step_is_next(&self) -> bool {
-        if self.turn_over || self.damage_begun || self.phase_in_progress() != Some(Phase::Combat) {
+        if self.damage_begun {
             return false;
         }
-        let Some(active) = self.active else {
+        self.next_combat_segment().is_some_and(is_damage_step)
+    }
+
+    /// Whether the next item [`TurnScheduler::next_item`] would yield is a declare blockers or
+    /// combat damage step (first-strike or regular) of the in-progress combat phase, pending
+    /// step skips taken into account, while no declare attackers, declare blockers or combat
+    /// damage step has begun in that combat phase. This is the case when a step skip removed
+    /// the declare attackers step (CR 614.10, CR 500.11), so the check made as declare
+    /// attackers ends never ran; CR 508.8 ("If no creatures are declared as attackers or put
+    /// onto the battlefield attacking, skip the declare blockers and combat damage steps.")
+    /// still applies, and [`run_planned_turn`] then asks [`TurnHost::attackers_declared`] once
+    /// (true when a creature was put onto the battlefield attacking). Read-only; false outside
+    /// a combat phase and once the turn is over.
+    #[must_use]
+    pub fn attackers_check_is_next(&self) -> bool {
+        if self.attack_steps_begun {
             return false;
-        };
+        }
+        self.next_combat_segment()
+            .is_some_and(is_blockers_or_damage)
+    }
+
+    /// The segment [`TurnScheduler::next_item`] would yield next within the in-progress combat
+    /// phase, pending step skips taken into account (CR 614.10: a skipped step yields nothing);
+    /// `None` outside a combat phase, once the turn is over, or when no segment is left.
+    fn next_combat_segment(&self) -> Option<Segment> {
+        if self.turn_over || self.phase_in_progress() != Some(Phase::Combat) {
+            return None;
+        }
+        let active = self.active?;
         // The skips `next_item` would consume on the way, oldest first.
         let mut consumed: Vec<Step> = Vec::new();
         for seg in &self.plan[0].segments {
@@ -591,9 +636,9 @@ impl TurnScheduler {
                     continue;
                 }
             }
-            return is_damage_step(seg.segment);
+            return Some(seg.segment);
         }
-        false
+        None
     }
 
     /// The phase of the last item yielded; `None` before the first item or after the turn is
@@ -1349,7 +1394,10 @@ pub fn restart_game<H: RestartHost + ?Sized>(
 ///
 /// In a combat phase, as `run_phase` does: once a declare attackers step has ended,
 /// [`TurnHost::attackers_declared`] `false` calls [`TurnScheduler::skip_blockers_and_damage`]
-/// (CR 508.8). CR 510.4: when the next item is the first combat damage step of the combat
+/// (CR 508.8). When a step skip removed the declare attackers step, the same check is made
+/// once before the combat phase's first declare blockers or combat damage step would begin
+/// ([`TurnScheduler::attackers_check_is_next`]); a creature put onto the battlefield attacking
+/// keeps those steps. CR 510.4: when the next item is the first combat damage step of the combat
 /// phase ([`TurnScheduler::first_damage_step_is_next`]), whatever step preceded it (declare
 /// blockers, or declare attackers when declare blockers is skipped),
 /// [`TurnHost::first_strike_damage_step`] is asked once and passed to
@@ -1387,6 +1435,11 @@ pub fn run_planned_turn<H: TurnHost + ?Sized>(
     }
     let mut segments = Vec::new();
     loop {
+        // CR 508.8, when a step skip removed the declare attackers step (CR 614.10): checked
+        // once, before the first declare blockers or combat damage step would begin.
+        if scheduler.attackers_check_is_next() && !host.attackers_declared() {
+            scheduler.skip_blockers_and_damage();
+        }
         // CR 510.4: "as the combat damage step begins" (R5: whatever step preceded it).
         if scheduler.first_damage_step_is_next() {
             scheduler.set_first_strike_damage_step(host.first_strike_damage_step());
