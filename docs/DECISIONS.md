@@ -11395,3 +11395,103 @@ appearing that many times in sequence); the CR has no explicit rule or example f
 700.2i ("worth of modes") is a separate rule not covered here.
 **Alternatives.** Requiring distinct legal modes regardless of the repeat instruction (contradicts
 CR 700.2d).
+
+## #53 FP-051 — Cost-effect parameter conventions and minimum / set semantics (CR 601.2f)
+
+**Decision.** `determine_total_cost` reads every cost entry from its typed `modification.cost`
+member; the opaque `params` are used only for `"minimum"`. An entry whose kind does not match its
+`CostStages` list, or that is malformed, is ignored (no effect, no error, no panic). A
+`COST_INCREASE` needs `cost`; each `PAY_MANA` adds its symbols (generic, colored, colorless or snow
+only, else the whole entry is ignored) and every other cost item is appended to the non-mana part.
+A `COST_REDUCTION` reduces by each `PAY_MANA` in `cost` (other items ignored; a variable symbol
+makes the whole entry ignored). `COST_MINIMUM` takes `params["minimum"]`, a non-negative JSON
+integer `N`; if the payable mana component's total (every mana amount, Phyrexian life excluded) is
+below `N`, generic mana is added to reach `N`. `COST_SET` makes the sum of its `PAY_MANA` items
+(generic, colored, colorless or snow only; at least one `PAY_MANA`) the mana component; the
+non-mana part and the Phyrexian life are unchanged. An unpayable mana part is unchanged by both
+(CR 118.6a). An ignored reduction keeps its slot in the player's order and its `hybrid_halves` are
+not checked; a well-formed reduction's halves are checked even when the mana part is unpayable.
+Composite cost items in an increase are appended to the non-mana part unchanged.
+**Rationale.** The typed `cost` member already carries the mana algebra; the opaque params are
+never guessed (decision "#35 FP-034 — RuleModification parameter conventions", R12). Generic
+padding is the least-specific way to meet a minimum and leaves the colored requirements intact.
+**Alternatives.** A `"generic"` / `"amount"` param for increases and reductions (duplicates
+`cost`); a minimum counted on generic mana only; a set effect that also replaces non-mana costs.
+
+## #53 FP-051 — Total-cost effects applied in CostStages list order (CR 601.2f)
+
+**Decision.** `stages.total_effects` are applied after every reduction, in the list order exactly
+as given (the layers unit's order: all `COST_MINIMUM` then all `COST_SET`, each in timestamp order);
+the calculator does not re-sort them.
+**Rationale.** CR 601.2f says only that effects that directly affect the total cost are applied
+once the total is determined; it is silent on their mutual order. The layers contract already fixes
+an order, so the calculator follows it and the order stays a single-owner decision.
+**Alternatives.** Re-sorting by timestamp across kinds; letting the player choose.
+
+## #53 FP-051 — Hybrid Phyrexian reductions take only a colored half (CR 118.7e, 118.7f)
+
+**Decision.** In a reduction, a hybrid Phyrexian symbol `{a/b/P}` consumes one `hybrid_halves`
+element, which must be `First` (color `a`) or `Second` (color `b`); `Life` is `BadChoice`. A plain
+Phyrexian symbol `{c/P}` takes no choice and reduces one mana of color `c` (CR 118.7f).
+**Rationale.** A reduction reduces mana; there is no life to reduce, and CR 118.7e/118.7f speak
+only of mana of the chosen half or the symbol's color.
+**Alternatives.** Treating `Life` as "no reduction" for that symbol.
+
+## #53 FP-051 — ManaComponent::to_mana_cost bounds the repeated symbols
+
+**Decision.** `to_mana_cost` returns `Overflow` when the generic amount is above `MAX_GENERIC`, and
+also when the colored, colorless and snow amounts together are above `MAX_GENERIC` symbols.
+**Rationale.** Those amounts are written as repeated symbols; an untrusted saturated amount
+(`u64::MAX`) would otherwise allocate without bound (R12). `MAX_GENERIC` is the DSL's own bound.
+**Alternatives.** Only the generic check the brief names (unbounded allocation).
+
+## #53 FP-051 — casting/mod.rs wiring outside the issue's owned-paths list
+
+**Decision.** `crates/fineprint-core/src/casting/mod.rs` gets `mod cost;`, the `pub use cost::{…}`
+re-export of the pinned items and a short step-6 paragraph in the module doc; nothing else.
+**Rationale.** The issue lists only `casting/cost.rs`, but the pinned API is re-exported from
+`fineprint_core::casting`, which needs these lines; the brief allows exactly this minimal wiring.
+**Alternatives.** A separate wiring PR (needless churn for three lines).
+
+## #53 FP-051 — SRS §7.1 step 6 formula vs CR 118.7 (CR 2026-11-06 wins)
+
+**Decision.** `docs/SRS.md` is not edited. The code follows CR 601.2f and 118.7a-g: reductions are
+applied one at a time in the player's order, component by component, with the mana component
+floored at `{0}`, then the total-cost effects, then lock-in. The SRS formula
+`C = floorEffects(max({0}, base + additional + increases - reductions_ordered))` has a single
+max-floor over the total and no component-wise reduction, and it conflicts with SRS Appendix A
+row 11. A P8 SRS-edit line is in `docs/HUMAN_QUEUE.md`.
+**Rationale.** CR wins over the SRS (PROCESS.md); precedent "#52 FP-050 — SRS §7.1 discrepancies".
+**Alternatives.** Implementing the SRS formula literally (wrong for colored reductions, CR 118.7a-c).
+
+## #53 FP-051 tester - u64::MAX minimum
+
+**Decision.** The spec test for a `COST_MINIMUM` whose `"minimum"` is `u64::MAX` asserts only no
+panic plus one of: the entry ignored, the entry applied (total raised to `u64::MAX`, colored
+components kept, `to_mana_cost` then `Err(Overflow)`), or `Err(Overflow)` from the calculator.
+**Rationale.** Brief S3 makes any non-negative JSON integer a valid minimum, while T10 lists "huge
+u64" among malformed values to be ignored; the brief does not settle which. A value beyond `u64`
+(parsed as a JSON float) is asserted ignored, as every float is.
+**Alternatives.** Assert "ignored" (contradicts S3) or "applied" (contradicts T10).
+
+## #53 FP-051 tester - COST_REDUCTION without a cost member
+
+**Decision.** The reference model treats a `COST_REDUCTION` with `cost: None` as a malformed entry,
+ignored like a `COST_INCREASE` with no cost: it keeps its slot in the order list and its
+`hybrid_halves` are not checked. A `COST_REDUCTION` whose `cost` has no `PayMana` is well formed,
+reduces nothing and needs zero halves (any half is `BadChoice`).
+**Rationale.** S3 says `COST_INCREASE` with `cost` None is ignored and that non-`PayMana` items of a
+reduction are ignored; it is silent on a reduction with no cost member. Reading "no cost member" as
+malformed in both lists is the uniform choice, and the product behaves the same way.
+**Alternatives.** Treat it as a well-formed no-op that needs zero halves.
+
+## #53 FP-051 tester - wrong-kind reductions and the error set
+
+**Decision.** An entry of the wrong kind in the reductions list is asserted ignored, with its slot
+kept and its halves unchecked (one targeted case). The seeded sweep gives wrong-kind entries only
+plain symbols and an unpayable basis only valid orders and halves, and when the inputs justify more
+than one error (for example an invalid order plus bad halves) it accepts any of them.
+**Rationale.** S3 says wrong-kind entries are ignored and that ignored entries do not check halves;
+the brief fixes no precedence among `BadReductionOrder`, `BadChoice` and `UnpayableAdditional`,
+nor whether halves are checked for an unpayable basis.
+**Alternatives.** Pin an error precedence (not in the brief).
