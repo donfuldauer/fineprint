@@ -65,6 +65,15 @@
         "crates/fineprint-core/src/actions/tests.rs:7",
         "crates/fineprint-core/src/actions/tests.rs:872",
         "crates/fineprint-core/src/actions/types.rs:279",
+        "crates/fineprint-core/src/casting/announce.rs:437",
+        "crates/fineprint-core/src/casting/announce.rs:463",
+        "crates/fineprint-core/src/casting/announce.rs:486",
+        "crates/fineprint-core/src/casting/announce.rs:597",
+        "crates/fineprint-core/src/casting/announce.rs:615",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789",
+        "crates/fineprint-core/src/casting/announce_tests.rs:886",
+        "crates/fineprint-core/src/casting/mod.rs:65",
+        "crates/fineprint-core/src/casting/mod.rs:69",
         "crates/fineprint-core/src/layers/mod.rs:140",
         "crates/fineprint-core/src/layers/post/mod.rs:26",
         "crates/fineprint-core/src/layers/post/rules.rs:125",
@@ -120,6 +129,13 @@
         "crates/fineprint-core/tests/spec_actions_special.rs:216",
         "crates/fineprint-core/tests/spec_actions_special.rs:219",
         "crates/fineprint-core/tests/spec_actions_support.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:388",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:537",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:599",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:621",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:669",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:223",
         "crates/fineprint-core/tests/spec_layers_post_property.rs:192",
         "crates/fineprint-core/tests/spec_layers_post_property.rs:195",
         "crates/fineprint-core/tests/spec_layers_post_property.rs:259",
@@ -596,6 +612,12 @@
       "locations": [
         "crates/fineprint-core/src/sba/registry.rs:625",
         "crates/fineprint-core/src/sba/tests.rs:762"
+      ]
+    },
+    "107.3": {
+      "sha256": "39a789b28c738acc2336c3a5b3d1d96bba668dcc817fe21f6ad49e9a21db9c4b",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:77"
       ]
     },
     "107.3a": {
@@ -1304,6 +1326,7 @@
     "113.7a": {
       "sha256": "6eafae30a8edc3e7edf339f3ddde24448548b1168c84306e00b01ad4028ffe3d",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:176",
         "crates/fineprint-core/src/interp/expr.rs:286",
         "crates/fineprint-core/src/interp/expr.rs:334",
         "crates/fineprint-core/src/interp/expr.rs:357",
@@ -1321,6 +1344,8 @@
         "crates/fineprint-core/src/memory/lki.rs:408",
         "crates/fineprint-core/src/memory/mod.rs:14",
         "crates/fineprint-core/src/memory/tests.rs:399",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:474",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:488",
         "crates/fineprint-core/tests/spec_interp_references.rs:6",
         "crates/fineprint-core/tests/spec_interp_references.rs:60",
         "crates/fineprint-core/tests/spec_interp_references.rs:87",
@@ -1352,9 +1377,57 @@
         "docs/SRS.md:458"
       ]
     },
+    "115": {
+      "sha256": "97a554d79c71f6a87247f3bf31cfd275176addf74c0fd6252ab70f37e7150b8f",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:486",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789"
+      ]
+    },
+    "115.2": {
+      "sha256": "f2b40d410e31ef7260f0f45d4ca77807c5e985f88a70536a0c64bcff9965f194",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:624",
+        "crates/fineprint-core/src/casting/mod.rs:27"
+      ]
+    },
+    "115.3": {
+      "sha256": "5e85b0a5d904922f4e1117c4227baecb1b0a19d63573ca0d8a9b29c4d3eadd5b",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:112",
+        "crates/fineprint-core/src/casting/announce.rs:893",
+        "crates/fineprint-core/src/casting/announce_tests.rs:931",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:743",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:407"
+      ]
+    },
+    "115.4": {
+      "sha256": "a513f17204b1bfeaa3e5f2dcb297eeb211ce2a608371b2fdb9eecf0d7a889fe0",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:624"
+      ]
+    },
+    "115.5": {
+      "sha256": "91f45c3822f647d476e1738b98b49e18aa92a1d0639b3f642ebdd882b825c27f",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:623",
+        "crates/fineprint-core/src/casting/announce_tests.rs:931",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:115",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:696",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:921",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:407",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:46"
+      ]
+    },
     "115.6": {
       "sha256": "f3d24c3d8001e92b65cbb753528c7406b566cf5888a581bd3acef46656a2e850",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:116",
+        "crates/fineprint-core/src/casting/announce.rs:893",
+        "crates/fineprint-core/src/casting/announce_tests.rs:959",
+        "crates/fineprint-core/src/casting/mod.rs:27",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:773",
         "crates/fineprint-dsl/src/lint/mana_ability.rs:143",
         "crates/fineprint-dsl/src/lint/mana_ability.rs:181",
         "crates/fineprint-dsl/src/lint/mana_ability.rs:57",
@@ -4193,7 +4266,7 @@
         "crates/fineprint-core/src/events/types.rs:674",
         "crates/fineprint-core/src/events/types.rs:740",
         "crates/fineprint-core/src/knowledge/mod.rs:11",
-        "crates/fineprint-core/src/lib.rs:45",
+        "crates/fineprint-core/src/lib.rs:47",
         "crates/fineprint-core/src/memory/error.rs:19",
         "crates/fineprint-core/src/memory/linked.rs:17",
         "crates/fineprint-core/src/memory/linked.rs:19",
@@ -5983,9 +6056,36 @@
         "docs/SRS.md:373"
       ]
     },
+    "601.2": {
+      "sha256": "c8f97ba9a314210b7c1467e284c495099dde0afa7f207b530893c96f8f8ab46a",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:28",
+        "crates/fineprint-core/src/casting/announce.rs:285",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/src/casting/mod.rs:7",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:70",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:90",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:972",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:461",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:591",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:742"
+      ]
+    },
     "601.2a": {
       "sha256": "794572517487b69d9a61c04e331719c8dab511b88efbcc763585786a4535aa6b",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:169",
+        "crates/fineprint-core/src/casting/announce.rs:209",
+        "crates/fineprint-core/src/casting/announce.rs:357",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/src/casting/announce_tests.rs:556",
+        "crates/fineprint-core/src/casting/mod.rs:23",
+        "crates/fineprint-core/src/casting/mod.rs:7",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:214",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:6",
         "docs/SRS.md:375",
         "docs/SRS.md:379"
       ]
@@ -5996,6 +6096,23 @@
         "crates/fineprint-core/src/actions/generate.rs:365",
         "crates/fineprint-core/src/actions/tests.rs:722",
         "crates/fineprint-core/src/actions/types.rs:75",
+        "crates/fineprint-core/src/casting/announce.rs:124",
+        "crates/fineprint-core/src/casting/announce.rs:151",
+        "crates/fineprint-core/src/casting/announce.rs:154",
+        "crates/fineprint-core/src/casting/announce.rs:211",
+        "crates/fineprint-core/src/casting/announce.rs:361",
+        "crates/fineprint-core/src/casting/announce.rs:370",
+        "crates/fineprint-core/src/casting/announce.rs:55",
+        "crates/fineprint-core/src/casting/announce.rs:640",
+        "crates/fineprint-core/src/casting/announce.rs:70",
+        "crates/fineprint-core/src/casting/announce.rs:708",
+        "crates/fineprint-core/src/casting/announce.rs:79",
+        "crates/fineprint-core/src/casting/announce.rs:793",
+        "crates/fineprint-core/src/casting/announce.rs:96",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1016",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1140",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1143",
+        "crates/fineprint-core/src/casting/mod.rs:26",
         "crates/fineprint-core/src/choice/generate.rs:357",
         "crates/fineprint-core/src/choice/mod.rs:158",
         "crates/fineprint-core/src/choice/mod.rs:160",
@@ -6009,6 +6126,11 @@
         "crates/fineprint-core/tests/spec_actions_cast.rs:249",
         "crates/fineprint-core/tests/spec_actions_cast.rs:252",
         "crates/fineprint-core/tests/spec_actions_cast.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1034",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1120",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1148",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1320",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:884",
         "docs/SRS.md:1130",
         "docs/SRS.md:1131",
         "docs/SRS.md:380",
@@ -6019,10 +6141,32 @@
     "601.2c": {
       "sha256": "a258cdfe57a0d317fbafc7acf8caee205cb0c71c4aa988052472580c4910558c",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:112",
+        "crates/fineprint-core/src/casting/announce.rs:157",
+        "crates/fineprint-core/src/casting/announce.rs:213",
+        "crates/fineprint-core/src/casting/announce.rs:231",
+        "crates/fineprint-core/src/casting/announce.rs:378",
+        "crates/fineprint-core/src/casting/announce.rs:893",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1200",
+        "crates/fineprint-core/src/casting/announce_tests.rs:711",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789",
+        "crates/fineprint-core/src/casting/announce_tests.rs:931",
+        "crates/fineprint-core/src/casting/mod.rs:27",
         "crates/fineprint-core/src/choice/generate.rs:332",
         "crates/fineprint-core/src/choice/mod.rs:162",
         "crates/fineprint-core/src/choice/request.rs:247",
         "crates/fineprint-core/src/choice/request.rs:330",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:115",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1320",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:696",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:743",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:773",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:819",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:90",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:407",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:461",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:347",
         "docs/SRS.md:1132",
         "docs/SRS.md:381",
         "docs/SRS.md:888"
@@ -6031,11 +6175,29 @@
     "601.2d": {
       "sha256": "6f9f37717e4f0594579bc0cf3fd938c7d56cc49deaa165c7c011400e46e38fbc",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:124",
+        "crates/fineprint-core/src/casting/announce.rs:166",
+        "crates/fineprint-core/src/casting/announce.rs:215",
+        "crates/fineprint-core/src/casting/announce.rs:237",
+        "crates/fineprint-core/src/casting/announce.rs:407",
+        "crates/fineprint-core/src/casting/announce.rs:640",
+        "crates/fineprint-core/src/casting/announce.rs:944",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1235",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1238",
+        "crates/fineprint-core/src/casting/announce_tests.rs:729",
+        "crates/fineprint-core/src/casting/mod.rs:28",
         "crates/fineprint-core/src/choice/generate.rs:519",
         "crates/fineprint-core/src/choice/generate.rs:62",
         "crates/fineprint-core/src/choice/mod.rs:164",
         "crates/fineprint-core/src/choice/request.rs:1165",
         "crates/fineprint-core/src/choice/request.rs:337",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1201",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1231",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1260",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:132",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1320",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:407",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
         "crates/fineprint-core/tests/spec_choice_generate.rs:238",
         "crates/fineprint-core/tests/spec_choice_generate.rs:356",
         "crates/fineprint-core/tests/spec_choice_generate.rs:550",
@@ -6048,6 +6210,21 @@
     "601.2e": {
       "sha256": "5018bdf165a44b908061d10b22018f6e9d5772fa60fbcd97dbc22f428cceec1e",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:179",
+        "crates/fineprint-core/src/casting/announce.rs:217",
+        "crates/fineprint-core/src/casting/announce.rs:244",
+        "crates/fineprint-core/src/casting/announce.rs:437",
+        "crates/fineprint-core/src/casting/announce.rs:453",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/src/casting/announce_tests.rs:650",
+        "crates/fineprint-core/src/casting/announce_tests.rs:748",
+        "crates/fineprint-core/src/casting/mod.rs:29",
+        "crates/fineprint-core/src/casting/mod.rs:7",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:155",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:172",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:372",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:6",
         "docs/SRS.md:383"
       ]
     },
@@ -6126,6 +6303,17 @@
         "crates/fineprint-core/src/actions/mod.rs:9",
         "crates/fineprint-core/src/actions/tests.rs:648",
         "crates/fineprint-core/src/actions/tests.rs:705",
+        "crates/fineprint-core/src/casting/announce.rs:207",
+        "crates/fineprint-core/src/casting/announce.rs:224",
+        "crates/fineprint-core/src/casting/announce.rs:269",
+        "crates/fineprint-core/src/casting/announce.rs:304",
+        "crates/fineprint-core/src/casting/announce.rs:453",
+        "crates/fineprint-core/src/casting/announce.rs:463",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/src/casting/announce_tests.rs:592",
+        "crates/fineprint-core/src/casting/announce_tests.rs:626",
+        "crates/fineprint-core/src/casting/mod.rs:17",
+        "crates/fineprint-core/src/casting/mod.rs:7",
         "crates/fineprint-core/tests/spec_actions_cast.rs:141",
         "crates/fineprint-core/tests/spec_actions_cast.rs:144",
         "crates/fineprint-core/tests/spec_actions_cast.rs:170",
@@ -6146,7 +6334,29 @@
         "crates/fineprint-core/tests/spec_actions_matrix.rs:55",
         "crates/fineprint-core/tests/spec_actions_matrix.rs:557",
         "crates/fineprint-core/tests/spec_actions_matrix.rs:560",
-        "crates/fineprint-core/tests/spec_actions_matrix.rs:6"
+        "crates/fineprint-core/tests/spec_actions_matrix.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:232",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:249",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:273",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:388",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:115",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:775"
+      ]
+    },
+    "601.3a": {
+      "sha256": "ff96b03a53f3aba9b2a2b88fd3faca23f6726f9b68d43cd6c1f866b7a71ea851",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:188",
+        "crates/fineprint-core/src/casting/announce.rs:304",
+        "crates/fineprint-core/src/casting/announce_tests.rs:354",
+        "crates/fineprint-core/src/casting/announce_tests.rs:650",
+        "crates/fineprint-core/src/casting/mod.rs:17",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:155",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:321",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:337",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8"
       ]
     },
     "601.3b": {
@@ -6182,7 +6392,23 @@
     "602.2": {
       "sha256": "3274ecd59dfa8c89f87e943323f2137fbb5d6ba4e7049e1cfbfbe51a7cc1ebfe",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:36",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:232",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:115",
         "docs/SRS.md:375"
+      ]
+    },
+    "602.2a": {
+      "sha256": "e36fbb27a8bc6cccc20d5bc22f5a6d1bc4cc7f8fb377ec070478d7de5ffaefb6",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:169",
+        "crates/fineprint-core/src/casting/announce.rs:209",
+        "crates/fineprint-core/src/casting/announce.rs:357",
+        "crates/fineprint-core/src/casting/announce_tests.rs:574",
+        "crates/fineprint-core/src/casting/mod.rs:23",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:214"
       ]
     },
     "602.5": {
@@ -10220,6 +10446,7 @@
     "613.11": {
       "sha256": "751278309d9710973daefe67a9d39b1b11df8041e989db9885a9018884cd6452",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:142",
         "crates/fineprint-core/src/layers/mod.rs:137",
         "crates/fineprint-core/src/layers/post/cost.rs:6",
         "crates/fineprint-core/src/layers/post/effects.rs:111",
@@ -10239,6 +10466,7 @@
         "crates/fineprint-core/src/layers/post/tests.rs:818",
         "crates/fineprint-core/tests/spec_actions_matrix.rs:187",
         "crates/fineprint-core/tests/spec_actions_support.rs:104",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:242",
         "crates/fineprint-core/tests/spec_layers_post_property.rs:192",
         "crates/fineprint-core/tests/spec_layers_post_property.rs:195",
         "crates/fineprint-core/tests/spec_layers_post_props.rs:196",
@@ -11515,6 +11743,10 @@
     "700.2": {
       "sha256": "3ace2a9a1a7450b7a26c03157c786728c374d9236c2142505c5bd63dade2ab2d",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:151",
+        "crates/fineprint-core/src/casting/announce.rs:361",
+        "crates/fineprint-core/src/casting/announce.rs:55",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1320",
         "crates/fineprint-ingest/src/tokenize/lines.rs:13",
         "crates/fineprint-ingest/src/tokenize/lines.rs:185",
         "crates/fineprint-ingest/src/tokenize/lines.rs:197",
@@ -11524,6 +11756,26 @@
         "crates/fineprint-ingest/src/tokenize/tests.rs:719",
         "crates/fineprint-ingest/src/tokenize/tests.rs:774",
         "crates/fineprint-ingest/src/tokenize/tests.rs:967"
+      ]
+    },
+    "700.2a": {
+      "sha256": "049e3399de4078090f40e014d2c47ecbe0c7a173516552a5f163caa464b9690b",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:229",
+        "crates/fineprint-core/src/casting/announce.rs:694",
+        "crates/fineprint-core/src/casting/announce.rs:708",
+        "crates/fineprint-core/src/casting/announce.rs:717",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1016",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1031",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1125",
+        "crates/fineprint-core/src/casting/announce_tests.rs:687",
+        "crates/fineprint-core/src/casting/mod.rs:26",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:1568",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:70",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:884",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:921",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:972",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:997"
       ]
     },
     "700.2b": {
@@ -11559,6 +11811,7 @@
     "700.2c": {
       "sha256": "22c07d344b1fecf57c8fe39ecb67146b61657262e1585ff402eb21348084adc8",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:157",
         "crates/fineprint-core/src/triggers/place.rs:138",
         "crates/fineprint-core/src/triggers/place.rs:570",
         "crates/fineprint-core/src/triggers/place.rs:587",
@@ -11574,6 +11827,19 @@
         "crates/fineprint-core/tests/spec_triggers_stack_placement.rs:6",
         "crates/fineprint-core/tests/spec_triggers_stack_placement.rs:623",
         "crates/fineprint-core/tests/spec_triggers_stack_placement.rs:655"
+      ]
+    },
+    "700.2d": {
+      "sha256": "2856a8691e0e834170a9ebce51bd8b0089c39d87a49ba4d0736c59249e825cff",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:1056",
+        "crates/fineprint-core/src/casting/announce.rs:64",
+        "crates/fineprint-core/src/casting/announce.rs:708",
+        "crates/fineprint-core/src/casting/announce.rs:777",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1016",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1077",
+        "crates/fineprint-core/src/casting/mod.rs:26",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:943"
       ]
     },
     "700.2h": {
@@ -12469,19 +12735,51 @@
     "702.11": {
       "sha256": "3c8ed45954d4edbfb3062c8d017eba31db3c99dc772d9872b73b35826ce6e0e1",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:486",
+        "crates/fineprint-core/src/casting/announce.rs:624",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789",
+        "crates/fineprint-core/src/casting/mod.rs:50",
         "docs/SRS.md:1022",
         "docs/SRS.md:381"
+      ]
+    },
+    "702.11b": {
+      "sha256": "3020195e04ad0b9fe3616ae2774bbd84ba00cde61a25b1545893ae2e1b1e9395",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:548",
+        "crates/fineprint-core/src/casting/announce.rs:568",
+        "crates/fineprint-core/src/casting/announce_tests.rs:792",
+        "crates/fineprint-core/src/casting/mod.rs:57",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:429",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:183"
+      ]
+    },
+    "702.11c": {
+      "sha256": "a025898e99882fc3b3ab9b0ce03186c39439a10dc2eff71118bcaaa7585b9015",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:568",
+        "crates/fineprint-core/src/casting/announce_tests.rs:792",
+        "crates/fineprint-core/src/casting/mod.rs:57",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:442",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:188"
       ]
     },
     "702.11d": {
       "sha256": "45f504c34a509e85f4c71633d826180717788766bf0188ef2694a6436baef983",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:176",
+        "crates/fineprint-core/src/casting/announce.rs:548",
+        "crates/fineprint-core/src/casting/announce.rs:578",
+        "crates/fineprint-core/src/casting/announce_tests.rs:872",
+        "crates/fineprint-core/src/casting/mod.rs:60",
         "crates/fineprint-core/src/layers/pipeline.rs:290",
         "crates/fineprint-core/src/layers/pipeline.rs:307",
         "crates/fineprint-core/src/layers/pipeline.rs:40",
         "crates/fineprint-core/src/layers/tests.rs:1900",
         "crates/fineprint-core/src/layers/tests.rs:1930",
         "crates/fineprint-core/src/layers/tests.rs:2205",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:517",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:193",
         "crates/fineprint-core/tests/spec_layers_counters.rs:449",
         "crates/fineprint-core/tests/spec_layers_counters.rs:521",
         "crates/fineprint-core/tests/spec_layers_each_layer.rs:494"
@@ -12490,6 +12788,11 @@
     "702.11e": {
       "sha256": "9528fe83683972b06358bae6a51d283dcff9f9b20620a479d4591cdc77edf975",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:597",
+        "crates/fineprint-core/src/casting/announce.rs:611",
+        "crates/fineprint-core/src/casting/announce_tests.rs:886",
+        "crates/fineprint-core/src/casting/mod.rs:53",
+        "crates/fineprint-core/src/casting/mod.rs:69",
         "crates/fineprint-core/src/layers/pipeline.rs:301",
         "crates/fineprint-core/src/layers/pipeline.rs:304",
         "crates/fineprint-core/src/layers/pipeline.rs:318",
@@ -12501,6 +12804,10 @@
         "crates/fineprint-core/src/layers/tests.rs:2170",
         "crates/fineprint-core/src/layers/tests.rs:2192",
         "crates/fineprint-core/src/layers/tests.rs:2205",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:537",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:599",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:669",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:228",
         "crates/fineprint-core/tests/spec_layers_counters.rs:207",
         "crates/fineprint-core/tests/spec_layers_each_layer.rs:494",
         "crates/fineprint-core/tests/spec_layers_each_layer.rs:521",
@@ -12543,9 +12850,35 @@
     "702.16": {
       "sha256": "6b6aa9e7c9aaec2b13e62991e3a7356827d85615c5d0d0b4afb895a140d1ff84",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:486",
+        "crates/fineprint-core/src/casting/announce.rs:624",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789",
+        "crates/fineprint-core/src/casting/mod.rs:51",
         "docs/SRS.md:1023",
         "docs/SRS.md:264",
         "docs/SRS.md:381"
+      ]
+    },
+    "702.16a": {
+      "sha256": "a08d2948a09f93a53d3182daaa52f6d5a019aa9c80c4fd0cee255ee87ae91c4a",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:176",
+        "crates/fineprint-core/src/casting/announce.rs:548",
+        "crates/fineprint-core/src/casting/announce.rs:578",
+        "crates/fineprint-core/src/casting/announce_tests.rs:827",
+        "crates/fineprint-core/src/casting/mod.rs:60"
+      ]
+    },
+    "702.16b": {
+      "sha256": "7f0881a9ed80889c5d4ff03c7d104b19fbb391b054232e69986bca4d07a4fec8",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:548",
+        "crates/fineprint-core/src/casting/announce.rs:578",
+        "crates/fineprint-core/src/casting/announce_tests.rs:827",
+        "crates/fineprint-core/src/casting/mod.rs:58",
+        "crates/fineprint-core/src/casting/mod.rs:60",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:474",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:208"
       ]
     },
     "702.16d": {
@@ -12567,6 +12900,25 @@
         "crates/fineprint-core/tests/spec_sba_support.rs:338"
       ]
     },
+    "702.16j": {
+      "sha256": "2e8a81e09b907d689568808851103cf2518574d5ac35f1deefc0ef5934e8d9dd",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce_tests.rs:854",
+        "crates/fineprint-core/src/casting/mod.rs:61",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:490",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:213"
+      ]
+    },
+    "702.16k": {
+      "sha256": "f0d3982c71cb6cd4c227d903f078a3234daf5050d545b61c2b4a901e7a03f36d",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:588",
+        "crates/fineprint-core/src/casting/announce_tests.rs:854",
+        "crates/fineprint-core/src/casting/mod.rs:63",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:504",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:218"
+      ]
+    },
     "702.17": {
       "sha256": "61f0b46f2905843ffacc7e0faef2bfbf68923c618b7d4e88d08fdbc5608d3696",
       "locations": [
@@ -12576,8 +12928,22 @@
     "702.18": {
       "sha256": "6a9a7fb43dc8c4b2a44334b5a03fe3bd3d0c304eec877f5fcc4cc6e3045e4ae0",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:486",
+        "crates/fineprint-core/src/casting/announce.rs:624",
+        "crates/fineprint-core/src/casting/announce_tests.rs:789",
+        "crates/fineprint-core/src/casting/mod.rs:50",
         "docs/SRS.md:1022",
         "docs/SRS.md:381"
+      ]
+    },
+    "702.18a": {
+      "sha256": "f9ba8bd0ffbfe8d46e946b4b917d2a84b42b8182690bc7ed9e579713de08a985",
+      "locations": [
+        "crates/fineprint-core/src/casting/announce_tests.rs:812",
+        "crates/fineprint-core/src/casting/mod.rs:58",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:460",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:198",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:203"
       ]
     },
     "702.19": {
@@ -13613,7 +13979,7 @@
     "704.5a": {
       "sha256": "c7194366d1f4f3ea1c396cd4d1699458364938d44a56dcee8600fa009fde87cf",
       "locations": [
-        "crates/fineprint-core/src/lib.rs:33",
+        "crates/fineprint-core/src/lib.rs:35",
         "crates/fineprint-core/src/sba/mod.rs:21",
         "crates/fineprint-core/src/sba/mod.rs:7",
         "crates/fineprint-core/src/sba/perform.rs:377",
@@ -14022,7 +14388,7 @@
       "sha256": "9cabfbdbdc750ad01f7a6a5e9f53d2f718510d23bc93b3bb299b3eabb7aa4942",
       "locations": [
         "crates/fineprint-core/src/events/types.rs:90",
-        "crates/fineprint-core/src/lib.rs:33",
+        "crates/fineprint-core/src/lib.rs:35",
         "crates/fineprint-core/src/sba/perform.rs:712",
         "crates/fineprint-core/src/sba/registry.rs:30",
         "crates/fineprint-core/src/sba/registry.rs:400",
@@ -15945,6 +16311,7 @@
     "708.4": {
       "sha256": "f6063059564ec33136b63a31d27db9eda4c187384e74e270c279c2b5fe8dcb5b",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:29",
         "crates/fineprint-core/src/layers/facedown.rs:17",
         "crates/fineprint-core/src/layers/facedown.rs:20",
         "crates/fineprint-core/src/layers/facedown.rs:63",
@@ -16168,6 +16535,8 @@
     "709.3": {
       "sha256": "584c2b981b240988e95d9105b67b0921cc59f0ccdb3479801fed9f742ad39c8f",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:29",
+        "crates/fineprint-core/src/casting/mod.rs:24",
         "crates/fineprint-core/src/layouts/room.rs:181",
         "crates/fineprint-core/src/layouts/tests_composite.rs:247",
         "crates/fineprint-core/src/layouts/tests_composite.rs:450",
@@ -16789,6 +17158,8 @@
       "sha256": "4ded27142c1f6d2c15fbfbc4379842ea0117a371432c89dc6c85198789590c0e",
       "locations": [
         "crates/fineprint-core/src/actions/tests.rs:722",
+        "crates/fineprint-core/src/casting/announce.rs:29",
+        "crates/fineprint-core/src/casting/mod.rs:24",
         "crates/fineprint-core/src/layouts/dfc.rs:56",
         "crates/fineprint-core/src/layouts/tests.rs:888",
         "crates/fineprint-core/src/layouts/tests.rs:905",
@@ -17145,6 +17516,8 @@
     "716.3a": {
       "sha256": "5032aeb8a34449e6c581ad8efaeb543f54ae36bb563ee68fcc6168fc14b9b5f7",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:29",
+        "crates/fineprint-core/src/casting/mod.rs:24",
         "docs/SRS.md:379"
       ]
     },
@@ -17281,6 +17654,8 @@
     "719.3a": {
       "sha256": "911dd1744646b1789ca4359efe563ffb939f3942792e9a1da1280a6e9030909b",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:29",
+        "crates/fineprint-core/src/casting/mod.rs:24",
         "docs/SRS.md:379"
       ]
     },
@@ -17406,6 +17781,7 @@
     "721.3a": {
       "sha256": "816b3dcdfc88115fe7789dac33be1a1a56086e6e88403158e96559d253142f08",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:29",
         "docs/SRS.md:379"
       ]
     },
@@ -18162,6 +18538,9 @@
     "734": {
       "sha256": "2b2e56c3b58a6b644f17a430aba50f679469af6983aff458b0530fdb37334ead",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:312",
+        "crates/fineprint-core/src/casting/announce.rs:6",
+        "crates/fineprint-core/src/casting/mod.rs:22",
         "crates/fineprint-core/src/choice/response.rs:122",
         "crates/fineprint-core/src/txn/game_state.rs:5",
         "crates/fineprint-core/src/txn/mod.rs:190",
@@ -18179,6 +18558,19 @@
     "734.1": {
       "sha256": "2ae9e792e4106f420029775edc9e1c90658f3a5c60da10790ba4ae8708b6285b",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:253",
+        "crates/fineprint-core/src/casting/announce.rs:291",
+        "crates/fineprint-core/src/casting/announce.rs:293",
+        "crates/fineprint-core/src/casting/announce.rs:330",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1522",
+        "crates/fineprint-core/src/casting/announce_tests.rs:493",
+        "crates/fineprint-core/src/casting/announce_tests.rs:684",
+        "crates/fineprint-core/src/casting/announce_tests.rs:687",
+        "crates/fineprint-core/src/casting/announce_tests.rs:711",
+        "crates/fineprint-core/src/casting/announce_tests.rs:729",
+        "crates/fineprint-core/src/casting/announce_tests.rs:748",
+        "crates/fineprint-core/src/casting/mod.rs:32",
+        "crates/fineprint-core/src/casting/mod.rs:35",
         "crates/fineprint-core/src/state/effects_tests.rs:1294",
         "crates/fineprint-core/src/txn/game_state.rs:39",
         "crates/fineprint-core/src/txn/game_state.rs:8",
@@ -18203,6 +18595,19 @@
         "crates/fineprint-core/src/txn/tests.rs:688",
         "crates/fineprint-core/src/txn/tests.rs:892",
         "crates/fineprint-core/src/txn/tests.rs:919",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:132",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:155",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:172",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:192",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:70",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:90",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:972",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:392",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:461",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:591",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:6",
         "crates/fineprint-core/tests/spec_txn_durable.rs:1011",
         "crates/fineprint-core/tests/spec_txn_durable.rs:1041",
         "crates/fineprint-core/tests/spec_txn_durable.rs:1069",
@@ -18257,6 +18662,15 @@
     "734.2": {
       "sha256": "f185baf9fea08df4759324b2494348530db29a5cb1a83cd74fe042b0c6b3a8e5",
       "locations": [
+        "crates/fineprint-core/src/casting/announce.rs:253",
+        "crates/fineprint-core/src/casting/announce.rs:262",
+        "crates/fineprint-core/src/casting/announce.rs:291",
+        "crates/fineprint-core/src/casting/announce.rs:330",
+        "crates/fineprint-core/src/casting/announce_tests.rs:1522",
+        "crates/fineprint-core/src/casting/announce_tests.rs:493",
+        "crates/fineprint-core/src/casting/announce_tests.rs:684",
+        "crates/fineprint-core/src/casting/announce_tests.rs:687",
+        "crates/fineprint-core/src/casting/mod.rs:33",
         "crates/fineprint-core/src/txn/game_state.rs:16",
         "crates/fineprint-core/src/txn/game_state.rs:34",
         "crates/fineprint-core/src/txn/mod.rs:11",
@@ -18267,6 +18681,18 @@
         "crates/fineprint-core/src/txn/tests.rs:141",
         "crates/fineprint-core/src/txn/tests.rs:599",
         "crates/fineprint-core/src/txn/tests.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:132",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:155",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:172",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:193",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:70",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:8",
+        "crates/fineprint-core/tests/spec_casting_announce.rs:90",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:392",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:461",
+        "crates/fineprint-core/tests/spec_casting_announce_property.rs:6",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:328",
+        "crates/fineprint-core/tests/spec_casting_announce_support.rs:6",
         "crates/fineprint-core/tests/spec_txn_durable.rs:20",
         "crates/fineprint-core/tests/spec_txn_durable.rs:369",
         "crates/fineprint-core/tests/spec_txn_durable.rs:51",
