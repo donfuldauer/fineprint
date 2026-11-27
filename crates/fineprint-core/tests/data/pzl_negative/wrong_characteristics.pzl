@@ -1,0 +1,66 @@
+{
+  "pzlVersion": 1,
+  "title": "Deliberately wrong expectation (must fail): Characteristics assertion reads the printed values of a vanilla creature",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {
+      "test.vanilla_green_2_2": "e8744f6f3091b0523468ddb9b545c8a7213bdc9828ed949e50d7ea6450b2ffa4"
+    }
+  },
+  "prngSeed": 1,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20,
+      "zones": {
+        "hand": []
+      }
+    },
+    {
+      "id": "p2",
+      "life": 20
+    }
+  ],
+  "battlefield": [
+    {
+      "id": "o1",
+      "card": "test.vanilla_green_2_2",
+      "owner": "p1",
+      "controller": "p1"
+    }
+  ],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": [
+    {
+      "kind": "characteristics",
+      "object": "o1",
+      "expect": {
+        "power": 3,
+        "toughness": 2,
+        "controller": "p1",
+        "manaValue": 2
+      }
+    },
+    {
+      "kind": "absent",
+      "what": "zoneMember",
+      "owner": "p1",
+      "zone": "hand",
+      "object": "o1"
+    }
+  ]
+}

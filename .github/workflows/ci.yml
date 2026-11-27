@@ -178,6 +178,41 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         run: cargo test --workspace --locked
 
+  pzl:
+    name: pzl (ubuntu-latest)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Keep line endings as committed
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4.2.2
+        if: needs.changes.outputs.code == 'true'
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        if: needs.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+      - name: Cache cargo registry and target
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-pzl-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-pzl-
+      - name: cargo xtask pzl tests/scenarios
+        if: needs.changes.outputs.code == 'true'
+        run: cargo xtask pzl tests/scenarios
+
   coverage:
     name: coverage (ubuntu-latest)
     needs: changes

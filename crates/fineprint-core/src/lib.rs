@@ -32,6 +32,8 @@ pub mod permanent;
 pub mod replacement;
 /// State-based actions: the data-driven registry of CR 704.5a-704.5i and the simultaneous check-and-perform pass (REQ-SBA-001).
 pub mod sba;
+/// The `.pzl` scenario format, its defensive loader, the runner and the reference host (REQ-TEST-001).
+pub mod scenario;
 /// The root game-state value: players, turn position, PRNG, ID generators (REQ-CORE-001).
 pub mod state;
 /// Trigger detection: look-back classification, event matching, intervening-if, trigger limits and the waiting-trigger queue (REQ-EVENT-002).

@@ -1,0 +1,45 @@
+{
+  "pzlVersion": 1,
+  "title": "Malformed scenario fixture",
+  "requirements": [
+    "REQ-TEST-001"
+  ],
+  "cr": [],
+  "format": "testformat",
+  "rulesBaseline": "test-baseline",
+  "cardDatabase": {
+    "version": "synthetic-library-1",
+    "definitionHashes": {
+      "test.vanilla_green_2_2": "E8744F6F3091B0523468DDB9B545C8A7213BDC9828ED949E50D7EA6450B2FFA4"
+    }
+  },
+  "prngSeed": 7,
+  "players": [
+    {
+      "id": "p1",
+      "life": 20
+    },
+    {
+      "id": "p2",
+      "life": 20
+    }
+  ],
+  "battlefield": [
+    {
+      "id": "o1",
+      "card": "test.vanilla_green_2_2",
+      "owner": "p1",
+      "controller": "p1"
+    }
+  ],
+  "stack": [],
+  "turn": {
+    "number": 1,
+    "activePlayer": "p1",
+    "phase": "PRECOMBAT_MAIN",
+    "step": "MAIN"
+  },
+  "priority": "p1",
+  "script": [],
+  "assertions": []
+}
