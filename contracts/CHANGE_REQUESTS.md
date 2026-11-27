@@ -196,3 +196,54 @@ Requested by: #50 gate 06-turn (round 2, R8)   Kind: breaking   Status: open
 Change: `PendingChoiceRequest::validate_response` (choice/request.rs) now rejects `TAKE_MULLIGAN` for a `MULLIGAN_DECISION` payload whose `to_bottom` is at least the hand size (the last mulligan: the whole hand goes on the bottom, CR 103.5). Before, every non-KEEP_HAND answer passed the payload check and the game-start procedure rejected TAKE_MULLIGAN afterwards. The payload fields, canonical encoding, wire names and `ValidatorRule` are unchanged. Breaking: merges only between phases (R2); requested at the phase 06-turn boundary by its gate review (PR #280). The implementation lands with the gate issue PR #279 after this contract-only PR.
 Why: REQ-NET-003 (the request describes the legal answers); gate 06-turn F86/R8.
 Consumers affected: any client or host that submitted TAKE_MULLIGAN on the final request (it was a procedure error at the next replay; it is now a submit-time rejection). No signature changes.
+
+## CR-011 — CastState (REQ-CAST-001): hybrid and Phyrexian symbol slots follow the chosen costs
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412739)   Kind: additive   Status: open
+Change: new provided method on `casting::CastState`:
+`fn symbol_slots(&self, req: &CastRequest, modes: &[u32], costs: &CostChoice) -> Vec<Vec<String>>`
+(one option list per hybrid or Phyrexian symbol of the costs that WILL BE PAID once `modes` and
+the alternative, additional, X and harmonize parts of `costs` are chosen; `costs.symbol_options`
+is empty in the call). Default: `Vec::new()` when `costs.alternative.is_some()` (an alternative
+cost is paid rather than the mana cost, CR 118.9), otherwise `self.cost_spec(req, modes).symbol_slots`.
+Hosts whose alternative or additional costs carry symbols of their own override it.
+`CostSpec::symbol_slots` is documented as the slots of the normal cost. `announce` change: when
+the `CostSpec` lists at least one alternative or additional cost, it asks `CHOOSE_COSTS_AND_X`
+first WITHOUT symbol slots (payload `symbol_slots` empty), then calls `CastState::symbol_slots`
+with the answer and, when the result is non-empty, asks a second `CHOOSE_COSTS_AND_X` whose
+payload has empty `alternative_costs`, `additional_costs` and `harmonize_candidates`, `x_range:
+None` and the returned `symbol_slots`; its answer is a `ConfigureCosts` with `alternative: None`,
+`additional: []`, `x: None`, `harmonize: None` and one option per slot, and the two answers are
+merged into the `CostChoice`. When the spec lists neither an alternative nor an additional cost,
+the single request is unchanged. `ChoicePayload`, `ChoiceResponse`, `ValidatorRule`, the payload
+validator and all canonical encodings are unchanged.
+Why: REQ-CAST-001 (SRS 7.1 step 2); CR 601.2b: "If a cost that will be paid as the spell is being
+cast includes hybrid mana symbols, the player announces the nonhybrid equivalent cost they intend
+to pay." and CR 118.9 (an alternative cost is paid "rather than paying the spell’s mana cost"):
+a spell with a hybrid mana cost and a symbol-free alternative cost asked for the hybrid choice
+even when the alternative was chosen, and `PendingChoiceRequest::validate_response` requires one
+option per slot. Gate 06-turn round 5.
+Consumers affected: every `CastState` implementor (source-compatible: the method is provided),
+`casting::announce`; a spell with an alternative or additional cost and a symbol slot now takes two
+`CHOOSE_COSTS_AND_X` requests (no replay with such a request exists: no integrating host yet).
+
+## CR-012 — CastState (REQ-CAST-001): mode legality probes the cost choices
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412705)   Kind: additive   Status: open
+Change: no signature or type changes. `casting::announce` decides whether a mode (an original
+index `m`) is offered by probing the host: for the normal cost and for each alternative cost `i` of
+`cost_spec(req, &[m])`, combined with additional-cost subsets (every subset when the spec lists at
+most 6 additional costs; otherwise none, each one alone, and all), it calls
+`target_slots(req, &[m], &probe)` where `probe` is a `CostChoice` with that `alternative`, that
+`additional` (ascending), `x` = the low end of the X range if any, empty `symbol_options` and
+`harmonize: None`. The mode is offered when at least one probe gives every target slot at least
+`min` legal candidates; before, only `CostChoice::default()` was probed. The check of CR 601.2c
+with the costs the player actually chose is unchanged. This supersedes the statement of the
+decision "#52 FP-050 - Mode legality and index translation" that mode legality cannot depend on costs.
+`CastState::target_slots` may therefore be called before the costs are chosen with a non-default
+`CostChoice` for a one-mode list; it must stay pure (R3).
+Why: REQ-CAST-001; CR 700.2a: "If one of the modes would be illegal (due to an inability to choose
+legal targets, for example), that mode can’t be chosen."; CR 601.2c: "A spell may require some
+targets only if an alternative or additional cost (such as a kicker cost) or a particular mode was
+chosen for it" and "a spell may require alternative targets only if an alternative or additional
+cost was chosen for it." A mode whose only legal targets come through an alternative cost was
+removed (and the cast rolled back with `NoLegalMode` when it was the only mode). Gate 06-turn round 5.
+Consumers affected: `casting::announce`; `CastState::target_slots` implementors (extra calls only).
