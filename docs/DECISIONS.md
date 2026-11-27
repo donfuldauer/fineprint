@@ -11037,3 +11037,100 @@ first; rejection is tested through `validate` and `submit`). The CR 103.5c "firs
 **Alternatives.** Exposing `ChoiceContext::new` to reach the defensive branches (rejected:
 `src/choice` is outside #48's owned paths and the branches are unreachable through the public
 protocol).
+
+## #50 FP-048 — Spec-test judgement calls
+
+**Decision.** The black-box spec tests (`tests/spec_turn_control*.rs`) make these calls where the
+brief left room:
+1. Follow-ups of skipped turns (CR 614.10b) are asserted in the creation order of the skip
+   effects, as the brief states twice ("in creation order"), not in the order the skipped turns
+   come up; one case separates the two (P3's skip created before P2's).
+2. `run_planned_turn` is compared with `run_turn` over one turn (the brief's T8 clause) and also
+   over three consecutive turns, including the `TurnState` left behind, because the next turn's
+   untap step passes the previous active player to the day/night check (REQ-TURN-002).
+3. A pending self-control effect (CR 724.9) may be reported by `pending_controller` as `None` or
+   as the player itself; the tests assert only that it overwrites the earlier effect and leaves
+   the player uncontrolled.
+4. An extra main phase created with `Phase::PrecombatMain` as its kind is asserted only through
+   its segment (`Segment::PostcombatMain`, CR 505.1a), not through the `BeginPhase` value.
+5. `end_the_turn` followed by the rest of the turn is exercised by pulling the items up to the
+   upkeep without running them, calling `end_the_turn`, then `run_planned_turn` (which calls
+   `begin_turn` first). The brief's "mutation from inside a host callback" is not testable black
+   box: the scheduler is a separate `&mut` argument that no host can reach.
+6. A step skip whose phase is skipped stays pending (the step never would begin, CR 500.11).
+7. The CR 728.2 ownership check uses the recording `reset_for_new_game` double (cards return to
+   their owner's library); the no-random-draw check compares the restart with `run_game_start`
+   with the restarter given, over the same reset state (same PRNG state, same report).
+**Rationale.** Each follows the brief's specified behaviour or the existing REQ-TURN-002
+contract; where the brief is silent the tests assert only what it implies.
+**Alternatives.** Consumption-order follow-ups (rejected: contradicts the brief's wording;
+reported as a failing test for the Orchestrator); comparing only one turn in T8 (rejected: would
+miss a previous-active-player regression in the day/night check).
+
+## #50 FP-048 — SRS 5.3 erratum
+
+**Decision.** Skipped turns, phases and steps are modelled as replacement-style "skip your next
+occurrence" effects (CR 614.1b, CR 614.10, CR 614.10a, CR 614.10b), consumed at the moment the
+turn, phase or step would begin, and they cover turns as well as phases and steps. A departed
+player's turn does not begin per CR 800.4k.
+**Rationale.** SRS 5.3 (REQ-TURN-003) calls skips "613.11 rule modifications", but CR 614.1b and
+CR 614.10 make them replacement effects. SRS line 240 also cites CR 800.4j where this unit needs
+CR 800.4k. This implementation follows the CR. The Orchestrator queues the SRS wording fix for the
+owner.
+**Alternatives.** Following the SRS wording literally (rejected: it conflicts with the CR, which
+is the rules baseline).
+
+## #50 FP-048 — Engine gaps
+
+**Decision.** These are out of scope for #50 and become new issues:
+1. Heartbeat early exit: an end-the-turn or end-the-combat effect that resolves must stop the
+   current step's priority loop (heartbeat.rs, steps.rs). Until then `end_the_turn` and
+   `end_the_combat_phase` only change the plan that the next `TurnScheduler::next_item` reads.
+2. `run_turn` consuming `TurnScheduler` (steps.rs).
+3. Wiring turn, phase and step skips into the replacement bus (the SRS `SKIP` replaceWith op), and
+   the CR 616.1 affected-player choice among simultaneous skip effects. The scheduler consumes
+   skips oldest first.
+4. Answerer enforcement in `ChoiceSession` (`PlayerControl::check_answerer` is a pure check),
+   wire-level redacted views for a controller, and merging knowledge projections for a controller
+   (view/, #80).
+5. A real `GameState`-backed `EndTurnHost` and `RestartHost` (game loop), and CR 728.3.
+6. Native effects that call these procedures (extra-turn, skip, control, end-the-turn and restart
+   effects).
+**Rationale.** The brief limits #50 to `turn/control.rs` against the current public APIs. Each
+item needs edits in files this unit does not own.
+**Alternatives.** Editing steps.rs or heartbeat.rs here (rejected: outside the owned paths, R1).
+
+## #50 FP-048 — Turn scheduler judgement calls
+
+**Decision.**
+- *Normal-order fallback:* the next normal turn goes to the next seat after the last NORMAL
+  turn's player, skipping players who are not in the game. If that player is not in the seat
+  order, it goes to the first in-game seat. A normal turn that is skipped or dropped (CR 800.4k)
+  still advances the normal order. A skipped extra turn is just removed.
+- *Skip ordering:* turn, phase and step skips are consumed oldest first (identical skips can only
+  be told apart by their follow-ups). Follow-ups are reported in the order their skips were
+  created, not the order they were consumed. Choosing by the affected player per CR 616.1 is an
+  engine gap.
+- *Anchor resolution:* "after X" means the current phase or step if it is X. If X has just ended,
+  the front of the remaining plan counts too. Otherwise it is the first not-yet-started
+  occurrence of X. With no such anchor nothing is added. "Before X" needs a not-yet-started X.
+  Several steps created after the same step run newest first (CR 500.9). Several created before
+  the same step each go directly before it, so the newest runs last, right before the anchor.
+- *Main phase labels (CR 505.1a):* a main phase gets its precombat or postcombat label when it is
+  planned. The first main phase of the turn that has not yet begun or been skipped is precombat,
+  and every other is postcombat. An extra main phase inserted after combat is therefore
+  postcombat. One inserted before the normal precombat main phase becomes the precombat one and
+  relabels the normal one postcombat. A skipped precombat main phase still counts as the first
+  (see the rules question in the #50 report).
+- *`you_get` modelling:* `Some(controller)` adds nothing unless `controller` is the active
+  player of the current turn (CR 500.10a). `None` always adds.
+- *`end_combat_phase_now`:* acts only while a combat phase is in progress (begun, its
+  `EndPhase` not yet yielded). In the gap after `EndPhase(Combat)` it returns false.
+- *Driver:* `run_planned_turn` mirrors `run_phase` item by item and, on success, records the
+  turn's active player via `TurnState::record_turn_taken`, as `run_turn` does.
+**Rationale.** Each is the reading closest to the quoted CR text and the brief. All are
+deterministic and use ordered containers only (R3).
+**Alternatives.** Static main-phase labels (rejected: an extra main phase before the first one
+would not be "the first main phase of the turn"). Reporting follow-ups in consumption order
+(rejected: the brief asks for creation order). LIFO for "before" anchors (rejected: CR 500.9
+states LIFO only for steps created after the same step).
