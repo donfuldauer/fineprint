@@ -13,6 +13,8 @@
 #[path = "spec_turn_heartbeat_support.rs"]
 mod support;
 
+use std::collections::BTreeSet;
+
 use fineprint_base::ids::PlayerId;
 use fineprint_core::choice::{ChoicePayload, ChoiceResponse, ChoiceType, PendingChoiceRequest};
 use fineprint_core::turn::{HeartbeatHost, PassResult, players_in_game};
@@ -26,7 +28,9 @@ const MAX_ACTIONS: usize = 6;
 /// A generated host for `seed` (2 to 4 players; random active seat or none; a random set of
 /// players who left, possibly empty or everyone; scripted SBA and trigger sequences that settle
 /// within a bound; stack depth up to 4; random legal actions per player; random host requests
-/// and departures in SBAs, resolutions and actions that always leave one player in the game).
+/// and departures in SBAs, resolutions and actions that always leave one player in the game;
+/// and departures while a player decides priority: as the heartbeat collects the actions of the
+/// player about to be asked, another player or that player leaves (F23)).
 fn generate(seed: u64) -> FakeHost {
     let mut g = Lcg::new(seed);
     let n = 2 + g.below(3) as usize;
@@ -141,7 +145,25 @@ fn generate(seed: u64) -> FakeHost {
         (Some(fineprint_core::events::Phase::PostcombatMain), None),
     ];
     host.phase = phases[g.below(3) as usize];
+    // F23: departures while a seat decides priority (never the survivor).
+    if g.chance(1, 2) {
+        let mut queue = std::collections::VecDeque::new();
+        for _ in 0..g.below(8) {
+            let entry = if g.chance(1, 3) {
+                pick_leaver(&mut g).map(|l| l[0])
+            } else {
+                None
+            };
+            queue.push_back(entry);
+        }
+        *host.concede_on_ask.borrow_mut() = queue;
+    }
     host
+}
+
+/// The players of `w` still in the game.
+fn live_of(w: &World<FakeHost>) -> BTreeSet<PlayerId> {
+    w.fake().live().into_iter().collect()
 }
 
 /// The seeded answer policy: a priority request is answered with a legal action (at most
@@ -172,12 +194,17 @@ fn policy(
 /// game's priority player; (d) PassCount never exceeds the players in game and is 0 at the
 /// first ask after every action and resolution; (e) resolutions = initial depth + pushes by
 /// actions + stacked triggers, ending with an empty stack; (f) the records are consistent;
-/// (g) replaying the answers reproduces the state hash and the final state.
+/// (g) replaying the answers reproduces the state hash and the final state; (h) with seats
+/// leaving while another seat (or the seat itself) decides priority, the expected PassCount and
+/// the all-passed threshold come from the players still in the game, the top resolves and the
+/// step ends only after every one of them has passed in succession, and every host request
+/// names a player still in the game (F21, F23).
 #[test]
 fn req_turn_001_property_heartbeat_terminates_or_asks() {
     let mut step_ends = 0;
     let mut no_player = 0;
     let mut resolutions = 0;
+    let mut mid_decision_departures = 0;
     for seed in 0..SEEDS {
         let host = generate(seed);
         let initial_depth = host.depth;
@@ -223,51 +250,109 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
         }
         resolutions += last.resolutions;
 
-        // Walk the trace: (b), (c), (d), (f).
+        // Walk the trace: (b), (c), (d), (f), (h). The oracle keeps the SET of players who
+        // passed since the last action or resolution, and derives the expected PassCount and the
+        // all-passed threshold from the players still in the game at each pass (F23; CR 117.4,
+        // CR 800.4a, CR 800.4j).
         let records = run.last.hb.passes().to_vec();
         assert_eq!(records.len(), pass_answers(&run.answers), "{ctx}");
         let mut ask_index = 0usize;
-        let mut counter = 0usize;
+        let mut resolve_index = 0usize;
+        let mut passed: BTreeSet<PlayerId> = BTreeSet::new();
         let mut reset_pending = true;
         let mut rec_index = 0usize;
         let mut pending_moved: Option<PlayerId> = None;
+        // R11 (CR 117.4): set by a TopResolved pass, cleared at the resolution.
+        let mut resolution_pending = false;
         for ev in trace(&run) {
             match ev {
-                Ev::Act(..) | Ev::Resolve => {
-                    counter = 0;
+                Ev::Act(..) => {
+                    passed.clear();
                     reset_pending = true;
                 }
-                Ev::HostAsk(_) => ask_index += 1,
+                Ev::Resolve => {
+                    // (h) The top resolves only after every player still in the game (as the
+                    // resolution begins) has passed in succession.
+                    let live = &last.live_at_resolve[resolve_index];
+                    resolve_index += 1;
+                    assert!(
+                        live.is_subset(&passed),
+                        "{ctx}: resolved with {live:?} live but only {passed:?} passed"
+                    );
+                    if let Some(to) = pending_moved.take() {
+                        assert!(
+                            !live.contains(&to),
+                            "{ctx}: {to:?} was skipped while in game"
+                        );
+                    }
+                    passed.clear();
+                    reset_pending = true;
+                    resolution_pending = false;
+                }
+                Ev::HostAsk(chooser) => {
+                    // F21: a generated host request names a player still in the game.
+                    let at = &run.at_ask[ask_index];
+                    ask_index += 1;
+                    assert!(
+                        !at.host.has_left_game(chooser),
+                        "{ctx}: host request to departed {chooser:?}"
+                    );
+                }
                 Ev::Ask(chooser) => {
                     let at = &run.at_ask[ask_index];
                     let answer = &run.answers[ask_index];
                     ask_index += 1;
+                    assert!(
+                        !resolution_pending,
+                        "{ctx}: priority asked before the top object resolved"
+                    );
+                    let live = live_of(at);
                     // (b), (c)
                     assert!(!at.host.has_left_game(chooser), "{ctx}");
                     assert_eq!(at.priority_player_now(), Some(chooser), "{ctx}");
                     if let Some(to) = pending_moved.take() {
-                        assert_eq!(to, chooser, "{ctx}: PriorityMoved names the next asked");
+                        // PriorityMoved names the next asked player, unless that player left
+                        // before being asked (CR 800.4a).
+                        assert!(
+                            to == chooser || !live.contains(&to),
+                            "{ctx}: PriorityMoved to {to:?} but {chooser:?} was asked"
+                        );
                     }
-                    // (d)
+                    // (d) The state's count lies between the live passers and all passers
+                    // (a departure during this ask is forgotten at the next pass).
                     let in_game = players_in_game(&at.host);
+                    assert_eq!(in_game, live.len(), "{ctx}");
+                    let live_passed = passed.intersection(&live).count();
                     assert!(at.hb.pass_count() <= in_game, "{ctx}");
-                    assert_eq!(at.hb.pass_count(), counter, "{ctx}");
+                    assert!(
+                        (live_passed..=passed.len()).contains(&at.hb.pass_count()),
+                        "{ctx}: pass count {} vs live {live_passed} / all {}",
+                        at.hb.pass_count(),
+                        passed.len()
+                    );
                     if reset_pending {
                         assert_eq!(at.hb.pass_count(), 0, "{ctx}");
                         reset_pending = false;
                     }
                     // (f)
                     if matches!(answer, ChoiceResponse::PassPriority) {
-                        counter += 1;
+                        // R10 (CR 117.4): one pass per player per pass cycle; an action or a
+                        // resolution clears the set.
+                        assert!(
+                            passed.insert(chooser),
+                            "{ctx}: {chooser:?} passed twice in one pass cycle"
+                        );
+                        passed.retain(|p| live.contains(p));
+                        let count = passed.len();
                         let rec = &records[rec_index];
                         assert_eq!(rec.sequence, rec_index as u64, "{ctx}");
                         assert_eq!(rec.turn_number, TURN, "{ctx}");
                         assert_eq!((rec.phase, rec.step), at.fake().phase, "{ctx}");
                         assert_eq!(rec.player, chooser, "{ctx}");
-                        assert_eq!(rec.pass_count, counter, "{ctx}");
+                        assert_eq!(rec.pass_count, count, "{ctx}");
                         assert_eq!(rec.players_in_game, in_game, "{ctx}");
                         assert_eq!(rec.stack_empty, at.host.stack_is_empty(), "{ctx}");
-                        let expected_kind = if counter < in_game {
+                        let expected_kind = if count < in_game {
                             0
                         } else if !at.host.stack_is_empty() {
                             1
@@ -276,7 +361,8 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                         };
                         match (&rec.result, expected_kind) {
                             (PassResult::PriorityMoved { to }, 0) => pending_moved = Some(*to),
-                            (PassResult::TopResolved, 1) | (PassResult::StepEnds, 2) => {}
+                            (PassResult::TopResolved, 1) => resolution_pending = true,
+                            (PassResult::StepEnds, 2) => {}
                             (r, k) => panic!("{ctx}: record {rec_index} result {r:?}, kind {k}"),
                         }
                         rec_index += 1;
@@ -287,6 +373,26 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
         }
         assert_eq!(rec_index, records.len(), "{ctx}");
         assert_eq!(ask_index, run.requests.len(), "{ctx}");
+        assert_eq!(resolve_index, last.live_at_resolve.len(), "{ctx}");
+        if !run.last.fake().conceded.borrow().is_empty() {
+            mid_decision_departures += 1;
+        }
+        // (h) The step ends only after every player still in the game has passed in
+        // succession: by a StepEnds pass, or (F45) by a departure after the others passed.
+        if run.out == Some(Ok(Out::StepEnds)) {
+            let live = live_of(&run.last);
+            assert!(
+                live.is_subset(&passed),
+                "{ctx}: step ended with {live:?} live but only {passed:?} passed"
+            );
+            if let Some(to) = pending_moved {
+                assert!(
+                    !live.contains(&to),
+                    "{ctx}: {to:?} was skipped while in game"
+                );
+            }
+            assert_eq!(run.last.hb.pass_count(), live.len(), "{ctx}");
+        }
 
         // (g)
         let (hash, state) = replay_all(base, &run.answers);
@@ -297,6 +403,10 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
     assert!(step_ends > SEEDS / 2, "step ends: {step_ends}");
     assert!(no_player > 0, "no-player runs: {no_player}");
     assert!(resolutions > SEEDS, "resolutions: {resolutions}");
+    assert!(
+        mid_decision_departures > SEEDS / 10,
+        "departures while deciding: {mid_decision_departures}"
+    );
 }
 
 /// The game's current priority player.

@@ -18,7 +18,7 @@ mod state_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fineprint_base::ids::{EffectId, ObjectId, PlayerId};
+use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_core::layers::{
     Affected, CounterHolder, EffectOrigin, Evaluated, Invalidation, LayerCache, LayerModification,
     MatchContext, ObjectBase, StampReason, evaluate_all, evaluated_digest, literal_of,
@@ -327,6 +327,65 @@ impl Rig {
 
 use Invalidation as Inv;
 
+/// CR 613.7a (as cited by the layer-timestamp procedures): re-stamps `source` from its
+/// previous object timestamp (read BEFORE the new stamp) to a new one and checks the registry
+/// changed accordingly: every printed static effect of `source` carries exactly the new object
+/// timestamp, and every granted effect that was later than the previous object timestamp has a
+/// fresh timestamp later than the new object stamp, in its previous relative order. Returns the
+/// number of granted effects that were restamped.
+fn restamp_checked(s: &mut GameState, source: ObjectId) -> usize {
+    let old = s
+        .timestamps()
+        .object_timestamp(source)
+        .expect("the source holds an object timestamp");
+    let mut granted_before: Vec<(Timestamp, EffectId)> = s
+        .effects()
+        .iter()
+        .filter(|(_, e)| {
+            e.source == Some(source)
+                && matches!(
+                    e.origin,
+                    EffectOrigin::Static {
+                        granted_at: Some(_)
+                    }
+                )
+                && e.timestamp > old
+        })
+        .map(|(id, e)| (e.timestamp, id))
+        .collect();
+    granted_before.sort_unstable();
+    let new = s
+        .stamp_object(source, StampReason::TurnedFaceUpOrDown)
+        .expect("stamp");
+    assert!(new > old);
+    s.restamp_static_effects(source, old, new).expect("restamp");
+    let mut printed = 0;
+    for (_, e) in s.effects().iter() {
+        if e.source == Some(source) && e.origin == (EffectOrigin::Static { granted_at: None }) {
+            assert_eq!(
+                e.timestamp, new,
+                "a printed effect takes the new object stamp"
+            );
+            printed += 1;
+        }
+    }
+    assert!(printed > 0, "the source has printed static effects");
+    let mut after: Vec<Timestamp> = Vec::new();
+    for (_, id) in &granted_before {
+        let e = s.effects().get(*id).expect("the granted effect remains");
+        assert!(
+            e.timestamp > new,
+            "a granted effect is later than the new source stamp"
+        );
+        after.push(e.timestamp);
+    }
+    assert!(
+        after.windows(2).all(|w| w[0] < w[1]),
+        "relative order is kept"
+    );
+    granted_before.len()
+}
+
 // ---------------------------------------------------------------------------------------------
 // requirement 1: one test per mutation kind
 // ---------------------------------------------------------------------------------------------
@@ -391,7 +450,9 @@ fn req_layer_005_effect_removal_state_hash_matches() {
     r.assert_hash_changed("removal of a static effect");
 }
 
-/// REQ-LAYER-005: object timestamp stamping, re-stamping static effects, forgetting stamps.
+/// REQ-LAYER-005, REQ-CORE-002 (CR 613.7a as cited by `restamp_static_effects`): object
+/// timestamp stamping, re-stamping static effects (the printed effect takes the new object
+/// stamp, a later granted effect a fresh one after it), forgetting stamps.
 #[test]
 fn req_layer_005_object_timestamp_state_hash_matches() {
     let mut r = Rig::standard();
@@ -402,12 +463,34 @@ fn req_layer_005_object_timestamp_state_hash_matches() {
         r.step(&[Inv::Timestamp]);
         r.assert_hash_changed("stamp_object");
     }
+    // A granted effect of object 2, later than object 2's current timestamp.
     r.both(|s| {
-        let old = s.stamp_object(oid(2), StampReason::EntersZone).unwrap();
-        let new = s
-            .stamp_object(oid(2), StampReason::TurnedFaceUpOrDown)
-            .unwrap();
-        s.restamp_static_effects(oid(2), old, new).unwrap();
+        let g = s.stamp_resolved_effect().unwrap();
+        let mut granted = static_sel(
+            oid(2),
+            g,
+            Layer::L7c,
+            SEL_TAPPED,
+            LayerModification::ModifyPt {
+                power: 0,
+                toughness: 1,
+            },
+        );
+        granted.origin = EffectOrigin::Static {
+            granted_at: Some(g),
+        };
+        s.register_effect(
+            granted,
+            Some(GeneratingAbility::new(
+                oid(2),
+                ability("test.o2_granted_static"),
+            )),
+        )
+        .unwrap();
+    });
+    r.step(&[Inv::EffectRegistration]);
+    r.both(|s| {
+        assert_eq!(restamp_checked(s, oid(2)), 1, "the granted effect restamps");
     });
     r.step(&[Inv::Timestamp]);
     r.assert_hash_changed("restamp");

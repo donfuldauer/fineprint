@@ -10,6 +10,8 @@
 //! integers within `i64::MIN..=u64::MAX`. It never panics and uses no recursion deeper than
 //! [`MAX_DEPTH`].
 
+use std::collections::BTreeSet;
+
 use super::error::{ScenarioError, ScenarioErrorKind, quote, segment};
 use super::{MAX_ARRAY_ELEMENTS, MAX_DEPTH, MAX_SCENARIO_BYTES};
 
@@ -294,6 +296,9 @@ impl Reader {
         self.check_depth(depth)?;
         self.bump(); // '{'
         let mut members: Vec<Member> = Vec::new();
+        // The keys seen so far: a duplicate is found in O(log n), not by scanning `members`
+        // (R12: a wide object must not cost quadratic time; R3: an ordered set).
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         self.skip_ws();
         if self.peek() == Some('}') {
             self.bump();
@@ -307,7 +312,7 @@ impl Reader {
             let (line, column) = (self.line, self.column);
             let key = self.string()?;
             // The path of a duplicate is the object holding it; the position is the key's.
-            if members.iter().any(|m| m.key == key) {
+            if !seen.insert(key.clone()) {
                 return Err(self.error_at(
                     ScenarioErrorKind::DuplicateKey,
                     (line, column),
@@ -487,6 +492,19 @@ impl Reader {
         )
     }
 
+    /// Consumes a run of ASCII digits into `text`; false if there was none.
+    fn take_digits(&mut self, text: &mut String) -> bool {
+        let mut any = false;
+        while let Some(d) = self.peek().filter(char::is_ascii_digit) {
+            self.bump();
+            if text.len() <= 4 * super::error::MAX_QUOTE_CHARS {
+                text.push(d);
+            }
+            any = true;
+        }
+        any
+    }
+
     fn number(&mut self) -> Result<Value, ScenarioError> {
         let start = (self.line, self.column);
         let negative = self.peek() == Some('-');
@@ -515,14 +533,33 @@ impl Reader {
             _ => return Err(self.unexpected()),
         }
         if matches!(self.peek(), Some('.' | 'e' | 'E')) {
-            // Consume the rest of the number so the message can quote it (R3: no floats).
+            // Consume exactly what the JSON number grammar allows (a fraction is `.` and at
+            // least one digit; an exponent is `e|E`, an optional sign and at least one digit),
+            // so a malformed number is a syntax error and the next token is reported correctly.
             let mut text = format!("{}{digits}", if negative { "-" } else { "" });
-            while let Some(c) = self
-                .peek()
-                .filter(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
-            {
+            let mut well_formed = true;
+            if self.peek() == Some('.') {
                 self.bump();
-                text.push(c);
+                text.push('.');
+                well_formed &= self.take_digits(&mut text);
+            }
+            if well_formed && matches!(self.peek(), Some('e' | 'E')) {
+                if let Some(e) = self.peek() {
+                    self.bump();
+                    text.push(e);
+                }
+                if let Some(sign) = self.peek().filter(|c| matches!(c, '+' | '-')) {
+                    self.bump();
+                    text.push(sign);
+                }
+                well_formed &= self.take_digits(&mut text);
+            }
+            if !well_formed {
+                return Err(self.error_at(
+                    ScenarioErrorKind::Syntax,
+                    start,
+                    format!("{} is not a valid number", quote(&text)),
+                ));
             }
             return Err(self.error_at(
                 ScenarioErrorKind::WrongType,

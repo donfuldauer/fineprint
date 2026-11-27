@@ -1174,7 +1174,9 @@ fn spelled_numbers(spelling: &str) -> Value {
 /// `-0.0`, `1.0` and `1e0` load exactly as `0` and `1` (same value, same hash), and the loaded
 /// value seals unchanged and round-trips. A non-integral number is not a valid real AST
 /// (REQ-CORE-006): it is refused on load, and a hand-built typed value holding one cannot be
-/// sealed or hashed.
+/// sealed or hashed. In memory no number is normalised: a hand-built keyword parameter holding
+/// an integral float (`-0.0`, `1.0`, `1e0`) is refused like a fraction, and building the integer
+/// instead seals to the wire case's value, hash and bytes (gate 06-turn F97).
 #[test]
 fn req_dsl_001_seal_normalises_numbers() {
     for (spelling, integer) in [("-0.0", "0"), ("1.0", "1"), ("1e0", "1")] {
@@ -1192,6 +1194,59 @@ fn req_dsl_001_seal_normalises_numbers() {
             CardDefinitionDSL::from_json(&exported).as_ref(),
             Ok(&sealed),
             "{spelling}"
+        );
+        // The in-memory case (gate 06-turn F97; docs/DECISIONS.md "Gate 06-turn F97 —
+        // In-memory integral floats in AST params"): the same keyword `params` built in memory
+        // with the float spelling is refused by the ability serializer, so it cannot be
+        // hashed, exported or sealed (the typed AST wire contract has integers only; `power` is
+        // an `i64` and cannot hold a float at all). The migration path is to build the
+        // integer (as here) or to load the document text with `from_json`, which normalises it
+        // (the wire case above): both give the same sealed value, hash and bytes.
+        let float = serde_json::from_str::<Value>(spelling).expect("float");
+        assert!(float.is_f64(), "{spelling}: an in-memory float");
+        let int = serde_json::from_str::<Value>(integer).expect("integer");
+        let with_params = |n: &Value| {
+            let mut def = plain.clone();
+            let crate::ability::AbilityAST::Keyword(keyword) = &mut def.faces[0].abilities[0]
+            else {
+                panic!("the spelled ability is a keyword")
+            };
+            keyword.params = Some(BTreeMap::from([
+                ("m".to_owned(), Value::Array(vec![n.clone()])),
+                ("n".to_owned(), n.clone()),
+            ]));
+            def
+        };
+        let in_memory = with_params(&float);
+        assert_ne!(in_memory, plain, "{spelling}: the float is held as given");
+        assert!(
+            matches!(in_memory.compute_hash(), Err(CanonicalError::Serialize(_))),
+            "{spelling}: hash"
+        );
+        assert!(
+            matches!(
+                in_memory.to_canonical_json(),
+                Err(CanonicalError::Serialize(_))
+            ),
+            "{spelling}: export"
+        );
+        assert!(
+            matches!(in_memory.clone().seal(), Err(CanonicalError::Serialize(_))),
+            "{spelling}: seal"
+        );
+        let migrated = with_params(&int);
+        assert_eq!(migrated, plain, "{spelling}: integer migration");
+        let migrated_sealed = migrated.seal().expect("seal migrated");
+        assert_eq!(migrated_sealed, sealed, "{spelling}: same sealed value");
+        assert_eq!(
+            migrated_sealed.to_canonical_json().expect("json"),
+            exported,
+            "{spelling}: same bytes"
+        );
+        assert_eq!(
+            CardDefinitionDSL::from_json(&exported).as_ref(),
+            Ok(&migrated_sealed),
+            "{spelling}: reload"
         );
     }
     // A fraction survives canonicalisation but is no value expression: the load refuses it.

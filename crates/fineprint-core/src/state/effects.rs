@@ -19,9 +19,15 @@
 //! **Validation at this boundary.** [`GameState::register_effect`] enforces what
 //! [`ContinuousEffects::register`] enforces plus: an effect of a static ability with a source
 //! has the link to its generating ability, and only such an effect has one; a layer-7a effect
-//! is from a characteristic-defining ability (SRS 6.2 item 1, CR 613.4a).
+//! is from a characteristic-defining ability (SRS 6.2 item 1, CR 613.4a); the effect's
+//! timestamp and the timestamp of its granting effect were issued by the state's timestamp
+//! generator (REQ-CORE-002); and a resolved effect's affected set is already locked (CR
+//! 611.2c): a resolved effect with a selector is registered through
+//! [`GameState::register_effect_group`], which locks it, or with its locked set
+//! ([`Affected::Objects`]), while a static effect keeps its selector (CR 611.3a).
 //! [`GameState::effects_mut`] gives direct, unvalidated access to the registry (a state made
-//! inconsistent through it serializes, but [`GameState::deserialize`] rejects it).
+//! inconsistent through it can no longer be serialized: [`GameState::serialize`] refuses what
+//! [`GameState::deserialize`] would reject).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,10 +37,11 @@ use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::AbilityAST;
 
+use super::effects_wire::Issued;
 use super::{GameState, StateError};
 use crate::layers::{
-    ContinuousEffect, ContinuousEffects, CounterHolder, EffectOrigin, LayerEnvironment, LayerError,
-    SimultaneousStamp, StampReason, TimestampLedger, put_typed, restamp_static_effects,
+    Affected, ContinuousEffect, ContinuousEffects, CounterHolder, EffectOrigin, LayerEnvironment,
+    LayerError, SimultaneousStamp, StampReason, TimestampLedger, put_typed, restamp_static_effects,
     stamp_resolved_effect, stamp_static_and_resolved,
 };
 
@@ -101,6 +108,38 @@ fn check_effect(
 }
 
 impl GameState {
+    /// The last issued effect id and timestamp of this state's generators.
+    fn issued(&self) -> Issued {
+        Issued {
+            effect: self.ids.effect.last_issued(),
+            timestamp: self.ids.timestamp.last_issued(),
+        }
+    }
+
+    /// `Ok` if `t` was issued by this state's timestamp generator (`1..=last issued`, as
+    /// decoding accepts it; REQ-CORE-002).
+    fn check_timestamp_issued(&self, t: Timestamp) -> Result<(), StateError> {
+        if self.issued().has_timestamp(t.get()) {
+            Ok(())
+        } else {
+            Err(StateError::TimestampNotIssued(t))
+        }
+    }
+
+    /// The boundary checks of [`GameState::register_effect`] that read the state: the effect's
+    /// timestamp and the timestamp of its granting effect (`granted_at`) were issued by the
+    /// state's timestamp generator (REQ-CORE-002), so the state stays restorable.
+    fn check_effect_timestamps(&self, effect: &ContinuousEffect) -> Result<(), StateError> {
+        self.check_timestamp_issued(effect.timestamp)?;
+        if let EffectOrigin::Static {
+            granted_at: Some(t),
+        } = effect.origin
+        {
+            self.check_timestamp_issued(t)?;
+        }
+        Ok(())
+    }
+
     /// The continuous effects in force (REQ-LAYER-001).
     #[must_use]
     pub fn effects(&self) -> &ContinuousEffects {
@@ -110,8 +149,10 @@ impl GameState {
     /// Direct write access to the continuous effects, copy-on-write (only the registry is
     /// un-shared). Nothing written here is validated by the state: prefer
     /// [`GameState::register_effect`] and [`GameState::remove_effect`]. A static effect with a
-    /// source registered here has no generating-ability link and is reported to exist always;
-    /// such a state serializes, but [`GameState::deserialize`] rejects it.
+    /// source registered here has no generating-ability link and is reported to exist always.
+    /// A state made inconsistent through it (that link missing, a non-CDA layer-7a effect, an
+    /// unissued effect id or timestamp) can no longer be serialized: [`GameState::serialize`]
+    /// refuses what [`GameState::deserialize`] would reject; its state hash stays computable.
     pub fn effects_mut(&mut self) -> &mut ContinuousEffects {
         Arc::make_mut(&mut self.effects)
     }
@@ -145,7 +186,17 @@ impl GameState {
     /// records the link to its generating ability (REQ-LAYER-001, REQ-LAYER-002). All or
     /// nothing: on any error the state, the effect generator included, is unchanged.
     ///
+    /// This API does not lock selectors: a resolved effect ([`EffectOrigin::Resolved`]) must
+    /// come with its locked set ([`Affected::Objects`]), since its affected set is fixed when it
+    /// begins (CR 611.2c); register a resolved effect with a selector through
+    /// [`GameState::register_effect_group`] (a one-part group), which locks it. A static
+    /// effect keeps its selector and is matched again on every evaluation (CR 611.3a).
+    ///
     /// # Errors
+    /// - [`StateError::TimestampNotIssued`]: `effect.timestamp`, or the `granted_at` of a
+    ///   static effect, is 0 or above the state's last issued timestamp (REQ-CORE-002);
+    /// - [`StateError::UnlockedResolvedSelector`]: a resolved effect with
+    ///   [`Affected::Selector`] (CR 611.2c);
     /// - [`StateError::NonCdaInLayer7a`]: `effect.layer` is 7a and `effect.is_cda` is `false`
     ///   (SRS 6.2 item 1, CR 613.4a);
     /// - [`StateError::MissingGenerator`]: a static effect (`EffectOrigin::Static`) with a
@@ -162,6 +213,13 @@ impl GameState {
         generator: Option<GeneratingAbility>,
     ) -> Result<EffectId, StateError> {
         check_effect(&effect, generator.as_ref())?;
+        self.check_effect_timestamps(&effect)?;
+        // CR 611.2c: the set is determined when the effect begins; only the group path locks.
+        if effect.origin == EffectOrigin::Resolved
+            && matches!(effect.affected, Affected::Selector(_))
+        {
+            return Err(StateError::UnlockedResolvedSelector);
+        }
         let mut ids = self.ids.effect.clone();
         let id = ids.issue().map_err(|_| StateError::IdExhausted)?;
         if self.effects.get(id).is_some() {
@@ -184,11 +242,15 @@ impl GameState {
     /// Registers one multi-layer effect (CR 613.6) through
     /// [`ContinuousEffects::register_group`]: each part gets the next [`EffectId`] in the order
     /// given and its generating-ability link, with the checks of
-    /// [`GameState::register_effect`] applied to every part. Returns the parts' ids in that
+    /// [`GameState::register_effect`] applied to every part (timestamps against the state's
+    /// issued range before the call; parts may share a timestamp), except that a resolved part
+    /// with a selector is locked to the objects matching it now (CR 611.2c) instead of being
+    /// refused; a static part keeps its selector (CR 611.3a). Returns the parts' ids in that
     /// order. All or nothing.
     ///
     /// # Errors
-    /// The errors of [`GameState::register_effect`] for any part, and the error of
+    /// The errors of [`GameState::register_effect`] for any part (other than
+    /// [`StateError::UnlockedResolvedSelector`]), and the error of
     /// [`ContinuousEffects::register_group`] as [`StateError::Layer`].
     pub fn register_effect_group(
         &mut self,
@@ -200,6 +262,7 @@ impl GameState {
         let mut links = Vec::new();
         for (effect, generator) in parts {
             check_effect(&effect, generator.as_ref())?;
+            self.check_effect_timestamps(&effect)?;
             let id = ids.issue().map_err(|_| StateError::IdExhausted)?;
             if let Some(g) = generator {
                 links.push((id, g));
@@ -389,13 +452,16 @@ impl GameState {
     /// state's generator ([`crate::layers::restamp_static_effects`]).
     ///
     /// # Errors
-    /// [`StateError::IdExhausted`]; the state is then unchanged.
+    /// [`StateError::TimestampNotIssued`] if `new_object_ts` is 0 or above the state's last
+    /// issued timestamp (REQ-CORE-002: the state would not be restorable);
+    /// [`StateError::IdExhausted`]. The state is then unchanged.
     pub fn restamp_static_effects(
         &mut self,
         object: ObjectId,
         old_object_ts: Timestamp,
         new_object_ts: Timestamp,
     ) -> Result<(), StateError> {
+        self.check_timestamp_issued(new_object_ts)?;
         let mut ids = self.ids.timestamp.clone();
         let mut effects = (*self.effects).clone();
         restamp_static_effects(&mut effects, &mut ids, object, old_object_ts, new_object_ts)

@@ -13,7 +13,7 @@ use fineprint_base::ids::{ObjectId, PlayerId};
 
 use super::types::{GameVariant, LOST_THE_GAME, SbaEnvironment, SbaSubject};
 use crate::events::EventState;
-use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, literal_of};
+use crate::layers::{ContinuousEffects, LayerEnvironment, evaluate, evaluate_all, literal_of};
 use crate::permanent::{AttachTarget, AttackState, AttackTarget, Permanents};
 use crate::state::{GameState, PlayerState};
 use crate::zones::{ZoneId, Zones};
@@ -142,14 +142,22 @@ impl<'a> SbaView<'a> {
         env: &'a dyn SbaEnvironment,
     ) -> SbaView<'a> {
         let mut permanents = BTreeMap::new();
+        // CR 613.1, CR 613.4: one layer pass for the whole snapshot. `evaluate_all` fails the
+        // whole pass if any listed object has no base; then fall back to per-object evaluation,
+        // skipping the objects that error.
+        let all = evaluate_all(effects, layer_env).ok();
         for id in zones.contents(ZoneId::Battlefield) {
             // CR 702.26b
             if phasing.get(id).is_some_and(|p| p.status().phased_out) {
                 continue;
             }
             // CR 613.1, CR 613.4: the characteristics after every layer.
-            let Ok(evaluated) = evaluate(effects, layer_env, id) else {
-                continue;
+            let evaluated = match all.as_ref().and_then(|m| m.get(&id)) {
+                Some(e) => e.clone(),
+                None => match evaluate(effects, layer_env, id) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                },
             };
             let c = &evaluated.characteristics;
             // CR 613.4: the pipeline writes the final P/T as numeric literals; read the

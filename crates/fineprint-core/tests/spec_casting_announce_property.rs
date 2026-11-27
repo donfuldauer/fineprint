@@ -12,13 +12,14 @@
 #[path = "spec_casting_announce_support.rs"]
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::PlayerId;
 use fineprint_base::prng::Pcg64Dxsm;
 use fineprint_core::casting::*;
 use fineprint_core::choice::{
-    ChoicePayload, ChoiceResponse, ChoiceTarget, PendingChoiceRequest, Status,
+    ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse, ChoiceTarget, PendingChoiceRequest,
+    Status,
 };
 use fineprint_core::txn::Transactional;
 use fineprint_dsl::ability::RuleKind;
@@ -162,7 +163,12 @@ fn random_costs(rng: &mut Pcg64Dxsm) -> CostSpec {
             .collect();
     }
     if coin(rng) {
-        let lo = below(rng, 3);
+        // B3: sometimes a range that reaches above i64::MAX.
+        let lo = if below(rng, 6) == 0 {
+            i64::MAX as u64 - below(rng, 2)
+        } else {
+            below(rng, 3)
+        };
         c.x_range = Some((lo, lo + below(rng, 4)));
     }
     if below(rng, 4) == 0 {
@@ -204,6 +210,38 @@ fn random_case(rng: &mut Pcg64Dxsm) -> (Fake, CastRequest, Vec<R>) {
         f.mode_slots = (0..n).map(|_| random_slots(rng, 1)).collect();
     }
     f.cost_spec = random_costs(rng);
+    // CR-011 (B2): the host's symbol slots after the first cost answer.
+    f.symbols = match below(rng, 3) {
+        0 => SymbolHost::Default,
+        1 => SymbolHost::Always(f.cost_spec.symbol_slots.clone()),
+        _ => {
+            let mut per = BTreeMap::new();
+            per.insert((None, Vec::new()), f.cost_spec.symbol_slots.clone());
+            for i in 0..f.cost_spec.alternative_costs.len() as u32 {
+                if coin(rng) {
+                    let n = between(rng, 1, 3) as usize;
+                    per.insert(
+                        (Some(i), Vec::new()),
+                        vec![(0..n).map(|k| format!("test.alt_sym_{k}")).collect(); n],
+                    );
+                }
+            }
+            SymbolHost::PerCosts(per)
+        }
+    };
+    // CR-012 (B1): some modes get other slots with an alternative cost or additional cost 0.
+    if let Some(spec) = &f.mode_spec {
+        for m in 0..spec.labels.len() as u32 {
+            if !f.cost_spec.alternative_costs.is_empty() && coin(rng) {
+                f.mode_cost_slots
+                    .insert((m, Some(0), Vec::new()), random_slots(rng, 1));
+            }
+            if !f.cost_spec.additional_costs.is_empty() && coin(rng) {
+                f.mode_cost_slots
+                    .insert((m, None, vec![0]), random_slots(rng, 1));
+            }
+        }
+    }
     f.base_slots = random_slots(rng, 2);
     if !f.cost_spec.additional_costs.is_empty() && coin(rng) {
         f.additional_slots = random_slots(rng, 1);
@@ -342,6 +380,7 @@ fn junk_answer(rng: &mut Pcg64Dxsm) -> ChoiceResponse {
 /// either be rejected without changing anything or be valid.
 struct Driven {
     requests: Vec<PendingChoiceRequest>,
+    answers: Vec<ChoiceResponse>,
     state: Fake,
     final_hash: fineprint_base::hash::Digest,
     observed: Observed,
@@ -356,6 +395,7 @@ fn drive_random(rng: &mut Pcg64Dxsm, f: &Fake, req: &CastRequest) -> Driven {
             Status::Done { state, output } => {
                 return Driven {
                     requests,
+                    answers: s.answers().to_vec(),
                     state: state.clone(),
                     final_hash: s.state_hash(),
                     observed: output.clone(),
@@ -377,6 +417,7 @@ fn drive_random(rng: &mut Pcg64Dxsm, f: &Fake, req: &CastRequest) -> Driven {
                 );
             }
         }
+        check_request(&p);
         let a = valid_answer(rng, &p);
         if let Err(e) = p.validate(&a) {
             panic!("constructed answer {a:?} rejected by {:?}: {e}", p.payload);
@@ -386,8 +427,193 @@ fn drive_random(rng: &mut Pcg64Dxsm, f: &Fake, req: &CastRequest) -> Driven {
     }
 }
 
+/// Property (e), REQ-NET-003, R12 (B3, B4): the request validates its own default answer, every
+/// enumerated option stands for something the request accepts (a `Number` is the exact X of the
+/// payload's range and the default with that X validates; an `Object` of a cost request is one
+/// of its harmonize candidates; a `Text` of a cost request is one of its alternative or
+/// additional cost labels or symbol options; no other kind appears in a cost request; a
+/// recipient or mode is in the payload), and a validator contract carries the request's bounds.
+fn check_request(p: &PendingChoiceRequest) {
+    assert!(
+        p.validate(&p.default_on_timeout).is_ok(),
+        "default of {:?} rejected",
+        p.payload
+    );
+    match &p.options {
+        ChoiceOptions::Validator(c) => {
+            assert_eq!((c.min, c.max), (p.min, p.max), "validator bounds");
+        }
+        ChoiceOptions::Enumerated(items) => {
+            for item in items {
+                match (item, &p.payload) {
+                    (ChoiceOption::Number(n), ChoicePayload::ChooseCostsAndX { x_range, .. }) => {
+                        let (lo, hi) = x_range.expect("Number without an X range");
+                        let v = u64::try_from(*n).expect("negative Number");
+                        assert!(lo <= v && v <= hi, "lossy Number({n}) for {lo}..={hi}");
+                        let ChoiceResponse::ConfigureCosts {
+                            alternative,
+                            additional,
+                            symbol_options,
+                            harmonize,
+                            ..
+                        } = p.default_on_timeout.clone()
+                        else {
+                            panic!("cost default is not ConfigureCosts");
+                        };
+                        let a = ChoiceResponse::ConfigureCosts {
+                            alternative,
+                            additional,
+                            x: Some(v),
+                            symbol_options,
+                            harmonize,
+                        };
+                        assert!(p.validate(&a).is_ok(), "X {v} rejected");
+                    }
+                    (
+                        ChoiceOption::Object(o),
+                        ChoicePayload::ChooseCostsAndX {
+                            harmonize_candidates,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            harmonize_candidates.contains(o),
+                            "harmonize option {o:?} not in {harmonize_candidates:?}"
+                        );
+                    }
+                    (
+                        ChoiceOption::Text(t),
+                        ChoicePayload::ChooseCostsAndX {
+                            alternative_costs,
+                            additional_costs,
+                            symbol_slots,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            alternative_costs.contains(t)
+                                || additional_costs.contains(t)
+                                || symbol_slots.iter().any(|s| s.contains(t)),
+                            "cost option {t:?} is no cost or symbol option of {:?}",
+                            p.payload
+                        );
+                    }
+                    (o, ChoicePayload::ChooseCostsAndX { .. }) => {
+                        panic!("unexpected cost option {o:?} for {:?}", p.payload)
+                    }
+                    (ChoiceOption::Mode(m), ChoicePayload::ChooseModes { labels, .. }) => {
+                        assert!((*m as usize) < labels.len(), "mode option {m}");
+                    }
+                    (o, ChoicePayload::DivideValue { recipients, .. }) => {
+                        let t = match o {
+                            ChoiceOption::Object(x) => ChoiceTarget::Object(*x),
+                            ChoiceOption::Player(x) => ChoiceTarget::Player(*x),
+                            other => panic!("division option {other:?}"),
+                        };
+                        assert!(recipients.iter().any(|(r, _)| *r == t), "{t:?}");
+                    }
+                    (o, ChoicePayload::ChooseTargets { slots, .. }) => {
+                        let t = match o {
+                            ChoiceOption::Object(x) => ChoiceTarget::Object(*x),
+                            ChoiceOption::Player(x) => ChoiceTarget::Player(*x),
+                            other => panic!("target option {other:?}"),
+                        };
+                        assert!(slots.iter().any(|s| s.legal.contains(&t)), "{t:?}");
+                    }
+                    (o, payload) => panic!("option {o:?} for {payload:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// Property (f), CR-011 (B2), REQ-CAST-001; CR 601.2b: for an announced proposal, the cost
+/// requests follow the two-request shape and `symbol_options` comes from the second request.
+fn check_cost_requests(f: &Fake, req: &CastRequest, d: &Driven, proposal: &Proposal) {
+    let idx: Vec<usize> = d
+        .requests
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.payload, ChoicePayload::ChooseCostsAndX { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let spec = &f.cost_spec;
+    let two_step = !spec.alternative_costs.is_empty() || !spec.additional_costs.is_empty();
+    let Some(&first) = idx.first() else {
+        assert_eq!(proposal.costs, no_choice());
+        return;
+    };
+    let ChoicePayload::ChooseCostsAndX { symbol_slots, .. } = &d.requests[first].payload else {
+        unreachable!()
+    };
+    if !two_step {
+        assert_eq!(
+            idx.len(),
+            1,
+            "one cost request without alternative/additional costs"
+        );
+        assert_eq!(symbol_slots, &spec.symbol_slots);
+        return;
+    }
+    assert!(
+        symbol_slots.is_empty(),
+        "first cost request with symbol slots"
+    );
+    let ChoiceResponse::ConfigureCosts {
+        alternative,
+        additional,
+        x,
+        harmonize,
+        ..
+    } = d.answers[first].clone()
+    else {
+        panic!("first cost answer is not ConfigureCosts");
+    };
+    let asked = CostChoice {
+        alternative,
+        additional,
+        x,
+        symbol_options: Vec::new(),
+        harmonize,
+    };
+    let expected = f.symbol_slots(req, &proposal.modes, &asked);
+    if expected.is_empty() {
+        assert_eq!(idx.len(), 1, "a symbol request without slots");
+        assert!(proposal.costs.symbol_options.is_empty());
+    } else {
+        assert_eq!(idx, vec![first, first + 1], "the symbol request follows");
+        let second = &d.requests[first + 1];
+        assert_eq!(
+            second.request_id.get(),
+            d.requests[first].request_id.get() + 1
+        );
+        assert_eq!(second.chooser, req.caster);
+        assert_eq!(
+            second.payload,
+            ChoicePayload::ChooseCostsAndX {
+                alternative_costs: Vec::new(),
+                additional_costs: Vec::new(),
+                x_range: None,
+                symbol_slots: expected.clone(),
+                harmonize_candidates: Vec::new(),
+            }
+        );
+        let ChoiceResponse::ConfigureCosts { symbol_options, .. } = &d.answers[first + 1] else {
+            panic!("second cost answer is not ConfigureCosts");
+        };
+        assert_eq!(&proposal.costs.symbol_options, symbol_options);
+    }
+    assert_eq!(
+        CostChoice {
+            symbol_options: Vec::new(),
+            ..proposal.costs.clone()
+        },
+        asked
+    );
+}
+
 /// Checks (a) and (b) on one run.
-fn check_invariants(f: &Fake, d: &Driven) {
+fn check_invariants(f: &Fake, req: &CastRequest, d: &Driven) {
     match &d.observed.outcome {
         // (a) CR 734.1, 734.2, REQ-CORE-005.
         AnnounceOutcome::RolledBack(rb) => {
@@ -410,6 +636,7 @@ fn check_invariants(f: &Fake, d: &Driven) {
             proposal,
         } => {
             assert_eq!(*stack_object, oid(f.next_id));
+            check_cost_requests(f, req, d, proposal);
             assert_eq!(d.state.stack.len(), f.stack.len() + 1);
             assert_eq!(d.state.priority, f.priority);
             let targets_req = d
@@ -470,7 +697,7 @@ fn prop_rollback_identity_and_announced_proposals() {
         let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_0050_0000 + seed);
         let (f, req, _) = random_case(&mut rng);
         let d = drive_random(&mut rng, &f, &req);
-        check_invariants(&f, &d);
+        check_invariants(&f, &req, &d);
         kinds[match d.observed.outcome {
             AnnounceOutcome::NotStarted { .. } => 0,
             AnnounceOutcome::Announced { .. } => 1,
@@ -615,7 +842,7 @@ fn prop_arbitrary_params_never_panic_and_malformed_do_not_apply() {
         all.extend(items.iter().cloned());
         let wild = f.clone().with_rules(&all);
         let d = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &wild, &req);
-        check_invariants(&wild, &d);
+        check_invariants(&wild, &req, &d);
 
         // Malformed entries only: identical requests and outcome to the case without them.
         let mut junk = Vec::new();
@@ -657,7 +884,7 @@ fn prop_arbitrary_params_never_panic_and_malformed_do_not_apply() {
         let with_junk = f.clone().with_rules(&with_junk_items);
         let a = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &f, &req);
         let b = drive_random(&mut Pcg64Dxsm::from_u64_seed(answer_seed), &with_junk, &req);
-        check_invariants(&with_junk, &b);
+        check_invariants(&with_junk, &req, &b);
         assert_eq!(
             shape(&a),
             shape(&b),
@@ -737,4 +964,170 @@ fn prop_prohibit_is_monotone() {
             );
         }
     }
+}
+
+/// A random modal fake for the probe model: 1-3 modes (choose exactly one), 0-2 alternative and
+/// 0-3 additional costs, X absent, a small range or `lo > hi`; each mode's only slot (min 1) is
+/// plain legal, plain illegal (object 30 has shroud), "mana value X" on its own object (maybe
+/// shrouded) or legal only with one random (alternative, additional) configuration (possibly
+/// one the spec does not have). Also returns the shrouded objects.
+fn random_probe_case(rng: &mut Pcg64Dxsm) -> (Fake, BTreeSet<ChoiceTarget>) {
+    let n = between(rng, 1, 3) as usize;
+    let alts = below(rng, 3) as usize;
+    let adds = below(rng, 4) as usize;
+    let x_range = match below(rng, 3) {
+        0 => None,
+        1 => {
+            let lo = below(rng, 3);
+            Some((lo, lo + below(rng, 4)))
+        }
+        _ => Some((between(rng, 3, 6), below(rng, 3))),
+    };
+    let mut f = Fake {
+        mode_spec: Some(modes_spec(n, 1, 1, false)),
+        cost_spec: CostSpec {
+            alternative_costs: (0..alts).map(|i| format!("test.alt_{i}")).collect(),
+            additional_costs: (0..adds).map(|i| format!("test.add_{i}")).collect(),
+            x_range,
+            symbol_slots: vec![vec!["test.sym_a".to_owned(), "test.sym_b".to_owned()]],
+            harmonize_candidates: vec![oid(31)],
+        },
+        ..Fake::new()
+    };
+    let mut items = vec![tr(1, shroud_obj(30), 1)];
+    let mut shrouded = BTreeSet::from([to(30)]);
+    for m in 0..n as u32 {
+        let own = 10 + u64::from(m);
+        match below(rng, 4) {
+            0 => f.mode_slots.push(vec![slot(1, 1, &[to(own)])]),
+            1 => f.mode_slots.push(vec![slot(1, 1, &[to(30)])]),
+            2 => {
+                f.mode_slots.push(Vec::new());
+                f.mode_x_slots.insert(m, slot(1, 1, &[to(own)]));
+                f.mana_values.insert(own, below(rng, 7));
+                if coin(rng) {
+                    items.push(tr(2 + u64::from(m), shroud_obj(own), 2));
+                    shrouded.insert(to(own));
+                }
+            }
+            _ => {
+                f.mode_slots.push(vec![slot(1, 1, &[to(30)])]);
+                let alternative = match below(rng, alts as u64 + 2) {
+                    0 => None,
+                    k => Some((k - 1) as u32),
+                };
+                let additional: Vec<u32> = (0..adds as u32 + 1).filter(|_| coin(rng)).collect();
+                f.mode_cost_slots
+                    .insert((m, alternative, additional), vec![slot(1, 1, &[to(own)])]);
+            }
+        }
+    }
+    (f.with_rules(&items), shrouded)
+}
+
+/// REQ-CAST-001 (step 2), REQ-CORE-005, REQ-TEST-001; CR 107.3a, 601.2b, 601.2c, 700.2a, 734.1
+/// (CR-014 model): for random small modal fakes, each mode is probed in exactly the CR-014 order
+/// (alternative-major, additional subsets by ascending mask, X ascending innermost; one value
+/// for no X or `lo > hi`) up to and including its first legal configuration, or over the whole
+/// product when none is legal, and nothing else calls `target_slots` before the modes request;
+/// every probe has empty symbol options and no harmonize creature; a mode is offered exactly
+/// when some probed configuration is legal; with no mode offered the cast rolls back at Choices
+/// with NoLegalMode to the identical hash and priority.
+#[test]
+fn prop_mode_probes_follow_the_cr014_product() {
+    let mut offered_some = 0;
+    let mut offered_none = 0;
+    for seed in 0..CASES {
+        let mut rng = Pcg64Dxsm::from_u64_seed(0x0052_0140_0000 + seed);
+        let (f, shrouded) = random_probe_case(&mut rng);
+        let req = if coin(&mut rng) {
+            spell(P1)
+        } else {
+            ability(P1)
+        };
+        let spec = f.cost_spec.clone();
+        let n = f.mode_spec.as_ref().map_or(0, |s| s.labels.len()) as u32;
+        let product = expected_probes(
+            spec.alternative_costs.len(),
+            spec.additional_costs.len(),
+            &x_values(spec.x_range),
+        );
+        // The model: a configuration is legal when every slot keeps at least `min` candidates
+        // that are not shrouded (CR 702.18a). Computed before the log is reset.
+        let mut want_probes = Vec::new();
+        let mut want_offered = Vec::new();
+        for m in 0..n {
+            let mut probes = Vec::new();
+            for (alternative, additional, x) in &product {
+                probes.push((*alternative, additional.clone(), *x));
+                let costs = CostChoice {
+                    alternative: *alternative,
+                    additional: additional.clone(),
+                    x: *x,
+                    symbol_options: Vec::new(),
+                    harmonize: None,
+                };
+                let slots = f.target_slots(&req, &[m], &costs);
+                if slots.iter().all(|s| {
+                    s.candidates
+                        .iter()
+                        .filter(|t| !shrouded.contains(t))
+                        .count() as u64
+                        >= s.min
+                }) {
+                    want_offered.push(m);
+                    break;
+                }
+            }
+            want_probes.push(probes);
+        }
+
+        f.reset_probes();
+        let session = start(&f, &req);
+        let log = f.target_slots_log.get();
+        let label = format!("seed {seed}");
+        assert_probe_shape(&log, &label);
+        for m in 0..n {
+            assert_eq!(
+                probes_for_mode(&log, m),
+                want_probes[m as usize],
+                "{label}: probes of mode {m} ({spec:?})"
+            );
+        }
+        assert_eq!(
+            log.len(),
+            want_probes.iter().map(Vec::len).sum::<usize>(),
+            "{label}: calls other than the probes"
+        );
+        match session.status() {
+            Status::Pending(p) => {
+                offered_some += 1;
+                let ChoicePayload::ChooseModes { labels, .. } = &p.payload else {
+                    panic!("{label}: expected ChooseModes, got {:?}", p.payload);
+                };
+                let all = mode_labels(n as usize);
+                let want: Vec<String> = want_offered
+                    .iter()
+                    .map(|&m| all[m as usize].clone())
+                    .collect();
+                assert_eq!(labels, &want, "{label}: offered modes");
+            }
+            Status::Done { state, output } => {
+                offered_none += 1;
+                assert!(want_offered.is_empty(), "{label}: {:?}", output.outcome);
+                let AnnounceOutcome::RolledBack(rb) = &output.outcome else {
+                    panic!("{label}: expected NoLegalMode, got {:?}", output.outcome);
+                };
+                assert_eq!(rb.step, CastStep::Choices, "{label}");
+                assert_eq!(rb.reason, StopReason::NoLegalMode, "{label}");
+                assert_eq!(rb.state_hash, f.state_hash(), "{label}");
+                assert_eq!(rb.priority_player, f.priority, "{label}");
+                assert_eq!(state, &f, "{label}");
+            }
+        }
+    }
+    assert!(
+        offered_some > 0 && offered_none > 0,
+        "{offered_some} / {offered_none}"
+    );
 }

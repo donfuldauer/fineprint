@@ -8,7 +8,9 @@
 // (targeting consults only TARGETING_RULE entries and host query points), REQ-CORE-001
 // (replay determinism). Synthetic ids, synthetic rule effects and neutral labels only (R5).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
@@ -19,8 +21,9 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::choice::{
-    ChoiceContext, ChoiceError, ChoiceOptions, ChoicePayload, ChoiceResponse, ChoiceSession,
-    ChoiceTarget, ChoiceType, ENUMERATION_LIMIT, Interrupt, PendingChoiceRequest, Status,
+    ChoiceContext, ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse,
+    ChoiceSession, ChoiceTarget, ChoiceType, ENUMERATION_LIMIT, Interrupt, PendingChoiceRequest,
+    Status, ValidatorContract, ValidatorRule,
 };
 use crate::layers::{
     EffectOrigin, PlayerAffected, PostLayerEffects, PostLayerEnvironment, RuleEffect, RuleEntry,
@@ -140,6 +143,26 @@ fn rules(list: &[Fx]) -> RuleSet {
     build_rule_set(&reg, &Env)
 }
 
+/// The `target_slots` calls of a toy: (modes, costs) in call order. Shared by clones and left
+/// out of the state hash, so it observes the probes without changing any outcome.
+#[derive(Clone, Default)]
+struct CallLog(Rc<RefCell<Vec<Probe>>>);
+
+/// One `target_slots` call: the modes and the cost choice.
+type Probe = (Vec<u32>, CostChoice);
+
+impl core::fmt::Debug for CallLog {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CallLog")
+    }
+}
+
+impl CallLog {
+    fn take(&self) -> Vec<Probe> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+}
+
 /// A toy host: everything is a field. Players 1 and 3 are teammates; player 2 opposes both.
 #[derive(Clone, Debug)]
 struct Toy {
@@ -159,6 +182,21 @@ struct Toy {
     mode_slots: BTreeMap<u32, Vec<TargetSlotSpec>>,
     /// Extra slots when any additional cost is chosen.
     kicker_slots: Vec<TargetSlotSpec>,
+    /// Slots replacing `mode_slots` of a mode for an exact (alternative, additional, mode) cost
+    /// configuration (CR 601.2c: targets that depend on the costs).
+    cost_mode_slots: BTreeMap<(Option<u32>, Vec<u32>, u32), Vec<TargetSlotSpec>>,
+    /// Slots replacing `mode_slots` of a mode whose target restriction refers to X (synthetic
+    /// "mana value == X", CR 601.2b, 601.2c): the slot's candidates are filtered to the objects
+    /// whose `mana_values` entry equals the cost choice's X (none when X is `None`). Consulted
+    /// after `cost_mode_slots`.
+    x_mode_slots: BTreeMap<u32, TargetSlotSpec>,
+    /// Mana value of each object, read only by `x_mode_slots`.
+    mana_values: BTreeMap<ObjectId, u64>,
+    /// Symbol slots of each alternative cost (overriding `CastState::symbol_slots`); an
+    /// alternative cost not listed has none.
+    alt_symbol_slots: BTreeMap<u32, Vec<Vec<String>>>,
+    /// The `target_slots` calls.
+    calls: CallLog,
     /// The amount to divide, if any.
     division: Option<u64>,
     /// The spell's mana value before X.
@@ -201,6 +239,11 @@ impl Toy {
             base_slots: Vec::new(),
             mode_slots: BTreeMap::new(),
             kicker_slots: Vec::new(),
+            cost_mode_slots: BTreeMap::new(),
+            x_mode_slots: BTreeMap::new(),
+            mana_values: BTreeMap::new(),
+            alt_symbol_slots: BTreeMap::new(),
+            calls: CallLog::default(),
             division: None,
             base_mana_value: 3,
             stack: Vec::new(),
@@ -299,9 +342,25 @@ impl CastState for Toy {
         modes: &[u32],
         costs: &CostChoice,
     ) -> Vec<TargetSlotSpec> {
+        self.calls
+            .0
+            .borrow_mut()
+            .push((modes.to_vec(), costs.clone()));
         let mut out = self.base_slots.clone();
         for m in modes {
-            if let Some(s) = self.mode_slots.get(m) {
+            let key = (costs.alternative, costs.additional.clone(), *m);
+            if let Some(s) = self.cost_mode_slots.get(&key) {
+                out.extend(s.iter().cloned());
+            } else if let Some(s) = self.x_mode_slots.get(m) {
+                let mut slot = s.clone();
+                slot.candidates.retain(|c| match c {
+                    ChoiceTarget::Object(id) => {
+                        costs.x.is_some() && self.mana_values.get(id).copied() == costs.x
+                    }
+                    ChoiceTarget::Player(_) => false,
+                });
+                out.push(slot);
+            } else if let Some(s) = self.mode_slots.get(m) {
                 out.extend(s.iter().cloned());
             }
         }
@@ -309,6 +368,18 @@ impl CastState for Toy {
             out.extend(self.kicker_slots.iter().cloned());
         }
         out
+    }
+
+    fn symbol_slots(
+        &self,
+        _req: &CastRequest,
+        _modes: &[u32],
+        costs: &CostChoice,
+    ) -> Vec<Vec<String>> {
+        match costs.alternative {
+            Some(a) => self.alt_symbol_slots.get(&a).cloned().unwrap_or_default(),
+            None => self.costs.symbol_slots.clone(),
+        }
     }
 
     fn division_total(&self, _req: &CastRequest, _proposal: &Proposal) -> Option<u64> {
@@ -369,7 +440,7 @@ impl CastState for Toy {
     }
 }
 
-/// A host that keeps the default `proposal_combination_legal`.
+/// A host that keeps the default `proposal_combination_legal` and `symbol_slots`.
 #[derive(Clone, Debug)]
 struct Plain(Toy);
 
@@ -1140,8 +1211,10 @@ fn req_cast_001_mode_spec_max_below_min_rolls_back() {
 // Costs (REQ-NET-003; CR 601.2b)
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-NET-003, CR 601.2b: at most one alternative cost, distinct additional costs, X in range,
-/// one option per symbol slot, harmonize from the candidates; invalid answers rejected.
+/// REQ-NET-003, REQ-CAST-001, CR 601.2b, 118.9: at most one alternative cost, distinct
+/// additional costs, X in range, harmonize from the candidates; with an alternative or additional
+/// cost the symbols are asked in a second request (brief gate5-impl item 2, CR-011: the first
+/// request carries no symbol slot); invalid answers rejected.
 #[test]
 fn req_net_003_costs_request_and_validation() {
     let mut toy = Toy::new();
@@ -1159,6 +1232,10 @@ fn req_net_003_costs_request_and_validation() {
     assert!(!r.hidden && r.reveal_to.is_empty());
     assert!(matches!(r.options, ChoiceOptions::Enumerated(_)));
     assert!(r.validate(&r.default_on_timeout).is_ok());
+    let ChoicePayload::ChooseCostsAndX { symbol_slots, .. } = &r.payload else {
+        panic!("{:?}", r.payload)
+    };
+    assert!(symbol_slots.is_empty());
     let cc = |alternative, additional: Vec<u32>, x, symbol_options: Vec<u32>, harmonize| {
         ChoiceResponse::ConfigureCosts {
             alternative,
@@ -1168,26 +1245,49 @@ fn req_net_003_costs_request_and_validation() {
             harmonize,
         }
     };
-    let good = cc(Some(1), vec![1, 0], Some(4), vec![1], Some(o(10)));
+    let good = cc(Some(1), vec![1, 0], Some(4), vec![], Some(o(10)));
     assert!(r.validate(&good).is_ok());
     for bad in [
-        cc(Some(2), vec![], Some(1), vec![0], None),
-        cc(None, vec![0, 0], Some(1), vec![0], None),
-        cc(None, vec![], Some(5), vec![0], None),
-        cc(None, vec![], Some(0), vec![0], None),
-        cc(None, vec![], None, vec![0], None),
-        cc(None, vec![], Some(1), vec![2], None),
-        cc(None, vec![], Some(1), vec![], None),
-        cc(None, vec![], Some(1), vec![0], Some(o(20))),
+        cc(Some(2), vec![], Some(1), vec![], None),
+        cc(None, vec![0, 0], Some(1), vec![], None),
+        cc(None, vec![], Some(5), vec![], None),
+        cc(None, vec![], Some(0), vec![], None),
+        cc(None, vec![], None, vec![], None),
+        cc(None, vec![], Some(1), vec![0], None),
+        cc(None, vec![], Some(1), vec![], Some(o(20))),
     ] {
         assert!(r.validate(&bad).is_err(), "{bad:?}");
         assert!(drive(&toy, &spell(), &[bad]).is_err());
     }
-    // The answer is kept (additional costs ascending).
+    // An alternative cost without symbols: the answer is kept (additional costs ascending).
     assert_eq!(
         announced(done(&toy, &spell(), &[good]).1).costs,
         CostChoice {
             alternative: Some(1),
+            additional: vec![0, 1],
+            x: Some(4),
+            symbol_options: vec![],
+            harmonize: Some(o(10)),
+        }
+    );
+    // The normal cost: its symbol is asked next and merged.
+    let first = cc(None, vec![1, 0], Some(4), vec![], Some(o(10)));
+    let r2 = pending(&toy, &spell(), std::slice::from_ref(&first));
+    for bad in [
+        cc(None, vec![], None, vec![2], None),
+        cc(None, vec![], None, vec![], None),
+        cc(Some(0), vec![], None, vec![0], None),
+        cc(None, vec![0], None, vec![0], None),
+        cc(None, vec![], Some(1), vec![0], None),
+    ] {
+        assert!(r2.validate(&bad).is_err(), "{bad:?}");
+        assert!(drive(&toy, &spell(), &[first.clone(), bad]).is_err());
+    }
+    let second = cc(None, vec![], None, vec![1], None);
+    assert_eq!(
+        announced(done(&toy, &spell(), &[first, second]).1).costs,
+        CostChoice {
+            alternative: None,
             additional: vec![0, 1],
             x: Some(4),
             symbol_options: vec![1],
@@ -1691,4 +1791,972 @@ fn req_net_003_answer_counters() {
     assert_eq!(ts::modes(3, 2, 2, true), 6);
     assert_eq!(ts::modes(0, 0, 1, true), 1);
     assert_eq!(ts::modes(50, 1, 50, false), ENUMERATION_LIMIT);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn rounds 5-6 (REQ-CAST-001; CR 700.2a, 601.2b-601.2d, 118.9; CR-011 to CR-013)
+// ---------------------------------------------------------------------------------------------
+
+/// The answers of `pending` that end the session, and every request asked on the way.
+fn requests_until_done(
+    toy: &impl CastState,
+    req: &CastRequest,
+    answers: &[ChoiceResponse],
+) -> Vec<PendingChoiceRequest> {
+    let mut asked = Vec::new();
+    for i in 0..=answers.len() {
+        match drive(toy, req, &answers[..i]).expect("session") {
+            Status::Pending(r) => asked.push(r),
+            Status::Done { .. } => {
+                assert_eq!(i, answers.len(), "done before every answer was used");
+            }
+        }
+    }
+    asked
+}
+
+/// A one- or two-mode toy (labels m0, m1), one mode chosen.
+fn modes_toy(n: usize) -> Toy {
+    let mut toy = Toy::new();
+    toy.modes = Some(ModeSpec {
+        labels: (0..n).map(|i| format!("m{i}")).collect(),
+        min: 1,
+        max: 1,
+        ..ModeSpec::default()
+    });
+    toy
+}
+
+fn mode_labels(r: &PendingChoiceRequest) -> Vec<String> {
+    match &r.payload {
+        ChoicePayload::ChooseModes { labels, .. } => labels.clone(),
+        other => panic!("not a mode request: {other:?}"),
+    }
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-012): a mode whose only legal target comes through an
+/// alternative cost is offered; chosen with that cost it is announced, chosen with the normal
+/// cost it rolls back at step 3 with `MissingTarget`.
+#[test]
+fn req_cast_001_mode_legal_through_alternative_cost() {
+    let mut toy = modes_toy(2).with_rules(&[targeting(1, 1, "SHROUD", to(20))]);
+    toy.costs.alternative_costs = strs(&["alt0"]);
+    toy.mode_slots.insert(0, vec![spec(1, 1, vec![to(20)])]);
+    toy.cost_mode_slots
+        .insert((Some(0), vec![], 0), vec![spec(1, 1, vec![to(21)])]);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!(mode_labels(&r), strs(&["m0", "m1"]));
+    // Probes of mode 0: normal cost (illegal), then alternative 0 (legal); mode 1: normal cost.
+    let probes = toy.calls.take();
+    assert_eq!(
+        probes,
+        vec![
+            (vec![0], CostChoice::default()),
+            (
+                vec![0],
+                CostChoice {
+                    alternative: Some(0),
+                    ..CostChoice::default()
+                }
+            ),
+            (vec![1], CostChoice::default()),
+        ]
+    );
+    let mode0 = ChoiceResponse::SelectModes { modes: vec![0] };
+    let answers = [
+        mode0.clone(),
+        costs(Some(0), vec![], None),
+        select_targets(vec![vec![to(21)]]),
+    ];
+    let proposal = announced(done(&toy, &spell(), &answers).1);
+    assert_eq!(proposal.modes, vec![0]);
+    assert_eq!(proposal.targets, vec![vec![to(21)]]);
+    // The real choice (normal cost) leaves no legal target: step 3 rolls back.
+    let (after, out) = done(&toy, &spell(), &[mode0, costs(None, vec![], None)]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Targets,
+        StopReason::MissingTarget { slot: 0 },
+    );
+}
+
+/// REQ-CAST-001, CR 700.2a, 734.1 (CR-012, CR-013): when no probed cost configuration gives the
+/// only mode its target, the cast rolls back with `NoLegalMode` and the identical hash.
+#[test]
+fn req_cast_001_mode_with_no_legal_probe_rolls_back() {
+    let mut toy = modes_toy(1).with_rules(&[targeting(1, 1, "SHROUD", to(20))]);
+    toy.costs.alternative_costs = strs(&["alt0", "alt1"]);
+    toy.costs.additional_costs = strs(&["add0"]);
+    toy.mode_slots.insert(0, vec![spec(1, 1, vec![to(20)])]);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    // Every probe: 3 alternative choices x 2 additional subsets, in order.
+    let probes: Vec<(Option<u32>, Vec<u32>)> = toy
+        .calls
+        .take()
+        .into_iter()
+        .map(|(m, c)| {
+            assert_eq!(m, vec![0]);
+            (c.alternative, c.additional)
+        })
+        .collect();
+    assert_eq!(
+        probes,
+        vec![
+            (None, vec![]),
+            (None, vec![0]),
+            (Some(0), vec![]),
+            (Some(0), vec![0]),
+            (Some(1), vec![]),
+            (Some(1), vec![0]),
+        ]
+    );
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2b, 601.2c (CR-012, CR-014): a single mode legal only through
+/// an additional-cost subset is offered; the probes stop at the first success, each subset tried
+/// with every X of the range 2..=5 ascending (X innermost) before the next subset.
+#[test]
+fn req_cast_001_mode_legal_through_additional_subset() {
+    let mut toy = modes_toy(1);
+    toy.costs.additional_costs = strs(&["add0", "add1"]);
+    toy.costs.x_range = Some((2, 5));
+    toy.mode_slots.insert(0, vec![spec(1, 1, vec![])]);
+    toy.cost_mode_slots
+        .insert((None, vec![0, 1], 0), vec![spec(1, 1, vec![to(21)])]);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let mut expected: Vec<(Option<u32>, Vec<u32>, Option<u64>)> = Vec::new();
+    for subset in [vec![], vec![0], vec![1]] {
+        expected.extend((2..=5).map(|x| (None, subset.clone(), Some(x))));
+    }
+    expected.push((None, vec![0, 1], Some(2)));
+    assert_eq!(x_probe_list(&toy), expected);
+}
+
+/// The additional-cost subset of `mask` over `n` costs, ascending (written out independently of
+/// the procedure's helper).
+fn mask_subset(n: u32, mask: u32) -> Vec<u32> {
+    (0..n).filter(|i| mask >> i & 1 == 1).collect()
+}
+
+/// The (alternative, additional) part of every recorded `target_slots` call, asserting each one
+/// probes mode 0 alone with the CR-012 probe fields.
+fn probe_list(toy: &Toy) -> Vec<(Option<u32>, Vec<u32>)> {
+    toy.calls
+        .take()
+        .into_iter()
+        .map(|(m, c)| {
+            assert_eq!(m, vec![0]);
+            assert!(c.symbol_options.is_empty() && c.harmonize.is_none());
+            (c.alternative, c.additional)
+        })
+        .collect()
+}
+
+/// A one-mode toy with `alternatives` alternative and `additional` additional costs whose mode 0
+/// has one slot without a candidate unless a `cost_mode_slots` entry gives it one.
+fn budget_toy(alternatives: usize, additional: usize) -> Toy {
+    let mut toy = modes_toy(1);
+    toy.costs.alternative_costs = (0..alternatives).map(|i| format!("alt{i}")).collect();
+    toy.costs.additional_costs = (0..additional).map(|i| format!("add{i}")).collect();
+    toy.mode_slots.insert(0, vec![spec(1, 1, vec![])]);
+    toy
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): with 7 additional costs a mode legal only through
+/// the pair [2, 5] is offered; the probes before the success are exactly the ascending-mask
+/// subsets up to {2, 5} (mask 36), with the normal cost.
+#[test]
+fn req_cast_001_mode_legal_through_intermediate_pair_of_seven() {
+    let mut toy = budget_toy(0, 7);
+    toy.cost_mode_slots
+        .insert((None, vec![2, 5], 0), vec![spec(1, 1, vec![to(21)])]);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let expected: Vec<(Option<u32>, Vec<u32>)> =
+        (0..=36).map(|mask| (None, mask_subset(7, mask))).collect();
+    assert_eq!(expected.last(), Some(&(None, vec![2, 5])));
+    assert_eq!(probe_list(&toy), expected);
+    // Chosen with that pair it is announced with the target.
+    let answers = [
+        ChoiceResponse::SelectModes { modes: vec![0] },
+        costs(None, vec![2, 5], None),
+        select_targets(vec![vec![to(21)]]),
+    ];
+    let proposal = announced(done(&toy, &spell(), &answers).1);
+    assert_eq!(proposal.targets, vec![vec![to(21)]]);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2, 734.1 (CR-013): 1 alternative and 7 additional costs with no
+/// legal probe: exactly 2 * 128 = 256 calls, alternative-major and mask-minor, then `NoLegalMode`
+/// at step Choices with the identical hash and priority player.
+#[test]
+fn req_cast_001_mode_no_legal_probe_of_seven_rolls_back() {
+    let toy = budget_toy(1, 7);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    let mut expected: Vec<(Option<u32>, Vec<u32>)> = Vec::new();
+    for alternative in [None, Some(0)] {
+        expected.extend((0..128).map(|mask| (alternative, mask_subset(7, mask))));
+    }
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 256);
+    assert_eq!(probes, expected);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): the budget boundary. 12 additional costs and no
+/// alternative (4096 probes) are exhaustive: a mode legal only through the full set (mask 4095)
+/// is offered after exactly 4096 calls. 3 alternatives and 10 additional costs (4 * 1024 = 4096)
+/// are exhaustive too.
+#[test]
+fn req_cast_001_mode_probe_budget_exhaustive_at_4096() {
+    let mut toy = budget_toy(0, 12);
+    toy.cost_mode_slots
+        .insert((None, (0..12).collect(), 0), vec![spec(1, 1, vec![to(21)])]);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[0], (None, vec![]));
+    assert_eq!(probes[4095], (None, (0..12).collect::<Vec<u32>>()));
+
+    let mut toy = budget_toy(3, 10);
+    toy.cost_mode_slots.insert(
+        (Some(2), (0..10).collect(), 0),
+        vec![spec(1, 1, vec![to(21)])],
+    );
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[1024], (Some(0), vec![]));
+    assert_eq!(probes[4095], (Some(2), (0..10).collect::<Vec<u32>>()));
+    // Without any legal probe the same shape is rejected after exactly 4096 calls.
+    let toy = budget_toy(3, 10);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    assert_eq!(probe_list(&toy).len(), 4096);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): over the budget (13 additional costs: 8192;
+/// 1 alternative and 12: 8192; 3 alternatives and 11: 8192; 70 additional costs: shift beyond
+/// the word size) the mode is offered with zero `target_slots` calls from the mode check, and
+/// nothing panics.
+#[test]
+fn req_cast_001_mode_probe_over_budget_offered_without_calls() {
+    for (alternatives, additional) in [(0, 13), (1, 12), (3, 11), (0, 70), (0, 200)] {
+        let toy = budget_toy(alternatives, additional);
+        let r = pending(&toy, &spell(), &[]);
+        assert_eq!(
+            r.choice_type,
+            ChoiceType::ChooseModes,
+            "{alternatives} + {additional}"
+        );
+        assert_eq!(mode_labels(&r), strs(&["m0"]));
+        assert!(
+            toy.calls.take().is_empty(),
+            "{alternatives} alternatives, {additional} additional: no probe call"
+        );
+    }
+}
+
+/// REQ-CAST-001, CR 601.2c, 601.2, 734.1 (CR-013): a mode offered over the budget whose real
+/// cost choice leaves no legal target goes past the mode request and rolls back at step Targets
+/// with `MissingTarget`, the identical hash and priority player; the only `target_slots` call is
+/// the step-3 one with the real choice.
+#[test]
+fn req_cast_001_mode_over_budget_rolls_back_at_targets() {
+    let toy = budget_toy(0, 13);
+    let answers = [
+        ChoiceResponse::SelectModes { modes: vec![0] },
+        costs(None, vec![3], None),
+    ];
+    let asked = requests_until_done(&toy, &spell(), &answers);
+    assert_eq!(asked[0].choice_type, ChoiceType::ChooseModes);
+    assert_eq!(asked[1].choice_type, ChoiceType::ChooseCostsAndX);
+    toy.calls.take();
+    let (after, out) = done(&toy, &spell(), &answers);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Targets,
+        StopReason::MissingTarget { slot: 0 },
+    );
+    assert_eq!(probe_list(&toy), vec![(None, vec![3])]);
+}
+
+/// REQ-CAST-001, REQ-CORE-001 (CR-013, CR-014): the budget arithmetic over alternative cost x
+/// additional-cost subset x X is exact at the boundary and never overflows; the X count of a
+/// range is `hi - lo + 1` (1 without a range or for lo > hi), `None` when it does not fit;
+/// subsets come out ascending in bit order.
+#[test]
+fn req_cast_001_probe_budget_arithmetic() {
+    use super::announce::tests_support as ts;
+    assert_eq!(ts::PROBE_BUDGET, 4096);
+    assert_eq!(ts::probe_count(0, 0, 1), Some(1));
+    assert_eq!(ts::probe_count(0, 12, 1), Some(4096));
+    assert_eq!(ts::probe_count(0, 13, 1), None);
+    assert_eq!(ts::probe_count(1, 11, 1), Some(4096));
+    assert_eq!(ts::probe_count(1, 12, 1), None);
+    assert_eq!(ts::probe_count(3, 10, 1), Some(4096));
+    assert_eq!(ts::probe_count(3, 11, 1), None);
+    assert_eq!(ts::probe_count(4095, 0, 1), Some(4096));
+    assert_eq!(ts::probe_count(4096, 0, 1), None);
+    assert_eq!(ts::probe_count(usize::MAX, 0, 1), None);
+    assert_eq!(ts::probe_count(usize::MAX, 1, 1), None);
+    assert_eq!(ts::probe_count(0, 62, 1), None);
+    assert_eq!(ts::probe_count(0, 63, 1), None);
+    assert_eq!(ts::probe_count(0, 64, 1), None);
+    assert_eq!(ts::probe_count(0, usize::MAX, 1), None);
+    // The X dimension (CR-014).
+    assert_eq!(ts::probe_count(0, 10, 4), Some(4096));
+    assert_eq!(ts::probe_count(0, 11, 4), None);
+    assert_eq!(ts::probe_count(1, 2, 4), Some(32));
+    assert_eq!(ts::probe_count(0, 0, 4096), Some(4096));
+    assert_eq!(ts::probe_count(0, 0, 4097), None);
+    assert_eq!(ts::probe_count(1, 0, 2048), Some(4096));
+    assert_eq!(ts::probe_count(1, 0, 2049), None);
+    assert_eq!(ts::probe_count(0, 1, usize::MAX), None);
+    assert_eq!(ts::probe_count(usize::MAX - 1, 0, usize::MAX), None);
+    assert_eq!(ts::x_count(None), Some(1));
+    assert_eq!(ts::x_count(Some((2, 2))), Some(1));
+    assert_eq!(ts::x_count(Some((5, 3))), Some(1));
+    assert_eq!(ts::x_count(Some((0, 3))), Some(4));
+    assert_eq!(ts::x_count(Some((0, 4095))), Some(4096));
+    assert_eq!(ts::x_count(Some((u64::MAX - 1, u64::MAX))), Some(2));
+    assert_eq!(ts::x_count(Some((0, u64::MAX))), None);
+    if usize::BITS >= 64 {
+        assert_eq!(
+            ts::x_count(Some((1, u64::MAX))),
+            usize::try_from(u64::MAX).ok()
+        );
+    }
+    assert_eq!(ts::subset_from_mask(0, 0), Vec::<u32>::new());
+    assert_eq!(ts::subset_from_mask(7, 36), vec![2, 5]);
+    assert_eq!(ts::subset_from_mask(6, 5), vec![0, 2]);
+    assert_eq!(ts::subset_from_mask(3, 0b1111), vec![0, 1, 2]);
+    assert_eq!(
+        ts::subset_from_mask(12, 4095),
+        (0..12).collect::<Vec<u32>>()
+    );
+}
+
+/// REQ-CAST-001, CR 700.2a (CR-012, CR-013): a spell without alternative or additional costs makes
+/// exactly one `target_slots` call per mode, with the default cost choice.
+#[test]
+fn req_cast_001_mode_probe_single_call_without_costs() {
+    let toy = modal(1, 1, false);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r).len(), 3);
+    assert_eq!(
+        toy.calls.take(),
+        vec![
+            (vec![0], CostChoice::default()),
+            (vec![1], CostChoice::default()),
+            (vec![2], CostChoice::default()),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// X is a probed dimension of the mode legality check (REQ-CAST-001; CR 700.2a, 601.2b, 601.2c,
+// 107.3a; CR-014)
+// ---------------------------------------------------------------------------------------------
+
+/// The (alternative, additional, x) part of every recorded `target_slots` call, asserting each
+/// one probes mode 0 alone with empty symbol options and no harmonize creature (CR-014).
+fn x_probe_list(toy: &Toy) -> Vec<(Option<u32>, Vec<u32>, Option<u64>)> {
+    toy.calls
+        .take()
+        .into_iter()
+        .map(|(m, c)| {
+            assert_eq!(m, vec![0]);
+            assert!(c.symbol_options.is_empty(), "{c:?}");
+            assert_eq!(c.harmonize, None, "{c:?}");
+            (c.alternative, c.additional, c.x)
+        })
+        .collect()
+}
+
+/// A one-mode toy whose mode 0 has one slot "target object with mana value X" (synthetic, CR
+/// 601.2c) with the single candidate object 20 of mana value `mv`, X in `x_range`,
+/// `alternatives` alternative and `additional` additional costs.
+fn x_toy(x_range: Option<(u64, u64)>, mv: u64, alternatives: usize, additional: usize) -> Toy {
+    let mut toy = budget_toy(alternatives, additional);
+    toy.costs.x_range = x_range;
+    toy.x_mode_slots.insert(0, spec(1, 1, vec![to(20)]));
+    toy.mana_values.insert(o(20), mv);
+    toy
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2b, 601.2c, 107.3a (CR-014): a mode legal only at X = 1 of the
+/// range 0..=3 is offered; the probes before the success are exactly X = 0 then X = 1; chosen
+/// with X = 1 it is announced with the target, chosen with X = 0 it rolls back at step Targets.
+#[test]
+fn req_cast_001_mode_legal_only_at_intermediate_x() {
+    let toy = x_toy(Some((0, 3)), 1, 0, 0);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    assert_eq!(
+        x_probe_list(&toy),
+        vec![(None, vec![], Some(0)), (None, vec![], Some(1))]
+    );
+    let mode0 = ChoiceResponse::SelectModes { modes: vec![0] };
+    let answers = [
+        mode0.clone(),
+        costs(None, vec![], Some(1)),
+        select_targets(vec![vec![to(20)]]),
+    ];
+    let proposal = announced(done(&toy, &spell(), &answers).1);
+    assert_eq!(proposal.costs.x, Some(1));
+    assert_eq!(proposal.targets, vec![vec![to(20)]]);
+    let (after, out) = done(&toy, &spell(), &[mode0, costs(None, vec![], Some(0))]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Targets,
+        StopReason::MissingTarget { slot: 0 },
+    );
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2b, 601.2c (CR-014): a mode legal only at the HIGH end X = 3 of
+/// 0..=3 is offered after exactly 4 calls, X ascending.
+#[test]
+fn req_cast_001_mode_legal_only_at_high_end_x() {
+    let toy = x_toy(Some((0, 3)), 3, 0, 0);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let expected: Vec<_> = (0..=3).map(|x| (None, vec![], Some(x))).collect();
+    assert_eq!(x_probe_list(&toy), expected);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2, 734.1 (CR-014): no X of 0..=3 is legal with 1 alternative
+/// and 2 additional costs: exactly 2 * 4 * 4 = 32 calls, alternative-major, mask-middle,
+/// X-minor, then `NoLegalMode` at step Choices with the identical hash and priority player.
+#[test]
+fn req_cast_001_mode_no_legal_x_rolls_back_after_full_product() {
+    let toy = x_toy(Some((0, 3)), 9, 1, 2);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    let mut expected = Vec::new();
+    for alternative in [None, Some(0)] {
+        for mask in 0..4 {
+            for x in 0..=3 {
+                expected.push((alternative, mask_subset(2, mask), Some(x)));
+            }
+        }
+    }
+    let probes = x_probe_list(&toy);
+    assert_eq!(probes.len(), 32);
+    assert_eq!(probes, expected);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2b, 601.2c (CR-014): the budget boundary with X. 0..=3 with 10
+/// additional costs (4 * 1024 = 4096) is exhaustive; 0..=3 with 11 (8192) is offered with zero
+/// calls; 0..=4095 alone is exhaustive and a mode legal only at X = 4095 is offered after
+/// exactly 4096 calls; 0..=4096 and 0..=u64::MAX are offered with zero calls and no overflow.
+#[test]
+fn req_cast_001_mode_x_probe_budget_boundaries() {
+    // 4 * 1024 = 4096: exhaustive, no legal probe -> NoLegalMode after exactly 4096 calls.
+    let toy = x_toy(Some((0, 3)), 9, 0, 10);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    let probes = x_probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[0], (None, vec![], Some(0)));
+    assert_eq!(probes[3], (None, vec![], Some(3)));
+    assert_eq!(probes[4], (None, vec![0], Some(0)));
+    assert_eq!(probes[4095], (None, (0..10).collect::<Vec<u32>>(), Some(3)));
+    // A mode legal only at the last probe of that product is offered after 4096 calls.
+    let mut toy = x_toy(Some((0, 3)), 3, 0, 10);
+    // Every subset other than the full one has no candidate; the full one uses the X slot.
+    for mask in 0..1023u32 {
+        toy.cost_mode_slots
+            .insert((None, mask_subset(10, mask), 0), vec![spec(1, 1, vec![])]);
+    }
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = x_probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[4095], (None, (0..10).collect::<Vec<u32>>(), Some(3)));
+
+    // 4 * 2048 = 8192: offered with zero calls.
+    let toy = x_toy(Some((0, 3)), 9, 0, 11);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    assert!(toy.calls.take().is_empty());
+
+    // 0..=4095 alone: exhaustive, legal only at X = 4095, offered after exactly 4096 calls.
+    let toy = x_toy(Some((0, 4095)), 4095, 0, 0);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = x_probe_list(&toy);
+    let expected: Vec<_> = (0..=4095).map(|x| (None, vec![], Some(x))).collect();
+    assert_eq!(probes, expected);
+
+    // 0..=4096, 0..=u64::MAX and the top of the u64 range at width 2^64 - 1: zero calls.
+    for range in [(0, 4096), (0, u64::MAX), (1, u64::MAX)] {
+        let toy = x_toy(Some(range), 9, 0, 0);
+        let r = pending(&toy, &spell(), &[]);
+        assert_eq!(r.choice_type, ChoiceType::ChooseModes, "{range:?}");
+        assert_eq!(mode_labels(&r), strs(&["m0"]));
+        assert!(toy.calls.take().is_empty(), "{range:?}: no probe call");
+    }
+    // A narrow range at the very top of u64 is enumerated without overflow.
+    let toy = x_toy(Some((u64::MAX - 1, u64::MAX)), u64::MAX, 0, 0);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    assert_eq!(
+        x_probe_list(&toy),
+        vec![
+            (None, vec![], Some(u64::MAX - 1)),
+            (None, vec![], Some(u64::MAX))
+        ]
+    );
+}
+
+/// REQ-CAST-001, CR 601.2c, 601.2, 734.1 (CR-014): an X range too wide to enumerate is offered
+/// without a probe; when the X actually chosen leaves no legal target the cast goes past the
+/// mode request and rolls back at step Targets with `MissingTarget`, the identical hash and
+/// priority player; the only `target_slots` call is the step-3 one with the real choice.
+#[test]
+fn req_cast_001_mode_over_budget_x_rolls_back_at_targets() {
+    for range in [(0, 4096), (0, u64::MAX)] {
+        let toy = x_toy(Some(range), 9, 0, 0);
+        let answers = [
+            ChoiceResponse::SelectModes { modes: vec![0] },
+            costs(None, vec![], Some(7)),
+        ];
+        let asked = requests_until_done(&toy, &spell(), &answers);
+        assert_eq!(asked[0].choice_type, ChoiceType::ChooseModes);
+        assert_eq!(asked[1].choice_type, ChoiceType::ChooseCostsAndX);
+        toy.calls.take();
+        let (after, out) = done(&toy, &spell(), &answers);
+        assert_rolled_back(
+            &toy,
+            &after,
+            &out,
+            CastStep::Targets,
+            StopReason::MissingTarget { slot: 0 },
+        );
+        assert_eq!(x_probe_list(&toy), vec![(None, vec![], Some(7))]);
+        // With the X that matches, the same over-budget mode is announced.
+        let answers = [
+            ChoiceResponse::SelectModes { modes: vec![0] },
+            costs(None, vec![], Some(9)),
+            select_targets(vec![vec![to(20)]]),
+        ];
+        assert_eq!(
+            announced(done(&toy, &spell(), &answers).1).targets,
+            vec![vec![to(20)]]
+        );
+    }
+}
+
+/// REQ-CAST-001, CR 700.2a (CR-014): with no X range, a one-value range `Some((2, 2))` or a
+/// range with lo > hi `Some((5, 3))`, and no other cost, the check makes exactly one call per
+/// mode, with `x` = `None`, `Some(2)` and `Some(5)` respectively.
+#[test]
+fn req_cast_001_mode_x_probe_single_value() {
+    for (range, x) in [
+        (None, None),
+        (Some((2, 2)), Some(2)),
+        (Some((5, 3)), Some(5)),
+    ] {
+        let mut toy = modes_toy(2);
+        toy.costs.x_range = range;
+        let r = pending(&toy, &spell(), &[]);
+        assert_eq!(r.choice_type, ChoiceType::ChooseModes, "{range:?}");
+        assert_eq!(mode_labels(&r), strs(&["m0", "m1"]));
+        let calls: Vec<(Vec<u32>, Option<u64>)> = toy
+            .calls
+            .take()
+            .into_iter()
+            .map(|(m, c)| {
+                assert_eq!((c.alternative, c.additional.len()), (None, 0));
+                assert!(c.symbol_options.is_empty() && c.harmonize.is_none());
+                (m, c.x)
+            })
+            .collect();
+        assert_eq!(calls, vec![(vec![0], x), (vec![1], x)], "{range:?}");
+    }
+}
+
+/// REQ-CAST-001, CR 601.2c, 601.2h (CR-014): symbol options and the harmonize creature are not
+/// probed dimensions: with symbol slots and harmonize candidates in the spec every probe still
+/// carries empty `symbol_options` and `harmonize: None`, and the product counts only
+/// alternative x subset x X (2 * 2 * 3 = 12 calls).
+#[test]
+fn req_cast_001_mode_x_probe_ignores_symbols_and_harmonize() {
+    let mut toy = x_toy(Some((4, 6)), 0, 1, 1);
+    toy.costs.symbol_slots = vec![strs(&["s.mana", "s.life"])];
+    toy.costs.harmonize_candidates = vec![o(10), o(11)];
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    // `x_probe_list` asserts the empty symbol options and absent harmonize of every probe.
+    let probes = x_probe_list(&toy);
+    assert_eq!(probes.len(), 12);
+    assert_eq!(probes[0], (None, vec![], Some(4)));
+    assert_eq!(probes[11], (Some(0), vec![0], Some(6)));
+}
+
+/// REQ-CAST-001, REQ-CORE-001, CR 700.2a, 601.2b (CR-014), exhaustive over small inputs: for every
+/// X range lo..=hi with lo, hi in 0..6 and every candidate mana value in 0..8, the mode is offered
+/// iff some X of the range equals the mana value (or the range is empty and lo equals it), and the
+/// probe list is the ascending prefix of the range up to the first match.
+#[test]
+fn req_cast_001_property_mode_offered_iff_some_x_legal() {
+    for lo in 0..6u64 {
+        for hi in 0..6u64 {
+            for mv in 0..8u64 {
+                let toy = x_toy(Some((lo, hi)), mv, 0, 0);
+                let values: Vec<u64> = if lo <= hi {
+                    (lo..=hi).collect()
+                } else {
+                    vec![lo]
+                };
+                let hit = values.iter().position(|&x| x == mv);
+                let out = drive(&toy, &spell(), &[]).expect("session");
+                let probes = x_probe_list(&toy);
+                match hit {
+                    Some(i) => {
+                        assert!(matches!(out, Status::Pending(_)), "{lo} {hi} {mv}");
+                        let expected: Vec<_> = values[..=i]
+                            .iter()
+                            .map(|&x| (None, vec![], Some(x)))
+                            .collect();
+                        assert_eq!(probes, expected, "{lo} {hi} {mv}");
+                    }
+                    None => {
+                        match out {
+                            Status::Done { output, .. } => {
+                                let AnnounceOutcome::RolledBack(rb) = output else {
+                                    panic!("{lo} {hi} {mv}: {output:?}")
+                                };
+                                assert_eq!(rb.reason, StopReason::NoLegalMode);
+                            }
+                            Status::Pending(r) => panic!("{lo} {hi} {mv}: {r:?}"),
+                        }
+                        assert_eq!(probes.len(), values.len(), "{lo} {hi} {mv}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A toy with a normal cost of one hybrid slot and one alternative cost.
+fn hybrid_toy() -> Toy {
+    let mut toy = Toy::new();
+    toy.costs.alternative_costs = strs(&["alt0"]);
+    toy.costs.symbol_slots = vec![strs(&["h.white", "h.blue"])];
+    toy
+}
+
+/// REQ-CAST-001, CR 601.2b, 118.9 (CR-011): choosing the symbol-free alternative cost asks no
+/// symbol; choosing the normal cost asks a second CHOOSE_COSTS_AND_X with only the symbol slots,
+/// whose answer is merged. Uses the default `CastState::symbol_slots`.
+#[test]
+fn req_cast_001_symbol_slots_follow_chosen_costs() {
+    let toy = Plain(hybrid_toy());
+    let first = requests_until_done(&toy, &spell(), &[costs(Some(0), vec![], None)]);
+    assert_eq!(first.len(), 1);
+    match &first[0].payload {
+        ChoicePayload::ChooseCostsAndX { symbol_slots, .. } => assert!(symbol_slots.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    let (_, out) = done(&toy, &spell(), &[costs(Some(0), vec![], None)]);
+    let c = announced(out).costs;
+    assert_eq!(c.alternative, Some(0));
+    assert!(c.symbol_options.is_empty());
+    // The normal cost: a second request.
+    let answer = ChoiceResponse::ConfigureCosts {
+        alternative: None,
+        additional: vec![],
+        x: None,
+        symbol_options: vec![1],
+        harmonize: None,
+    };
+    let answers = [costs(None, vec![], None), answer];
+    let asked = requests_until_done(&toy, &spell(), &answers);
+    assert_eq!(asked.len(), 2);
+    let r = &asked[1];
+    assert_eq!(r.request_id.get(), 1);
+    assert_eq!(r.choice_type, ChoiceType::ChooseCostsAndX);
+    assert_eq!(r.reason.cr, "CR 601.2b");
+    assert_eq!(r.chooser, p(1));
+    assert_eq!((r.min, r.max), (1, 1));
+    assert_eq!(
+        r.payload,
+        ChoicePayload::ChooseCostsAndX {
+            alternative_costs: vec![],
+            additional_costs: vec![],
+            x_range: None,
+            symbol_slots: vec![strs(&["h.white", "h.blue"])],
+            harmonize_candidates: vec![],
+        }
+    );
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Enumerated(vec![
+            ChoiceOption::Text("h.white".to_owned()),
+            ChoiceOption::Text("h.blue".to_owned()),
+        ])
+    );
+    assert_eq!(
+        r.default_on_timeout,
+        ChoiceResponse::ConfigureCosts {
+            alternative: None,
+            additional: vec![],
+            x: None,
+            symbol_options: vec![0],
+            harmonize: None,
+        }
+    );
+    let (_, out) = done(&toy, &spell(), &answers);
+    assert_eq!(
+        announced(out).costs,
+        CostChoice {
+            symbol_options: vec![1],
+            ..CostChoice::default()
+        }
+    );
+}
+
+/// REQ-CAST-001, CR 601.2b (CR-011): a host whose alternative cost has symbols of its own
+/// (overriding `symbol_slots`) gets them asked; many symbol answers use a payload validator.
+#[test]
+fn req_cast_001_symbol_slots_of_an_alternative_cost() {
+    let mut toy = hybrid_toy();
+    toy.alt_symbol_slots
+        .insert(0, vec![strs(&["p.mana", "p.life"]), strs(&["q.a", "q.b"])]);
+    let r = pending(&toy, &spell(), &[costs(Some(0), vec![], None)]);
+    match &r.payload {
+        ChoicePayload::ChooseCostsAndX { symbol_slots, .. } => assert_eq!(
+            symbol_slots,
+            &vec![strs(&["p.mana", "p.life"]), strs(&["q.a", "q.b"])]
+        ),
+        other => panic!("{other:?}"),
+    }
+    let second = ChoiceResponse::ConfigureCosts {
+        alternative: None,
+        additional: vec![],
+        x: None,
+        symbol_options: vec![1, 0],
+        harmonize: None,
+    };
+    let (_, out) = done(&toy, &spell(), &[costs(Some(0), vec![], None), second]);
+    assert_eq!(
+        announced(out).costs,
+        CostChoice {
+            alternative: Some(0),
+            symbol_options: vec![1, 0],
+            ..CostChoice::default()
+        }
+    );
+    // 3^10 answers: a validator.
+    toy.alt_symbol_slots
+        .insert(0, vec![strs(&["a", "b", "c"]); 10]);
+    let r = pending(&toy, &spell(), &[costs(Some(0), vec![], None)]);
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Validator(ValidatorContract {
+            min: 1,
+            max: 1,
+            rule: ValidatorRule::Payload,
+        })
+    );
+    assert!(r.validate(&r.default_on_timeout).is_ok());
+}
+
+/// REQ-CAST-001, CR 601.2b (CR-011): without an alternative or additional cost there is exactly
+/// one CHOOSE_COSTS_AND_X carrying the symbol slots, as before.
+#[test]
+fn req_cast_001_symbol_slots_single_request_without_alternatives() {
+    let mut toy = Toy::new();
+    toy.costs.symbol_slots = vec![strs(&["h.white", "h.blue"])];
+    toy.costs.x_range = Some((0, 1));
+    let answer = ChoiceResponse::ConfigureCosts {
+        alternative: None,
+        additional: vec![],
+        x: Some(1),
+        symbol_options: vec![1],
+        harmonize: None,
+    };
+    let asked = requests_until_done(&toy, &spell(), std::slice::from_ref(&answer));
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].request_id.get(), 0);
+    match &asked[0].payload {
+        ChoicePayload::ChooseCostsAndX { symbol_slots, .. } => {
+            assert_eq!(symbol_slots, &vec![strs(&["h.white", "h.blue"])]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let c = announced(done(&toy, &spell(), &[answer]).1).costs;
+    assert_eq!((c.x, c.symbol_options), (Some(1), vec![1]));
+}
+
+/// REQ-CAST-001, R12 (CR-011): a symbol slot with no option from the host is a procedure error.
+#[test]
+fn req_cast_001_empty_symbol_slot_is_an_error() {
+    let mut toy = hybrid_toy();
+    toy.alt_symbol_slots.insert(0, vec![vec![]]);
+    assert!(drive(&toy, &spell(), &[costs(Some(0), vec![], None)]).is_err());
+}
+
+/// REQ-CAST-001, CR 601.2b, 118.9 (CR-011): the default `CastState::symbol_slots` gives no slot
+/// for an alternative cost and the normal cost's slots otherwise.
+#[test]
+fn req_cast_001_default_symbol_slots() {
+    let mut toy = Plain(hybrid_toy());
+    toy.0.costs.additional_costs = strs(&["add0"]);
+    let alt = CostChoice {
+        alternative: Some(0),
+        ..CostChoice::default()
+    };
+    assert!(toy.symbol_slots(&spell(), &[], &alt).is_empty());
+    let kicked = CostChoice {
+        additional: vec![0],
+        ..CostChoice::default()
+    };
+    assert_eq!(
+        toy.symbol_slots(&spell(), &[], &kicked),
+        vec![strs(&["h.white", "h.blue"])]
+    );
+    assert_eq!(
+        toy.symbol_slots(&spell(), &[], &CostChoice::default()),
+        vec![strs(&["h.white", "h.blue"])]
+    );
+}
+
+/// REQ-CAST-001, CR 601.2b: an X range beyond `i64::MAX` uses a validator and the payload keeps
+/// the exact `u64` range (both ends accepted); a small range is still enumerated.
+#[test]
+fn req_cast_001_x_range_beyond_i64() {
+    let lo = i64::MAX as u64 + 1;
+    let hi = lo + 1;
+    for alternatives in [vec![], strs(&["alt0"])] {
+        let mut toy = Toy::new();
+        toy.costs.x_range = Some((lo, hi));
+        toy.costs.alternative_costs = alternatives;
+        let r = pending(&toy, &spell(), &[]);
+        assert_eq!(
+            r.options,
+            ChoiceOptions::Validator(ValidatorContract {
+                min: 1,
+                max: 1,
+                rule: ValidatorRule::Payload,
+            })
+        );
+        match &r.payload {
+            ChoicePayload::ChooseCostsAndX { x_range, .. } => assert_eq!(*x_range, Some((lo, hi))),
+            other => panic!("{other:?}"),
+        }
+        for x in [lo, hi] {
+            let a = costs(None, vec![], Some(x));
+            assert!(r.validate(&a).is_ok());
+            assert_eq!(announced(done(&toy, &spell(), &[a]).1).costs.x, Some(x));
+        }
+        assert!(r.validate(&costs(None, vec![], Some(lo - 1))).is_err());
+        assert!(r.validate(&costs(None, vec![], Some(hi + 1))).is_err());
+    }
+    let mut toy = Toy::new();
+    toy.costs.x_range = Some((0, 3));
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(
+        r.options,
+        ChoiceOptions::Enumerated((0..4).map(ChoiceOption::Number).collect())
+    );
+}
+
+/// REQ-CAST-001, CR 601.2d: the division request enumerates the recipients when fewer than
+/// ENUMERATION_LIMIT positive splits exist (C(total - 1, n - 1)) and otherwise carries a
+/// `Division` validator.
+#[test]
+fn req_cast_001_division_representation() {
+    let two = [to(20), to(21)];
+    for (total, enumerated) in [(3, true), (10_000, true), (10_001, false)] {
+        let mut toy = Toy::new().slot(1, 2, two.to_vec());
+        toy.division = Some(total);
+        let r = pending(&toy, &spell(), &[select_targets(vec![two.to_vec()])]);
+        assert_eq!(r.choice_type, ChoiceType::DivideValue);
+        if enumerated {
+            assert_eq!(
+                r.options,
+                ChoiceOptions::Enumerated(vec![
+                    ChoiceOption::Object(o(20)),
+                    ChoiceOption::Object(o(21)),
+                ]),
+                "total {total}"
+            );
+        } else {
+            assert_eq!(
+                r.options,
+                ChoiceOptions::Validator(ValidatorContract {
+                    min: 2,
+                    max: 2,
+                    rule: ValidatorRule::Division {
+                        total,
+                        recipients: vec![(to(20), 1), (to(21), 1)],
+                    },
+                }),
+                "total {total}"
+            );
+        }
+        assert!(r.validate(&r.default_on_timeout).is_ok());
+    }
+    for total in [3, 10_000, 10_001] {
+        let mut toy = Toy::new().slot(1, 1, vec![to(20)]);
+        toy.division = Some(total);
+        let r = pending(&toy, &spell(), &[select_targets(vec![vec![to(20)]])]);
+        assert_eq!(
+            r.options,
+            ChoiceOptions::Enumerated(vec![ChoiceOption::Object(o(20))]),
+            "total {total}"
+        );
+    }
 }

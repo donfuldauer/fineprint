@@ -1231,6 +1231,69 @@ fn req_event_001_cr_122_1d_stun_counter() {
     assert!(!run.state.permanents.get(x).unwrap().status().tapped);
 }
 
+/// REQ-EVENT-001 (Gate 06-turn F12): CR 614.7, CR 701.3d: with X attached to B,
+/// `UnattachFrom(X, A)` would not happen, so an `Instead([LifeChange])` replacement of unattach
+/// events is not offered, no life changes and X stays attached to B; `UnattachFrom(X, B)` (the
+/// exact host) stays replaceable. A plain `Unattach` of an unattached permanent offers nothing.
+#[test]
+fn req_event_001_cr_614_7_unattach_from_exact_host() {
+    use crate::permanent::AttachTarget;
+    let mut w = World::new();
+    let x = w.create(1, ZoneKind::Battlefield);
+    let a = w.create(1, ZoneKind::Battlefield);
+    let b = w.create(1, ZoneKind::Battlefield);
+    let loose = w.create(1, ZoneKind::Battlefield);
+    w.setup(GameEvent::Attach {
+        attachment: x,
+        target: AttachTarget::Permanent(b),
+    });
+    w.add(ReplacementEffect::new(
+        e(1),
+        EventMatcher::new(BusEventKind::Unattach),
+        Action::Instead(vec![life(1, 1)]),
+    ));
+    // Another host: a no-op, nothing offered, nothing replaced.
+    let wrong = GameEvent::UnattachFrom {
+        attachment: x,
+        host: AttachTarget::Permanent(a),
+    };
+    let run = drive(&w, vec![wrong], false, &[]);
+    let report = ok(&run);
+    assert!(run.asked.is_empty());
+    assert!(report.applications.is_empty());
+    assert!(report.executed.iter().all(|b| b.events.is_empty()));
+    assert_eq!(run.state.life(1), 20);
+    assert_eq!(
+        run.state.permanents.attached_to(x),
+        Some(AttachTarget::Permanent(b))
+    );
+    // Plain Unattach of an unattached permanent: no-op, nothing replaced.
+    let run = drive(
+        &w,
+        vec![GameEvent::Unattach { attachment: loose }],
+        false,
+        &[],
+    );
+    assert!(ok(&run).applications.is_empty());
+    assert_eq!(run.state.life(1), 20);
+    // The exact host: replaced (the life change happens instead, X stays attached).
+    let right = GameEvent::UnattachFrom {
+        attachment: x,
+        host: AttachTarget::Permanent(b),
+    };
+    let run = drive(&w, vec![right], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.life(1), 21);
+    assert_eq!(
+        run.state.permanents.attached_to(x),
+        Some(AttachTarget::Permanent(b))
+    );
+    // Plain Unattach of the attached X: replaced as well.
+    let run = drive(&w, vec![GameEvent::Unattach { attachment: x }], false, &[]);
+    assert_eq!(ok(&run).applications, vec![e(1)]);
+    assert_eq!(run.state.life(1), 21);
+}
+
 /// REQ-EVENT-001: CR 122.1h, from the battlefield to a graveyard goes to exile instead; from
 /// another zone it does not apply.
 #[test]

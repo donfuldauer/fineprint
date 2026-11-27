@@ -352,6 +352,25 @@ fn clip(text: &str, max: usize) -> String {
     }
 }
 
+/// `id` quoted for a message: `{:?}` of [`clip`]`(id, CLIP)`, and when the id was cut, its
+/// length in `char`s and a 64-bit FNV-1a digest of its bytes in hex, so two ids that differ
+/// only after the cut still give distinct findings while repeats of one id stay equal (and
+/// collapse in the report). Pure and deterministic (R3).
+fn quote_id(id: &str) -> String {
+    let clipped = clip(id, CLIP);
+    if id.chars().nth(CLIP).is_none() {
+        return format!("{clipped:?}");
+    }
+    // FNV-1a, 64-bit: offset basis and prime of the published parameters.
+    let digest = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!(
+        "{clipped:?} ({} chars, digest {digest:016x})",
+        id.chars().count()
+    )
+}
+
 /// Pushes a finding.
 fn push(
     out: &mut Vec<Lint>,

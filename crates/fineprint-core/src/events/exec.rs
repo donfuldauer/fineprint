@@ -43,6 +43,18 @@ use crate::zones::{MoveRequest, Moved, Position, ZoneId, ZoneKind, Zones};
 /// let mut ctx = EventContext { game: &mut game, /* ... */ provider: &provider };
 /// ```
 ///
+/// **The provider is a per-batch snapshot.** Every batch this context executes
+/// ([`EventContext::execute_batch`] and its variants) uses `provider` for all its events, so
+/// all simultaneous departures of one batch share one evaluation (CR 603.10a, CR 704.8). A
+/// context reused for a LATER batch keeps the same snapshot unless the caller rebuilds it.
+/// The replacement bus runs a submitted batch and then its `Prevent` follow-up batches on one
+/// context: [`process_batch_refreshing`](crate::replacement::process_batch_refreshing)
+/// rebuilds the provider over the live state before each follow-up batch (through a
+/// [`ProviderRefresh`](crate::replacement::ProviderRefresh)), whereas plain
+/// [`process_batch`](crate::replacement::process_batch) and
+/// [`process_event`](crate::replacement::process_event) keep this pre-call snapshot for the
+/// follow-up batches too (their choosers and LKI then reflect the state before the call).
+///
 /// An object created by an earlier event of the same batch is unknown to the snapshot, as to
 /// any injected provider, so its capture fails with
 /// [`MemoryError::NoCharacteristics`](crate::memory::MemoryError::NoCharacteristics). Only the
@@ -197,17 +209,34 @@ impl EventContext<'_> {
     /// part. Every component of the context is left unchanged.
     ///
     /// # Errors
-    /// As [`EventContext::execute_batch`] (the batch would fail); nothing is changed.
+    /// As [`EventContext::execute_batch`] (the batch would fail, last-known-information
+    /// capture included, so no group is offered for a batch whose capture fails); nothing is
+    /// changed.
     pub fn graveyard_order_groups(
         &mut self,
         batch: &EventBatch,
     ) -> Result<Vec<GraveyardOrderGroup>, EventError> {
         let snapshot = self.snapshot();
-        let result = self
-            .run(batch, &LkiMode::Off, &[])
-            .map(|planned| groups_of(self.zones, self.events.markers(), &planned));
+        let result = self.plan_groups(batch, &snapshot);
         self.restore(snapshot);
         result
+    }
+
+    /// The rollback-only preflight of [`EventContext::graveyard_order_groups`]: the planning
+    /// run gives the groups, then the context is restored and the real run, LKI capture
+    /// included (CR 704.8, CR 603.10a), is tried so that a batch `execute_batch_ordered` would
+    /// reject (for example [`MemoryError::NoCharacteristics`](crate::memory::MemoryError))
+    /// offers no group. The caller restores `snapshot` afterwards.
+    fn plan_groups(
+        &mut self,
+        batch: &EventBatch,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<GraveyardOrderGroup>, EventError> {
+        let planned = self.run(batch, &LkiMode::Off, &[])?;
+        let groups = groups_of(self.zones, self.events.markers(), &planned);
+        self.restore(snapshot.clone());
+        self.run_captured(batch, &planned, &[])?;
+        Ok(groups)
     }
 
     /// Executes `batch` exactly as [`EventContext::execute_batch`] does (same events, same
@@ -893,24 +922,44 @@ impl EventContext<'_> {
         Ok(Some(Outcome::Attached { timestamp }))
     }
 
-    /// CR 701.3d: unattach; the cleared link is appended to `unattached`. With `only_from`
-    /// (`UnattachFrom`), the link is cleared only if it is to exactly that host. An unattached
-    /// object, or one attached to another host than `only_from`, is no event.
+    /// CR 701.3d: unattach; the cleared link is appended to `unattached`.
+    ///
+    /// With `only_from` (`UnattachFrom`), the link is cleared only if it is to exactly that
+    /// host, and the live link is looked up before the unknown-object check: if the object no
+    /// longer exists (an earlier event, for example one of the same batch, moved it, so its old
+    /// id is gone), is unattached, or is attached to another host, the specified link is
+    /// already gone and the event is a no-op (no event, no error, so earlier events of the
+    /// batch are not rolled back; see docs/DECISIONS.md "Gate 06-turn F57"). Only an id the
+    /// object-id generator never issued is [`EventError::UnknownObject`]. Plain `Unattach`
+    /// (`only_from` is `None`) of an object that is in no zone is
+    /// [`EventError::UnknownObject`]; of an unattached object it is no event.
     fn unattach(
         &mut self,
         attachment: ObjectId,
         only_from: Option<AttachTarget>,
         unattached: &mut Vec<UnattachRecord>,
     ) -> Result<Option<Outcome>, EventError> {
-        if self.zones.object(attachment).is_none() {
-            return Err(EventError::UnknownObject(attachment));
-        }
-        let Some(host) = self.permanents.attached_to(attachment) else {
-            return Ok(None);
+        let live = self.permanents.attached_to(attachment);
+        let host = if let Some(from) = only_from {
+            // CR 701.3d: only the exact live link to `from`, checked before existence.
+            match live {
+                Some(host) if host == from && self.zones.object(attachment).is_some() => host,
+                _ if self.zones.object(attachment).is_some()
+                    || (1..=self.ids.last_issued()).contains(&attachment.get()) =>
+                {
+                    return Ok(None);
+                }
+                _ => return Err(EventError::UnknownObject(attachment)),
+            }
+        } else {
+            if self.zones.object(attachment).is_none() {
+                return Err(EventError::UnknownObject(attachment));
+            }
+            let Some(host) = live else {
+                return Ok(None);
+            };
+            host
         };
-        if only_from.is_some_and(|from| from != host) {
-            return Ok(None);
-        }
         self.permanents.detach(attachment)?;
         unattached.push(UnattachRecord { attachment, host });
         Ok(Some(Outcome::Applied))

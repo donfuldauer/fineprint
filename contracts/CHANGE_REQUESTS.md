@@ -71,7 +71,7 @@ Consumers affected: events executor (`events/exec.rs`), trigger normalizer (`tri
 replacement bus kind mapping (`replacement/types.rs`), replay and state-hash goldens.
 
 ## CR-005 — State model and canonical state hash: layers in GameState
-Requested by: #183 FP-144   Kind: breaking   Status: open
+Requested by: #183 FP-144   Kind: breaking   Status: merged (#243)
 Change: the placeholder type `state::EffectRegistry` (and its `is_empty`) is removed, with no
 compatibility alias. `GameState` stores the real `layers::ContinuousEffects`, the
 `layers::TimestampLedger` and the links `BTreeMap<EffectId, state::GeneratingAbility>` (new type
@@ -105,6 +105,10 @@ state, hashed and replayed); REQ-LAYER-002 existence (CR 613.8a): each static (a
 linked to the ability on its source that generates it.
 Consumers affected: fineprint-core state and txn; golden state hashes; bindings and replay format
 (not yet implemented); #184, #186, #193.
+Process note: the contract change and its implementation merged together in #243 (phase 04)
+without a separate contract-only PR, and #243 is not a phase boundary. It is recorded as merged and
+ratified by the phase 06 gate review (a phase boundary, docs/DECISIONS.md "Gate 06-turn F30 — CR-005
+recorded as merged"), as the phase 02 gate did for CR-002 and CR-003.
 
 ## CR-006 — Card DSL (SRS 14.4.3): optional "defines" on layer-4 CHAR modifications
 Requested by: #198 FP-151   Kind: additive   Status: open
@@ -186,19 +190,19 @@ the stored controller until they forward it; that is a follow-up (those files be
 unit, #209).
 
 ## CR-009 — SBA perform (REQ-SBA-001, REQ-REPL-*): `post_batch` is also called before each Prevent follow-up batch
-Requested by: #50 gate 06-turn (round 2, R1; change made by round 1, F6/F13)   Kind: breaking   Status: open
-Change: `sba::perform_all_relayered` and `sba::perform_all_post_batch` now call their `post_batch` provider, besides the single call after the batch for retained zero-defense battles, once before each `Prevent` follow-up batch of the pass's batch (through `replacement::process_batch_refreshing`), so the follow-up batch is resolved and executed with characteristics evaluated from the inputs it supplies. A pass with a prevention follow-up and no retained battle therefore calls it, where it was called at most once and only for a retained battle before. `sba::perform_all` is unchanged (follow-ups use the pre-pass provider). No signature or type changes. Breaking: merges only between phases (R2); requested at the phase 06-turn boundary by its gate review (PR #280). The implementation lands with the gate issue PR #279 after this contract-only PR.
+Requested by: #50 gate 06-turn (round 2, R1; change made by round 1, F6/F13)   Kind: breaking   Status: merged (#284)
+Change: `sba::perform_all_relayered` and `sba::perform_all_post_batch` now call their `post_batch` provider, besides the single call after the batch for retained zero-defense battles, once before each `Prevent` follow-up batch of the pass's batch (through `replacement::process_batch_refreshing`), so the follow-up batch is resolved and executed with characteristics evaluated from the inputs it supplies. A pass with a prevention follow-up and no retained battle therefore calls it, where it was called at most once and only for a retained battle before. `sba::perform_all` is unchanged (follow-ups use the pre-pass provider). No signature or type changes. Breaking: requested at the phase 06-turn boundary by its gate review (PR #280) and merged between phases (R2) as the contract-only PR #284; the implementation lands with the gate issue PR #279.
 Why: REQ-LAYER-001 (CR 613.1b), REQ-REPL-* (CR 616.1), REQ-CORE-003 (CR 603.10a): follow-up batches must see the state the previous batch left. Gate 06-turn F6/F13.
 Consumers affected: every caller of the two entry points whose `post_batch` is not a pure function of its context or counts its calls (it must remain pure, R3); none in-tree besides tests.
 
 ## CR-010 — MulliganDecision payload validator (REQ-NET-003): TAKE_MULLIGAN rejected on the final request
-Requested by: #50 gate 06-turn (round 2, R8)   Kind: breaking   Status: open
-Change: `PendingChoiceRequest::validate_response` (choice/request.rs) now rejects `TAKE_MULLIGAN` for a `MULLIGAN_DECISION` payload whose `to_bottom` is at least the hand size (the last mulligan: the whole hand goes on the bottom, CR 103.5). Before, every non-KEEP_HAND answer passed the payload check and the game-start procedure rejected TAKE_MULLIGAN afterwards. The payload fields, canonical encoding, wire names and `ValidatorRule` are unchanged. Breaking: merges only between phases (R2); requested at the phase 06-turn boundary by its gate review (PR #280). The implementation lands with the gate issue PR #279 after this contract-only PR.
+Requested by: #50 gate 06-turn (round 2, R8)   Kind: breaking   Status: merged (#284)
+Change: `PendingChoiceRequest::validate_response` (choice/request.rs) now rejects `TAKE_MULLIGAN` for a `MULLIGAN_DECISION` payload whose `to_bottom` is at least the hand size (the last mulligan: the whole hand goes on the bottom, CR 103.5). Before, every non-KEEP_HAND answer passed the payload check and the game-start procedure rejected TAKE_MULLIGAN afterwards. The payload fields, canonical encoding, wire names and `ValidatorRule` are unchanged. Breaking: requested at the phase 06-turn boundary by its gate review (PR #280) and merged between phases (R2) as the contract-only PR #284; the implementation lands with the gate issue PR #279.
 Why: REQ-NET-003 (the request describes the legal answers); gate 06-turn F86/R8.
 Consumers affected: any client or host that submitted TAKE_MULLIGAN on the final request (it was a procedure error at the next replay; it is now a submit-time rejection). No signature changes.
 
 ## CR-011 — CastState (REQ-CAST-001): hybrid and Phyrexian symbol slots follow the chosen costs
-Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412739)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412739)   Kind: additive   Status: merged (#286)
 Change: new provided method on `casting::CastState`:
 `fn symbol_slots(&self, req: &CastRequest, modes: &[u32], costs: &CostChoice) -> Vec<Vec<String>>`
 (one option list per hybrid or Phyrexian symbol of the costs that WILL BE PAID once `modes` and
@@ -227,7 +231,7 @@ Consumers affected: every `CastState` implementor (source-compatible: the method
 `CHOOSE_COSTS_AND_X` requests (no replay with such a request exists: no integrating host yet).
 
 ## CR-012 — CastState (REQ-CAST-001): mode legality probes the cost choices
-Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412705)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412705)   Kind: additive   Status: merged (#286)
 Change: no signature or type changes. `casting::announce` decides whether a mode (an original
 index `m`) is offered by probing the host: for the normal cost and for each alternative cost `i` of
 `cost_spec(req, &[m])`, combined with additional-cost subsets (every subset when the spec lists at
@@ -249,7 +253,7 @@ removed (and the cast rolled back with `NoLegalMode` when it was the only mode).
 Consumers affected: `casting::announce`; `CastState::target_slots` implementors (extra calls only).
 
 ## CR-013 — CastState (REQ-CAST-001): mode legality probes every additional-cost subset within a budget (amends CR-012)
-Requested by: #50 gate 06-turn (round 6, CodeRabbit thread 4718412705 re-opened)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 6, CodeRabbit thread 4718412705 re-opened)   Kind: additive   Status: merged (#287)
 Change: no signature or type changes. Amends the probe set of CR-012. `casting::announce` probes the host
 for a mode (original index `m`) over the Cartesian product of {the normal cost, each alternative cost
 `i` of `cost_spec(req, &[m])`} and EVERY subset of the additional costs of that spec (ascending
@@ -282,7 +286,7 @@ mode before the costs are chosen, instead of at most 64 per alternative); the sp
 the omission.
 
 ## CR-014 — CastState (REQ-CAST-001): mode legality probes X (amends CR-012 and CR-013)
-Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021411 and re-opened thread 4718412705)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021411 and re-opened thread 4718412705)   Kind: additive   Status: merged (#289)
 Change: no signature or type changes. Amends the probe set of CR-013: X is a probed dimension. For a
 mode (original index `m`), `casting::announce` probes the host over the Cartesian product of {the
 normal cost, each alternative cost `i` of `cost_spec(req, &[m])`} (outermost), EVERY subset of the
@@ -323,7 +327,7 @@ mode before the costs are chosen, now including calls with different `x`); the u
 asserted a single low-end X probe.
 
 ## CR-015 — PAY_MANA_AND_COSTS (REQ-CAST-001): the mana-ability window is asked again after each answer that activates abilities
-Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021419)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021419)   Kind: additive   Status: merged (#289)
 Change: no type, field, `ValidatorRule`, validator or canonical-encoding change (`ChoicePayload::PayManaAndCosts`
 and `ChoiceResponse::PayCosts` are unchanged); only the request SEQUENCE of step 7 changes, as CR-011
 changed the sequence of CHOOSE_COSTS_AND_X. `casting::pay_total_cost` asks PAY_MANA_AND_COSTS one or more
@@ -361,7 +365,7 @@ activates abilities is now followed by another request; no replay with such a re
 integrating host yet).
 
 ## CR-016 — PayState (REQ-CAST-001, REQ-CORE-005): the host reports which pool units the last mana-ability activation removed
-Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021426 and comment 4720082538)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 7, CodeRabbit thread 4720021426 and comment 4720082538)   Kind: additive   Status: merged (#289)
 Change: new provided method on `casting::PayState`:
 `fn last_activation_removed(&self, player: PlayerId) -> Option<Vec<usize>>`, default `None`.
 After a successful `activate_mana_ability(player, ..)`, `Some(v)` lists every unit of

@@ -84,8 +84,16 @@ fn any_cost(costs: &[CostAST], pred: impl Fn(&CostAST) -> bool) -> bool {
 }
 
 /// Whether the raw JSON under `roots` holds an instruction that moves a card to or from a
-/// library: an op of [`LIBRARY_OPS`], or a `MOVE` whose `toZone` is `LIBRARY` or whose
-/// `objects` selector names the `LIBRARY` zone (CR 605.1a).
+/// library (CR 605.1a): an op of [`LIBRARY_OPS`], a `MOVE` whose `toZone` is `LIBRARY` or
+/// whose `objects` selector names the `LIBRARY` zone, or an `EXILE_UNTIL` whose `objects`
+/// selector names the `LIBRARY` zone.
+///
+/// Inline branches (`IF`/`ELSE` bodies, modes, `FOR_EACH` bodies and every other nested
+/// instruction list) are followed. The body of a `CREATE_DELAYED_TRIGGER` is not: the delayed
+/// trigger is a separate ability that resolves later (CR 603.7), so its `trigger` and `effect`
+/// are not part of this ability's effect. Nor is the `params` member of a `NATIVE_EFFECT`:
+/// it is opaque data handed to the registered native effect (REQ-DSL-015, SRS §14.8), not an
+/// instruction list.
 fn moves_library_card(roots: &[Option<&Value>]) -> bool {
     let mut stack: Vec<&Value> = roots.iter().flatten().copied().collect();
     while let Some(v) = stack.pop() {
@@ -99,6 +107,22 @@ fn moves_library_card(roots: &[Option<&Value>]) -> bool {
                             || map.get("objects").is_some_and(names_library_zone) =>
                     {
                         return true;
+                    }
+                    // CR 605.1a: exiling a card taken from a library moves it from a library.
+                    Some("EXILE_UNTIL") if map.get("objects").is_some_and(names_library_zone) => {
+                        return true;
+                    }
+                    // CR 603.7: a delayed trigger is a separate ability; its body is not walked.
+                    Some("CREATE_DELAYED_TRIGGER") => continue,
+                    // REQ-DSL-015 (SRS §14.8): a native effect's `params` are opaque data, not
+                    // instructions, so only its other members are walked (gate 06-turn R16).
+                    Some("NATIVE_EFFECT") => {
+                        stack.extend(
+                            map.iter()
+                                .filter(|(key, _)| key.as_str() != "params")
+                                .map(|(_, v)| v),
+                        );
+                        continue;
                     }
                     _ => {}
                 }

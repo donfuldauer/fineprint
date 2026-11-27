@@ -564,6 +564,15 @@ fn req_cast_001_riders_fire_only_for_spent_units() {
     )
     .expect("payable");
     assert_eq!(plan.spent, vec![1, 2, 3]);
+    // Exact records: one per spent unit with riders (none for the riders-free green unit 3), in
+    // the order of `spent`.
+    let expected_riders: Vec<(usize, Vec<_>)> = plan
+        .spent
+        .iter()
+        .filter(|&&i| !p.units()[i].riders.is_empty())
+        .map(|&i| (i, p.units()[i].riders.clone()))
+        .collect();
+    assert_eq!(plan.riders_fired, expected_riders);
     let mut seen = BTreeSet::new();
     for (i, riders) in &plan.riders_fired {
         assert!(plan.spent.contains(i), "rider of unspent unit {i}");
@@ -583,6 +592,39 @@ fn req_cast_001_riders_fire_only_for_spent_units() {
             &rider("test.rider_a"),
             &rider("test.rider_b"),
             &rider("test.rider_a")
+        ]
+    );
+}
+
+/// REQ-CAST-001: `riders_fired` equals exactly the ordered `(index, riders)` records of the spent
+/// units that carry riders (CR 106.6, 106.6a). A planner that also adds `(3, [])` for the spent
+/// riders-free green unit fails this equality.
+#[test]
+fn req_cast_001_riders_fired_exact_records() {
+    // CR 106.6, CR 106.6a
+    let p = pool_of(&[
+        unit(ManaType::Blue).with_rider(rider("test.rider_unspent")),
+        unit(ManaType::Red)
+            .with_rider(rider("test.rider_a"))
+            .with_rider(rider("test.rider_b")),
+        unit(ManaType::Red).with_rider(rider("test.rider_a")),
+        unit(ManaType::Green),
+    ]);
+    let plan = plan_payment(
+        &p,
+        &cost(|m| {
+            m.red = 2;
+            m.green = 1;
+        }),
+        &any_purpose(),
+    )
+    .expect("payable");
+    assert_eq!(plan.spent, vec![1, 2, 3]);
+    assert_eq!(
+        plan.riders_fired,
+        vec![
+            (1, vec![rider("test.rider_a"), rider("test.rider_b")]),
+            (2, vec![rider("test.rider_a")]),
         ]
     );
 }
@@ -722,6 +764,14 @@ fn req_cast_001_property_plan_matches_brute_force() {
         // The plan pays exactly the cost.
         assert_eq!(plan.spent.len() as u64, c.total());
         assert!(assignable(&units, &plan.spent, &syms));
+        // Exact records: one per spent unit with riders, none for riders-free units, in order.
+        let expected_riders: Vec<(usize, Vec<_>)> = plan
+            .spent
+            .iter()
+            .filter(|&&i| !units[i].riders.is_empty())
+            .map(|&i| (i, units[i].riders.clone()))
+            .collect();
+        assert_eq!(plan.riders_fired, expected_riders);
         // Riders only for spent units, once each, with the unit's own riders.
         let mut seen = BTreeSet::new();
         for (i, r) in &plan.riders_fired {

@@ -62,6 +62,13 @@ pub fn native_with(params: Value) -> Value {
     json!({"op":"NATIVE_EFFECT","id":"test.native_effect","version":1,"params":params})
 }
 
+/// A KEYWORD ability whose `params` hold `params` (an object); unlike `NATIVE_EFFECT` params,
+/// keyword params are scanned for look-back keys (REQ-ING-009; docs/DECISIONS.md "Gate 06-turn
+/// F53").
+pub fn keyword_with(id: &str, params: Value) -> Value {
+    json!({"abilityId":id,"kind":"KEYWORD","keyword":"TEST_KEYWORD","params":params})
+}
+
 pub fn draw() -> Value {
     json!({"op":"DRAW","player":{"ref":"CONTROLLER"},"count":{"LITERAL":1}})
 }

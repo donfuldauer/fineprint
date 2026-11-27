@@ -11,14 +11,18 @@
 //! names are the wire contract. Decoding treats the bytes as untrusted: it rebuilds the
 //! registry through [`ContinuousEffects::register`] and
 //! [`ContinuousEffects::register_group`], so a decoded registry passes every check registration
-//! makes, rebuilds the ledger through the ledger's own stamping operations, and then checks
+//! makes, rebuilds the ledger once from its checked entries, and then checks
 //! what the state boundary checks ([`GameState::register_effect`](super::GameState::register_effect),
 //! [`GameState::link_effect_generator`](super::GameState::link_effect_generator)). Every failure
 //! is [`StateError::Decode`].
+//!
+//! The per-effect, ledger and generating-ability checks are shared with
+//! [`GameState::serialize`](super::GameState::serialize), which refuses (as
+//! [`StateError::Encode`]) a state these checks would refuse on decode.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fineprint_base::ids::{EffectId, IdGenerator, ObjectId, PlayerId, Timestamp};
+use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_dsl::ability::Layer;
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
@@ -30,8 +34,7 @@ use super::{GeneratingAbility, StateError};
 use crate::layers::{
     Affected, ContinuousEffect, ContinuousEffects, CopiedCharacteristic, CopyException,
     CounterHolder, EffectOrigin, LayerEnvironment, LayerModification, MatchContext, ObjectBase,
-    StampReason, TimestampLedger, ValueSource, effect_links, provenance_from_parts,
-    provenance_parts,
+    TimestampLedger, ValueSource, effect_links, provenance_from_parts, provenance_parts,
 };
 use crate::objects::Characteristics;
 
@@ -637,9 +640,19 @@ pub(super) struct Issued {
 }
 
 impl Issued {
+    /// Whether `raw` is a timestamp issued by the state's generator (`1..=last issued`); the
+    /// test [`Issued::timestamp`] applies on decode and [`GameState::register_effect`] and
+    /// [`GameState::restamp_static_effects`] apply at the state boundary (REQ-CORE-002).
+    ///
+    /// [`GameState::register_effect`]: super::GameState::register_effect
+    /// [`GameState::restamp_static_effects`]: super::GameState::restamp_static_effects
+    pub(super) fn has_timestamp(self, raw: u64) -> bool {
+        raw != 0 && raw <= self.timestamp
+    }
+
     /// `raw` as a timestamp issued by the state's generator (`1..=last issued`).
     fn timestamp(self, raw: u64) -> Result<Timestamp, StateError> {
-        if raw == 0 || raw > self.timestamp {
+        if !self.has_timestamp(raw) {
             return Err(bad("timestamp not issued by the timestamp generator"));
         }
         Ok(Timestamp::new(raw))
@@ -738,11 +751,55 @@ fn modification_from_wire(m: ModificationWire) -> Result<LayerModification, Stat
     })
 }
 
-/// The effect `e` describes, with its timestamps checked against `issued`.
+/// The checks of one effect's own fields that decoding and [`GameState::serialize`] share:
+/// its timestamp and the timestamp of its granting effect (`granted_at`) were issued by the
+/// state's generator (REQ-CORE-002), and a layer-7a effect is from a characteristic-defining
+/// ability (SRS 6.2 item 1, CR 613.4a: as [`GameState::register_effect`]), and a resolved effect
+/// does not carry an unlocked selector (CR 611.2c).
+///
+/// [`GameState::serialize`]: super::GameState::serialize
+/// [`GameState::register_effect`]: super::GameState::register_effect
+fn check_effect_fields(effect: &ContinuousEffect, issued: Issued) -> Result<(), StateError> {
+    if let EffectOrigin::Static {
+        granted_at: Some(t),
+    } = effect.origin
+    {
+        issued.timestamp(t.get())?;
+    }
+    issued.timestamp(effect.timestamp.get())?;
+    // SRS 6.2 item 1, CR 613.4a: as `GameState::register_effect`.
+    if effect.layer == Layer::L7a && !effect.is_cda {
+        return Err(bad("non-CDA effect in layer 7a"));
+    }
+    // CR 611.2c: a resolved effect affects the objects determined when it begins, so its
+    // selector is locked (`register_effect_group`) before it is stored; an unlocked one would
+    // reach objects that start matching after a restore (as `GameState::register_effect`).
+    if effect.origin == EffectOrigin::Resolved && matches!(effect.affected, Affected::Selector(_)) {
+        return Err(bad("unlocked resolved selector"));
+    }
+    Ok(())
+}
+
+/// What decoding checks of every effect of a registry, for [`GameState::serialize`]: its id was
+/// issued by the effect generator and its fields pass [`check_effect_fields`].
+///
+/// # Errors
+/// The [`StateError::Decode`] decoding would report.
+///
+/// [`GameState::serialize`]: super::GameState::serialize
+pub(super) fn check_effects(effects: &ContinuousEffects, issued: Issued) -> Result<(), StateError> {
+    for (id, effect) in effects.iter() {
+        issued.effect(id.get())?;
+        check_effect_fields(effect, issued)?;
+    }
+    Ok(())
+}
+
+/// The effect `e` describes, with its fields checked by [`check_effect_fields`].
 fn effect_from_wire(e: EffectWire, issued: Issued) -> Result<ContinuousEffect, StateError> {
     let origin = match e.origin {
         OriginWire::Static { granted_at } => EffectOrigin::Static {
-            granted_at: granted_at.map(|t| issued.timestamp(t)).transpose()?,
+            granted_at: granted_at.map(Timestamp::new),
         },
         OriginWire::Resolved => EffectOrigin::Resolved,
     };
@@ -757,17 +814,14 @@ fn effect_from_wire(e: EffectWire, issued: Issued) -> Result<ContinuousEffect, S
     let effect = ContinuousEffect {
         source: e.source.map(ObjectId::new),
         controller: PlayerId::new(e.controller),
-        timestamp: issued.timestamp(e.timestamp)?,
+        timestamp: Timestamp::new(e.timestamp),
         layer: e.layer,
         is_cda: e.is_cda,
         origin,
         affected,
         modification: modification_from_wire(e.modification)?,
     };
-    // SRS 6.2 item 1, CR 613.4a: as `GameState::register_effect`.
-    if effect.layer == Layer::L7a && !effect.is_cda {
-        return Err(bad("non-CDA effect in layer 7a"));
-    }
+    check_effect_fields(&effect, issued)?;
     Ok(effect)
 }
 
@@ -858,11 +912,6 @@ pub(super) fn effects_from_wire(
         let mut group = Vec::with_capacity(parts.len() + 1);
         for id in std::iter::once(anchor).chain(parts) {
             let effect = described[id].clone();
-            if effect.origin == EffectOrigin::Resolved
-                && matches!(effect.affected, Affected::Selector(_))
-            {
-                return Err(bad("unlocked resolved selector inside an effect group"));
-            }
             group.push((*id, effect));
         }
         registry
@@ -920,69 +969,115 @@ pub(super) fn effects_from_wire(
     Ok(registry)
 }
 
-/// Rebuilds the ledger `wire` describes through the ledger's own stamping operations, each
-/// timestamp issued from a generator positioned just before it.
-pub(super) fn ledger_from_wire(
-    wire: TimestampsWire,
-    issued: Issued,
-) -> Result<TimestampLedger, StateError> {
-    strictly_ascending(wire.objects.iter().map(|o| o.object), "object timestamps")?;
-    let holder = |h: HolderWire| match h {
+/// The [`CounterHolder`] `h` describes.
+fn holder_from_wire(h: HolderWire) -> CounterHolder {
+    match h {
         HolderWire::Object(o) => CounterHolder::Object(ObjectId::new(o)),
         HolderWire::Player(p) => CounterHolder::Player(PlayerId::new(p)),
-    };
+    }
+}
+
+/// The checks of a ledger's wire form that decoding and [`GameState::serialize`] share: each
+/// table strictly ascending by key, then every timestamp (objects, counters, stickers, in that
+/// order) issued by the state's generator (REQ-CORE-002, CR 613.7).
+///
+/// # Errors
+/// The first failing check, as [`StateError::Decode`].
+///
+/// [`GameState::serialize`]: super::GameState::serialize
+pub(super) fn check_ledger_wire(wire: &TimestampsWire, issued: Issued) -> Result<(), StateError> {
+    strictly_ascending(wire.objects.iter().map(|o| o.object), "object timestamps")?;
     strictly_ascending(
         wire.counters
             .iter()
-            .map(|c| (holder(c.holder), c.kind.as_str())),
+            .map(|c| (holder_from_wire(c.holder), c.kind.as_str())),
         "counter timestamps",
     )?;
     strictly_ascending(
         wire.stickers.iter().map(|s| (s.host, s.sticker)),
         "sticker timestamps",
     )?;
-    let at = |ts: u64| -> Result<IdGenerator<Timestamp>, StateError> {
-        let t = issued.timestamp(ts)?;
-        Ok(IdGenerator::from_last_issued(t.get() - 1))
-    };
-    let failed = |_| bad("timestamp ledger refused an entry");
-    let mut ledger = TimestampLedger::new();
-    // Objects before stickers, so stamping an object re-stamps no sticker.
-    for o in &wire.objects {
-        ledger
-            .stamp_object(
-                &mut at(o.timestamp)?,
-                ObjectId::new(o.object),
-                StampReason::EntersZone,
-            )
-            .map_err(failed)?;
+    let stamps = wire.objects.iter().map(|o| o.timestamp);
+    let stamps = stamps.chain(wire.counters.iter().map(|c| c.timestamp));
+    for t in stamps.chain(wire.stickers.iter().map(|s| s.timestamp)) {
+        issued.timestamp(t)?;
     }
-    for c in &wire.counters {
-        ledger
-            .put_counters(&mut at(c.timestamp)?, holder(c.holder), &c.kind)
-            .map_err(failed)?;
-    }
-    for s in &wire.stickers {
-        ledger
-            .put_sticker(&mut at(s.timestamp)?, ObjectId::new(s.host), s.sticker)
-            .map_err(failed)?;
-    }
-    Ok(ledger)
+    Ok(())
 }
 
-/// Rebuilds and checks the generating-ability links against `effects` (CR 613.8a): every static
-/// effect with a source has a link with that source; a link of a registered effect belongs to
-/// such an effect; a link of an id that is not registered (an ETB effect) names an issued id.
+/// Rebuilds the ledger `wire` describes once from its validated entries ([`check_ledger_wire`];
+/// [`TimestampLedger::from_entries`]): linear in the number of entries (REQ-NFR-006), and equal
+/// to the ledger the stamping operations give when they issue those timestamps.
+pub(super) fn ledger_from_wire(
+    wire: TimestampsWire,
+    issued: Issued,
+) -> Result<TimestampLedger, StateError> {
+    check_ledger_wire(&wire, issued)?;
+    let objects = wire
+        .objects
+        .into_iter()
+        .map(|o| (ObjectId::new(o.object), Timestamp::new(o.timestamp)))
+        .collect();
+    let counters = wire
+        .counters
+        .into_iter()
+        .map(|c| {
+            (
+                (holder_from_wire(c.holder), c.kind),
+                Timestamp::new(c.timestamp),
+            )
+        })
+        .collect();
+    let stickers = wire
+        .stickers
+        .into_iter()
+        .map(|s| {
+            (
+                (ObjectId::new(s.host), s.sticker),
+                Timestamp::new(s.timestamp),
+            )
+        })
+        .collect();
+    Ok(TimestampLedger::from_entries(objects, counters, stickers))
+}
+
+/// Rebuilds the generating-ability links and checks them with [`check_generators`].
 pub(super) fn generators_from_wire(
     wire: Vec<GeneratorWire>,
     effects: &ContinuousEffects,
     issued: Issued,
 ) -> Result<BTreeMap<EffectId, GeneratingAbility>, StateError> {
     strictly_ascending(wire.iter().map(|g| g.effect), "generating-ability links")?;
-    let mut out = BTreeMap::new();
-    for g in wire {
-        let id = issued.effect(g.effect)?;
-        let source = ObjectId::new(g.source);
+    let out: BTreeMap<EffectId, GeneratingAbility> = wire
+        .into_iter()
+        .map(|g| {
+            (
+                EffectId::new(g.effect),
+                GeneratingAbility::new(ObjectId::new(g.source), g.ability),
+            )
+        })
+        .collect();
+    check_generators(&out, effects, issued)?;
+    Ok(out)
+}
+
+/// Checks the generating-ability links against `effects` (CR 613.8a), for decoding and
+/// [`GameState::serialize`]: every link names an effect id issued by the effect generator;
+/// a link of a registered effect belongs to a static effect with a source, on that source;
+/// every static effect with a source has a link. Links are checked in ascending [`EffectId`]
+/// order.
+///
+/// # Errors
+/// The first failing check, as [`StateError::Decode`].
+///
+/// [`GameState::serialize`]: super::GameState::serialize
+pub(super) fn check_generators(
+    generators: &BTreeMap<EffectId, GeneratingAbility>,
+    effects: &ContinuousEffects,
+    issued: Issued,
+) -> Result<(), StateError> {
+    for (&id, g) in generators {
+        issued.effect(id.get())?;
         if let Some(effect) = effects.get(id) {
             let static_with_source =
                 matches!(effect.origin, EffectOrigin::Static { .. }) && effect.source.is_some();
@@ -991,21 +1086,20 @@ pub(super) fn generators_from_wire(
                     "generating ability for an effect that is not static with a source",
                 ));
             }
-            if effect.source != Some(source) {
+            if effect.source != Some(g.source) {
                 return Err(bad("generating ability not on the effect's source"));
             }
         }
-        out.insert(id, GeneratingAbility::new(source, g.ability));
     }
     for (id, effect) in effects.iter() {
         if matches!(effect.origin, EffectOrigin::Static { .. })
             && effect.source.is_some()
-            && !out.contains_key(&id)
+            && !generators.contains_key(&id)
         {
             return Err(bad(
                 "static effect with a source lacks its generating ability",
             ));
         }
     }
-    Ok(out)
+    Ok(())
 }

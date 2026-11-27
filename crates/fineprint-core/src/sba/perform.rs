@@ -5,6 +5,7 @@
 //! One state-based action pass (REQ-SBA-001, CR 704.3): check every entry against one
 //! snapshot, then perform every result simultaneously as one event.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::ids::{IdGenerator, ObjectId, PlayerId};
@@ -22,13 +23,16 @@ use crate::events::{
     CounterTarget, EventBatch, EventContext, EventError, EventState, ExecutedBatch, GameEvent,
     ObjectMarkers, Outcome, ZoneChangeCause,
 };
-use crate::layers::{ContinuousEffects, LayerEnvironment};
+use crate::layers::{ContinuousEffects, Evaluated, LayerEnvironment, evaluate, evaluate_all};
 use crate::memory::{
     CharacteristicsProvider, LkiStore, MemoryError, MemoryTable, capture_lki_on_move,
 };
 use crate::objects::Characteristics;
 use crate::permanent::{AttachTarget, Permanents};
-use crate::replacement::{BusError, BusInterrupt, ReplacementRegistry, process_batch};
+use crate::replacement::{
+    BusError, BusInterrupt, ProviderRefresh, ReplacementRegistry, process_batch,
+    process_batch_refreshing,
+};
 use crate::state::{DesignationValue, GameState};
 use crate::zones::{MoveRequest, ZoneId, ZoneKind, Zones};
 
@@ -313,7 +317,7 @@ impl Plan {
 ///   host's zone change then has nothing to unattach), and the look-back of "becomes
 ///   unattached" triggers (CR 603.10c) sees it. Counters left on an object that moves get no
 ///   removal event (CR 122.2). [`SbaOutcome::unattached`] lists the attachment of every
-///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
+///   `Unattach` or `UnattachFrom` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
 /// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): before
@@ -410,6 +414,13 @@ impl Plan {
 /// supplies the layer inputs of the state after the batch; a caller whose protector facts
 /// ([`SbaEnvironment::battle_protector`], [`SbaEnvironment::can_be_protector`]) also depend on
 /// such state calls [`perform_all_post_batch`] and supplies a read-only view of them too.
+///
+/// # Follow-up batches
+/// The batch is submitted through [`process_batch`]: the SBA batch and every `Prevent` follow-up
+/// batch of the bus are resolved and executed with `ctx.provider` (the pre-pass snapshot).
+/// [`perform_all_relayered`] and [`perform_all_post_batch`] instead submit it through
+/// [`process_batch_refreshing`] and rebuild the evaluated provider from their post-batch
+/// provider before each follow-up batch (gate 06-turn F6/F13).
 pub fn perform_all(
     registry: &SbaRegistry,
     ctx: &mut EventContext<'_>,
@@ -419,7 +430,9 @@ pub fn perform_all(
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
-    perform_all_relayered(
+    // The pre-batch inputs describe no later state: the follow-up batches of the bus keep the
+    // context's provider (gate 06-turn F6/F13; see "Follow-up batches" above).
+    perform_pass(
         registry,
         ctx,
         replacements,
@@ -427,7 +440,8 @@ pub fn perform_all(
         layer_env,
         env,
         choices,
-        &mut |_, view| view(effects, layer_env),
+        false,
+        &mut |_, view| view(effects, layer_env, None),
     )
 }
 
@@ -450,10 +464,16 @@ pub type PostBatchLayers<'a> =
 /// post-batch protector step of the retained zero-defense battles ("Battle protectors" in
 /// [`perform_all`]) reads the inputs `post_batch` supplies, for both the test that the battle
 /// is still a CR 704.5x or CR 704.5y subject and its request (the chooser, its controller, and
-/// the candidates).
+/// the candidates), and so do the `Prevent` follow-up batches of the bus ("Follow-up batches"
+/// in [`perform_all`]).
 ///
-/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
-/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// `post_batch` is called, after the batch, at most once per pass for the retained battles, and
+/// only when the pass has a retained battle that is still on the battlefield; in addition, the
+/// bus calls it once before each `Prevent` follow-up batch of the pass's batch, with the context
+/// as the previous batch left it, and resolves and executes that follow-up batch with the
+/// characteristics evaluated from the inputs it supplies (CR 613.1b, CR 616.1, CR 603.10a,
+/// CR 608.2h; [`process_batch_refreshing`], gate 06-turn F6/F13). An ordinary pass (no retained
+/// battle, no follow-up batch) never calls it. It must
 /// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
 /// environment read), so that re-running the pass from the same state (a
 /// [`ChoiceSession`](crate::choice::ChoiceSession) replay) gives the same requests.
@@ -481,6 +501,7 @@ pub fn perform_all_relayered(
         layer_env,
         env,
         choices,
+        true,
         &mut |after, view| post_batch(after, &mut |e, l| view(e, l, None)),
     )
 }
@@ -514,8 +535,13 @@ pub type PostBatchState<'a> = &'a mut dyn FnMut(
 /// its candidates. A caller whose protector facts depend on state the batch can change (an
 /// attachment the batch unattaches) uses this entry point.
 ///
-/// `post_batch` is called at most once per pass, after the batch, and only when the pass has a
-/// retained battle that is still on the battlefield; an ordinary pass never calls it. It must
+/// `post_batch` is called, after the batch, at most once per pass for the retained battles, and
+/// only when the pass has a retained battle that is still on the battlefield; in addition, the
+/// bus calls it once before each `Prevent` follow-up batch of the pass's batch, with the context
+/// as the previous batch left it, and resolves and executes that follow-up batch with the
+/// characteristics evaluated from the inputs it supplies (CR 613.1b, CR 616.1, CR 603.10a,
+/// CR 608.2h; [`process_batch_refreshing`], gate 06-turn F6/F13). An ordinary pass (no retained
+/// battle, no follow-up batch) never calls it. It must
 /// be a pure function of the context it receives (R3, REQ-CORE-001: no clock, I/O, global or
 /// environment read). The view it supplies is read-only: every write (the chosen protectors
 /// through [`SbaEnvironment::set_battle_protector`], the deathtouch flag) goes to `env`, and
@@ -543,6 +569,7 @@ pub fn perform_all_post_batch(
         layer_env,
         env,
         choices,
+        true,
         &mut |after, view| post_batch(after, &mut |e, l, s| view(e, l, Some(s))),
     )
 }
@@ -565,6 +592,7 @@ fn perform_pass(
     layer_env: &dyn LayerEnvironment,
     env: &mut dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
+    refresh_follow_ups: bool,
     post_batch: PostBatchInputs<'_>,
 ) -> Result<SbaOutcome, BusInterrupt> {
     // CR 704.3: every predicate is evaluated against one snapshot before anything changes.
@@ -590,6 +618,7 @@ fn perform_pass(
         replacements,
         findings,
         &plan,
+        refresh_follow_ups,
         post_batch,
         &*env,
         choices,
@@ -634,6 +663,7 @@ fn perform_findings(
     replacements: &mut ReplacementRegistry,
     findings: Vec<SbaFinding>,
     plan: &Plan,
+    refresh_follow_ups: bool,
     post_batch: PostBatchInputs<'_>,
     env: &dyn SbaEnvironment,
     choices: &mut ChoiceContext<'_>,
@@ -807,13 +837,19 @@ fn perform_findings(
     let mut executed: Vec<ExecutedBatch> = Vec::new();
     if !moves.is_empty() {
         // CR 704.3, CR 704.7, CR 704.8: one simultaneous event through the bus.
-        let report = process_batch(
-            ctx,
-            replacements,
-            &EventBatch::from_events(moves),
-            true,
-            choices,
-        )?;
+        let batch = EventBatch::from_events(moves);
+        let report = if refresh_follow_ups {
+            // Gate 06-turn F6/F13: each `Prevent` follow-up batch is resolved and executed with
+            // the characteristics evaluated over the state the previous batch left (CR 613.1b,
+            // CR 616.1, CR 603.10a, CR 608.2h); the SBA batch itself keeps the context's
+            // provider (CR 704.8).
+            let refresh = PostBatchRefresh {
+                inputs: RefCell::new(&mut *post_batch),
+            };
+            process_batch_refreshing(ctx, replacements, &batch, true, choices, &refresh)?
+        } else {
+            process_batch(ctx, replacements, &batch, true, choices)?
+        };
         executed = report.executed;
     }
 
@@ -916,20 +952,23 @@ fn perform_findings(
     removed_from_game.sort_unstable();
 
     // CR 704.5n, CR 704.5p, CR 701.3d: "It remains on the battlefield": the permanents that
-    // every Unattach event of the batch, planned or produced by a replacement, unattached and
-    // that are still on the battlefield as the same object at the end of the pass (decision
-    // #42 FP-041, D2). An unattach that found nothing attached is no event (the bus records
-    // only events that occurred), and an executed one reports `Outcome::Applied`. The event
-    // itself stays in `executed` either way.
+    // every Unattach or UnattachFrom event of the batch, planned or produced by a replacement,
+    // unattached and that are still on the battlefield as the same object at the end of the pass (decision
+    // #42 FP-041, D2). An unattach that found nothing attached (an `UnattachFrom` of another
+    // host included) is no event (the bus records only events that occurred), and an executed
+    // one reports `Outcome::Applied`. The event itself stays in `executed` either way (gate
+    // 06-turn R18).
     let unattached: Vec<ObjectId> = executed
         .iter()
         .flat_map(|b| &b.events)
         .filter_map(|ev| match (ev.instance.event(), ev.outcome) {
-            (GameEvent::Unattach { attachment }, Outcome::Applied)
-                if ctx
-                    .zones
-                    .object(*attachment)
-                    .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
+            (
+                GameEvent::Unattach { attachment } | GameEvent::UnattachFrom { attachment, .. },
+                Outcome::Applied,
+            ) if ctx
+                .zones
+                .object(*attachment)
+                .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
             {
                 Some(*attachment)
             }
@@ -1300,6 +1339,118 @@ fn cease_reasons(entry_id: &str, object: ObjectId, env: &dyn SbaEnvironment) -> 
             }
             reasons
         }
+    }
+}
+
+/// The [`ProviderRefresh`] of the follow-up batches of an SBA batch (gate 06-turn F6/F13;
+/// REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-003): the caller's post-batch provider supplies the
+/// layer inputs of the live state the previous batch left, and an [`EvaluatedSnapshot`] of
+/// that state is built from them (CR 613.1-613.4). The provider is called once per follow-up
+/// batch, through a [`RefCell`] because [`ProviderRefresh::refresh`] takes `&self`; the bus is
+/// single-threaded and never calls `refresh` re-entrantly.
+struct PostBatchRefresh<'p> {
+    inputs: RefCell<PostBatchInputs<'p>>,
+}
+
+impl ProviderRefresh for PostBatchRefresh<'_> {
+    fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_> {
+        let mut snapshot = EvaluatedSnapshot::default();
+        let mut inputs = self.inputs.borrow_mut();
+        (*inputs)(ctx, &mut |effects, layer_env, _| {
+            snapshot = EvaluatedSnapshot::of(ctx, effects, layer_env);
+        });
+        Box::new(snapshot)
+    }
+}
+
+/// One object of an [`EvaluatedSnapshot`]: what a
+/// [`LayeredProvider`](crate::layers::LayeredProvider) over the same inputs answers for it.
+#[derive(Debug)]
+struct SnapshotEntry {
+    evaluated: Evaluated,
+    counters: BTreeMap<String, i64>,
+    attached_here: Vec<ObjectId>,
+}
+
+/// An owned provider of the characteristics evaluated through layers 1a-7d over one state
+/// (REQ-LAYER-001; CR 613.1-613.4, CR 613.1b): for every object it knows it answers exactly
+/// what a [`LayeredProvider`](crate::layers::LayeredProvider) over the same layer inputs
+/// answers, so that it can outlive the inputs, which never leave the post-batch provider's
+/// call. An object it does not know is unknown (`None`, no counters, no attachments).
+#[derive(Debug, Default)]
+struct EvaluatedSnapshot {
+    objects: BTreeMap<ObjectId, SnapshotEntry>,
+}
+
+impl EvaluatedSnapshot {
+    /// The snapshot of every object of `layer_env.objects()` and of every object in the zones
+    /// of `ctx`, by ascending id (R3, REQ-CORE-001: never in the environment's order). The
+    /// objects are evaluated in one layer-major board pass (REQ-LAYER-001, REQ-LAYER-005); an
+    /// object outside that pass (not listed by the environment, or the pass failed because a
+    /// listed object has no base) is evaluated alone, exactly as `evaluate` does; an object
+    /// without a base is left out.
+    fn of(
+        ctx: &EventContext<'_>,
+        effects: &ContinuousEffects,
+        layer_env: &dyn LayerEnvironment,
+    ) -> EvaluatedSnapshot {
+        let board = evaluate_all(effects, layer_env).unwrap_or_default();
+        let mut ids = layer_env.objects();
+        ids.extend(ctx.zones.all_object_ids());
+        ids.sort_unstable();
+        ids.dedup();
+        let mut objects = BTreeMap::new();
+        for id in ids {
+            let evaluated = match board.get(&id) {
+                Some(e) => e.clone(),
+                None => match evaluate(effects, layer_env, id) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                },
+            };
+            let counters = layer_env
+                .counters(id)
+                .into_iter()
+                .filter(|&(_, n)| n >= 1)
+                .collect();
+            let attached_here = layer_env.attached_here(id);
+            objects.insert(
+                id,
+                SnapshotEntry {
+                    evaluated,
+                    counters,
+                    attached_here,
+                },
+            );
+        }
+        EvaluatedSnapshot { objects }
+    }
+}
+
+impl CharacteristicsProvider for EvaluatedSnapshot {
+    fn characteristics(&self, id: ObjectId) -> Option<Characteristics> {
+        self.objects
+            .get(&id)
+            .map(|o| o.evaluated.characteristics.clone())
+    }
+
+    fn counters(&self, id: ObjectId) -> BTreeMap<String, i64> {
+        self.objects
+            .get(&id)
+            .map(|o| o.counters.clone())
+            .unwrap_or_default()
+    }
+
+    fn attached_here(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.objects
+            .get(&id)
+            .map(|o| o.attached_here.clone())
+            .unwrap_or_default()
+    }
+
+    // CR 613.1b: the controller after layer 2.
+    fn controller(&self, id: ObjectId) -> Option<PlayerId> {
+        self.objects.get(&id).and_then(|o| o.evaluated.controller)
     }
 }
 

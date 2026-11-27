@@ -338,7 +338,7 @@ fn req_ing_009_ordering_is_total_and_deterministic() {
 fn req_ing_009_ability_reorder_invariance() {
     // #232 FP-164: q1 (formerly REPEAT_WHILE with `maxIter` 0) and q3 (formerly a look-back
     // trigger filter) no longer decode as typed abilities; they are replaced by valid abilities
-    // that still have findings (a look-back key in NATIVE_EFFECT params, an unpaired link
+    // that still have findings (a look-back key in KEYWORD params, an unpaired link
     // reference), and the former JSON is refused by `from_json`.
     for former in [
         spell("q1", json!([repeat_while(Some(json!(0)), json!([draw()]))])),
@@ -352,7 +352,7 @@ fn req_ing_009_ability_reorder_invariance() {
     }
     let abilities = [
         with(&good_activated_mana("q0"), "targets", one_target()),
-        spell("q1", json!([native_with(json!({"LOOK_BACK": 1}))])),
+        keyword_with("q1", json!({"LOOK_BACK": 1})),
         with(
             &replacement("q2", "DIES", json!([modify_event()])),
             "tierHint",
@@ -1059,13 +1059,10 @@ fn req_ing_009_look_back_fail() {
                     json!([native()]),
                 ),
                 triggered("t", in_trigger, json!([native()])),
-                spell("s", json!([native_with(Value::Object(params.clone()))])),
-                spell(
-                    "s",
-                    json!([if_then(json!([native_with(
-                        json!({"deep":[{"x": Value::Object(params)}]})
-                    )]))]),
-                ),
+                // KEYWORD params are scanned (NATIVE_EFFECT params are opaque: see
+                // `req_ing_009_native_effect_params_not_scanned`).
+                keyword_with("s", Value::Object(params.clone())),
+                keyword_with("s", json!({"deep":[{"x": Value::Object(params)}]})),
                 top,
             ];
             for v in cases {
@@ -1082,6 +1079,22 @@ fn req_ing_009_look_back_fail() {
                 assert_none(&r, LintId::SCHEMA);
             }
         }
+    }
+}
+
+/// REQ-ING-009, REQ-DSL-015 (SRS §14.8): the `params` of a NATIVE_EFFECT are opaque data for the
+/// registered native effect, so a look-back-like key inside them (at any depth) is not reported.
+#[test]
+fn req_ing_009_native_effect_params_not_scanned() {
+    for params in [
+        json!({"lookBack": true}),
+        json!({"deep":[{"x":{"LOOK_BACK": 1}}]}),
+    ] {
+        let v = spell("s", json!([native_with(params)]));
+        assert_decodes(&v);
+        let r = run0(&def_abilities(vec![v]));
+        assert_none(&r, LintId::LOOK_BACK);
+        assert_none(&r, LintId::SCHEMA);
     }
 }
 
@@ -1381,8 +1394,7 @@ fn case(id: LintId) -> Case {
                 one(spell("s", json!([native_with(json!({"lookup":1}))]))),
                 c0(),
             ),
-            fail: one_fail(spell("s", json!([native_with(json!({"lookBack":1}))])))
-                .map(|d| (d, c0())),
+            fail: one_fail(keyword_with("s", json!({"lookBack":1}))).map(|d| (d, c0())),
             severity: E,
             path: a00(),
         }

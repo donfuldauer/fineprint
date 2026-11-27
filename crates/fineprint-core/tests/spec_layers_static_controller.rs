@@ -537,8 +537,14 @@ fn req_layer_001_req_layer_002_property_controller_follows_source() {
             Some(P2),
             true,
         );
+        // Each artifact's base controller and its latest generated layer-2 control effect
+        // (timestamp, new controller), tracked independently of the evaluator.
+        let mut art_base: Vec<PlayerId> = Vec::new();
+        let mut art_latest: Vec<Option<(u64, PlayerId)>> =
+            vec![None; usize::try_from(n).expect("fits")];
         for i in 1..=n {
             let c = player(&mut rng);
+            art_base.push(c);
             env.put_full(
                 oid(i),
                 artifact(&format!("test.artifact_{i}")),
@@ -578,6 +584,10 @@ fn req_layer_001_req_layer_002_property_controller_follows_source() {
                 let to = player(&mut rng);
                 let t = pool.next().expect("pool");
                 steals.push((next_id, steal(target, to, t, EffectOrigin::Resolved)));
+                let slot = &mut art_latest[usize::try_from(target - 1).expect("fits")];
+                if slot.is_none_or(|(lt, _)| t > lt) {
+                    *slot = Some((t, to));
+                }
                 next_id += 1;
             }
         }
@@ -612,9 +622,18 @@ fn req_layer_001_req_layer_002_property_controller_follows_source() {
         assert_eq!(m[&oid(S)].controller, Some(s_final), "{what}: S controller");
         for i in 1..=n {
             let e = &m[&oid(i)];
+            // The expected controller comes from the base controller and the highest-timestamp
+            // layer-2 effect that applies to this artifact, not from the evaluator's output.
+            let idx = usize::try_from(i - 1).expect("fits");
+            let expected = art_latest[idx].map_or(art_base[idx], |(_, p)| p);
+            assert_eq!(
+                e.controller,
+                Some(expected),
+                "{what}: artifact {i} final controller"
+            );
             assert_eq!(
                 is_creature(e),
-                e.controller == Some(s_final),
+                expected == s_final,
                 "{what}: artifact {i} (controller {:?})",
                 e.controller
             );

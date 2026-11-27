@@ -8,7 +8,7 @@
 //! `VERIFIED` and `AUTO_PARSED`, a Warning for `PARTIAL`; `UNSUPPORTED` definitions are not
 //! checked (docs/DECISIONS.md, "#16 FP-015 — Text coverage").
 
-use super::walk::{CardFacts, RawSpan};
+use super::walk::{AbilityFacts, CardFacts, RawSpan};
 use super::{Lint, LintId, LintLocation, Severity, push};
 use crate::card::{CardDefinitionDSL, SupportStatus};
 
@@ -19,10 +19,19 @@ pub(super) fn check(def: &CardDefinitionDSL, facts: &CardFacts<'_>, out: &mut Ve
         SupportStatus::Partial => Severity::Warning,
         SupportStatus::Unsupported => return,
     };
-    for (i, face) in def.faces.iter().enumerate() {
+    // One pass groups the abilities by face (REQ-NFR-006), in their order in `facts`; an
+    // ability whose face index names no face of `def` is not checked, and a face with no
+    // ability keeps an empty bucket, so its whole text is a gap.
+    let mut by_face: Vec<Vec<&AbilityFacts<'_>>> = vec![Vec::new(); def.faces.len()];
+    for a in &facts.abilities {
+        if let Some(bucket) = by_face.get_mut(a.face) {
+            bucket.push(a);
+        }
+    }
+    for (i, (face, abilities)) in def.faces.iter().zip(&by_face).enumerate() {
         let n = u64::try_from(face.text.len()).unwrap_or(u64::MAX);
         let mut covered: Vec<(u64, u64)> = Vec::new();
-        for a in facts.abilities.iter().filter(|a| a.face == i) {
+        for a in abilities {
             match a.span {
                 RawSpan::Absent => {}
                 RawSpan::Malformed => push(

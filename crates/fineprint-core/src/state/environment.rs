@@ -31,7 +31,7 @@
 //!
 //! | `GameState` mutation | Invalidation |
 //! |---|---|
-//! | [`GameState::register_effect`], [`GameState::register_effect_group`], [`GameState::effects_mut`] writes, [`GameState::restamp_static_effects`] | none needed: the cache detects registry changes itself ([`Invalidation::EffectRegistration`]) |
+//! | [`GameState::register_effect`], [`GameState::register_effect_group`], [`GameState::effects_mut`] writes, [`GameState::restamp_static_effects`] | none needed: the cache detects registry changes itself ([`Invalidation::EffectRegistration`]); it compares the registry only, which is enough because through the validated API equal registries imply equal generating-ability links (a link is written only together with its effect, effect ids are never reused, [`GameState::link_effect_generator`] rejects registered effects and [`GameState::remove_effect`] removes an effect and its link together). A state changed by raw writes that alter which ability generates an effect (for example registering through [`GameState::effects_mut`] and linking nothing, or moving a generated effect between states) must declare [`Invalidation::EffectRegistration`] |
 //! | [`GameState::remove_effect`] of a continuous effect | none needed (detected); [`Invalidation::EffectExpiry`] may be declared |
 //! | [`GameState::remove_effect`] or [`GameState::link_effect_generator`] of an ETB effect id | none: not read by layer evaluation |
 //! | [`GameState::stamp_counters`], [`GameState::clear_counter_stamp`] | [`Invalidation::Timestamp`] (counter timestamps, CR 613.7c) |

@@ -18,8 +18,9 @@ use fineprint_base::prng::{ALGORITHM_ID, Pcg64Dxsm};
 use serde::{Deserialize, Serialize};
 
 use super::effects_wire::{
-    EffectsWire, GeneratorWire, Issued, TimestampsWire, effects_from_wire, generators_from_wire,
-    generators_to_wire, ledger_from_wire,
+    EffectsWire, GeneratorWire, Issued, TimestampsWire, check_effects, check_generators,
+    check_ledger_wire, effects_from_wire, generators_from_wire, generators_to_wire,
+    ledger_from_wire,
 };
 use super::{
     DesignationValue, GameState, HistoryLedger, MAX_PLAYERS, PlayerState, STATE_FORMAT_VERSION,
@@ -272,6 +273,27 @@ impl StateWire {
         })
     }
 
+    /// Refuses a wire value of `state` whose layer components decoding would refuse, with the
+    /// decoder's own checks ([`check_effects`], [`check_ledger_wire`], [`check_generators`]):
+    /// a state made inconsistent by raw writes ([`GameState::effects_mut`],
+    /// [`GameState::timestamps_mut`]) is not written (REQ-CORE-001, REQ-NFR-006).
+    ///
+    /// # Errors
+    /// [`StateError::Encode`] with the message decoding would give.
+    fn check_restorable(&self, state: &GameState) -> Result<(), StateError> {
+        let issued = Issued {
+            effect: self.ids.effect,
+            timestamp: self.ids.timestamp,
+        };
+        check_effects(&state.effects, issued)
+            .and_then(|()| check_ledger_wire(&self.timestamps, issued))
+            .and_then(|()| check_generators(&state.generators, &state.effects, issued))
+            .map_err(|e| match e {
+                StateError::Decode(msg) => StateError::Encode(msg),
+                other => other,
+            })
+    }
+
     /// MessagePack bytes of this wire value (structs as maps keyed by member name).
     pub(super) fn to_bytes(&self) -> Result<Vec<u8>, StateError> {
         rmp_serde::to_vec_named(self).map_err(|e| StateError::Encode(e.to_string()))
@@ -294,10 +316,23 @@ impl GameState {
     /// The MessagePack transport form of this state (REQ-CORE-001, REQ-NFR-006): the same
     /// state always gives the same bytes. Never a hash input.
     ///
+    /// The encoder runs the decoder's checks of the layer components first, so a state whose
+    /// effects, timestamps or generating-ability links [`GameState::deserialize`] would refuse
+    /// is not written. Only raw writes ([`GameState::effects_mut`],
+    /// [`GameState::timestamps_mut`]) can make such a state; its [`GameState::state_hash`]
+    /// stays computable.
+    ///
     /// # Errors
-    /// [`StateError::Encode`] if the encoder fails.
+    /// [`StateError::Encode`] if the encoder fails, or with the message
+    /// [`GameState::deserialize`] would give for a layer component it would refuse: an effect
+    /// id or a timestamp (of an effect, its granting effect, an object, counters or a sticker)
+    /// not issued by this state's generators, a non-CDA effect in layer 7a (CR 613.4a), a
+    /// static effect with a source without its generating ability (CR 613.8a), or a generating
+    /// ability for an id not issued, for any other registered effect or on another source.
     pub fn serialize(&self) -> Result<Vec<u8>, StateError> {
-        StateWire::from_state(self).to_bytes()
+        let wire = StateWire::from_state(self);
+        wire.check_restorable(self)?;
+        wire.to_bytes()
     }
 
     /// Rebuilds a state from untrusted MessagePack bytes, validating everything (R12).

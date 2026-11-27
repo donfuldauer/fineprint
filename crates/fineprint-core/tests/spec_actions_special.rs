@@ -33,7 +33,7 @@ fn table() -> Vec<(&'static str, &'static str, SpecialTiming)> {
         ("FORETELL", "CR 116.2h", OwnTurn),
         ("ROLL_PLANAR_DIE", "CR 116.2i", SorceryTiming),
         ("TURN_CONSPIRACY_FACE_UP", "CR 116.2j", AnyPriority),
-        ("PLOT", "CR 116.2k", OwnTurnStackEmpty),
+        ("PLOT", "CR 116.2k", SorceryTiming),
         ("UNLOCK", "CR 116.2m", SorceryTiming),
     ]
 }
@@ -145,8 +145,9 @@ fn req_dsl_013_special_kinds_timing_groups() {
 }
 
 /// REQ-DSL-013: AnyPriority kinds are offered even on the opponent's turn with a non-empty stack
-/// outside a main phase; FORETELL on its own turn with a non-empty stack; PLOT on its own turn
-/// in combat with an empty stack (CR 116.2c, 116.2h, 116.2k).
+/// outside a main phase; FORETELL on its own turn with a non-empty stack; PLOT in a main phase
+/// of its own turn with an empty stack but not in combat or with a non-empty stack (CR 116.2c,
+/// 116.2h, 116.2k, 702.170a).
 #[test]
 fn req_dsl_013_special_timing_edges() {
     // CR 116.2c, CR 116.2d, CR 116.2e, CR 116.2j
@@ -164,17 +165,25 @@ fn req_dsl_013_special_timing_edges() {
     let mut h = situation(true, false, false);
     h.specials.push(special("FORETELL", 10));
     assert_legal(&h, P1, &special_resp(&special("FORETELL", 10)));
-    // CR 116.2k
-    let mut h = situation(true, false, true);
+    // CR 116.2k, 702.170a: main phase of its own turn with an empty stack.
+    let mut h = situation(true, true, true);
     h.specials.push(special("PLOT", 10));
     assert_legal(&h, P1, &special_resp(&special("PLOT", 10)));
+    let mut h = situation(true, false, true);
+    h.specials.push(special("PLOT", 10));
+    assert_illegal(
+        &h,
+        P1,
+        &special_resp(&special("PLOT", 10)),
+        &[Reason::Timing(TimingRequirement::SorceryTiming)],
+    );
     let mut h = situation(true, true, false);
     h.specials.push(special("PLOT", 10));
     assert_illegal(
         &h,
         P1,
         &special_resp(&special("PLOT", 10)),
-        &[Reason::Timing(TimingRequirement::OwnTurnStackEmpty)],
+        &[Reason::Timing(TimingRequirement::SorceryTiming)],
     );
     // CR 116.2f: suspend on the opponent's turn with a non-empty stack, if it could be cast.
     let mut h = situation(false, false, false);

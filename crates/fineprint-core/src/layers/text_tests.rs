@@ -1531,7 +1531,8 @@ fn property_rewrite_and_round_trip() {
     let mut rng = Lcg(612);
     for _ in 0..500 {
         let s = random_stream(&mut rng);
-        assert_eq!(s.clone(), s);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(serde_json::from_value::<TextTokenStream>(json).unwrap(), s);
         let category = *rng.pick(&SUPPORTED);
         let from = *rng.pick(&WORDS);
         let to = *rng.pick(&WORDS);

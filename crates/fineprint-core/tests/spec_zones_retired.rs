@@ -322,11 +322,26 @@ fn req_nfr_006_retired_set_in_equality_and_encoding() {
     assert_eq!(encode_to_vec(&a), encode_to_vec(&a));
 
     // Ceased vs never created.
+    // The survivor must end with the same object id and allocation mark as in `build(1)`
+    // (the second allocated object) without retiring a card: create it in the library, then move
+    // it to the hand.
     let mut never = two();
     let mut gn = idgen();
-    never
-        .create_object(&mut gn, cid(2), pid(1), req(ZoneKind::Hand))
+    let in_library = never
+        .create_object(&mut gn, cid(2), pid(1), req(ZoneKind::Library))
         .unwrap();
+    let survivor = never
+        .move_object(&mut gn, in_library, req(ZoneKind::Hand))
+        .unwrap()
+        .new;
+    assert_eq!(
+        never.object_of_card(cid(2)),
+        a.object_of_card(cid(2)),
+        "same surviving object id"
+    );
+    assert_eq!(never.object_of_card(cid(2)), Some(survivor));
+    assert_eq!(never.all_object_ids(), a.all_object_ids());
+    assert_eq!(tail8(&never), tail8(&a), "same allocation mark");
     assert_ne!(never, a);
     assert_ne!(encode_to_vec(&never), encode_to_vec(&a));
 

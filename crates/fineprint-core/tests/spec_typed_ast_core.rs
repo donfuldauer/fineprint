@@ -332,36 +332,71 @@ fn req_dsl_012_card_name_category_is_unsupported() {
 // (c), (d) state hash of a state holding typed ASTs
 // ---------------------------------------------------------------------------------------------
 
-/// The typed contents a state is built from; one field at a time is varied by (d).
+/// The typed contents a state is built from, one field per stored AST slot, so that (d) can vary
+/// exactly one slot at a time while every other AST value, effect id and timestamp stays fixed.
 #[derive(Clone)]
 struct Contents {
-    literal: i64,
-    token: &'static str,
-    ability_id: &'static str,
+    /// `power` of the layer-1a `CopyValues` characteristics.
+    copy_power: i64,
+    /// `power` of the layer-1b `FaceDown` characteristics.
+    face_down_power: i64,
+    /// The value of the layer-1a `CopyException::SetPower`.
+    set_power: i64,
+    /// The literal token text in the `CopyValues` characteristics' rules text.
+    copy_token: &'static str,
+    /// The literal token text in the `FaceDown` characteristics' rules text.
+    face_down_token: &'static str,
+    /// The literal token text of the layer-3 `SetText`.
+    set_text_token: &'static str,
+    /// The ability id of the ability in the `CopyValues` characteristics.
+    copy_ability: &'static str,
+    /// The ability id of the ability in the `FaceDown` characteristics.
+    face_down_ability: &'static str,
+    /// The ability id of the layer-1a `CopyException::GainAbility`.
+    gain_ability: &'static str,
+    /// The ability id of the layer-6 `AddAbility`.
+    add_ability: &'static str,
 }
 
-const BASE: Contents = Contents {
-    literal: 2,
-    token: "test.word_a",
-    ability_id: "test.typed_grant",
-};
+impl Contents {
+    /// Contents holding the same literal, token text and ability id in every slot of its kind.
+    const fn uniform(literal: i64, token: &'static str, ability_id: &'static str) -> Self {
+        Self {
+            copy_power: literal,
+            face_down_power: literal,
+            set_power: literal,
+            copy_token: token,
+            face_down_token: token,
+            set_text_token: token,
+            copy_ability: ability_id,
+            face_down_ability: ability_id,
+            gain_ability: ability_id,
+            add_ability: ability_id,
+        }
+    }
+}
 
-fn chars_with(c: &Contents) -> Characteristics {
+const BASE: Contents = Contents::uniform(2, "test.word_a", "test.typed_grant");
+
+fn chars_with(power: i64, token: &str, ability_id: &str) -> Characteristics {
     Characteristics {
         rules_text: stream(vec![
-            lit_t("w0", c.token),
+            lit_t("w0", token),
             word("w1", ColorWord, "Red"),
             self_ref("w2"),
         ]),
-        abilities: vec![ability(
-            json!({"abilityId": c.ability_id, "kind": "KEYWORD",
-            "keyword": "TEST_KEYWORD"}),
-        )],
-        power: Some(ValueExpressionAST::Literal(c.literal)),
+        abilities: vec![ability(json!({"abilityId": ability_id, "kind": "KEYWORD",
+            "keyword": "TEST_KEYWORD"}))],
+        power: Some(ValueExpressionAST::Literal(power)),
         toughness: Some(value(json!({"MATH": {"op": "ADD", "lhs": "X",
             "rhs": {"LITERAL": 1}}}))),
         ..support::creature("test.typed_state", 0, 0)
     }
+}
+
+fn grant(ability_id: &str) -> AbilityAST {
+    ability(json!({"abilityId": ability_id, "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}]}))
 }
 
 /// A state holding typed ASTs in every place of C6: Characteristics inside a layer-1a copy and
@@ -371,32 +406,41 @@ fn typed_state(c: &Contents) -> GameState {
     let mut s = state_support::base();
     let t0 = s.stamp_object(oid(1), StampReason::EntersZone).unwrap();
     let _ = t0;
-    let grant = ability(json!({"abilityId": c.ability_id, "kind": "STATIC",
-        "effects": [{"type": "RULE", "kind": "SKIP"}]}));
     let mods: Vec<(Layer, LayerModification)> = vec![
         (
             Layer::L1a,
-            LayerModification::CopyValues(Box::new(chars_with(c))),
+            LayerModification::CopyValues(Box::new(chars_with(
+                c.copy_power,
+                c.copy_token,
+                c.copy_ability,
+            ))),
         ),
         (
             Layer::L1a,
             LayerModification::ApplyCopyExceptions(vec![
-                CopyException::SetPower(ValueExpressionAST::Literal(c.literal)),
-                CopyException::GainAbility(grant.clone()),
+                CopyException::SetPower(ValueExpressionAST::Literal(c.set_power)),
+                CopyException::GainAbility(grant(c.gain_ability)),
             ]),
         ),
         (
             Layer::L1b,
-            LayerModification::FaceDown(Box::new(chars_with(c))),
+            LayerModification::FaceDown(Box::new(chars_with(
+                c.face_down_power,
+                c.face_down_token,
+                c.face_down_ability,
+            ))),
         ),
         (
             Layer::L3,
             LayerModification::SetText(stream(vec![
-                lit_t("s0", c.token),
+                lit_t("s0", c.set_text_token),
                 other_ref("s1", "Test Other"),
             ])),
         ),
-        (Layer::L6, LayerModification::AddAbility(grant)),
+        (
+            Layer::L6,
+            LayerModification::AddAbility(grant(c.add_ability)),
+        ),
     ];
     for (layer, m) in mods {
         let t = s.stamp_resolved_effect().unwrap();
@@ -445,33 +489,97 @@ fn req_nfr_006_typed_state_hash_is_deterministic() {
     assert_eq!(first.state_hash(), h);
 }
 
-/// REQ-NFR-006, REQ-CORE-001 (C7): two states that differ only in one typed AST (a LITERAL
-/// value, a text token, one ability) have different state hashes, and each is deterministic.
+/// REQ-NFR-006, REQ-CORE-001 (C7): two states that differ only in one stored typed AST slot (a
+/// LITERAL value, a text token or one ability, each in exactly one of the places that hold it)
+/// have different state hashes, and each is deterministic. Each variant changes one slot of
+/// `Contents` only; every other AST value, effect id and timestamp is the baseline's.
 #[test]
 fn req_nfr_006_one_typed_ast_changes_the_state_hash() {
     let h = typed_state(&BASE).state_hash();
-    let variants = [
-        Contents {
-            literal: 3,
-            ..BASE.clone()
-        },
-        Contents {
-            token: "test.word_b",
-            ..BASE.clone()
-        },
-        Contents {
-            ability_id: "test.typed_grant_other",
-            ..BASE.clone()
-        },
+    let variants: [(&str, Contents); 10] = [
+        // LITERAL value: one case per stored slot.
+        (
+            "CopyValues power",
+            Contents {
+                copy_power: 3,
+                ..BASE
+            },
+        ),
+        (
+            "FaceDown power",
+            Contents {
+                face_down_power: 3,
+                ..BASE
+            },
+        ),
+        (
+            "CopyException::SetPower",
+            Contents {
+                set_power: 3,
+                ..BASE
+            },
+        ),
+        // Text token: one case per stored slot.
+        (
+            "CopyValues rules text token",
+            Contents {
+                copy_token: "test.word_b",
+                ..BASE
+            },
+        ),
+        (
+            "FaceDown rules text token",
+            Contents {
+                face_down_token: "test.word_b",
+                ..BASE
+            },
+        ),
+        (
+            "SetText token",
+            Contents {
+                set_text_token: "test.word_b",
+                ..BASE
+            },
+        ),
+        // Ability: one case per stored slot.
+        (
+            "CopyValues ability",
+            Contents {
+                copy_ability: "test.typed_grant_other",
+                ..BASE
+            },
+        ),
+        (
+            "FaceDown ability",
+            Contents {
+                face_down_ability: "test.typed_grant_other",
+                ..BASE
+            },
+        ),
+        (
+            "CopyException::GainAbility",
+            Contents {
+                gain_ability: "test.typed_grant_other",
+                ..BASE
+            },
+        ),
+        (
+            "AddAbility",
+            Contents {
+                add_ability: "test.typed_grant_other",
+                ..BASE
+            },
+        ),
     ];
     let mut seen = std::collections::BTreeSet::new();
     seen.insert(h.to_hex());
-    for v in &variants {
+    for (slot, v) in &variants {
         let hv = typed_state(v).state_hash();
-        assert_eq!(typed_state(v).state_hash(), hv);
+        assert_eq!(typed_state(v).state_hash(), hv, "{slot}: deterministic");
+        assert_ne!(hv, h, "{slot}: hashes like the baseline");
         assert!(
             seen.insert(hv.to_hex()),
-            "a variant hashes like another state"
+            "{slot}: a variant hashes like another state"
         );
     }
 }
@@ -488,16 +596,15 @@ fn req_nfr_006_property_state_hash_is_a_function_of_typed_contents() {
     let mut by_hash: std::collections::BTreeMap<String, (i64, &str, &str)> =
         std::collections::BTreeMap::new();
     for _ in 0..40 {
-        let c = Contents {
-            literal: i64::try_from(rng.below(7)).unwrap() - 3,
-            token: tokens[usize::try_from(rng.below(4)).unwrap()],
-            ability_id: ids[usize::try_from(rng.below(3)).unwrap()],
-        };
+        let literal = i64::try_from(rng.below(7)).unwrap() - 3;
+        let token = tokens[usize::try_from(rng.below(4)).unwrap()];
+        let ability_id = ids[usize::try_from(rng.below(3)).unwrap()];
+        let c = Contents::uniform(literal, token, ability_id);
         let a = typed_state(&c);
         let b = typed_state(&c);
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(a.serialize().unwrap(), b.serialize().unwrap());
-        let key = (c.literal, c.token, c.ability_id);
+        let key = (literal, token, ability_id);
         let prev = by_hash.insert(a.state_hash().to_hex(), key);
         assert!(prev.is_none() || prev == Some(key), "{prev:?} vs {key:?}");
     }

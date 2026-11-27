@@ -149,19 +149,38 @@ fn str_member<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<
 }
 
 /// Walks `root` iteratively and records every fact of [`Scan`].
+///
+/// The `params` member of a `NATIVE_EFFECT` instruction is opaque data handed to the
+/// registered native effect (REQ-DSL-015, SRS §14.8), so a look-back-like key inside it is not
+/// a look-back flag and is not recorded (docs/DECISIONS.md, "Gate 06-turn F53 — Look-back scan
+/// skips native-effect params"). Every other fact is still recorded there, and look-back keys
+/// everywhere else (trigger matchers, filters, bindings, keyword `params`) are recorded.
+///
+/// The exemption applies to native-effect *instructions* only (docs/DECISIONS.md, "Gate
+/// 06-turn R17 — Native-effect exemption applies to instructions only"): everything under the
+/// `params` member of a keyword instance (an object whose `kind` is `KEYWORD`) is opaque
+/// keyword data (REQ-DSL-005), so an object there whose `op` is `NATIVE_EFFECT` is data, not
+/// an instruction, and look-back-like keys inside it are recorded (CR 603.10).
 pub(super) fn scan(root: &Value) -> Scan<'_> {
     let mut out = Scan::default();
     let mut arena = vec![Node {
         parent: None,
         seg: Seg::Root,
     }];
-    let mut stack: Vec<(&Value, usize)> = vec![(root, 0)];
-    while let Some((value, node)) = stack.pop() {
+    // (value, arena node, inside native-effect params, inside keyword params)
+    let mut stack: Vec<(&Value, usize, bool, bool)> = vec![(root, 0, false, false)];
+    while let Some((value, node, opaque, data)) = stack.pop() {
         match value {
             Value::Object(map) => {
                 visit_object(map, node, &arena, &mut out);
+                // Below keyword `params` everything is keyword data (REQ-DSL-005), so an object
+                // there is never a native instruction, whatever its `op` (gate 06-turn R17).
+                let native = !data && str_member(map, "op") == Some("NATIVE_EFFECT");
+                let keyword = !data && str_member(map, "kind") == Some("KEYWORD");
                 for (key, child) in map {
-                    let lookback = is_lookback_key(key);
+                    let child_opaque = opaque || (native && key == "params");
+                    let child_data = data || (keyword && key == "params");
+                    let lookback = !child_opaque && is_lookback_key(key);
                     let container = child.is_object() || child.is_array();
                     if !lookback && !container {
                         continue;
@@ -175,7 +194,7 @@ pub(super) fn scan(root: &Value) -> Scan<'_> {
                         out.lookback.push((clip(key, CLIP), render(&arena, idx)));
                     }
                     if container {
-                        stack.push((child, idx));
+                        stack.push((child, idx, child_opaque, child_data));
                     }
                 }
             }
@@ -186,7 +205,7 @@ pub(super) fn scan(root: &Value) -> Scan<'_> {
                             parent: Some(node),
                             seg: Seg::Index(i),
                         });
-                        stack.push((child, arena.len() - 1));
+                        stack.push((child, arena.len() - 1, opaque, data));
                     }
                 }
             }
@@ -253,7 +272,7 @@ pub(super) struct AbilityFacts<'a> {
     /// The encoder's message when the typed ability does not encode (a hand-built value that
     /// breaks an invariant of its type).
     pub(super) error: Option<&'a str>,
-    /// The raw `textSpan`.
+    /// The raw `textSpan` (the typed base span when the ability does not encode).
     pub(super) span: RawSpan,
     /// The raw walk.
     pub(super) scan: Scan<'a>,
@@ -278,14 +297,30 @@ impl<'a> AbilityFacts<'a> {
             .unwrap_or_default();
         link_ids.sort_unstable();
         link_ids.dedup();
+        // An ability that does not encode has no JSON form to read: its span is the typed
+        // base `text_span` (malformed unless `start <= end`), and the failed JSON (`null`) is
+        // kept out of the raw scan (docs/DECISIONS.md, "Gate 06-turn F104 — Span of an
+        // ability that does not encode").
+        let (span, scan) = if error.is_some() {
+            let span = match typed.base().text_span {
+                None => RawSpan::Absent,
+                Some((start, end)) if start <= end => {
+                    RawSpan::Valid(u64::from(start), u64::from(end))
+                }
+                Some(_) => RawSpan::Malformed,
+            };
+            (span, Scan::default())
+        } else {
+            (RawSpan::read(raw), scan(raw))
+        };
         AbilityFacts {
             face,
             index,
             raw,
             typed,
             error,
-            span: RawSpan::read(raw),
-            scan: scan(raw),
+            span,
+            scan,
             link_ids,
         }
     }

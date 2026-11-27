@@ -575,7 +575,7 @@ fn req_test_001_script_errors_stop_the_run() {
     let report = run_scenario(&s, &mut h);
     let f = report.script_error.unwrap();
     assert_eq!(f.step, 0);
-    assert!(f.message.contains("expected a choice of p1"));
+    assert!(f.message.contains("expected a choice of \"p1\""));
     assert!(h.answers.is_empty());
     // The step expects another choice type.
     let mut h = Fake {
@@ -640,4 +640,121 @@ fn req_test_001_model_helpers() {
     assert_eq!(CardRef::Card("test.x".to_owned()).id(), None);
     assert_eq!(DesignationSpec::Bool(false).to_observed(), None);
     assert_eq!(ANSWER_TYPES.len(), 29);
+}
+
+// ---- Gate 06-turn findings F38, F78, F79 (REQ-TEST-001, R12) ----
+
+/// REQ-TEST-001 (F78): the report header is one line whatever the title holds; `title` is the
+/// original.
+#[test]
+fn req_test_001_report_title_is_one_line() {
+    let s = super::tests::edit(
+        "\"title\": \"test sample\"",
+        "\"title\": \"a\\nb\\r\\tc\\u0001\"",
+    );
+    let s = parse_scenario(s.as_bytes()).unwrap();
+    let report = run_scenario(&s, &mut fake());
+    assert_eq!(report.title, "a\nb\r\tc\u{1}");
+    let text = report.to_text();
+    assert_eq!(text.lines().next().unwrap(), "PASS a\\nb\\r\\tc\\u{1}");
+    assert_eq!(text.lines().count(), 1, "{text:?}");
+}
+
+/// REQ-TEST-001 (F79): chooser names in a script mismatch are escaped (one line), while the
+/// comparison uses the originals.
+#[test]
+fn req_test_001_chooser_names_are_escaped_in_script_diagnostics() {
+    let mut s = scenario();
+    s.script[0].expect.as_mut().unwrap().chooser = Some("p1\nx".to_owned());
+    let mut h = fake();
+    let report = run_scenario(&s, &mut h);
+    let f = report.script_error.as_ref().unwrap();
+    assert!(!f.message.contains('\n'), "{:?}", f.message);
+    assert!(f.message.contains("expected a choice of"), "{}", f.message);
+    assert!(h.answers.is_empty());
+    assert_eq!(
+        report.to_text().lines().count(),
+        1 + report.problems().len()
+    );
+    // The pending chooser is escaped too.
+    let mut h = Fake {
+        choices: vec![priority("p2\nz"), priority("p2")],
+        ..fake()
+    };
+    let s = scenario();
+    let report = run_scenario(&s, &mut h);
+    let f = report.script_error.unwrap();
+    assert!(!f.message.contains('\n'), "{:?}", f.message);
+}
+
+/// REQ-TEST-001, R12 (F38): previews are bounded (256 characters, `...` when cut) and the
+/// report keeps at most 256 KiB of them; pass/fail is exact.
+#[test]
+fn req_test_001_assertion_previews_are_bounded() {
+    let ids: Vec<String> = (0..2_000).map(|i| format!("o{i}")).collect();
+    let mut o = Observed::default();
+    o.zones.insert("p1/library".to_owned(), ids.clone());
+    let zone = |contents: Vec<String>| Assertion::Zone {
+        note: None,
+        owner: Some("p1".to_owned()),
+        zone: ZoneName::Library,
+        contents,
+        order: OrderMode::Exact,
+    };
+    let mut wrong = ids.clone();
+    wrong.reverse();
+    let mut s = scenario();
+    s.assertions = (0..1_000)
+        .map(|i| {
+            zone(if i % 2 == 0 {
+                ids.clone()
+            } else {
+                wrong.clone()
+            })
+        })
+        .collect();
+    let outcomes = evaluate_assertions(&s, &o);
+    assert_eq!(outcomes.len(), 1_000);
+    let mut kept = 0usize;
+    let mut omitted = 0usize;
+    for (i, out) in outcomes.iter().enumerate() {
+        assert_eq!(out.passed, i % 2 == 0, "{i}");
+        for text in [&out.expected, &out.actual] {
+            if text == "(omitted: report budget exhausted)" {
+                omitted += 1;
+            } else {
+                assert!(text.chars().count() <= 256 + 3, "{}", text.len());
+                assert!(text.ends_with("..."), "{text}");
+                kept += text.len();
+            }
+        }
+    }
+    assert!(kept <= 256 * 1024, "{kept}");
+    assert!(omitted > 0, "the aggregate budget was reached");
+    assert!(outcomes[0].expected.starts_with("[\"o0\",\"o1\""));
+    assert!(!outcomes[1].expected.contains("omitted"));
+    // A short value is untouched.
+    let mut o = Observed::default();
+    o.life.insert("p2".to_owned(), 20);
+    let mut s = scenario();
+    s.assertions = vec![Assertion::Life {
+        note: None,
+        player: "p2".to_owned(),
+        equals: 20,
+    }];
+    let out = evaluate_assertions(&s, &o);
+    assert_eq!(
+        (out[0].expected.as_str(), out[0].actual.as_str()),
+        ("20", "20")
+    );
+    // Multi-byte text is cut on a character boundary.
+    let mut o = Observed::default();
+    o.zones
+        .insert("p1/library".to_owned(), vec!["\u{20ac}".repeat(400)]);
+    let mut s = scenario();
+    s.assertions = vec![zone(vec!["x".to_owned()])];
+    let out = evaluate_assertions(&s, &o);
+    assert!(!out[0].passed);
+    assert!(out[0].actual.ends_with("..."));
+    assert_eq!(out[0].actual.chars().count(), 256 + 3);
 }

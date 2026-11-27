@@ -162,24 +162,37 @@ fn req_dsl_013_combat_only_on_opponents_combat_and_sorcery_needs_empty_stack() {
     );
 }
 
-/// REQ-DSL-013: a mana ability ignores its timing restriction; its basis is Rule "CR 605.3a"
-/// (CR 117.1d, 605.3a).
+/// REQ-DSL-013: a mana ability with no stated timing is offered whenever the player has
+/// priority; an explicit timing restriction still binds it (CR 117.1d, 605.3a, 605.1, 602.5d).
+/// Its basis is Rule "CR 605.3a" when legal.
 #[test]
 fn req_dsl_013_mana_ability_ignores_timing() {
-    // CR 117.1d, CR 605.3a
+    // CR 117.1d, CR 605.3a, CR 605.1, CR 602.5d
     for t in all_timings() {
         let a = AbilityCandidate {
             timing: t,
             is_mana_ability: true,
             ..ability(10, "test.mana_ability")
         };
-        for (_, mut h) in situations() {
+        for (s, mut h) in situations() {
             h.abilities.push(a.clone());
-            let basis = assert_legal(&h, P1, &ability_resp(&a));
-            assert!(
-                basis.contains(&Allowance::Rule { cr: "CR 605.3a" }),
-                "{t:?}: {basis:?}"
-            );
+            let resp = ability_resp(&a);
+            // No stated timing: always legal. Otherwise the explicit timing applies.
+            let required = if t.is_none() {
+                Ok(())
+            } else {
+                timing_ok(t, &s)
+            };
+            match required {
+                Ok(()) => {
+                    let basis = assert_legal(&h, P1, &resp);
+                    assert!(
+                        basis.contains(&Allowance::Rule { cr: "CR 605.3a" }),
+                        "{t:?}: {basis:?}"
+                    );
+                }
+                Err(req) => assert_illegal(&h, P1, &resp, &[Reason::Timing(req)]),
+            }
         }
     }
 }

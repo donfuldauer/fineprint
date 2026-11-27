@@ -36,9 +36,17 @@ fn template() -> ContinuousEffect {
 }
 
 /// `base()` with `e` registered through `register_effect`, linked to `generator` when the
-/// effect is static with a source.
+/// effect is static with a source. A resolved effect with a selector, which `register_effect`
+/// refuses (CR 611.2c), is written raw under the next effect id instead (the state
+/// `register_effect` built for it before gate 06-turn F26), so every effect field keeps its own
+/// hash variant.
 fn with_effect(e: ContinuousEffect) -> GameState {
     let mut s = base();
+    if e.origin == EffectOrigin::Resolved && matches!(e.affected, Affected::Selector(_)) {
+        let id = s.issue_effect_id().unwrap();
+        s.effects_mut().register(id, e).unwrap();
+        return s;
+    }
     let generator = match (&e.origin, e.source) {
         (EffectOrigin::Static { .. }, Some(src)) => {
             Some(GeneratingAbility::new(src, own_ability(src.get())))
@@ -695,7 +703,9 @@ fn set_pt(layer: Layer, is_cda: bool) -> ContinuousEffect {
 // REQ-LAYER-002, REQ-LAYER-001, CR 613.4a (T6): layer 7a consists only of
 // characteristic-defining abilities (SRS 6.2 item 1): a non-CDA 7a effect is rejected by
 // `register_effect` with the state unchanged; a CDA 7a effect and a non-CDA 7b effect are
-// accepted; `effects_mut().register` still accepts a non-CDA 7a effect (existing behaviour).
+// accepted; `effects_mut().register` still accepts a non-CDA 7a effect (existing behaviour), but
+// `serialize` refuses every raw-built state `deserialize` would refuse (REQ-CORE-001,
+// REQ-CORE-002, REQ-NFR-006).
 #[test]
 fn layer_7a_boundary() {
     let s = base();
@@ -726,6 +736,82 @@ fn layer_7a_boundary() {
         .register(id, set_pt(Layer::L7a, false))
         .unwrap();
     assert_eq!(raw.effects().len(), 1);
+    // REQ-CORE-001, REQ-CORE-002, REQ-NFR-006 (gate 06-turn F31): a state the decoder would
+    // refuse is not serialized, and its state hash is still computable.
+    assert!(
+        raw.serialize().is_err(),
+        "raw non-CDA 7a: serialize must fail"
+    );
+    let _ = raw.state_hash();
+    // Every raw-built state either fails to serialize or decodes to an equal state with the
+    // same state hash.
+    let mut raw_states: Vec<(&str, GameState)> = vec![("non-CDA 7a", raw)];
+    let mut unlinked = s.clone();
+    let id = unlinked.issue_effect_id().unwrap();
+    unlinked
+        .effects_mut()
+        .register(id, set_pt(Layer::L7b, false))
+        .unwrap();
+    raw_states.push(("static with a source and no link", unlinked));
+    let mut unissued = s.clone();
+    let id = unissued.issue_effect_id().unwrap();
+    let mut late = set_pt(Layer::L7b, false);
+    late.origin = EffectOrigin::Resolved;
+    late.source = None;
+    late.timestamp = ts(4);
+    unissued.effects_mut().register(id, late.clone()).unwrap();
+    raw_states.push(("unissued timestamp", unissued));
+    let mut unissued_id = s.clone();
+    let mut early = late.clone();
+    early.timestamp = ts(1);
+    unissued_id
+        .effects_mut()
+        .register(EffectId::new(1), early.clone())
+        .unwrap();
+    raw_states.push(("unissued effect id", unissued_id));
+    let mut granted_late = s.clone();
+    let id = granted_late.issue_effect_id().unwrap();
+    let mut grant = set_pt(Layer::L7b, false);
+    grant.origin = EffectOrigin::Static {
+        granted_at: Some(ts(9)),
+    };
+    granted_late.effects_mut().register(id, grant).unwrap();
+    raw_states.push(("unissued granting timestamp", granted_late));
+    // Valid control, also written raw: a resolved effect with issued id and timestamp.
+    let mut valid_raw = s.clone();
+    let id = valid_raw.issue_effect_id().unwrap();
+    valid_raw.effects_mut().register(id, early).unwrap();
+    raw_states.push(("valid raw write", valid_raw.clone()));
+    for (what, state) in &raw_states {
+        let hash = state.state_hash();
+        if let Ok(bytes) = state.serialize() {
+            let back = GameState::deserialize(&bytes)
+                .unwrap_or_else(|e| panic!("{what}: serialized but does not decode: {e}"));
+            assert_eq!(&back, state, "{what}: decodes equal");
+            assert_eq!(back.state_hash(), hash, "{what}: same hash");
+        }
+    }
+    let refused: Vec<&str> = raw_states
+        .iter()
+        .filter(|(_, state)| state.serialize().is_err())
+        .map(|(what, _)| *what)
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            "non-CDA 7a",
+            "static with a source and no link",
+            "unissued timestamp",
+            "unissued effect id",
+            "unissued granting timestamp"
+        ]
+    );
+    // The valid states round-trip equal with an identical hash.
+    for valid in [&ok, &ok7b, &valid_raw] {
+        let back = GameState::deserialize(&valid.serialize().unwrap()).unwrap();
+        assert_eq!(&back, valid);
+        assert_eq!(back.state_hash(), valid.state_hash());
+    }
 }
 
 // REQ-LAYER-001, REQ-CORE-001, REQ-CORE-002 (T6): every pinned rejection of `register_effect`

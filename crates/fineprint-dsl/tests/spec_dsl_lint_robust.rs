@@ -199,7 +199,7 @@ fn rand_ability_with_base(rng: &mut Rng) -> (Value, Option<Value>) {
             json!([{"cost":"COMPOSITE","costs":[{"cost":"PAY_MANA","mana":"{G}"}]}]),
             json!([search_library()]),
         ),
-        8 => spell("r", json!([native_with(json!({"lookBack": true}))])),
+        8 => keyword_with("r", json!({"lookBack": true})),
         9 => with(
             &replacement("r", "DIES", json!([modify_event()])),
             "tierHint",
@@ -488,14 +488,14 @@ fn deep_raw_text(levels: usize) -> String {
     open + "null" + &close
 }
 
-/// A valid typed SPELL ability `levels` IF levels deep around a NATIVE_EFFECT whose opaque
-/// params hold a look-back key, decoded from JSON built level by level.
+/// A valid typed KEYWORD ability whose `params` nest `levels` objects deep around a look-back
+/// key (KEYWORD params are scanned, unlike NATIVE_EFFECT params), built level by level.
 fn nested_look_back_spell(levels: usize) -> Value {
-    let mut inner = native_with(json!({"lookBack": true}));
+    let mut inner = json!({"lookBack": true});
     for _ in 0..levels {
-        inner = if_then(Value::Array(vec![inner]));
+        inner = json!({"n": inner});
     }
-    spell("deep", Value::Array(vec![inner]))
+    keyword_with("deep", inner)
 }
 
 /// REQ-ING-009, REQ-DSL-010 (R12): an ability nested thousands of JSON levels deep cannot crash

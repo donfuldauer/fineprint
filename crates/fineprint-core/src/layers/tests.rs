@@ -2619,3 +2619,48 @@ fn req_layer_005_results_equal_pre_migration_semantics() {
         assert_eq!(semantic_fingerprint(seed), expected, "seed {seed}");
     }
 }
+
+// REQ-CORE-002, REQ-NFR-006, CR 613.7c, 613.7d, 613.7k: a ledger built once from its entries
+// equals the ledger the stamping operations give for the same timestamps (objects, counters of
+// two holders, stickers), and its entries read back unchanged.
+#[test]
+fn ledger_from_entries_equals_stamped_ledger() {
+    let mut ids: IdGenerator<Timestamp> = IdGenerator::new();
+    let mut stamped = TimestampLedger::new();
+    stamped
+        .stamp_object(&mut ids, o(3), StampReason::EntersZone)
+        .unwrap();
+    stamped
+        .stamp_object(&mut ids, o(1), StampReason::Attached)
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Object(o(1)), "+1/+1")
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Player(p(2)), "poison")
+        .unwrap();
+    stamped
+        .put_counters(&mut ids, CounterHolder::Object(o(3)), "flying")
+        .unwrap();
+    stamped.put_sticker(&mut ids, o(3), 7).unwrap();
+    stamped.put_sticker(&mut ids, o(1), 2).unwrap();
+    let entries = stamped.entries();
+    let built = TimestampLedger::from_entries(
+        entries.objects.clone(),
+        entries.counters.clone(),
+        entries.stickers.clone(),
+    );
+    assert_eq!(built, stamped);
+    let expected_objects: BTreeMap<ObjectId, Timestamp> =
+        [(o(3), ts(1)), (o(1), ts(2))].into_iter().collect();
+    assert_eq!(built.entries().objects, &expected_objects);
+    assert_eq!(
+        built.counter_timestamp(CounterHolder::Player(p(2)), "poison"),
+        Some(ts(4))
+    );
+    assert_eq!(built.sticker_timestamp(o(1), 2), Some(ts(7)));
+    assert_eq!(
+        TimestampLedger::from_entries(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+        TimestampLedger::new()
+    );
+}

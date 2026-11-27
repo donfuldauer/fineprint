@@ -38,16 +38,25 @@
 //! 3. **Announce** (CR 601.2a, 602.2a): [`CastState::put_on_stack`]. Layout choices (split
 //!    half, face, cast mode) are already in [`CastKind`] (CR 709.3, 712.8b, 716.3a, 719.3a,
 //!    721.3a, 708.4).
-//! 4. **Choices** (CR 601.2b, 700.2a, 700.2d): `CHOOSE_MODES`, then `CHOOSE_COSTS_AND_X`.
+//! 4. **Choices** (CR 601.2b, 700.2a, 700.2d): `CHOOSE_MODES` (a mode is offered when some
+//!    cost configuration gives it its targets, or when probing every configuration would exceed
+//!    the per-mode budget, CR-012, CR-013), then `CHOOSE_COSTS_AND_X`; when the spell has an
+//!    alternative or additional cost, a second `CHOOSE_COSTS_AND_X` is sent only when
+//!    [`CastState::symbol_slots`] returns slots for the costs selected in the first, and asks
+//!    those hybrid and Phyrexian symbols (CR 118.9; CR-011). A selection whose costs have no such
+//!    symbol (for example a symbol-free alternative cost) gets one request only, so replay and UI
+//!    callers must not expect a fixed two-request sequence.
 //! 5. **Targets** (CR 601.2c, 115.2-115.6): `CHOOSE_TARGETS`.
 //! 6. **Division** (CR 601.2d): `DIVIDE_VALUE`.
 //! 7. **Legality** (CR 601.2e): every applicable prohibition is checked against the fully
 //!    specified proposal, with no 601.3a leniency, then the cross-slot combination.
 //!
 //! Any illegal step rolls the whole action back (CR 734.1): the state hash after the rollback
-//! equals the hash before the call and the priority player is kept (CR 734.2). Moving cards to
-//! or from a library, shuffling a library and revealing library cards are not reversible
-//! (CR 734.1); a host that does any of these during steps 0-5 is responsible for them.
+//! equals the hash before the call and the priority player is kept (CR 734.2). Moves of cards to
+//! a library, moves from a library to a zone other than the stack, library shuffles and library
+//! reveals are not reversible (CR 734.1) and are the host's concern; the move of a spell cast
+//! from a library to the stack (CR 601.2a) is reversible, and a failed cast returns the spell to
+//! the library it came from (CR 734.1).
 //!
 //! # Prohibition parameter conventions
 //!

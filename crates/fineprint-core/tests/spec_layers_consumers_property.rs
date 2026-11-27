@@ -32,6 +32,10 @@ fn one_case(seed: u64) -> (Vec<u8>, bool) {
     if rng.below(3) == 0 {
         objects.counter(a, "+1/+1", rng.range(1, 3));
     }
+    // REQ-CORE-002: the effects' timestamps 1..=40 are issued by the state's generator first.
+    for _ in 0..40 {
+        t.game.issue_timestamp().expect("timestamp");
+    }
     let n = rng.below(7);
     for _ in 0..n {
         let ts = Timestamp::new(1 + rng.below(40));

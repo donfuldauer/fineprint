@@ -90,8 +90,8 @@ fn two_turns(first_strike: bool) -> (Run, Vec<TC>) {
         &standard(),
         Answers::none(),
     );
-    // CR 103.8a: P1 plays first in a two-player game and skips the draw of turn 1; P2 draws on
-    // turn 2. CR 502.2: the day/night check gets the previous turn's active player.
+    // CR 103.8a: P1 plays first in a two-player game and skips the draw step of turn 1 (it
+    // never begins, F48); P2 draws on turn 2. CR 502.2: the day/night check gets the previous turn's active player.
     let expected = cat(vec![
         quiet_turn(
             P1,
@@ -129,10 +129,13 @@ fn check_two_turns(first_strike: bool) {
         let segs: Vec<Segment> = report.segments.iter().map(|s| s.segment).collect();
         assert_eq!(segs, turn_segments(first_strike));
         for s in &report.segments {
-            let quiet_no_priority = matches!(
-                s.segment,
-                Segment::Step(Step::Untap) | Segment::Step(Step::Cleanup)
-            );
+            // CR 103.8a: P1's skipped first draw step gives no priority (F48).
+            let skipped_draw = active == P1 && s.segment == Segment::Step(Step::Draw);
+            let quiet_no_priority = skipped_draw
+                || matches!(
+                    s.segment,
+                    Segment::Step(Step::Untap) | Segment::Step(Step::Cleanup)
+                );
             assert_eq!(s.heartbeat_ran, !quiet_no_priority, "{s:?}");
             let cleanups = u32::from(s.segment == Segment::Step(Step::Cleanup));
             assert_eq!(s.cleanup_steps, cleanups, "{s:?}");
@@ -231,9 +234,10 @@ fn expire_then_mana_at_every_boundary() {
                 _ => {}
             }
         }
-        // Per turn: 5 phases plus the steps (10 or 11) end, each once.
+        // Per turn: 5 phases plus the steps (10 or 11) end, each once; P1's first draw step is
+        // skipped before it begins and has no end (CR 103.8a, CR 500.11; F48).
         let steps_per_turn = if fs { 11 } else { 10 };
-        assert_eq!(ends, 2 * (5 + steps_per_turn));
+        assert_eq!(ends, 2 * (5 + steps_per_turn) - 1);
         assert_eq!(count(&log, &TC::EmptyMana), ends);
         // CR 500.5a: EndPhase(Combat) follows the end of the end of combat step.
         let eoc = TC::Expire(ExpiryPoint::EndStep(Step::EndOfCombat));
@@ -529,9 +533,9 @@ fn expected_skip(
         }
 }
 
-/// REQ-TURN-002; CR 103.8a, 103.8c, 504.1, 504.2: the draw-rule matrix over rule x player count
-/// x turn x starting player; the heartbeat runs in the draw step whether or not a card is
-/// drawn.
+/// REQ-TURN-002; CR 103.8a, 103.8c, 504.1, 504.2, 500.11: the draw-rule matrix over rule x
+/// player count x turn x starting player; a draw step that is not skipped draws and gives
+/// priority; a skipped one never begins: no host call at all, no priority (F48).
 #[test]
 fn draw_rule_matrix() {
     let rules = [
@@ -562,26 +566,31 @@ fn draw_rule_matrix() {
                         Answers::none(),
                     );
                     let order: Vec<PlayerId> = (1..=players as u64).map(PlayerId::new).collect();
-                    let mut body = Vec::new();
-                    if !skip {
-                        body.push(TC::Draw(P1));
-                    }
-                    body.extend(hb(&order));
-                    assert_eq!(
-                        run.calls(),
-                        step(Step::Draw, body),
-                        "{rule:?} {players} players turn {turn} starting {starting:?}"
-                    );
+                    let label =
+                        format!("{rule:?} {players} players turn {turn} starting {starting:?}");
+                    let expected = if skip {
+                        Vec::new()
+                    } else {
+                        let mut body = vec![TC::Draw(P1)];
+                        body.extend(hb(&order));
+                        step(Step::Draw, body)
+                    };
+                    assert_eq!(run.calls(), expected, "{label}");
                     assert_eq!(
                         run.segment(),
                         SegmentReport {
                             segment: Segment::Step(Step::Draw),
-                            heartbeat_ran: true,
+                            heartbeat_ran: !skip,
                             cleanup_steps: 0
-                        }
+                        },
+                        "{label}"
                     );
-                    assert_eq!(run.requests.len(), players);
-                    assert_eq!(run.requests[0].chooser, P1);
+                    if skip {
+                        assert!(run.requests.is_empty(), "{label}");
+                    } else {
+                        assert_eq!(run.requests.len(), players, "{label}");
+                        assert_eq!(run.requests[0].chooser, P1, "{label}");
+                    }
                 }
             }
         }
@@ -1124,33 +1133,91 @@ fn cleanup_repeat_count_follows_the_work() {
     }
 }
 
-/// REQ-TURN-002; CR 514.3a: more than MAX_CLEANUP_STEPS cleanup steps is a procedure error.
-/// The fake keeps an object on the stack forever and every player has left the game, so each
-/// heartbeat ends at once with no request (keeps the 10 000 iterations fast).
+/// REQ-TURN-002; CR 514.3a, CR 800.4j: every player has left the game and an object stays on
+/// the stack in every cleanup step. The heartbeat finds nobody in the game, so no pass cycle
+/// can complete and no further cleanup step begins: the step ends after one cleanup step (with
+/// its end-step expiry and mana emptying), with no request and no MAX_CLEANUP_STEPS error
+/// (F47).
 #[test]
-fn cleanup_guard_stops_endless_repetition() {
+fn cleanup_with_nobody_left_and_a_stack_stops_after_one_step() {
     let mut fake = cleanup_fake();
     fake.everyone_left = true;
     fake.cleanup_work_forever = Some(Work::Stack);
     let run = cleanup_run(fake, Answers::none());
-    assert_procedure_error(&run.out);
+    assert_eq!(run.segment(), cleanup_report(1, true));
     assert!(run.requests.is_empty());
+    let log = run.calls();
+    assert_eq!(count(&log, &TC::BeginStep(Step::Cleanup)), 1);
+    assert!(log.ends_with(&[
+        TC::Expire(ExpiryPoint::EndStep(Step::Cleanup)),
+        TC::EmptyMana
+    ]));
 }
 
-/// REQ-TURN-002; CR 514.3a: exactly MAX_CLEANUP_STEPS cleanup steps is still allowed.
+/// REQ-TURN-002; CR 514.3a: with every player gone, queued cleanup work (state-based actions
+/// performed in later cleanup steps) does not start another cleanup step (F47).
 #[test]
-fn cleanup_guard_allows_exactly_the_maximum() {
+fn cleanup_with_nobody_left_ignores_queued_work() {
     let mut fake = cleanup_fake();
     fake.everyone_left = true;
     fake.cleanup_work = (1..MAX_CLEANUP_STEPS).map(|_| Some(Work::Sba)).collect();
     let run = cleanup_run(fake, Answers::none());
     let report = run.segment();
     assert_eq!(report.segment, Segment::Step(Step::Cleanup));
-    assert_eq!(report.cleanup_steps, MAX_CLEANUP_STEPS);
-    assert_eq!(
-        count(&run.calls(), &TC::BeginStep(Step::Cleanup)),
-        MAX_CLEANUP_STEPS as usize
-    );
+    assert_eq!(report.cleanup_steps, 1);
+    assert_eq!(count(&run.calls(), &TC::BeginStep(Step::Cleanup)), 1);
+}
+
+/// REQ-TURN-002; CR 514.3a: a live endless cycle (the players are in the game; every cleanup
+/// step has work that needs priority) begins exactly one more cleanup step after each
+/// completed pass cycle and never ends or fails early on its own. The MAX_CLEANUP_STEPS
+/// guard error itself is driven by a unit test through a crate-only hook
+/// (turn::steps_tests::req_turn_002_cleanup_live_endless_cycle_hits_the_guard; docs/DECISIONS.md
+/// "Gate 06-turn F95 — Cleanup guard test"; F95).
+#[test]
+fn cleanup_live_endless_cycle_begins_one_step_per_pass_cycle() {
+    let mut fake = cleanup_fake();
+    fake.cleanup_work_forever = Some(Work::Sba);
+    let begun = std::cell::Cell::new(0usize);
+    let procedure = |w: &mut World, c: &mut ChoiceContext<'_>| {
+        let r = fineprint_core::turn::run_segment(
+            &mut w.host,
+            &mut w.ts,
+            &standard(),
+            Segment::Step(Step::Cleanup),
+            c,
+        );
+        begun.set(count(&w.calls(), &TC::BeginStep(Step::Cleanup)));
+        r
+    };
+    let mut session =
+        fineprint_core::choice::ChoiceSession::start(World::new(fake), procedure).expect("start");
+    for cycle in 0..25usize {
+        assert_eq!(
+            begun.get(),
+            cycle + 1,
+            "cleanup steps begun before cycle {cycle}"
+        );
+        for pass in 0..2usize {
+            let before = begun.get();
+            let req = session
+                .pending()
+                .cloned()
+                .expect("the cycle never ends by itself");
+            assert_eq!(req.choice_type, ChoiceType::PriorityAction);
+            session
+                .submit(req.request_id, ChoiceResponse::PassPriority)
+                .expect("a pass is accepted");
+            // Gate 06-turn R15: the first pass of the pair starts no cleanup step; the second
+            // (all players passed, CR 514.3a) starts exactly one.
+            assert_eq!(
+                begun.get(),
+                before + pass,
+                "cleanup steps begun after pass {pass} of cycle {cycle}"
+            );
+        }
+    }
+    assert_eq!(begun.get(), 26);
 }
 
 // =============================================================================================
@@ -1553,4 +1620,204 @@ fn discard_wrong_answers_are_rejected() {
             },
         )
         .expect("valid");
+}
+
+// =============================================================================================
+// Gate 06-turn: the first draw step, CR 508.8 and CR 510.4 through run_turn
+// =============================================================================================
+
+/// The steps of `phase` that began, in order.
+fn steps_begun(log: &[TC], phase: Phase) -> Vec<Step> {
+    log.iter()
+        .filter_map(|c| match c {
+            TC::BeginStep(s) if s.phase() == phase => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// REQ-TURN-002; CR 103.8a, 103.8c, 500.11, 504.1, 504.2: through `run_turn`, the starting
+/// player's first draw step in a two-player CR_DEFAULT game never begins (no begin-step,
+/// expiry, draw, priority, end-step expiry or mana emptying); the second turn, a three-player
+/// game and NEVER_SKIP keep the whole draw step (F48).
+#[test]
+fn first_draw_step_skip_through_run_turn() {
+    // (players, rule, turns, the draw steps expected per turn)
+    let cases: [(usize, FirstTurnDrawRule, Vec<PlayerId>, Vec<bool>); 3] = [
+        (
+            2,
+            FirstTurnDrawRule::CrDefault,
+            vec![P1, P2],
+            vec![false, true],
+        ),
+        (3, FirstTurnDrawRule::CrDefault, vec![P1], vec![true]),
+        (2, FirstTurnDrawRule::NeverSkip, vec![P1], vec![true]),
+    ];
+    for (players, rule, turns, draws) in cases {
+        let mut fake = TurnFake::new(players);
+        fake.draw_rule = rule;
+        let run = drive(
+            World::new(fake),
+            Proc::Turns(turns.clone()),
+            &standard(),
+            Answers::none(),
+        );
+        let label = format!("{players} players {rule:?}");
+        let log = run.calls();
+        for (n, (&active, &draw)) in turns.iter().zip(&draws).enumerate() {
+            // The turns have distinct active players, so this is turn `n`'s beginning phase.
+            let turn = between(
+                &log,
+                &TC::BeginTurn(active),
+                0,
+                &TC::BeginPhase(Phase::PrecombatMain),
+            );
+            assert_eq!(
+                steps_begun(&turn, Phase::Beginning).contains(&Step::Draw),
+                draw,
+                "{label} turn {n}"
+            );
+            assert_eq!(turn.contains(&TC::Draw(active)), draw, "{label} turn {n}");
+            assert_eq!(
+                turn.contains(&TC::Expire(ExpiryPoint::BeginStep(Step::Draw))),
+                draw,
+                "{label} turn {n}"
+            );
+            assert_eq!(
+                turn.contains(&TC::Expire(ExpiryPoint::EndStep(Step::Draw))),
+                draw,
+                "{label} turn {n}"
+            );
+            // The beginning phase's own boundary work stays.
+            assert!(turn.contains(&TC::Expire(ExpiryPoint::EndPhase(Phase::Beginning))));
+        }
+        let Rep::Turns(reports) = run.rep() else {
+            panic!("not a turn report")
+        };
+        for (report, &draw) in reports.iter().zip(&draws) {
+            let d = report.segments[2];
+            assert_eq!(d.segment, Segment::Step(Step::Draw), "{label}");
+            assert_eq!(d.heartbeat_ran, draw, "{label}");
+            assert_eq!(d.cleanup_steps, 0, "{label}");
+        }
+    }
+}
+
+/// REQ-TURN-002; CR 508.8, CR 506.1: through `run_turn`, no creature declared or put onto the
+/// battlefield attacking skips the declare blockers and combat damage steps (with or without
+/// first strike) and keeps the end of combat step; a creature put onto the battlefield
+/// attacking during declare-attackers priority keeps them (F46).
+#[test]
+fn no_attackers_skips_blockers_and_damage_through_run_turn() {
+    for (attackers, added, fs, expected) in [
+        (
+            false,
+            false,
+            true,
+            vec![
+                Step::BeginningOfCombat,
+                Step::DeclareAttackers,
+                Step::EndOfCombat,
+            ],
+        ),
+        (false, true, false, combat_steps(false)),
+        (true, false, false, combat_steps(false)),
+    ] {
+        let mut fake = TurnFake::new(2).at(2, Some(P1));
+        fake.attackers = attackers;
+        fake.resolve_adds_attacker = added;
+        fake.first_strike = fs;
+        fake.combat_stack = vec![Step::DeclareAttackers];
+        let run = drive(
+            World::new(fake),
+            Proc::Turns(vec![P2]),
+            &standard(),
+            Answers::none(),
+        );
+        let log = run.calls();
+        let label = format!("attackers {attackers}, added {added}, first strike {fs}");
+        assert_eq!(steps_begun(&log, Phase::Combat), expected, "{label}");
+        for s in [
+            Step::DeclareBlockers,
+            Step::FirstStrikeDamage,
+            Step::CombatDamage,
+        ] {
+            if !expected.contains(&s) {
+                assert!(!log.contains(&TC::Combat(s)), "{label} {s:?}");
+                assert!(
+                    !log.contains(&TC::Expire(ExpiryPoint::EndStep(s))),
+                    "{label} {s:?}"
+                );
+            }
+        }
+        assert_eq!(
+            count(&log, &TC::Expire(ExpiryPoint::EndPhase(Phase::Combat))),
+            1
+        );
+        assert!(
+            run.last.host.anomalies.is_empty(),
+            "{:?}",
+            run.last.host.anomalies
+        );
+    }
+}
+
+/// REQ-TURN-002; CR 510.4: through `run_turn`, the first-strike decision is taken as the
+/// combat damage step would begin, after declare-blockers priority: gaining first strike in
+/// that priority adds the first-strike combat damage step, losing it removes the step, and
+/// with no change the flag decides (F49, F18).
+#[test]
+fn first_strike_decided_at_the_damage_boundary_through_run_turn() {
+    for (start, flips, expected) in [
+        (false, true, true),
+        (true, true, false),
+        (false, false, false),
+        (true, false, true),
+    ] {
+        let mut fake = TurnFake::new(2).at(2, Some(P1));
+        fake.first_strike = start;
+        fake.resolve_flips_first_strike = flips;
+        fake.combat_stack = vec![Step::DeclareBlockers];
+        let run = drive(
+            World::new(fake),
+            Proc::Turns(vec![P2]),
+            &standard(),
+            Answers::none(),
+        );
+        let log = run.calls();
+        let label = format!("start {start}, flips {flips}");
+        assert_eq!(
+            steps_begun(&log, Phase::Combat),
+            combat_steps(expected),
+            "{label}"
+        );
+        // The damage split: the first-strike step's combat action precedes the regular one.
+        if expected {
+            let fs = log
+                .iter()
+                .position(|c| *c == TC::Combat(Step::FirstStrikeDamage));
+            let cd = log
+                .iter()
+                .position(|c| *c == TC::Combat(Step::CombatDamage));
+            assert!(fs.expect("first strike") < cd.expect("damage"), "{label}");
+        }
+        // Read once, in the declare blockers step, after the object there resolved.
+        assert_eq!(
+            *run.last.host.first_strike_reads.borrow(),
+            vec![Some(Step::DeclareBlockers)],
+            "{label}"
+        );
+        let Rep::Turns(reports) = run.rep() else {
+            panic!("not a turn report")
+        };
+        let combat: Vec<Step> = reports[0]
+            .segments
+            .iter()
+            .filter_map(|r| match r.segment {
+                Segment::Step(s) if s.phase() == Phase::Combat => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(combat, combat_steps(expected), "{label}");
+    }
 }

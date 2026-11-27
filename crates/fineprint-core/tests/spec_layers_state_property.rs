@@ -14,7 +14,8 @@ mod support;
 use fineprint_base::ids::EffectId;
 use fineprint_core::layers::{
     Affected, ContinuousEffect, CounterHolder, EffectOrigin, Invalidation, LayerCache,
-    LayerModification, StampReason, evaluate_all, evaluated_digest, literal,
+    LayerModification, OrderItem, StampReason, evaluate_all, evaluate_with_order, evaluated_digest,
+    keyword_counter_ability, literal,
 };
 use fineprint_core::state::{GameEnvironment, GameState, GeneratingAbility};
 use support::*;
@@ -249,6 +250,104 @@ fn cache_matches_fresh_after_each_operation() {
     assert_cache_agrees(&mut cache, &s, &w, "remove remover");
     assert!(s.remove_effect(grant));
     assert_cache_agrees(&mut cache, &s, &w, "remove grant");
+}
+
+/// The position of effect `id` among the steps of `rec`.
+fn position_of(rec: &fineprint_core::layers::OrderRecord, id: EffectId) -> usize {
+    rec.steps
+        .iter()
+        .position(|st| st.item == OrderItem::Effect(id))
+        .expect("the effect is a step of the record")
+}
+
+// REQ-LAYER-005, REQ-CORE-002, CR 613.7, CR 613.7a (as cited by `restamp_static_effects`): a
+// ledger-only `stamp_object` leaves the registered remover's own timestamp, so the order record
+// is unchanged (control); `restamp_static_effects` gives the remover the new object timestamp,
+// which moves it after the grant in the fresh order record, and the cache (with the timestamp
+// change declared) agrees with a fresh evaluation both times.
+#[test]
+fn restamp_static_effects_moves_the_remover_in_the_order_record() {
+    let w = prop_world();
+    let mut s = start();
+    let mut cache = LayerCache::new();
+    // The grant's source (o3) holds a later timestamp than the remover's source (o2).
+    let (e, g) = pool(&mut s, 3, 3, 5);
+    let grant = s.register_effect(e, g).unwrap();
+    let (e, g) = pool(&mut s, 2, 2, 1);
+    let remover = s.register_effect(e, g).unwrap();
+    assert_cache_agrees(&mut cache, &s, &w, "registered");
+    let order = |s: &GameState| {
+        let env = GameEnvironment::new(s, &w);
+        evaluate_with_order(s.effects(), &env, oid(5)).unwrap()
+    };
+    let (_, before) = order(&s);
+    assert!(
+        position_of(&before, remover) < position_of(&before, grant),
+        "the remover starts before the grant"
+    );
+
+    // Control: the ledger-only operation leaves the registry, so the order record.
+    let old = s.timestamps().object_timestamp(oid(2)).unwrap();
+    let new = s.stamp_object(oid(2), StampReason::EntersZone).unwrap();
+    assert!(new > old);
+    cache.invalidate(Invalidation::Timestamp);
+    assert_cache_agrees(&mut cache, &s, &w, "stamp_object only");
+    let (_, control) = order(&s);
+    assert_eq!(control, before, "stamp_object alone changes no order");
+
+    // The re-stamp moves the remover's effect to the new object timestamp.
+    s.restamp_static_effects(oid(2), old, new).unwrap();
+    cache.invalidate(Invalidation::Timestamp);
+    assert_cache_agrees(&mut cache, &s, &w, "restamp_static_effects");
+    let (_, after) = order(&s);
+    assert_ne!(after, before, "the order record changed");
+    assert!(
+        position_of(&after, remover) > position_of(&after, grant),
+        "the remover now follows the grant"
+    );
+}
+
+// REQ-LAYER-005, REQ-LAYER-001, CR 122.1b (keyword counters), CR 613.1f, CR 613.7c: a `flying`
+// counter grants flying in layer 6 at its counter timestamp; a layer-6 `RemoveKeyword("flying")`
+// effect stamped between the two counter stamps removes it while the counter is older and not
+// once the counter is re-stamped after it. The cache (timestamp change declared) agrees with a
+// fresh evaluation each time.
+#[test]
+fn restamped_flying_counter_outlives_a_later_keyword_removal() {
+    let mut w = prop_world();
+    w.counter(oid(1), "flying", 1);
+    let mut s = start();
+    let mut cache = LayerCache::new();
+    let flying = keyword_counter_ability("flying");
+    let has_flying = |s: &GameState| {
+        let env = GameEnvironment::new(s, &w);
+        let e = evaluate_all(s.effects(), &env).unwrap();
+        e[&oid(1)].characteristics.abilities.contains(&flying)
+    };
+    s.stamp_counters(CounterHolder::Object(oid(1)), "flying")
+        .unwrap();
+    let t = s.stamp_resolved_effect().unwrap();
+    s.register_effect(
+        resolved(
+            t,
+            Layer::L6,
+            &[1],
+            LayerModification::RemoveKeyword("flying".into()),
+        ),
+        None,
+    )
+    .unwrap();
+    cache.invalidate(Invalidation::Timestamp);
+    assert_cache_agrees(&mut cache, &s, &w, "counter older than the removal");
+    assert!(!has_flying(&s), "removal after the counter: no flying");
+
+    let c2 = s
+        .stamp_counters(CounterHolder::Object(oid(1)), "flying")
+        .unwrap();
+    assert!(c2 > t);
+    cache.invalidate(Invalidation::Timestamp);
+    assert_cache_agrees(&mut cache, &s, &w, "counter re-stamped after the removal");
+    assert!(has_flying(&s), "counter after the removal: flying");
 }
 
 // REQ-CORE-001, REQ-CORE-006, REQ-NFR-006, REQ-LAYER-001, REQ-LAYER-002 (T9 property): over 200

@@ -30,10 +30,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use cache_support::cda_expr;
 use cache_support::support::{add_card_types, creature, kw_ability, literal_of, modify_pt, set_pt};
 use fineprint_base::hash::Digest;
-use fineprint_base::ids::{EffectId, ObjectId, PlayerId};
+use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
 use fineprint_core::layers::{
-    Affected, CounterHolder, Evaluated, Invalidation, LayerCache, LayerModification, MatchContext,
-    ObjectBase, StampReason, evaluate_all,
+    Affected, CounterHolder, EffectOrigin, Evaluated, Invalidation, LayerCache, LayerModification,
+    MatchContext, ObjectBase, StampReason, evaluate_all,
 };
 use fineprint_core::objects::Characteristics;
 use fineprint_core::state::{GameEnvironment, GameState, GeneratingAbility, ObjectWorld};
@@ -441,6 +441,65 @@ fn state_hash_timestamp_order_removal_first() {
     assert_ne!(a, b, "the timestamp order changes the state");
 }
 
+/// CR 613.7a (as cited by the layer-timestamp procedures): re-stamps `source` from its
+/// previous object timestamp (read BEFORE the new stamp) to a new one and checks the registry
+/// changed accordingly: every printed static effect of `source` carries exactly the new object
+/// timestamp, and every granted effect that was later than the previous object timestamp has a
+/// fresh timestamp later than the new object stamp, in its previous relative order. Returns the
+/// number of granted effects that were restamped.
+fn restamp_checked(s: &mut GameState, source: ObjectId) -> usize {
+    let old = s
+        .timestamps()
+        .object_timestamp(source)
+        .expect("the source holds an object timestamp");
+    let mut granted_before: Vec<(Timestamp, EffectId)> = s
+        .effects()
+        .iter()
+        .filter(|(_, e)| {
+            e.source == Some(source)
+                && matches!(
+                    e.origin,
+                    EffectOrigin::Static {
+                        granted_at: Some(_)
+                    }
+                )
+                && e.timestamp > old
+        })
+        .map(|(id, e)| (e.timestamp, id))
+        .collect();
+    granted_before.sort_unstable();
+    let new = s
+        .stamp_object(source, StampReason::TurnedFaceUpOrDown)
+        .expect("stamp");
+    assert!(new > old);
+    s.restamp_static_effects(source, old, new).expect("restamp");
+    let mut printed = 0;
+    for (_, e) in s.effects().iter() {
+        if e.source == Some(source) && e.origin == (EffectOrigin::Static { granted_at: None }) {
+            assert_eq!(
+                e.timestamp, new,
+                "a printed effect takes the new object stamp"
+            );
+            printed += 1;
+        }
+    }
+    assert!(printed > 0, "the source has printed static effects");
+    let mut after: Vec<Timestamp> = Vec::new();
+    for (_, id) in &granted_before {
+        let e = s.effects().get(*id).expect("the granted effect remains");
+        assert!(
+            e.timestamp > new,
+            "a granted effect is later than the new source stamp"
+        );
+        after.push(e.timestamp);
+    }
+    assert!(
+        after.windows(2).all(|w| w[0] < w[1]),
+        "relative order is kept"
+    );
+    granted_before.len()
+}
+
 /// REQ-LAYER-005, REQ-CORE-001: a multi-layer group (`register_effect_group`) and a restamp of
 /// the static effects of a moved object.
 #[test]
@@ -476,14 +535,18 @@ fn state_hash_effect_group_and_restamp() {
     rig.step(&[Invalidation::EffectRegistration]);
     // Object 7 moves: its timestamp changes and its static effects are restamped (CR 613.7a as
     // cited by the layer-timestamp tests).
+    // A granted effect of object 7, later than its current object timestamp.
     rig.both(|s, _| {
-        let old = s
-            .stamp_object(oid(7), StampReason::EntersZone)
-            .expect("stamp");
-        let new = s
-            .stamp_object(oid(7), StampReason::EntersZone)
-            .expect("stamp");
-        s.restamp_static_effects(oid(7), old, new).expect("restamp");
+        let g = s.stamp_resolved_effect().expect("stamp");
+        let mut granted = static_sel(oid(7), g, Layer::L7c, SEL_IS_TAPPED, modify_pt(0, 1));
+        granted.origin = EffectOrigin::Static {
+            granted_at: Some(g),
+        };
+        s.register_effect(granted, Some(gen7())).expect("register");
+    });
+    rig.step(&[Invalidation::EffectRegistration]);
+    rig.both(|s, _| {
+        assert_eq!(restamp_checked(s, oid(7)), 1, "the granted effect restamps");
     });
     rig.step(&[Invalidation::Timestamp]);
     rig.finish("effect_group_and_restamp");
@@ -773,6 +836,10 @@ fn state_hash_random_walk_seed_1() {
 fn state_hash_random_walk_seeds_differ() {
     let a = random_walk(2, 40);
     let b = random_walk(3, 40);
+    // `feed_back` hashes no toughness, so a toughness-only cached/fresh mismatch would not show
+    // in the hashes; the mismatch lists themselves must be empty for both walks.
+    assert!(a.mismatches.is_empty(), "seed 2: {:?}", a.mismatches);
+    assert!(b.mismatches.is_empty(), "seed 3: {:?}", b.mismatches);
     assert_eq!(a.hashes().0, a.hashes().1);
     assert_ne!(a.hashes().0, b.hashes().0);
 }

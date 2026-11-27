@@ -258,6 +258,48 @@ fn req_nfr_004_no_card_data_members() {
     }
 }
 
+/// The generator's strict check of a library file's original bytes (R12): duplicate member
+/// names, unsafe integers, noncharacters and over-deep nesting are refused before the file is
+/// parsed into a plain `Value`, which would silently keep only the last of two duplicate
+/// members and so hash and write an altered definition.
+fn check_source(path: &std::path::Path, bytes: &[u8]) {
+    if let Err(e) = fineprint_dsl::canonical::parse_checked(bytes) {
+        panic!(
+            "{}: not strict canonical-loadable JSON: {e}",
+            path.display()
+        );
+    }
+}
+
+/// REQ-ING-009, REQ-TEST-001 (R12): the generator's source check refuses a library file whose
+/// face holds two `manaCost` members (a duplicate member name), and accepts every library file
+/// as it is.
+#[test]
+fn req_ing_009_seal_library_refuses_duplicate_members() {
+    let paths = card_library::library_paths();
+    let path = paths.first().expect("a library file");
+    let bytes = std::fs::read(path).expect("read card file");
+    for p in &paths {
+        check_source(p, &std::fs::read(p).expect("read card file"));
+    }
+    let text = String::from_utf8(bytes).expect("utf8");
+    let needle = "\"manaCost\":";
+    assert!(text.contains(needle), "{}: has a manaCost", path.display());
+    let duplicated = text.replacen(needle, "\"manaCost\": \"{9}\", \"manaCost\":", 1);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&duplicated).is_ok(),
+        "plain JSON parsing keeps the duplicate silently"
+    );
+    assert_eq!(
+        fineprint_dsl::canonical::parse_checked(duplicated.as_bytes()),
+        Err(fineprint_dsl::canonical::CanonicalError::DuplicateKey(
+            "manaCost".to_owned()
+        ))
+    );
+    let refused = std::panic::catch_unwind(|| check_source(path, duplicated.as_bytes()));
+    assert!(refused.is_err(), "the generator check accepts a duplicate");
+}
+
 /// Generator: rewrites `definitionHash` in place for every library file (README, "Adding a card").
 /// Run: `cargo test -p fineprint-dsl --test spec_dsl_card_library -- --ignored seal_library`.
 #[test]
@@ -265,6 +307,7 @@ fn req_nfr_004_no_card_data_members() {
 fn seal_library() {
     for path in card_library::library_paths() {
         let bytes = std::fs::read(&path).expect("read card file");
+        check_source(&path, &bytes);
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("plain JSON");
         value["definitionHash"] = serde_json::Value::String(String::new());
         let def: CardDefinitionDSL = serde_json::from_value(value)

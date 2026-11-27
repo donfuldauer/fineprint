@@ -343,10 +343,23 @@ fn check_land(ctx: &Ctx<'_>, played: i64, c: &LandCandidate) -> Legality {
         basis.extend(
             ctx.rules
                 .applying(RuleKind::AdditionalLandPlay, ctx.player)
+                // Same count reading as `RuleSet::land_plays_allowed`: only effects that add
+                // at least one play are part of the basis.
+                .filter(|e| additional_land_plays(e) > 0)
                 .map(|e| Allowance::Effect { id: e.id }),
         );
     }
     finish(reasons, basis)
+}
+
+/// The number of additional land plays of an `ADDITIONAL_LAND_PLAY` entry (CR 305.2): `"count"`
+/// when it is a non-negative integer, 1 when absent, 0 otherwise. Mirrors the reading of
+/// `RuleSet::land_plays_allowed`.
+fn additional_land_plays(e: &RuleEntry) -> i64 {
+    match e.modification.params.get("count") {
+        None => 1,
+        Some(v) => v.as_i64().filter(|&n| n >= 0).unwrap_or(0),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -456,9 +469,16 @@ fn check_activate(ctx: &Ctx<'_>, c: &AbilityCandidate) -> Legality {
     if c.summoning_sick && c.requires_tap_symbol {
         reasons.push(Reason::SummoningSick);
     }
-    // CR 117.1d, 605.3a: a mana ability whenever the player has priority, whatever its timing.
-    if !c.is_mana_ability {
-        let failed = match c.timing.unwrap_or(ActivationTiming::Instant) {
+    // CR 117.1d, 605.3a: an unrestricted mana ability whenever the player has priority; CR 605.1,
+    // 602.5d: an explicit timing restriction still binds it. Non-mana abilities with no stated
+    // timing are instant-speed (CR 117.1b, 602.5e).
+    let timing = if c.is_mana_ability {
+        c.timing
+    } else {
+        Some(c.timing.unwrap_or(ActivationTiming::Instant))
+    };
+    if let Some(timing) = timing {
+        let failed = match timing {
             // CR 117.1b, 602.5e: any time with priority.
             ActivationTiming::Instant => None,
             // CR 602.5d, 307.5: the timing rules for casting a sorcery.
@@ -466,9 +486,11 @@ fn check_activate(ctx: &Ctx<'_>, c: &AbilityCandidate) -> Legality {
                 (!t.sorcery_timing()).then_some(TimingRequirement::SorceryTiming)
             }
             ActivationTiming::YourTurn => (!t.is_own_turn()).then_some(TimingRequirement::OwnTurn),
-            ActivationTiming::OpponentTurn => {
-                t.is_own_turn().then_some(TimingRequirement::OpponentTurn)
-            }
+            // An opponent's turn needs an active player other than the acting player: with no
+            // active player (the active player left the game, CR 800.4j) it is not an
+            // opponent's turn.
+            ActivationTiming::OpponentTurn => (t.active_player.is_none() || t.is_own_turn())
+                .then_some(TimingRequirement::OpponentTurn),
             ActivationTiming::CombatOnly => (!t.in_combat()).then_some(TimingRequirement::Combat),
         };
         if let Some(req) = failed {

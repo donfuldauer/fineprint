@@ -347,6 +347,46 @@ fn req_event_001_unattach_unknown_object_errors() {
     assert_eq!(w.snap(), before);
 }
 
+// REQ-EVENT-001, REQ-ZONE-001, CR 701.3d (Gate 06-turn F57): an earlier move of the same batch
+// takes the attachment off the battlefield; a later UnattachFrom of its old id names a link that
+// is already gone, so it is no event and the move stays committed (no rollback). The move's own
+// record is the only one. A plain Unattach of the removed old id still errors and rolls back.
+#[test]
+fn req_event_001_unattach_from_vanished_attachment_is_no_event() {
+    let mut w = World::new();
+    let (host, att) = (bf(&mut w), bf(&mut w));
+    w.ok(attach(att, on(host)));
+    let mut plain = w.clone();
+    let b = w
+        .batch(vec![
+            zc(att, ZoneKind::Graveyard),
+            unattach_from(att, on(host)),
+        ])
+        .expect("UnattachFrom of a vanished attachment does not fail the batch");
+    assert_eq!(b.events.len(), 1, "the UnattachFrom is no event");
+    let m = moved_of(&b.events[0]);
+    assert_eq!(m.old, att);
+    assert_eq!(total_records(&b), vec![rec(att, on(host))]);
+    assert!(w.zones.object(att).is_none(), "the move stays committed");
+    assert!(w.zones.object(m.new).is_some());
+    assert_eq!(
+        w.permanents.attachments_of(on(host)),
+        Vec::<ObjectId>::new()
+    );
+
+    let before = plain.snap();
+    assert_eq!(
+        plain.batch(vec![zc(att, ZoneKind::Graveyard), unattach(att)]),
+        Err(EventError::UnknownObject(att))
+    );
+    assert_eq!(
+        plain.snap(),
+        before,
+        "plain Unattach still rolls the batch back"
+    );
+    assert_eq!(plain.permanents.attached_to(att), Some(on(host)));
+}
+
 // ---------------------------------------------------------------------------------------------
 // 4. no duplicates, rollback
 // ---------------------------------------------------------------------------------------------

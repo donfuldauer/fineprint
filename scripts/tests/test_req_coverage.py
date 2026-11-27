@@ -132,9 +132,14 @@ class TestNegatives(TreeCase):
         self.assertEqual(rc.cfg_test_text("#[cfg(test)]\nuse x;\n"), "")
 
     def test_mod_decls_parsing(self):
-        """REQ-NFR-008: mod_decls reports name, cfg(test) flag and path attribute."""
+        """REQ-NFR-008, REQ-TEST-001: mod_decls reports name, cfg(test) flag, path attribute and
+        the enclosing inline-module path (gate 06-turn F108: the fourth member is new)."""
         text = '#[cfg(test)] #[path = "a b.rs"] mod x;\npub(crate) mod y;\nmod z { }\n'
-        self.assertEqual(rc.mod_decls(text), [("x", True, "a b.rs"), ("y", False, None)])
+        self.assertEqual(rc.mod_decls(text), [("x", True, "a b.rs", ()), ("y", False, None, ())])
+        nested = ('mod a { fn f() { let s = "}"; } // }\n pub mod b { #[cfg(test)] mod c; }\n'
+                  ' mod d; }\nmod e;\n')
+        self.assertEqual(rc.mod_decls(nested), [("c", True, None, ("a", "b")), ("d", False, None, ("a",)),
+                                                ("e", False, None, ())])
 
     def test_resolve_mod_candidates(self):
         """REQ-NFR-008: resolve_mod follows rustc's module-root vs file layout."""
@@ -142,6 +147,51 @@ class TestNegatives(TreeCase):
         self.assertEqual(rc.resolve_mod(P("s/mod.rs"), "t", None), [P("s/t.rs"), P("s/t/mod.rs")])
         self.assertEqual(rc.resolve_mod(P("s/foo.rs"), "t", None), [P("s/foo/t.rs"), P("s/foo/t/mod.rs")])
         self.assertEqual(rc.resolve_mod(P("s/foo.rs"), "t", "x/y.rs"), [P("s/x/y.rs")])
+
+    def test_resolve_mod_inline_candidates(self):
+        """REQ-NFR-008, REQ-TEST-001 (gate 06-turn F108): inside inline modules the module
+        directory gains each inline name, and #[path] is relative to it."""
+        P = pathlib.Path
+        self.assertEqual(rc.resolve_mod(P("s/lib.rs"), "t", None, ("a", "b")),
+                         [P("s/a/b/t.rs"), P("s/a/b/t/mod.rs")])
+        self.assertEqual(rc.resolve_mod(P("s/foo.rs"), "t", None, ("a",)),
+                         [P("s/foo/a/t.rs"), P("s/foo/a/t/mod.rs")])
+        self.assertEqual(rc.resolve_mod(P("s/mod.rs"), "t", "x.rs", ("a",)), [P("s/a/x.rs")])
+        self.assertEqual(rc.resolve_mod(P("s/foo.rs"), "t", "x.rs", ("a",)), [P("s/foo/a/x.rs")])
+        self.assertEqual(rc.resolve_mod(P("s/foo.rs"), "t", "x.rs", ()), [P("s/x.rs")])
+
+    def test_inline_module_test_decl_resolves_through_outer(self):
+        """REQ-NFR-008, REQ-TEST-001 (gate 06-turn F108 (a)): in src/lib.rs, `mod checks;` plus
+        `mod outer { #[cfg(test)] mod checks; }` counts src/outer/checks.rs, never the
+        production src/checks.rs."""
+        write(self.root, "src/lib.rs", "mod checks;\nmod outer {\n    #[cfg(test)]\n    mod checks;\n}\n")
+        write(self.root, "src/checks.rs", "// REQ-ZZZ-001\nfn prod() {}\n")
+        write(self.root, "src/outer/checks.rs", "// REQ-ZZZ-002\n")
+        self.assertEqual(self.ids(), {"REQ-ZZZ-002"})
+        (self.root / "src/outer/checks.rs").unlink()
+        write(self.root, "src/outer/checks/mod.rs", "// REQ-ZZZ-003\n")
+        self.assertEqual(self.ids(), {"REQ-ZZZ-003"})
+
+    def test_top_level_decl_after_inline_module(self):
+        """REQ-NFR-008, REQ-TEST-001 (gate 06-turn F108 (b)): a top-level `#[cfg(test)] mod name;`
+        after a closed inline module still resolves next to the module root."""
+        write(self.root, "src/lib.rs", "mod outer {\n    fn f() {}\n}\n#[cfg(test)]\nmod checks;\n")
+        write(self.root, "src/checks.rs", "// REQ-ZZZ-004\n")
+        write(self.root, "src/outer/checks.rs", "// REQ-ZZZ-005\n")
+        self.assertEqual(self.ids(), {"REQ-ZZZ-004"})
+
+    def test_inline_module_in_non_root_file(self):
+        """REQ-NFR-008, REQ-TEST-001 (gate 06-turn F108 (c)): in a non-root src/foo.rs,
+        `mod inner { #[cfg(test)] mod t; }` resolves to src/foo/inner/t.rs, and a #[path] inside
+        the inline module is relative to src/foo/inner."""
+        write(self.root, "src/foo.rs",
+              'mod inner {\n    #[cfg(test)]\n    mod t;\n    #[cfg(test)]\n    #[path = "p.rs"]\n'
+              '    mod q;\n}\n')
+        write(self.root, "src/foo/inner/t.rs", "// REQ-ZZZ-006\n")
+        write(self.root, "src/foo/inner/p.rs", "// REQ-ZZZ-007\n")
+        write(self.root, "src/foo/t.rs", "// REQ-ZZZ-008\n")
+        write(self.root, "src/p.rs", "// REQ-ZZZ-009\n")
+        self.assertEqual(self.ids(), {"REQ-ZZZ-006", "REQ-ZZZ-007"})
 
     def test_declared_test_files_sorted(self):
         """REQ-NFR-008: declared_test_files returns existing files in sorted order."""

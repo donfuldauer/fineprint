@@ -27,15 +27,16 @@
 //! - Untap (CR 502): phasing (CR 502.1), the day/night check (CR 502.2), then the untap
 //!   (CR 502.3), with one `CHOOSE_UNTAP_SET` request when an effect lets the active player
 //!   choose. No player receives priority (CR 502.4): triggers wait.
-//! - Draw (CR 504): the active player draws (CR 504.1) unless the first-turn rule skips it
-//!   ([`first_turn_draw_skipped`], CR 103.8a-c), then the heartbeat (CR 504.2).
+//! - Draw (CR 504): the active player draws (CR 504.1), then the heartbeat (CR 504.2). When the
+//!   first-turn rule skips the draw step ([`first_turn_draw_skipped`], CR 103.8a-c) the whole
+//!   step is passed over before it begins (CR 500.11): no boundary work, no draw, no priority.
 //! - Main phases: the [`TurnBasedRegistry`] entries of the segment (lore counters at the
 //!   precombat main only, CR 505.4, CR 715.3c, CR 505.1a), then the heartbeat.
 //! - Combat steps: [`TurnHost::combat_step_actions`] (other units), then the heartbeat.
 //! - Cleanup (CR 514): discard to the maximum hand size with one `SELECT_OBJECTS_FROM_ZONE`
 //!   request (CR 514.1), then damage removal and "until end of turn" expiry (CR 514.2), then the
 //!   CR 514.3a check: with nothing to do the step ends without priority; otherwise the heartbeat
-//!   runs and another cleanup step begins.
+//!   runs and another cleanup step begins, unless no player is left in the game.
 //!
 //! # Seams and determinism
 //!
@@ -56,6 +57,7 @@ use crate::choice::{
 };
 use crate::events::{Phase, Step};
 use crate::format::FirstTurnDrawRule;
+use crate::turn::control::FollowUpId;
 use crate::turn::heartbeat::{
     HeartbeatHost, HeartbeatOutcome, HeartbeatState, run_heartbeat, settle_before_priority,
 };
@@ -323,11 +325,42 @@ pub trait TurnHost: HeartbeatHost + AsDynTurnHost {
         choices: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt>;
 
-    /// Whether the combat phase has a first-strike combat damage step (CR 510.4). Default:
-    /// `false`.
+    /// Whether at least one attacking or blocking creature has first strike or double strike
+    /// now, so that the combat damage step about to begin is the first of two (CR 510.4: "as
+    /// the combat damage step begins"). The sequencer asks once per combat phase, after the
+    /// declare blockers step has ended and before the first combat damage step begins, and
+    /// keeps the answer for the rest of that phase (docs/DECISIONS.md "Gate 06-turn F49 —
+    /// First-strike decision at the damage boundary"). Default: `false`.
     fn first_strike_damage_step(&self) -> bool {
         false
     }
+
+    /// Whether any creature was declared as an attacker or put onto the battlefield attacking
+    /// in the current combat phase (CR 508.8). The sequencer asks once per combat phase, after
+    /// the declare attackers step has ended (so after its priority, during which a creature
+    /// may be put onto the battlefield attacking); `false` skips the declare blockers and
+    /// combat damage steps (CR 508.8, CR 506.1) while the end of combat step still runs
+    /// (docs/DECISIONS.md "Gate 06-turn F46 — No attackers skips to end of combat"). Default:
+    /// `true` (the steps run).
+    fn attackers_declared(&self) -> bool {
+        true
+    }
+
+    /// Performs `follow_up`, the "then take another action" part of a skip effect whose turn
+    /// was skipped (CR 614.10b: "That action is considered to be the first thing that happens
+    /// during the next step, phase, or turn to actually occur"). Called by
+    /// [`run_planned_turn`](crate::turn::control::run_planned_turn) for each entry of
+    /// [`PlannedTurn::follow_ups`](crate::turn::control::PlannedTurn::follow_ups), in order,
+    /// after [`TurnHost::begin_turn`] and before the first phase begins (docs/DECISIONS.md
+    /// "Gate 06-turn F40 — Follow-up dispatch").
+    ///
+    /// # Errors
+    /// Whatever the host returns (a pending choice or a failure).
+    fn perform_follow_up(
+        &mut self,
+        follow_up: FollowUpId,
+        choices: &mut ChoiceContext<'_>,
+    ) -> Result<(), Interrupt>;
 
     /// The turn-based action of a combat step (declare attackers or blockers, combat damage).
     /// Default: nothing. Called for the six combat steps, after the begin-step expiry and
@@ -455,6 +488,11 @@ pub struct TurnState {
     heartbeat: HeartbeatState,
     /// The previous turn's active player.
     previous_active: Option<PlayerId>,
+    /// Whether the current turn's first-turn draw-step skip (CR 103.8a) has been applied: only
+    /// the first draw step run in that turn is skipped; a later (added) draw step of the same
+    /// turn runs (Gate 06-turn R9). Reset when a turn starts ([`run_turn`]) and when one ends
+    /// ([`TurnState::record_turn_taken`]).
+    first_turn_draw_skip_used: bool,
 }
 
 impl TurnState {
@@ -474,6 +512,14 @@ impl TurnState {
     #[must_use]
     pub fn previous_active_player(&self) -> Option<PlayerId> {
         self.previous_active
+    }
+
+    /// Records the active player of a turn that finished; the next turn's CR 502.2 day/night
+    /// check reads it (REQ-TURN-002, REQ-TURN-003).
+    pub(crate) fn record_turn_taken(&mut self, active: PlayerId) {
+        self.previous_active = Some(active);
+        // Gate 06-turn R9: the next turn starts with its CR 103.8a skip unconsumed.
+        self.first_turn_draw_skip_used = false;
     }
 }
 
@@ -517,11 +563,12 @@ fn active_player<H: TurnHost + ?Sized>(host: &H, what: &str) -> Result<PlayerId,
         .ok_or_else(|| procedure_error(format!("turn sequencer: {what} without an active player")))
 }
 
-/// CR 103.8: whether `active`'s draw step is skipped. True only on the first turn (turn number
+/// CR 103.8: whether `active`'s normal draw step of the current turn is skipped. True only on the first turn (turn number
 /// 1), when `active` is [`TurnHost::starting_player`] and the rule says skip: `AlwaysSkip`
 /// skips; `NeverSkip` does not; `CrDefault` skips only in a two-player game (CR 103.8a; the
 /// Two-Headed Giant rule CR 103.8b is out of scope; CR 103.8c: other multiplayer games never
-/// skip).
+/// skip). This is a pure query: [`run_segment`] applies the skip to the first draw step run in
+/// the turn only, so a draw step added to that turn by an effect still draws (Gate 06-turn R9).
 #[must_use]
 pub fn first_turn_draw_skipped<H: TurnHost + ?Sized>(host: &H, active: PlayerId) -> bool {
     if host.game().turn().turn_number() != 1 || host.starting_player() != Some(active) {
@@ -551,6 +598,8 @@ pub fn run_turn<H: TurnHost + ?Sized>(
     active: PlayerId,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<TurnReport, Interrupt> {
+    // Gate 06-turn R9: a new turn starts with its CR 103.8a skip unconsumed.
+    state.first_turn_draw_skip_used = false;
     host.begin_turn(active)?;
     let mut segments = Vec::new();
     // CR 500.1: "A turn consists of five phases, in this order ... Each of these phases takes
@@ -567,9 +616,16 @@ pub fn run_turn<H: TurnHost + ?Sized>(
 
 /// Runs one phase of the current turn (REQ-TURN-002): [`TurnHost::begin_phase`], the
 /// [`ExpiryPoint::BeginPhase`] expiry (CR 500.4), each segment of
-/// [`segments_of`]`(phase, host.first_strike_damage_step())` through [`run_segment`], then the
+/// [`segments_of`]`(phase, false)` through [`run_segment`], then the
 /// [`ExpiryPoint::EndPhase`] expiry and [`TurnHost::empty_mana_pools`] (CR 500.5, CR 500.5a).
 /// The active player is the game's; this does not call [`TurnHost::begin_turn`].
+///
+/// In the combat phase two decisions are made as the steps run: once the declare attackers
+/// step has ended, [`TurnHost::attackers_declared`] `false` drops the declare blockers and
+/// combat damage steps (CR 508.8); once the declare blockers step has ended,
+/// [`TurnHost::first_strike_damage_step`] `true` inserts the first-strike combat damage step
+/// before the combat damage step (CR 510.4), and the decision is kept for the rest of the
+/// phase.
 ///
 /// # Errors
 /// As [`run_turn`]; [`ChoiceError::Procedure`] if the game has no active player.
@@ -584,16 +640,39 @@ pub fn run_phase<H: TurnHost + ?Sized>(
     // CR 500.6, CR 500.4.
     host.begin_phase(phase)?;
     host.expire_effects(ExpiryPoint::BeginPhase(phase))?;
-    let segments = segments_of(phase, host.first_strike_damage_step());
-    let mut reports = Vec::with_capacity(segments.len());
-    for segment in segments {
+    let mut segments = segments_of(phase, false);
+    let mut reports = Vec::with_capacity(segments.len() + 1);
+    let mut next = 0;
+    while let Some(&segment) = segments.get(next) {
         reports.push(run_segment(host, state, registry, segment, choices)?);
+        next += 1;
+        match segment {
+            // CR 508.8: "If no creatures are declared as attackers or put onto the battlefield
+            // attacking, skip the declare blockers and combat damage steps."
+            Segment::Step(Step::DeclareAttackers) if !host.attackers_declared() => {
+                segments.retain(|s| !is_blockers_or_damage(*s));
+            }
+            // CR 510.4: decided "as the combat damage step begins"; the second combat damage
+            // step then follows without a new check.
+            Segment::Step(Step::DeclareBlockers) if host.first_strike_damage_step() => {
+                segments.insert(next, Segment::Step(Step::FirstStrikeDamage));
+            }
+            _ => {}
+        }
     }
     // CR 500.5: expiry first, then the mana pools empty (CR 703.4q); "until end of combat"
     // expires here at the end of the combat phase (CR 500.5a).
     host.expire_effects(ExpiryPoint::EndPhase(phase))?;
     host.empty_mana_pools()?;
     Ok(reports)
+}
+
+/// Whether `segment` is a step that CR 508.8 skips: declare blockers or a combat damage step.
+pub(crate) fn is_blockers_or_damage(segment: Segment) -> bool {
+    matches!(
+        segment,
+        Segment::Step(Step::DeclareBlockers | Step::FirstStrikeDamage | Step::CombatDamage)
+    )
 }
 
 /// Runs the registry entries of `segment` for `active`, in registration order.
@@ -610,16 +689,14 @@ fn run_registry<H: TurnHost + ?Sized>(
     Ok(())
 }
 
-/// Runs the heartbeat of the current step (CR 117.3a); [`HeartbeatOutcome::NoPlayerInGame`]
-/// also ends the step.
+/// Runs the heartbeat of the current step (CR 117.3a) and returns how it ended;
+/// [`HeartbeatOutcome::NoPlayerInGame`] also ends the step.
 fn heartbeat<H: TurnHost + ?Sized>(
     host: &mut H,
     state: &mut TurnState,
     choices: &mut ChoiceContext<'_>,
-) -> Result<(), Interrupt> {
-    match run_heartbeat(host, &mut state.heartbeat, choices)? {
-        HeartbeatOutcome::StepEnds | HeartbeatOutcome::NoPlayerInGame => Ok(()),
-    }
+) -> Result<HeartbeatOutcome, Interrupt> {
+    run_heartbeat(host, &mut state.heartbeat, choices)
 }
 
 /// Runs one segment (a step, or a main phase) of the current turn (REQ-TURN-002) with NO phase
@@ -657,6 +734,23 @@ pub fn run_segment<H: TurnHost + ?Sized>(
     if step == Step::Cleanup {
         return run_cleanup(host, state, registry, active, choices);
     }
+    // CR 103.8a: "the player who plays first skips the draw step ... of their first turn";
+    // CR 500.11: "To skip a step ... is to proceed past it as though it didn't exist", so the
+    // step never begins: no begin-step event or expiry, no draw, no registry entry, no
+    // priority, no end-step expiry or mana emptying (CR 614.10a). The rule names "the draw
+    // step" of that turn, so only the first draw step run in the turn is skipped; a draw step
+    // an effect adds to it (CR 500.9, CR 500.10) still runs (Gate 06-turn R9).
+    if step == Step::Draw
+        && !state.first_turn_draw_skip_used
+        && first_turn_draw_skipped(host, active)
+    {
+        state.first_turn_draw_skip_used = true;
+        return Ok(SegmentReport {
+            segment,
+            heartbeat_ran: false,
+            cleanup_steps: 0,
+        });
+    }
     // CR 500.6, CR 500.4.
     host.begin_step(step)?;
     host.expire_effects(ExpiryPoint::BeginStep(step))?;
@@ -668,10 +762,8 @@ pub fn run_segment<H: TurnHost + ?Sized>(
             false
         }
         Step::Draw => {
-            // CR 504.1, CR 703.4d, CR 103.8.
-            if !first_turn_draw_skipped(host, active) {
-                host.draw_card(active, choices)?;
-            }
+            // CR 504.1, CR 703.4d (a skipped first draw step returned above, CR 103.8).
+            host.draw_card(active, choices)?;
             run_registry(host, registry, segment, active, choices)?;
             // CR 504.2.
             heartbeat(host, state, choices)?;
@@ -894,15 +986,18 @@ fn run_cleanup<H: TurnHost + ?Sized>(
         let report = settle_before_priority(host, choices)?;
         let needs_priority =
             report.sba_passes > 1 || report.triggers_stacked > 0 || !host.stack_is_empty();
+        let mut nobody_left = false;
         if needs_priority {
             // CR 514.3a: "then the active player gets priority".
-            heartbeat(host, state, choices)?;
+            nobody_left = heartbeat(host, state, choices)? == HeartbeatOutcome::NoPlayerInGame;
             heartbeat_ran = true;
         }
         // CR 500.5, CR 703.4q.
         host.expire_effects(ExpiryPoint::EndStep(Step::Cleanup))?;
         host.empty_mana_pools()?;
-        if !needs_priority {
+        // With no player in the game no pass cycle can complete, so CR 514.3a never starts
+        // another cleanup step: the step ends here (F47).
+        if !needs_priority || nobody_left {
             return Ok(SegmentReport {
                 segment,
                 heartbeat_ran,

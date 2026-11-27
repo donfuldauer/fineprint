@@ -223,6 +223,17 @@ fn simultaneous_stamps_follow_apnap_and_choice() {
         .unwrap();
     assert_eq!(order_of(&out), vec![21, 20, 30, 11, 10]);
 
+    // Turn order 1, 2, 3 with player 2 active: APNAP is 2, 3, 1 (the turn order read
+    // cyclically from the active player), not 2, 1, 3; each player's objects follow the
+    // per-player choice order.
+    let mut s = GameState::new(1, 3, 20).unwrap();
+    s.set_turn_order(vec![P1, P2, p3]).unwrap();
+    s.set_active_player(Some(P2)).unwrap();
+    let out = s
+        .stamp_objects_simultaneously(&batch, StampReason::EntersZone)
+        .unwrap();
+    assert_eq!(order_of(&out), vec![21, 20, 30, 11, 10]);
+
     // No active player: the turn order 3, 1, 2.
     let mut s = GameState::new(1, 3, 20).unwrap();
     s.set_turn_order(vec![p3, P1, P2]).unwrap();
@@ -481,4 +492,88 @@ fn durable_sub_ids_and_timestamps_are_never_reused() {
     assert!(!used_effects.contains(&id.get()));
     let etb = s.issue_effect_id().unwrap();
     assert!(etb.get() > effect_hw);
+}
+
+// REQ-CORE-002, REQ-CORE-001 (T8, REQ-CORE-005 style): two durable sub-transactions under one
+// outer checkpoint: after the outer rollback the effect-id and timestamp generators stay at or
+// above the highest value EITHER child issued, and the next values exceed both children's.
+#[test]
+fn two_durable_subs_under_one_outer_keep_both_high_water_marks() {
+    let mut txns = Transactions::new(game());
+    let outer = txns.checkpoint();
+
+    // First durable child: one object stamp, one resolved effect.
+    let first = txns.checkpoint();
+    let t1 = txns
+        .state_mut()
+        .stamp_object(oid(2), StampReason::EntersZone)
+        .unwrap();
+    let r1 = txns.state_mut().stamp_resolved_effect().unwrap();
+    let id1 = txns
+        .state_mut()
+        .register_effect(
+            resolved(
+                r1,
+                Layer::L5,
+                &[2],
+                LayerModification::AddColors(ColorBitmask::RED),
+            ),
+            None,
+        )
+        .unwrap();
+    txns.commit_durable(first).unwrap();
+
+    // Second durable child: more stamps and effects, so it holds the higher marks.
+    let second = txns.checkpoint();
+    let t2 = txns
+        .state_mut()
+        .stamp_object(oid(3), StampReason::EntersZone)
+        .unwrap();
+    let r2 = txns.state_mut().stamp_resolved_effect().unwrap();
+    let id2 = txns
+        .state_mut()
+        .register_effect(
+            resolved(
+                r2,
+                Layer::L5,
+                &[3],
+                LayerModification::AddColors(ColorBitmask::BLUE),
+            ),
+            None,
+        )
+        .unwrap();
+    txns.commit_durable(second).unwrap();
+
+    let effect_hw = id1.get().max(id2.get());
+    let ts_hw = t1.get().max(t2.get()).max(r1.get()).max(r2.get());
+    assert!(
+        id2 > id1 && r2 > r1 && t2 > t1,
+        "the children issue in order"
+    );
+
+    txns.rollback(outer).unwrap();
+    let s = txns.state_mut();
+    assert!(
+        s.effects().is_empty(),
+        "the rollback removed both children's effects"
+    );
+    assert!(s.ids().effect.last_issued() >= effect_hw);
+    assert!(last_ts(s) >= ts_hw);
+    let t = s.stamp_object(oid(4), StampReason::EntersZone).unwrap();
+    assert!(t.get() > ts_hw, "timestamp {t:?} reused");
+    let r = s.stamp_resolved_effect().unwrap();
+    assert!(r.get() > ts_hw && r > t, "effect timestamp {r:?} reused");
+    let id = s
+        .register_effect(
+            resolved(
+                r,
+                Layer::L5,
+                &[4],
+                LayerModification::AddColors(ColorBitmask::RED),
+            ),
+            None,
+        )
+        .unwrap();
+    assert!(id.get() > effect_hw, "effect id {id:?} reused");
+    assert!(id > id1 && id > id2);
 }

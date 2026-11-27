@@ -35,8 +35,8 @@ use fineprint_core::state::GameState;
 use fineprint_core::triggers::{PendingTrigger, StackedTrigger, TriggerOrigin, TriggerPlacement};
 use fineprint_core::turn::heartbeat::HeartbeatHost;
 use fineprint_core::turn::{
-    ExpiryPoint, Segment, SegmentReport, TurnBasedRegistry, TurnHost, TurnReport, TurnState,
-    UntapOptions, run_phase, run_segment, run_turn,
+    ExpiryPoint, FollowUpId, Segment, SegmentReport, TurnBasedRegistry, TurnHost, TurnReport,
+    TurnState, UntapOptions, run_phase, run_segment, run_turn,
 };
 use fineprint_core::txn::Transactional;
 
@@ -86,6 +86,8 @@ pub enum TC {
     Prio(PlayerId),
     Resolve,
     Act(PlayerId),
+    /// `TurnHost::perform_follow_up` (CR 614.10b).
+    FollowUp(FollowUpId),
 }
 
 /// What the cleanup-step settle finds, armed by one `end_of_turn_cleanup` call (CR 514.3a).
@@ -122,6 +124,19 @@ pub struct TurnFake {
     pub draw_asks: bool,
     /// Every player has left the game (`has_left_game` is always true).
     pub everyone_left: bool,
+    /// What `attackers_declared` reports (CR 508.8).
+    pub attackers: bool,
+    /// The combat steps whose `combat_step_actions` put one object on the stack, so that the
+    /// step's priority resolves something.
+    pub combat_stack: Vec<Step>,
+    /// Resolving an object in the declare attackers step puts a creature onto the battlefield
+    /// attacking (`attackers` becomes true).
+    pub resolve_adds_attacker: bool,
+    /// Resolving an object in the declare blockers step flips `first_strike` (a creature gains
+    /// or loses first strike during declare-blockers priority).
+    pub resolve_flips_first_strike: bool,
+    /// The current step at each `first_strike_damage_step` call (kept out of `log`).
+    pub first_strike_reads: RefCell<Vec<Option<Step>>>,
     // scripts
     /// One entry per `place_triggers` call (triggers stacked); empty = 0.
     pub place: VecDeque<usize>,
@@ -159,6 +174,11 @@ impl TurnFake {
             sagas: BTreeMap::new(),
             draw_asks: false,
             everyone_left: false,
+            attackers: true,
+            combat_stack: Vec::new(),
+            resolve_adds_attacker: false,
+            resolve_flips_first_strike: false,
+            first_strike_reads: RefCell::new(Vec::new()),
             place: VecDeque::new(),
             cleanup_work: VecDeque::new(),
             cleanup_work_forever: None,
@@ -340,6 +360,12 @@ impl HeartbeatHost for TurnFake {
         } else {
             self.depth -= 1;
         }
+        if self.resolve_adds_attacker && self.phase.1 == Some(Step::DeclareAttackers) {
+            self.attackers = true;
+        }
+        if self.resolve_flips_first_strike && self.phase.1 == Some(Step::DeclareBlockers) {
+            self.first_strike = !self.first_strike;
+        }
         Ok(())
     }
 
@@ -503,7 +529,21 @@ impl TurnHost for TurnFake {
     }
 
     fn first_strike_damage_step(&self) -> bool {
+        self.first_strike_reads.borrow_mut().push(self.phase.1);
         self.first_strike
+    }
+
+    fn attackers_declared(&self) -> bool {
+        self.attackers
+    }
+
+    fn perform_follow_up(
+        &mut self,
+        follow_up: FollowUpId,
+        _choices: &mut ChoiceContext<'_>,
+    ) -> Result<(), Interrupt> {
+        self.push(TC::FollowUp(follow_up));
+        Ok(())
     }
 
     fn combat_step_actions(
@@ -512,6 +552,9 @@ impl TurnHost for TurnFake {
         _choices: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt> {
         self.push(TC::Combat(step));
+        if self.combat_stack.contains(&step) {
+            self.depth += 1;
+        }
         Ok(())
     }
 }
@@ -894,6 +937,8 @@ pub fn combat_steps(first_strike: bool) -> Vec<Step> {
 }
 
 /// The expected log of one quiet two-player turn of `active` (the other player `other`).
+/// `draws == false` is the starting player's first turn: CR 103.8a skips the whole draw step
+/// before it begins (CR 500.11: no boundary work, no draw, no priority; F48).
 pub fn quiet_turn(
     active: PlayerId,
     other: PlayerId,
@@ -909,11 +954,13 @@ pub fn quiet_turn(
         TC::UntapOptions(active),
     ];
     untap_body.extend(untap_body_tail);
-    let mut draw_body = Vec::new();
-    if draws {
-        draw_body.push(TC::Draw(active));
-    }
+    let mut draw_body = vec![TC::Draw(active)];
     draw_body.extend(hb(&order));
+    let draw_step = if draws {
+        step(Step::Draw, draw_body)
+    } else {
+        Vec::new()
+    };
     let combat = combat_steps(first_strike)
         .into_iter()
         .map(|s| step(s, cat(vec![vec![TC::Combat(s)], hb(&order)])))
@@ -925,7 +972,7 @@ pub fn quiet_turn(
             cat(vec![
                 step(Step::Untap, untap_body),
                 step(Step::Upkeep, hb(&order)),
-                step(Step::Draw, draw_body),
+                draw_step,
             ]),
         ),
         phase(Phase::PrecombatMain, hb(&order)),

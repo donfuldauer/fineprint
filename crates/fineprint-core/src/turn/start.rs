@@ -154,12 +154,14 @@ fn shuffle_library<H: GameStartHost + ?Sized>(
 }
 
 /// CR 103.5: the one `MULLIGAN_DECISION` request of `player`; `Ok(Some(bottom))` keeps the hand,
-/// `Ok(None)` takes a mulligan.
+/// `Ok(None)` takes a mulligan. `forced` is the last mulligan (the whole hand goes to the
+/// bottom, so no further mulligan): the player orders the bottom and `TakeMulligan` is rejected.
 fn ask_mulligan<H: GameStartHost + ?Sized>(
     host: &H,
     player: PlayerId,
     taken: u64,
     to_bottom: u64,
+    forced: bool,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<Option<Vec<ObjectId>>, Interrupt> {
     let hand = host.hand(player);
@@ -205,6 +207,10 @@ fn ask_mulligan<H: GameStartHost + ?Sized>(
             }
             Ok(Some(bottom))
         }
+        // CR 103.5: no mulligan once the opening hand would be zero cards (R12: reject).
+        ChoiceResponse::TakeMulligan if forced => Err(procedure_error(
+            "no further mulligan is allowed: the whole hand goes on the bottom",
+        )),
         ChoiceResponse::TakeMulligan => Ok(None),
         _ => Err(procedure_error(
             "the mulligan answer is neither KEEP_HAND nor TAKE_MULLIGAN",
@@ -335,11 +341,15 @@ pub fn run_game_start<H: GameStartHost + ?Sized>(
             let hand_len = u64::try_from(hand.len()).unwrap_or(u64::MAX);
             if c >= size || c >= hand_len {
                 // CR 103.5: the opening hand would be zero cards: no further mulligan; the
-                // player keeps, bottoming the whole hand (ascending ids).
-                host.put_on_library_bottom(p, &hand)?;
+                // player bottoms the whole hand "in any order" (ascending ids on timeout).
+                if !hand.is_empty() {
+                    let ordered = ask_mulligan(host, p, taken_p, hand_len, true, choices)?;
+                    let bottom = ordered.unwrap_or_default();
+                    host.put_on_library_bottom(p, &bottom)?;
+                }
                 continue;
             }
-            match ask_mulligan(host, p, taken_p, c, choices)? {
+            match ask_mulligan(host, p, taken_p, c, false, choices)? {
                 Some(bottom) => host.put_on_library_bottom(p, &bottom)?,
                 None => {
                     mulliganing.push(p);
@@ -360,6 +370,11 @@ pub fn run_game_start<H: GameStartHost + ?Sized>(
         deciding = still;
     }
 
+    // CR 103.5: the opening hands are those kept after the last mulligan, read before the
+    // CR 103.6 pregame actions move cards (REQ-NET-003).
+    let opening_hands: Vec<(PlayerId, Vec<ObjectId>)> =
+        stored.iter().map(|p| (*p, host.hand(*p))).collect();
+
     // CR 103.6: pregame actions, starting player first.
     for &p in &order {
         let eligible = host.pregame_eligible(p);
@@ -374,6 +389,6 @@ pub fn run_game_start<H: GameStartHost + ?Sized>(
             .iter()
             .map(|p| (*p, taken.get(p).copied().unwrap_or(0)))
             .collect(),
-        opening_hands: stored.iter().map(|p| (*p, host.hand(*p))).collect(),
+        opening_hands,
     })
 }

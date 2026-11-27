@@ -15,6 +15,7 @@ use fineprint_core::layers::{LayeredProvider, evaluate};
 use fineprint_core::memory::{
     CharacteristicsProvider, Information, InformationUser, LkiRecord, information_for,
 };
+use fineprint_core::permanent::AttachTarget;
 use fineprint_core::state::GameEnvironment;
 use fineprint_core::zones::{ZoneId, ZoneKind};
 use spec_layers_consumers_support::*;
@@ -221,6 +222,58 @@ fn simultaneous_batch_captures_both_records_before_either_move() {
         assert!(!has_type(c.lki_of(a).characteristics(), GRANTED), "control");
         assert!(!has_type(c.lki_of(b).characteristics(), GRANTED), "control");
         assert_eq!(pt(c.lki_of(b).characteristics()), spt(2, 3), "control");
+    }
+}
+
+// REQ-CORE-003, REQ-LAYER-001; CR 608.2h, 701.3d (a departing permanent's attachment links
+// end), 704.8: in a simultaneous batch where the first departing object `a` is attached to the
+// second object `b`, moving `a` removes the attachment from `b`'s live permanent state, yet
+// `b`'s LKI (captured before either move) still lists `a` in `attached_here`; the attachments
+// are read from the permanent container, not from the snapshot provider, so a capture made
+// after `a` left would lose it. Checked in both submission orders.
+#[test]
+fn simultaneous_batch_lki_keeps_pre_batch_attachment_of_second_object() {
+    for a_first in [true, false] {
+        let mut table = Table::new();
+        let a = table.create(ZoneKind::Battlefield, P1);
+        let b = table.create(ZoneKind::Battlefield, P2);
+        let mut objects = Objects::new();
+        objects.put(a, creature("test.lki_attached_1_1", 1, 1), P1);
+        objects.put(b, creature("test.lki_host_2_3", 2, 3), P2);
+        table
+            .permanents
+            .attach(a, AttachTarget::Permanent(b))
+            .expect("attach succeeds");
+        assert_eq!(
+            table.permanents.attachments_of(AttachTarget::Permanent(b)),
+            vec![a]
+        );
+        let snap = table.game.clone();
+        let env = GameEnvironment::new(&snap, &objects);
+        let layered = LayeredProvider::new(snap.effects(), &env);
+        let events = if a_first {
+            vec![
+                zone_change(a, ZoneKind::Graveyard),
+                zone_change(b, ZoneKind::Graveyard),
+            ]
+        } else {
+            vec![
+                zone_change(b, ZoneKind::Graveyard),
+                zone_change(a, ZoneKind::Graveyard),
+            ]
+        };
+        let done = table.batch(&layered, events);
+        assert!(done.events.iter().all(|e| e.lki_captured));
+        // The link is gone from the live state after the batch.
+        assert!(
+            table
+                .permanents
+                .attachments_of(AttachTarget::Permanent(b))
+                .is_empty()
+        );
+        // The LKI of the host still lists the pre-batch attachment.
+        assert_eq!(table.lki_of(b).attached_here(), &[a], "a_first={a_first}");
+        assert_eq!(table.lki_of(b).zone(), ZoneId::Battlefield);
     }
 }
 

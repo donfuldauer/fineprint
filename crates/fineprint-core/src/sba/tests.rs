@@ -108,17 +108,23 @@ struct World {
     chars: BTreeMap<CardId, Characteristics>,
     env: StoredSbaEnvironment,
     next_card: u64,
+    /// Objects the snapshot lists in `objects()` while `base()` is `None` (gate 06-turn R2).
+    unlisted_base: BTreeSet<ObjectId>,
 }
 
 /// The layer environment and LKI provider over one snapshot of a world.
 struct Snapshot {
     bases: BTreeMap<ObjectId, ObjectBase>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    /// Listed by `objects()` but with no base (an object of unknown base).
+    unlisted_base: BTreeSet<ObjectId>,
 }
 
 impl LayerEnvironment for Snapshot {
     fn objects(&self) -> Vec<ObjectId> {
-        self.bases.keys().copied().collect()
+        let mut ids: Vec<ObjectId> = self.bases.keys().copied().collect();
+        ids.extend(self.unlisted_base.iter().copied());
+        ids
     }
 
     fn base(&self, id: ObjectId) -> Option<ObjectBase> {
@@ -164,7 +170,11 @@ fn snapshot_of(
         );
         counters.insert(id, events.markers().counters(id));
     }
-    Snapshot { bases, counters }
+    Snapshot {
+        bases,
+        counters,
+        unlisted_base: BTreeSet::new(),
+    }
 }
 
 impl World {
@@ -186,6 +196,7 @@ impl World {
             chars: BTreeMap::new(),
             env: StoredSbaEnvironment::default(),
             next_card: 100,
+            unlisted_base: BTreeSet::new(),
         }
     }
 
@@ -234,7 +245,13 @@ impl World {
     }
 
     fn snapshot(&self) -> Snapshot {
-        snapshot_of(&self.zones, &self.events, &self.chars)
+        let mut snap = snapshot_of(&self.zones, &self.events, &self.chars);
+        // Gate 06-turn R2: listed, but its base is unavailable.
+        for &id in &self.unlisted_base {
+            snap.bases.remove(&id);
+        }
+        snap.unlisted_base = self.unlisted_base.clone();
+        snap
     }
 
     /// Executes `event` directly (no bus), for setup.
@@ -926,6 +943,50 @@ fn unknown_layer_object_is_skipped() {
     assert!(w.check().is_empty());
     let out = pass(&mut w);
     assert!(!out.performed);
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 613.1, CR 613.4: the snapshot takes one layer pass; with an
+// object of unknown base on the battlefield the whole-pass evaluation fails, so the snapshot
+// falls back to per-object evaluation: the unknown object is skipped, the others are evaluated.
+#[test]
+fn unknown_layer_object_skipped_others_evaluated() {
+    let mut w = World::new();
+    let ghost = w.creature(1, 0);
+    let dead = w.creature(1, 0);
+    let fine = w.creature(1, 2);
+    // Gate 06-turn R2: the environment lists all three objects but has no base for `ghost`
+    // (removing the card from `chars` would drop it from `objects()` and never fail).
+    w.unlisted_base.insert(ghost);
+    let snap = w.snapshot();
+    assert!(snap.objects().contains(&ghost) && snap.base(ghost).is_none());
+    assert!(
+        crate::layers::evaluate_all(&w.effects, &snap).is_err(),
+        "the premise: the whole-board evaluation fails"
+    );
+    assert_eq!(w.found(obj(dead)), ["704.5f"]);
+    assert!(w.found(obj(ghost)).is_empty());
+    assert!(w.found(obj(fine)).is_empty());
+    pass(&mut w);
+    assert!(w.zones.object(ghost).is_some());
+    assert!(w.zones.object(dead).is_none());
+    assert!(w.zones.object(fine).is_some());
+}
+
+// REQ-SBA-001, REQ-LAYER-001, CR 613.1, CR 613.4: a normal multi-permanent board (all known)
+// is evaluated in one pass and every permanent is read.
+#[test]
+fn multi_permanent_board_each_evaluated() {
+    let mut w = World::new();
+    let a = w.creature(1, 0);
+    let b = w.creature(2, 3);
+    let c = w.creature(1, 1);
+    assert_eq!(w.found(obj(a)), ["704.5f"]);
+    assert!(w.found(obj(b)).is_empty());
+    assert!(w.found(obj(c)).is_empty());
+    pass(&mut w);
+    assert!(w.zones.object(a).is_none());
+    assert!(w.zones.object(b).is_some());
+    assert!(w.zones.object(c).is_some());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4361,6 +4422,73 @@ fn unattached_omits_a_replacement_unattach_whose_attachment_left() {
     assert!(out.unattached.is_empty());
 }
 
+/// Gate 06-turn R18: Equipment `eq` attached to a legal host `b`, optionally `other_host`
+/// (`c`) instead, and a creature D (toughness 0) whose SBA move a replacement turns into
+/// `Instead([ZoneChange D, UnattachFrom eq from b])`, plus `ZoneChange eq` to exile with
+/// `eq_leaves`. Returns (world, eq).
+fn replacement_unattach_from_world(wrong_host: bool, eq_leaves: bool) -> (World, ObjectId) {
+    let mut w = World::new();
+    let b = w.creature(1, 3);
+    let c = w.creature(1, 3);
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(eq, AttachTarget::Permanent(if wrong_host { c } else { b }));
+    let d = w.creature(1, 0);
+    let mut instead = vec![
+        zone_change(d, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        GameEvent::UnattachFrom {
+            attachment: eq,
+            host: AttachTarget::Permanent(b),
+        },
+    ];
+    if eq_leaves {
+        instead.push(zone_change(eq, ZoneKind::Exile, ZoneChangeCause::Other));
+    }
+    w.registry
+        .add(ReplacementEffect::new(
+            e(1),
+            sba_move_of(d),
+            Action::Instead(instead),
+        ))
+        .unwrap();
+    (w, eq)
+}
+
+// REQ-SBA-001, CR 704.5n, CR 704.5p, CR 701.3d (gate 06-turn R18): a replacement turns the SBA
+// move of D into `UnattachFrom(eq, B)` with eq attached to B: eq is unattached, remains on the
+// battlefield and is listed in `unattached`.
+#[test]
+fn unattached_lists_an_unattach_from_produced_by_a_replacement() {
+    let (mut w, eq) = replacement_unattach_from_world(false, false);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.permanents.attached_to(eq), None);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(out.unattached, [eq]);
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d (gate 06-turn R18 control): eq is attached to another host
+// than the `UnattachFrom` names: nothing is unattached and eq is not listed.
+#[test]
+fn unattached_omits_an_unattach_from_of_the_wrong_host() {
+    let (mut w, eq) = replacement_unattach_from_world(true, false);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert!(w.permanents.attached_to(eq).is_some());
+    assert!(out.unattached.is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d (gate 06-turn R18 control): the attachment is unattached
+// and then leaves the battlefield in the same pass: not listed.
+#[test]
+fn unattached_omits_an_unattach_from_whose_attachment_left() {
+    let (mut w, eq) = replacement_unattach_from_world(false, true);
+    let card = w.card_of(eq);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(out.unattached.is_empty());
+}
+
 /// Equipment `eq` attached to player 2 (illegal, CR 704.5n), a creature H2 it may legally equip,
 /// and a creature Q (toughness 3) with one +1/+1 and one -1/-1 counter (CR 704.5q). With
 /// `via_counters`, a replacement turns Q's +1/+1 removal into `Attach eq -> H2`; otherwise a
@@ -6602,4 +6730,251 @@ fn req_sba_001_cr_122_1c_shield_counter_does_not_stop_5g_or_5h() {
         // The LKI shows the shield counter still on it as it died.
         assert_eq!(w.lki.get(c).unwrap().counters().get("shield"), Some(&1));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn F6/F13: the `Prevent` follow-up batches of the SBA batch
+// ---------------------------------------------------------------------------------------------
+
+/// `base` plus a static layer-2 effect of `source` giving `target` to player 2 (CR 613.1b),
+/// registered only while `source` is on the battlefield of `zones` (the effect exists only
+/// while its source does).
+fn control_while_on_battlefield(
+    base: &ContinuousEffects,
+    zones: &Zones,
+    source: ObjectId,
+    target: ObjectId,
+) -> ContinuousEffects {
+    let mut effects = base.clone();
+    if zones
+        .object(source)
+        .is_some_and(|r| r.zone == ZoneId::Battlefield)
+    {
+        effects
+            .register(
+                e(91),
+                ContinuousEffect {
+                    source: Some(source),
+                    controller: p(2),
+                    timestamp: Timestamp::new(91),
+                    layer: Layer::L2,
+                    is_cda: false,
+                    origin: EffectOrigin::Static { granted_at: None },
+                    affected: Affected::Objects(BTreeSet::from([target])),
+                    modification: LayerModification::SetController(p(2)),
+                },
+            )
+            .unwrap();
+    }
+    effects
+}
+
+/// The F13 world of the SBA pass: player 1's 1/1 `t` and player 2's 0-toughness creature `s`
+/// (CR 704.5f), the source of a static effect giving `t` to player 2. The SBA move of `s` is
+/// replaced by `Instead([s to graveyard, 1 damage to player 1])` (CR 614.6); that damage is
+/// prevented and queues `Tap(t)` as a follow-up batch; two `Skip` effects compete for the tap
+/// (CR 616.1). Returns (world, t, s).
+fn f13_sba_world() -> (World, ObjectId, ObjectId) {
+    let mut w = World::new();
+    let t = w.creature(1, 1);
+    let s = w.creature(2, 0);
+    let damage = GameEvent::Damage {
+        source: None,
+        source_controller: None,
+        target: DamageTarget::Player(p(1)),
+        amount: 1,
+        combat: false,
+    };
+    w.registry
+        .add(ReplacementEffect::new(
+            e(10),
+            sba_move_of(s),
+            Action::Instead(vec![
+                zone_change(s, ZoneKind::Graveyard, ZoneChangeCause::Other),
+                damage,
+            ]),
+        ))
+        .unwrap();
+    w.registry
+        .add(ReplacementEffect::new(
+            e(11),
+            EventMatcher::new(BusEventKind::Damage),
+            Action::Prevent {
+                then: vec![GameEvent::Tap { object: t }],
+            },
+        ))
+        .unwrap();
+    for id in [12, 13] {
+        w.registry
+            .add(ReplacementEffect::new(
+                e(id),
+                EventMatcher::new(BusEventKind::Tap),
+                Action::Skip,
+            ))
+            .unwrap();
+    }
+    (w, t, s)
+}
+
+/// One pass over the F13 world: the context's provider is a `LayeredProvider` over the state
+/// before the pass; through `perform_all_relayered` (whose post-batch provider describes the
+/// live state it is given, counting its calls in `calls`) when `relayered`, else through
+/// `perform_all`. Pending and error handling as [`run_pass`].
+fn run_f13_pass(
+    w: &mut World,
+    ch: &mut ChoiceContext<'_>,
+    (t, s): (ObjectId, ObjectId),
+    relayered: bool,
+    calls: &std::cell::Cell<usize>,
+) -> Result<Out, Interrupt> {
+    let before = w.state_hash();
+    let snap = w.snapshot();
+    let pre_effects = control_while_on_battlefield(&w.effects, &w.zones, s, t);
+    let root = crate::layers::LayeredProvider::new(&pre_effects, &snap);
+    let registry = SbaRegistry::standard();
+    let World {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        registry: replacements,
+        effects,
+        chars,
+        env,
+        ..
+    } = w;
+    let mut ctx = EventContext {
+        game,
+        zones,
+        ids,
+        permanents,
+        memories,
+        lki,
+        events,
+        provider: &root,
+    };
+    let result = if relayered {
+        let mut provider =
+            |after: &EventContext<'_>,
+             view: &mut dyn FnMut(&ContinuousEffects, &dyn LayerEnvironment)| {
+                calls.set(calls.get() + 1);
+                let fresh = snapshot_of(after.zones, after.events, chars);
+                let fresh_effects = control_while_on_battlefield(effects, after.zones, s, t);
+                view(&fresh_effects, &fresh);
+            };
+        perform_all_relayered(
+            &registry,
+            &mut ctx,
+            replacements,
+            &pre_effects,
+            &snap,
+            env,
+            ch,
+            &mut provider,
+        )
+    } else {
+        perform_all(
+            &registry,
+            &mut ctx,
+            replacements,
+            &pre_effects,
+            &snap,
+            env,
+            ch,
+        )
+    };
+    settle(w, before, result)
+}
+
+/// Runs one F13 pass on a clone of `w` in a choice session, answering every request with
+/// replacement index 0; returns the run, every request asked and the post-batch provider calls
+/// of each run of the procedure (the start, then one per answer).
+fn drive_f13(
+    w: &World,
+    objects: (ObjectId, ObjectId),
+    relayered: bool,
+) -> (Run, Vec<PendingChoiceRequest>, Vec<usize>) {
+    let calls = std::cell::Cell::new(0);
+    let mut session =
+        ChoiceSession::start(w.clone(), |w: &mut World, ch: &mut ChoiceContext<'_>| {
+            run_f13_pass(w, ch, objects, relayered, &calls)
+        })
+        .unwrap();
+    let mut per_run = vec![calls.replace(0)];
+    let mut asked = Vec::new();
+    loop {
+        let pending = match session.status() {
+            Status::Done { state, output } => {
+                let run = Run {
+                    asked: asked.len(),
+                    state: state.clone(),
+                    out: output.clone(),
+                    hash: session.state_hash(),
+                };
+                return (run, asked, per_run);
+            }
+            Status::Pending(r) => r.clone(),
+        };
+        assert!(asked.len() < 4, "too many requests");
+        session
+            .submit(
+                pending.request_id,
+                ChoiceResponse::SelectReplacement { index: 0 },
+            )
+            .unwrap();
+        per_run.push(calls.replace(0));
+        asked.push(pending);
+    }
+}
+
+// REQ-SBA-001, REQ-EVENT-001, REQ-LAYER-001, REQ-CORE-001; CR 704.3, CR 704.5f, CR 614.6,
+// CR 613.1b, CR 616.1 (gate 06-turn F6/F13): the replacement choice of a `Prevent` follow-up
+// batch of the SBA batch goes to the controller of the tapped creature as evaluated AFTER the
+// SBA batch (player 1: the batch moved the source of the control effect) through
+// `perform_all_relayered`, whose post-batch provider is called once per run for that follow-up
+// batch; `perform_all`, which has no post-batch inputs, keeps the pre-pass provider and asks
+// player 2. Both are deterministic (a second run asks the same request and ends in the same
+// state).
+#[test]
+fn sba_f13_follow_up_chooser_is_controller_after_sba_batch() {
+    let (w, t, s) = f13_sba_world();
+    let card_s = w.card_of(s);
+    // Sanity: before the pass the evaluated controller of `t` is player 2.
+    let snap = w.snapshot();
+    let pre = control_while_on_battlefield(&w.effects, &w.zones, s, t);
+    assert_eq!(
+        crate::layers::LayeredProvider::new(&pre, &snap).controller(t),
+        Some(p(2))
+    );
+
+    let (run, asked, calls) = drive_f13(&w, (t, s), true);
+    assert_eq!(asked.len(), 1);
+    assert!(matches!(
+        asked[0].payload,
+        ChoicePayload::ChooseReplacementEffect { .. }
+    ));
+    assert_eq!(asked[0].reason.cr, "CR 616.1");
+    assert_eq!(asked[0].chooser, p(1));
+    assert_eq!(calls, [1, 1]);
+    let out = run.out.as_ref().expect("the pass failed");
+    assert!(out.performed);
+    assert_eq!(
+        run.state.zone_of_card(card_s),
+        Some(ZoneId::Graveyard(p(2)))
+    );
+    assert!(!run.state.permanents.get(t).unwrap().status().tapped);
+
+    let (again, asked_again, _) = drive_f13(&w, (t, s), true);
+    assert_eq!(asked_again, asked);
+    assert_eq!(again.hash, run.hash);
+    assert_eq!(again.out, run.out);
+
+    let (stale, asked_stale, calls) = drive_f13(&w, (t, s), false);
+    assert_eq!(asked_stale.len(), 1);
+    assert_eq!(asked_stale[0].chooser, p(2));
+    assert_eq!(calls, [0, 0]);
+    stale.out.expect("the pass failed");
 }

@@ -39,9 +39,12 @@
 //!   characteristics and one application each), `O(k^2)` per layer; only when no step is
 //!   independent (a dependency loop) is the whole relation, `O(k^2)` trials, computed. Each
 //!   trial of a selector effect also asks [`LayerEnvironment::matches`]. A pass is therefore
-//!   about `O(N * sum of k^2 over the layers)` trial applications plus `O(E * k)` for the
-//!   foreign views, and copies each object's state once (at the start of layer 7a, moved, not
-//!   cloned).
+//!   about `O(N * sum of k^2 over the layers)` trial applications plus the foreign views, and
+//!   copies each object's state once (at the start of layer 7a, moved, not cloned). The
+//!   foreign views of a layer cost the sum, over the sourced static effects of the layer, of
+//!   one extra run of the layer (`run_layer`) on that effect's source, with the same dependency
+//!   ordering as the main pass: up to `O(k^2)` trials each, where `k` is the number of steps of
+//!   that source in the layer, even without a dependency loop.
 //! - A hit costs one comparison of the registry with the snapshot (`O(E)`, done once per
 //!   [`LayerCache::evaluate_all`] call and once per [`LayerCache::evaluate`] call), one ordered
 //!   map lookup (`O(log N)`) and one clone of the stored [`Evaluated`].

@@ -703,6 +703,22 @@ impl StateHost {
             }
         }
         let objects = setup.objects();
+        // Every id (players and objects together) is declared once: the typed `Setup` is a
+        // public input, so the host checks it as the parser does (R12).
+        let mut declared: BTreeSet<&str> = BTreeSet::new();
+        for id in setup
+            .players
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(objects.iter().map(|o| o.id.as_str()))
+        {
+            if !declared.insert(id) {
+                return Err(format!(
+                    "id {} is declared more than once",
+                    super::error::quote(id)
+                ));
+            }
+        }
         for o in setup.battlefield.iter().chain(&setup.shared_exile) {
             if o.face_down {
                 return Err(unsupported(format!(
@@ -711,7 +727,25 @@ impl StateHost {
                 )));
             }
         }
+        // A shared-exile object is no permanent: its permanent status fields would be dropped,
+        // so any non-default value is refused rather than silently ignored.
+        for o in &setup.shared_exile {
+            if let Some(field) = shared_exile_field(o) {
+                return Err(unsupported(format!(
+                    "{field} on the shared-exile object {}",
+                    super::error::quote(&o.id)
+                )));
+            }
+        }
         for o in &objects {
+            // R11: every card the setup uses has a required definitionHash (checked above).
+            if !setup.card_database.definition_hashes.contains_key(&o.card) {
+                return Err(format!(
+                    "card {} used by object {} has no entry in cardDatabase.definitionHashes",
+                    super::error::quote(&o.card),
+                    super::error::quote(&o.id)
+                ));
+            }
             let Some(def) = self.cards.get(&o.card) else {
                 return Err(format!(
                     "card {} is not loaded",
@@ -928,7 +962,7 @@ impl StateHost {
             }
         }
         stamped.sort_unstable();
-        for (_, _, id) in stamped {
+        for &(_, _, id) in &stamped {
             world
                 .game
                 .stamp_object(id, StampReason::EntersZone)
@@ -981,6 +1015,16 @@ impl StateHost {
             world
                 .with_context(|ctx| ctx.execute(crate::events::EventInstance::new(e)))
                 .map_err(|e| format!("setup event: {e}"))?;
+        }
+        // The attachments above issued fresh timestamps (CR 701.3c). The setup's `timestamp` is
+        // the authored order of the battlefield, so every battlefield object is stamped again,
+        // in the same order as the first pass: each ends later than every setup event and in
+        // exactly the authored relative order (docs/DECISIONS.md "Gate 06-turn F35").
+        for &(_, _, id) in &stamped {
+            world
+                .game
+                .stamp_object(id, StampReason::EntersZone)
+                .map_err(|e| format!("timestamp: {e}"))?;
         }
         if let Some(p) = &setup.priority
             && *p != setup.turn.active_player
@@ -1144,6 +1188,31 @@ impl StateHost {
         o.pending = self.pending();
         o.result = result(w, &order);
         o
+    }
+}
+
+/// The first shared-exile setup field with a non-default value, if any (camelCase, as in the
+/// scenario format). These fields describe a permanent or an attachment; an exiled object has
+/// neither, so the host refuses them instead of dropping them.
+fn shared_exile_field(o: &ObjectSetup) -> Option<&'static str> {
+    if o.tapped {
+        Some("tapped")
+    } else if o.flipped {
+        Some("flipped")
+    } else if o.phased_out {
+        Some("phasedOut")
+    } else if o.designations.values().any(|v| designation(v).is_some()) {
+        Some("designations")
+    } else if o.controller.as_ref().is_some_and(|c| *c != o.owner) {
+        Some("controller")
+    } else if o.attached_to.is_some() {
+        Some("attachedTo")
+    } else if o.timestamp.is_some() {
+        Some("timestamp")
+    } else if o.controlled_since_turn.is_some() {
+        Some("controlledSinceTurn")
+    } else {
+        None
     }
 }
 
@@ -1627,6 +1696,69 @@ mod tests {
             (Some(Phase::Combat), Some(Step::CombatDamage))
         );
         assert_eq!(w.player_name(PlayerId::new(42)), "#player42");
+    }
+
+    /// The id of the object called `name` in `w`.
+    fn named(w: &World, name: &str) -> ObjectId {
+        w.zones
+            .contents(ZoneId::Battlefield)
+            .iter()
+            .copied()
+            .find(|&id| w.object_name_in(&w.zones, id).as_deref() == Some(name))
+            .unwrap()
+    }
+
+    #[test]
+    fn req_test_001_setup_keeps_the_authored_timestamp_order_across_attach() {
+        // REQ-TEST-001: `timestamp` is the setup order of the battlefield, attachments
+        // included (docs/DECISIONS.md "Gate 06-turn F35"). Declared out of order on purpose:
+        // the other permanent first, then the host, then the attachment.
+        let def = CardDefinitionDSL::from_json(FLIER).unwrap();
+        let text = format!(
+            r#"{{"pzlVersion":1,"title":"t","requirements":["REQ-TEST-001"],"cr":[],"format":"f",
+"rulesBaseline":"b","cardDatabase":{{"version":"v","definitionHashes":{{"test.flier_2_2":"{}"}}}},
+"prngSeed":3,"players":[{{"id":"p1","life":20}},{{"id":"p2","life":20}}],
+"battlefield":[{{"id":"z","card":"test.flier_2_2","owner":"p1","timestamp":3}},
+{{"id":"h","card":"test.flier_2_2","owner":"p2","timestamp":2}},
+{{"id":"a","card":"test.flier_2_2","owner":"p1","attachedTo":"h","timestamp":1}}],
+"turn":{{"number":2,"activePlayer":"p1","phase":"BEGINNING","step":"UPKEEP"}},
+"priority":null,"assertions":[]}}"#,
+            def.definition_hash
+        );
+        let s = parse_scenario(text.as_bytes()).unwrap();
+        let mut h = StateHost::new();
+        h.add_card(def).unwrap();
+        let w = h.build_world(&s.setup).unwrap();
+        let ts = |name: &str| {
+            w.game
+                .timestamps()
+                .object_timestamp(named(&w, name))
+                .unwrap()
+        };
+        assert!(ts("a") < ts("h"), "attachment before its host");
+        assert!(ts("h") < ts("z"), "host before the later permanent");
+        // The attach really happened and issued its timestamp (CR 701.3c); the authored
+        // stamps come after it, so it cannot reorder the battlefield.
+        assert_eq!(
+            w.permanents.attached_to(named(&w, "a")),
+            Some(AttachTarget::Permanent(named(&w, "h")))
+        );
+        let attached: Vec<_> = w
+            .events
+            .log()
+            .batches()
+            .iter()
+            .flat_map(|b| &b.events)
+            .filter_map(|e| match e.outcome {
+                Outcome::Attached { timestamp } => Some(timestamp),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attached.len(), 1);
+        assert!(attached[0] < ts("a"));
+        // R3: the same setup builds the same state.
+        let again = h.build_world(&s.setup).unwrap();
+        assert_eq!(again.state_hash(), w.state_hash());
     }
 
     #[test]

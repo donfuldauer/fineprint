@@ -108,6 +108,22 @@ impl TimestampLedger {
         }
     }
 
+    /// A ledger holding exactly the given entries, built once (crate-internal: the wire decoder
+    /// of the game state, which has checked every timestamp against the state's generator
+    /// first; REQ-CORE-001, REQ-NFR-006). Equal to the ledger the stamping operations produce
+    /// when they issue those timestamps; no entry is re-stamped.
+    pub(crate) fn from_entries(
+        objects: BTreeMap<ObjectId, Timestamp>,
+        counters: BTreeMap<(CounterHolder, String), Timestamp>,
+        stickers: BTreeMap<(ObjectId, u32), Timestamp>,
+    ) -> TimestampLedger {
+        TimestampLedger {
+            objects,
+            counters,
+            stickers,
+        }
+    }
+
     /// Gives `id` a new, strictly later timestamp (CR 613.7d, 613.7e, 613.7f, 613.7g, 613.7h,
     /// 613.7i, 613.7j; every reason stamps the same way), then gives every sticker on `id` a
     /// new timestamp immediately after it, keeping the stickers' relative order (CR 613.7k).

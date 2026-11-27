@@ -352,7 +352,17 @@ fn req_dsl_003_010_012_nfr_006_from_json_schema_per_position() {
         let mut v = good.clone();
         v["faces"][0].as_object_mut().unwrap().remove(member);
         let d = load(&serde_json::to_vec(&redigested(v)).unwrap()).expect("absent member loads");
-        assert!(d.faces[0].power.is_none() || d.faces[0].toughness.is_none());
+        // Exactly the removed member is absent; the other keeps its original value.
+        let original = &sealed(full()).faces[0];
+        if member == "power" {
+            assert_eq!(d.faces[0].power, None, "{member} removed");
+            assert!(original.toughness.is_some(), "the fixture has a toughness");
+            assert_eq!(d.faces[0].toughness, original.toughness, "{member} removed");
+        } else {
+            assert_eq!(d.faces[0].toughness, None, "{member} removed");
+            assert!(original.power.is_some(), "the fixture has a power");
+            assert_eq!(d.faces[0].power, original.power, "{member} removed");
+        }
     }
     // An unsafe LITERAL is a document-level error before any AST check (decision #159 FP-140).
     let mut v = good.clone();
@@ -845,10 +855,43 @@ fn req_nfr_006_over_deep_positions_are_errors() {
             format!("\"partnerAbilities\":[{},", deep_params(10_000)),
         ),
     ];
-    for (needle, replacement) in cases {
+    for (needle, replacement) in &cases {
         assert!(text.contains(needle), "{needle}");
-        let doc = text.replacen(needle, &replacement, 1);
-        assert!(load(doc.as_bytes()).is_err(), "{needle}: accepted");
+        let doc = text.replacen(needle, replacement, 1);
+        // The canonical nesting-depth error (the parser's recursion limit, which equals
+        // `MAX_DEPTH`), not a later schema or hash error.
+        match load(doc.as_bytes()) {
+            Err(CardDefinitionError::Canonical(CanonicalError::Syntax(msg)))
+                if msg.contains("recursion limit") => {}
+            other => panic!("{needle}: expected the nesting-depth error, got {other:?}"),
+        }
+    }
+    // Controls: shallow valid forms of the same nestings load (re-digested, since the content
+    // changed), so the errors above come from the depth alone.
+    for (needle, replacement, what) in [
+        (
+            r#""power":{"LITERAL":2}"#,
+            format!("\"power\":{}", deep_math(3)),
+            "MATH",
+        ),
+        (
+            r#""abilities":["#,
+            format!("\"abilities\":[{},", deep_params(3)),
+            "keyword params",
+        ),
+    ] {
+        assert!(text.contains(needle), "{needle}");
+        let doc: Value = serde_json::from_str(&text.replacen(needle, &replacement, 1))
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        let d = load(&serde_json::to_vec(&redigested(doc)).unwrap())
+            .unwrap_or_else(|e| panic!("{what}: shallow control refused: {e:?}"));
+        if what == "MATH" {
+            assert_eq!(
+                serde_json::from_str::<Value>(&deep_math(3)).unwrap(),
+                serde_json::to_value(&d.faces[0].power).unwrap(),
+                "{what}"
+            );
+        }
     }
 }
 

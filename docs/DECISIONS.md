@@ -9113,6 +9113,13 @@ only on merged `issue/` branches, so a separate contract branch would also stall
 plan-scheduled change, an extra unauthorised branch, and it would leave the contract on `main`
 without its implementation).
 
+**Amendment (gate 06-turn F107).** This entry records a historical deviation from R2
+(`docs/PROCESS.md` P2), not an allowed workflow. R2 requires a contract change to go through
+`contracts/CHANGE_REQUESTS.md` as a separate contract-only PR; landing the entry as the first
+commit of the issue branch, touching only that file, and timing it at a phase boundary do not
+satisfy that requirement. The facts above stand as the record of what happened for CR-004.
+Later contract changes use a separate contract-only PR.
+
 ## #183 FP-144 — Ability identity by value
 
 **Decision:** A static (or ETB) effect is linked to its generating ability as a
@@ -11178,6 +11185,690 @@ Not covered by the provisional host (reported as `IN_PROGRESS`): draws by a mand
 games (CR 104.2c), Emperor (CR 104.2d) or limited range of influence (CR 104.3h); the reference
 host is two-player / free-for-all only, and the game-result unit replaces this reading.
 
+## #50 FP-048 — Spec-test judgement calls
+
+**Decision.** The black-box spec tests (`tests/spec_turn_control*.rs`) make these calls where the
+brief left room:
+1. Follow-ups of skipped turns (CR 614.10b) are asserted in the creation order of the skip
+   effects, as the brief states twice ("in creation order"), not in the order the skipped turns
+   come up; one case separates the two (P3's skip created before P2's).
+2. `run_planned_turn` is compared with `run_turn` over one turn (the brief's T8 clause) and also
+   over three consecutive turns, including the `TurnState` left behind, because the next turn's
+   untap step passes the previous active player to the day/night check (REQ-TURN-002).
+3. A pending self-control effect (CR 724.9) may be reported by `pending_controller` as `None` or
+   as the player itself; the tests assert only that it overwrites the earlier effect and leaves
+   the player uncontrolled.
+4. An extra main phase created with `Phase::PrecombatMain` as its kind is asserted only through
+   its segment (`Segment::PostcombatMain`, CR 505.1a), not through the `BeginPhase` value.
+5. `end_the_turn` followed by the rest of the turn is exercised by pulling the items up to the
+   upkeep without running them, calling `end_the_turn`, then `run_planned_turn` (which calls
+   `begin_turn` first). The brief's "mutation from inside a host callback" is not testable black
+   box: the scheduler is a separate `&mut` argument that no host can reach.
+6. A step skip whose phase is skipped stays pending (the step never would begin, CR 500.11).
+7. The CR 728.2 ownership check uses the recording `reset_for_new_game` double (cards return to
+   their owner's library); the no-random-draw check compares the restart with `run_game_start`
+   with the restarter given, over the same reset state (same PRNG state, same report).
+**Rationale.** Each follows the brief's specified behaviour or the existing REQ-TURN-002
+contract; where the brief is silent the tests assert only what it implies.
+**Alternatives.** Consumption-order follow-ups (rejected: contradicts the brief's wording;
+reported as a failing test for the Orchestrator); comparing only one turn in T8 (rejected: would
+miss a previous-active-player regression in the day/night check).
+
+## #50 FP-048 — SRS 5.3 erratum
+
+**Decision.** Skipped turns, phases and steps are modelled as replacement-style "skip your next
+occurrence" effects (CR 614.1b, CR 614.10, CR 614.10a, CR 614.10b), consumed at the moment the
+turn, phase or step would begin, and they cover turns as well as phases and steps. A departed
+player's turn does not begin per CR 800.4k.
+**Rationale.** SRS 5.3 (REQ-TURN-003) calls skips "613.11 rule modifications", but CR 614.1b and
+CR 614.10 make them replacement effects. SRS line 240 also cites CR 800.4j where this unit needs
+CR 800.4k. This implementation follows the CR. The Orchestrator queues the SRS wording fix for the
+owner.
+**Alternatives.** Following the SRS wording literally (rejected: it conflicts with the CR, which
+is the rules baseline).
+
+## #50 FP-048 — Engine gaps
+
+**Decision.** These are out of scope for #50 and become new issues:
+1. Heartbeat early exit: an end-the-turn or end-the-combat effect that resolves must stop the
+   current step's priority loop (heartbeat.rs, steps.rs). Until then `end_the_turn` and
+   `end_the_combat_phase` only change the plan that the next `TurnScheduler::next_item` reads.
+2. `run_turn` consuming `TurnScheduler` (steps.rs).
+3. Wiring turn, phase and step skips into the replacement bus (the SRS `SKIP` replaceWith op), and
+   the CR 616.1 affected-player choice among simultaneous skip effects. The scheduler consumes
+   skips oldest first.
+4. Answerer enforcement in `ChoiceSession` (`PlayerControl::check_answerer` is a pure check),
+   wire-level redacted views for a controller, and merging knowledge projections for a controller
+   (view/, #80).
+5. A real `GameState`-backed `EndTurnHost` and `RestartHost` (game loop), and CR 728.3.
+6. Native effects that call these procedures (extra-turn, skip, control, end-the-turn and restart
+   effects).
+**Rationale.** The brief limits #50 to `turn/control.rs` against the current public APIs. Each
+item needs edits in files this unit does not own.
+**Alternatives.** Editing steps.rs or heartbeat.rs here (rejected: outside the owned paths, R1).
+
+## #50 FP-048 — Turn scheduler judgement calls
+
+**Decision.**
+- *Normal-order fallback:* the next normal turn goes to the next seat after the last NORMAL
+  turn's player, skipping players who are not in the game. If that player is not in the seat
+  order, it goes to the first in-game seat. A normal turn that is skipped or dropped (CR 800.4k)
+  still advances the normal order. A skipped extra turn is just removed.
+- *Skip ordering:* turn, phase and step skips are consumed oldest first (identical skips can only
+  be told apart by their follow-ups). Follow-ups are reported in the order their skips were
+  created, not the order they were consumed. Choosing by the affected player per CR 616.1 is an
+  engine gap.
+- *Anchor resolution:* "after X" means the current phase or step if it is X. If X has just ended,
+  the front of the remaining plan counts too. Otherwise it is the first not-yet-started
+  occurrence of X. With no such anchor nothing is added. "Before X" needs a not-yet-started X.
+  Several steps created after the same step run newest first (CR 500.9). Several created before
+  the same step each go directly before it, so the newest runs last, right before the anchor.
+- *Main phase labels (CR 505.1a):* a main phase gets its precombat or postcombat label when it is
+  planned. The first main phase of the turn that has not yet begun or been skipped is precombat,
+  and every other is postcombat. An extra main phase inserted after combat is therefore
+  postcombat. One inserted before the normal precombat main phase becomes the precombat one and
+  relabels the normal one postcombat. A skipped precombat main phase still counts as the first
+  (see the rules question in the #50 report).
+- *`you_get` modelling:* `Some(controller)` adds nothing unless `controller` is the active
+  player of the current turn (CR 500.10a). `None` always adds.
+- *`end_combat_phase_now`:* acts only while a combat phase is in progress (begun, its
+  `EndPhase` not yet yielded). In the gap after `EndPhase(Combat)` it returns false.
+- *Driver:* `run_planned_turn` mirrors `run_phase` item by item and, on success, records the
+  turn's active player via `TurnState::record_turn_taken`, as `run_turn` does.
+**Rationale.** Each is the reading closest to the quoted CR text and the brief. All are
+deterministic and use ordered containers only (R3).
+**Alternatives.** Static main-phase labels (rejected: an extra main phase before the first one
+would not be "the first main phase of the turn"). Reporting follow-ups in consumption order
+(rejected: the brief asks for creation order). LIFO for "before" anchors (rejected: CR 500.9
+states LIFO only for steps created after the same step).
+
+## Gate 06-turn F30 — CR-005 recorded as merged
+
+**Decision.** CR-005 is marked `Status: merged (#243)` with a process note; no code or digest changes are made.
+
+**Rationale.** R2 requires a separate contract-only PR for later contract changes and a breaking change merges only between phases. #183 merged its own contract entry with its implementation inside phase 04, so the entry is ratified retroactively at the gate, the same remedy the phase 02 gate used for CR-002 and CR-003 (commit 8e35167).
+
+**Alternatives.** Reverting and re-landing the change as a contract-only PR (rejected: the code, goldens and later units already depend on state format version 2). Leaving the entry open (rejected: a contract mismatch cannot be deferred past the gate).
+
+## Gate 06-turn F2 — one layer pass per SBA snapshot
+
+**Decision.** `SbaView::new` runs `layers::evaluate_all` once per SBA snapshot and reads each phased-in battlefield object's `Evaluated` from that map. If `evaluate_all` fails (it errors for the whole pass when any listed object has no base), or lacks an entry, it falls back to the per-object `evaluate` and keeps skipping an object that errors. Observable SBA results (CR 613.1, 613.4) do not change.
+
+**Rationale.** `evaluate` already evaluates the whole object universe, so one call per permanent made a check quadratic in board size. One shared pass is linear and equal to the per-object results (REQ-LAYER-001: `evaluate(id) == evaluate_all()[id]`).
+
+**Alternatives.** Evaluating every object individually as before (rejected: quadratic). Failing the whole snapshot when one object is unknown (rejected: changes the existing skip behaviour).
+
+## Gate 06-turn F3 — PLOT is sorcery-timed
+
+**Decision.** The `PLOT` special action uses `SpecialTiming::SorceryTiming` (own turn, main phase, empty stack). `FORETELL` stays `OwnTurn`.
+
+**Rationale.** The CR is internally inconsistent. CR 116.2k: "A player can take this action any time they have priority during their own turn while the stack is empty." CR 702.170a: "Plot [cost]" means "Any time you have priority during your main phase while the stack is empty, you may exile this card from your hand and pay [cost]." CR 702.170d likewise says "during their main phase while the stack is empty". The keyword's own rule (702.170a) is the narrower and is consistent with 702.170d, so it is followed.
+
+**Alternatives.** Keeping `OwnTurnStackEmpty` per 116.2k (rejected: offers plot in non-main steps against the keyword definition).
+
+## Gate 06-turn F4 — explicit timing binds mana abilities
+
+**Decision.** `check_activate` evaluates an explicit `timing` for mana abilities too. A mana ability with no stated timing stays legal whenever the player has priority; non-mana abilities still default to Instant. The CR 602.5a summoning-sick check is kept.
+
+**Rationale.** CR 605.1: mana abilities are such "regardless of what other effects they may generate or what timing restrictions (such as "Activate only as an instant") they may have". CR 605.3: activating one "follows the rules for activating any other activated ability (see rule 602.2), with the following exceptions", and 605.3a widens only the general permission ("whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment"). CR 602.5d defines "Activate only as a sorcery". No exception waives a stated restriction, so it still applies (an inference from 605.3 and 602.5d; the CR has no sentence that says so).
+
+**Alternatives.** Ignoring all timing for mana abilities (rejected: offers a sorcery-restricted ability in combat).
+
+## Gate 06-turn F32 — Host requires a hash for every used card
+
+**Decision.** `StateHost::build` (`build_world`) refuses a typed `Setup` in which a card used by any object (every zone, generated ids included) has no entry in `cardDatabase.definitionHashes`; the error quotes the card and the object. The existing checks stay: every listed hash must match the loaded definition, and every listed or used card must be loaded.
+
+**Rationale.** R11: the engine never runs a definition that the scenario has not pinned. `parse_scenario` already rejects such files, but `StateHost::build(&Setup)` is public, so the host enforces the same rule independently.
+
+**Alternatives.** Trusting the parser (rejected: direct callers bypass it). Deriving the missing hash from the loaded card (rejected: the scenario would no longer pin its definitions).
+
+## Gate 06-turn F33 — Duplicate ids rejected in the host
+
+**Decision.** Before any object is created, `build_world` checks that every player id and every object id (declared ids and the generated `<player>.<zone>.<index>` ids, in `Setup::objects()` order) is declared once across players and objects together. A duplicate is a build error quoting the id. Distinct ids, the declaration order and the observation keys are unchanged.
+
+**Rationale.** The scenario contract says "every id (players and objects together) is declared once". Without the check a second object with the same id replaced the first one in the name map, and observation could not tell the two apart (R12: the typed setup is an input like the file).
+
+**Alternatives.** Renaming the later duplicate (rejected: assertions would silently target a different object). Checking only object ids (rejected: an object named like a player is ambiguous for `attachedTo` and counter targets).
+
+## Gate 06-turn F34 — Shared-exile fields are rejected, not dropped
+
+**Decision.** A `sharedExile` entry with a non-default `tapped`, `flipped`, `phasedOut`, `designations` (any value other than `false`), `controller` (other than the owner), `attachedTo`, `timestamp` or `controlledSinceTurn` fails the build with an `UNSUPPORTED`-prefixed error naming the field and the object. Plain entries, counters, `controller` equal to the owner and `false` designations (which mean absent) keep working. `attachedTo` is included because the contract defines shared-exile entries as entries without it and the host would otherwise drop it as well. `StackSetup` carries none of these fields, so the stack is unchanged.
+
+**Rationale.** These fields describe a permanent; only battlefield objects get a `Permanents` entry, so the host had no place to apply them and silently reported them as absent. Refusing loudly matches the existing `faceDown` rejection.
+
+**Alternatives.** Applying the designations to the exiled object (impossible: object designations live in the `Permanents` entry, which exists only for battlefield objects). Ignoring them (rejected: the observed state would contradict the setup).
+
+## Gate 06-turn F35 — Setup keeps authored timestamp order across attach
+
+**Decision.** After the setup events (the step, counters and attachments) have executed, `build_world` stamps every battlefield object again with `GameState::stamp_object(id, StampReason::EntersZone)`, in the same ascending `(timestamp.unwrap_or(0), declaration index)` order as the first pass. Every battlefield object then has a timestamp later than every timestamp a setup attach issued (CR 701.3c), and the battlefield's relative order is exactly the authored one, attachments included. Objects outside the battlefield keep their first stamps and stay older than every battlefield object.
+
+**Rationale.** `timestamp` is the authored setup order. `stamp_object` only writes the object's ledger entry (and re-stamps stickers, of which a setup has none) from the state's timestamp generator; re-stamping is explicitly allowed. It changes nothing but timestamps and the generator position, so the build stays deterministic (R3: the order comes from a sorted `Vec`). Setup `AddCounters` events do not stamp counters today, so no counter timestamp is reordered relative to its object. The ledger did not yet record the attach timestamp, but the attach outcome in the event log did, so the attachment's latest issued timestamp was newer than its host's. After the second pass the authored order also holds if attach later writes the ledger.
+
+**Alternatives.** Rejecting any setup whose declared timestamps an attach would reorder (rejected: it would forbid the common case of an attachment authored before its host, and re-stamping is possible without side effects). Executing the attachments before the only stamping pass (rejected: the brief keeps the first pass, and the second pass is independent of event order).
+
+## Gate 06-turn F57 — UnattachFrom of a vanished attachment is a no-op
+
+- **Decision:** `UnattachFrom { attachment, host }` looks up the live link before the
+  unknown-object check. If the attachment is in no zone but its id was issued by the context's
+  object-id generator (it was moved away, for example by an earlier event of the same final
+  batch), or it is unattached, or attached to another host, the event is a no-op (`Ok(None)`: no
+  executed event, no `UnattachRecord`, no rollback of the earlier events). An id the generator
+  never issued (above `last_issued`) stays `EventError::UnknownObject`. Plain `Unattach` keeps
+  `UnknownObject` for any object that is in no zone.
+- **Rationale:** `UnattachFrom` names one link (CR 701.3d); once that link is gone, whatever ended
+  it, there is nothing to do, and failing would roll back an otherwise legal batch. Keeping the
+  error for never-issued ids preserves the existing black-box contract
+  (`req_event_001_unattach_unknown_object_errors`) for malformed events while still treating a
+  departed object as a no-op.
+- **Alternatives:** treat every unknown id as a no-op for `UnattachFrom` (rejected: it would
+  silently accept malformed events and contradict an existing spec test); keep the error
+  (rejected: CodeRabbit F57, rolls back earlier moves).
+
+## Gate 06-turn F12 — UnattachFrom replaceable only for its exact host
+
+- **Decision:** the replacement bus's `would_happen` (CR 614.7) treats `UnattachFrom { attachment,
+  host }` as happening only when `permanents.attached_to(attachment) == Some(host)`, and plain
+  `Unattach { attachment }` only when the attachment is attached at all. Otherwise no effect is
+  offered and the event reaches the executor unchanged (a no-op there).
+- **Rationale:** an effect that would replace an event that does not happen does nothing
+  (CR 614.7); the executor already treats both cases as no event, so the bus must not let an
+  `Instead` replacement change the game for them. No existing test replaced an `Unattach` of an
+  unattached permanent, so the plain-`Unattach` arm changes no tested behaviour.
+- **Alternatives:** check only `UnattachFrom` and leave plain `Unattach` always replaceable
+  (rejected: the same CR 614.7 gap for an unattached permanent).
+
+## Gate 06-turn F7 — graveyard-order preflight captures LKI
+
+- **Decision:** `graveyard_order_groups` computes the groups from the LKI-off planning run, then
+  restores the snapshot and runs the real path (`run_captured`, LKI capture included, CR 704.8,
+  CR 603.10a) inside the same rollback-only preflight; any error (for example
+  `MemoryError::NoCharacteristics`) is returned and no group is offered. The context is restored
+  in every case. The groups returned are those of the planning run, so batches whose LKI can be
+  captured give exactly the same groups and defaults as before.
+- **Rationale:** `execute_batch_ordered` runs the same capture; offering a group that every
+  answer then fails leaves the `ORDER_CARDS` request pending forever. Running the identical code
+  path guarantees the preflight fails exactly when the execution would.
+- **Alternatives:** a separate capture-only check of each planned departure (rejected: duplicates
+  `run_captured` and could drift from it); computing groups from the captured run (equivalent
+  but changes which run defines the groups for no gain).
+
+## Gate 06-turn F36 — Field-less answers validated at parse time
+
+**Decision:** `decode_step` rejects any member other than `type` on an answer whose type carries
+no payload (`PASS_PRIORITY`, `DECLINE_OPTIONAL_PAYMENT`, `CANCEL_AND_ROLLBACK`, `YES`, `NO`,
+`ACCEPT`, `TAKE_MULLIGAN`: the unit variants of `ChoiceResponse`) with `UnknownField`, path
+`/script/<i>/answer`, positioned at the offending key. The list is one constant
+(`FIELDLESS_ANSWER_TYPES`) in `scenario/decode.rs`.
+**Rationale:** "every object rejects unknown members" must hold when the file is parsed, not only
+when `StateHost` runs it; a custom host otherwise receives unchecked members. `KEEP_HAND` and
+`SHORTEN` carry fields, so they are not in the list.
+**Alternatives:** derive the list from `ChoiceResponse` at run time (no such reflection exists;
+a constant plus the existing `ANSWER_TYPES` length test is simpler); validate in each host
+(duplicates the rule and leaves custom hosts unprotected).
+
+## Gate 06-turn F38 — Bounded assertion diagnostics
+
+**Decision:** assertion comparisons stay exact on the full values. The stored `expected` and
+`actual` of an `AssertionOutcome` are previews of at most 256 characters (cut on a character
+boundary, then `...`), and one `evaluate_assertions` call keeps at most 256 KiB (262,144 bytes)
+of previews in total; later previews are the fixed text `(omitted: report budget exhausted)`.
+Serialisation stops at the cap through a small capped writer.
+**Rationale:** a `.pzl` file can make thousands of assertions over one large zone, and the
+report retained a full copy of the zone per assertion (CWE-400, R12). Pass/fail must not depend
+on the bound, so only the diagnostic text is bounded.
+**Alternatives:** compare on the previews (wrong results for long values); cap the number of
+assertions (changes the file contract); keep the full text and cap only the report (still holds
+every copy in memory first).
+
+## Gate 06-turn F74 — ScenarioError.path is the complete pointer; Display sanitizes
+
+**Decision:** `segment` returns the complete JSON-pointer segment (`~` as `~0`, `/` as `~1`,
+nothing else), so `ScenarioError.path` always round-trips through `pointer_position`. Only
+`Display` shortens each path segment to 64 characters (then `...`) and prints control characters
+as `?`; the stored `path` is untouched. `message` keeps quoting at most 40 characters of input.
+**Rationale:** DEVELOPMENT.md defines `path` as a JSON pointer; a truncated or `?`-rewritten
+segment names no member, so tools (`cargo xtask pzl`) lost the position. The R12 concern is a
+log flood, which the display layer bounds.
+**Alternatives:** keep the lossy stored path and add a second field (API change); truncate only
+over a larger limit (still not a pointer for long keys). No test asserted the truncated stored path; the one existing assertion that matched an
+unquoted chooser name (F79) now matches the quoted name.
+
+## Gate 06-turn F86 — Last-mulligan bottom order
+
+**Decision:** When the counted mulligans reach the starting hand size (or the hand size), the
+game start no longer bottoms the whole hand silently in ascending order. It issues one
+`MULLIGAN_DECISION` with `to_bottom` = the hand size (min = max = `to_bottom`, `ValidatorRule::Payload`),
+`default_on_timeout` = `KeepHand` with the hand in ascending id order. The answer's order is the
+order passed to `put_on_library_bottom`. A `TakeMulligan` answer is rejected with a procedure
+error in the procedure (R12). An empty hand issues no request.
+
+**Rationale:** CR 103.5 (rules-researcher answer A-Q8): the cards go on the bottom "in any order"
+and the CR has no special case for the whole hand, so the owner chooses the order. The protocol
+payload has no can-mulligan flag and is a contract, so the rule is enforced in the procedure
+rather than by changing the payload.
+
+**Alternatives:** keep the silent ascending bottom (rejects the owner's choice); add a
+can-mulligan flag to the payload (contract change, R2); offer `TakeMulligan` and ignore it (hides
+an invalid answer).
+
+## Gate 06-turn F97 — In-memory integral floats in AST params
+
+**Decision:** No production change. An in-memory typed AST holding a JSON float in an opaque
+position, for example a hand-built `KeywordInstanceAST.params` value `1.0`, `-0.0` or `1e0`, is
+refused by the ability serializer exactly like a fraction (`2.5`): `compute_hash`,
+`to_canonical_json` and `seal` return `CanonicalError::Serialize`, never a panic. Only the wire
+path normalises: `CardDefinitionDSL::from_json` canonicalises the document first, so `1.0` in the
+document text loads as the integer `1` and seals, hashes and exports exactly like `1`. This is
+the builder contract since #232 FP-164 (typed AST positions) and is a breaking change against the
+merge-base behaviour, where the opaque AST wrappers let `seal` normalise such a value. Migration
+path for code that builds definitions in memory: build integers (`Value::from(1)`,
+`serde_json::json!(1)`), or produce the document text and load it with
+`CardDefinitionDSL::from_json`, which normalises on load. Plain `serde_json::from_str` into a
+typed AST does not normalise (the typed decoders refuse any non-integer spelling), so it is not a
+migration path. `card::tests::req_dsl_001_seal_normalises_numbers` covers both paths: the wire
+case per spelling, the explicit in-memory rejection per spelling, and the integer migration,
+which seals to the wire case's value, hash and bytes.
+
+**Rationale:** The ability wire contract (`#13 FP-012 — Wire catalogue as implemented`, the
+module docs of `ability` and `effect`) has integers only in every position and guarantees
+`decode(encode(x)) == x` for every value its serializer accepts (REQ-NFR-006, REQ-CORE-006: no
+floating point in rules data). Accepting an integral float in memory would let the serializer
+emit `1` for a value holding `1.0`, so the decoded value would differ from the encoded one and
+the guarantee would break; it would also need a float-integrality test in the serializer, and the
+same opaque check exists separately in `effect/util.rs` (outside this fix's paths), so only
+keyword parameters would change and native-effect parameters would not. Keeping the strictest
+behaviour leaves every wire and contract format as it is.
+
+**Alternatives:** Normalise integral floats in the ability serializer and in `seal` (rejected:
+breaks the encode/decode identity of the FP-012 contract and makes ability and effect opaque
+values disagree); normalise in `seal` only by rewriting the in-memory tree before serializing
+(rejected: `compute_hash` and `to_canonical_json` would still refuse the same value, so the three
+entry points would disagree).
+
+## Gate 06-turn F53 — Look-back scan skips native-effect params
+
+**Decision:** `FPL-LOOK-BACK` (`lint/walk.rs` `scan`) does not report a look-back-like key found
+anywhere under the `params` member of an object whose `op` is `NATIVE_EFFECT`. Nothing else
+changes: look-back keys in trigger matchers, filters, bindings, keyword `params` and every other
+position are still reported, and the other facts of the walk (`CREATE_TOKEN` token ids, `LINKED`
+references, mana strings, `REPEAT_WHILE` checks) are still collected inside native-effect
+`params`. Only a member named `params` of a `NATIVE_EFFECT` object is opaque; a `params` member of
+any other object is not.
+
+**Rationale:** SRS §14.8 and REQ-DSL-015 make a native effect opaque data registered by
+`id@version`: its `params` are read only by the registered Rust implementation, so a member name
+inside them carries no DSL meaning and cannot set the engine's look-back derivation (CR 603.10).
+Reporting it was a false positive the definition author cannot fix without renaming a native
+effect's parameter. Keyword `params` stay in scope because a keyword macro expands into DSL
+abilities, so a look-back key there can reach a trigger; the brief keeps that case
+(`req_ing_009_look_back`).
+
+**Alternatives:** Skip every `params` member (rejected: hides keyword-macro parameters, which do
+expand into DSL); skip the whole native-effect object (rejected: token and link references in it
+would no longer be checked); keep reporting (rejected: the finding is not about a look-back flag).
+Consequence: the spec tests `tests/spec_dsl_lint.rs` (`req_ing_009_look_back_fail`,
+`req_ing_009_every_lint_has_pass_and_fail_case`, `req_ing_009_ability_reorder_invariance`) and
+`tests/spec_dsl_lint_robust.rs` (`req_ing_009_deep_nesting`,
+`req_ing_009_random_definitions_total_and_ordered`) used native-effect `params` as the typed
+look-back fixture; they are outside the fix's paths and need their fixtures moved to keyword
+`params`.
+
+## Gate 06-turn F98 — Room mana value in the lint
+
+**Decision:** `FPL-MANA-VALUE` computes each half of a `ROOM` definition (`LEFT_HALF`,
+`RIGHT_HALF`) as the combined mana value of both halves, exactly as for `SPLIT`. The lint has no
+zone, so it checks only this value; the stack value (the cast half) and the battlefield value
+(locked halves have no mana cost) are not modelled in the lint.
+
+**Rationale:** CR 202.3d: "The mana value of a split card not on the stack ... is determined from
+the combined mana costs of its halves"; CR 709.4b: "A split card’s colors and mana value are
+determined from its combined mana cost"; CR 709.5 makes a Room a split card with a shared type
+line. Source data gives one value per card face outside any game, i.e. the off-stack, off-battle
+field value, which is what `fineprint-core` `layouts/room.rs` returns for every zone other than
+the stack and battlefield. The battlefield reading (locked halves) is an inference the CR does not
+state in one sentence (rules-researcher D-Q3), and the lint does not distinguish zones.
+
+**Alternatives:** Per-half values (rejected: wrong for every zone other than the stack); a
+zone-aware value (rejected: the lint has no zone input and the source data has none either).
+
+## Gate 06-turn F104 — Span of an ability that does not encode
+
+**Decision:** When a typed ability does not encode, its facts take the span from the typed base
+`text_span`: `Some((start, end))` with `start <= end` is a valid span (used for the finding
+location and for text coverage), `None` is absent, and an unordered span is malformed (no span in
+the location, and the usual `FPL-TEXT-COVERAGE` "textSpan is not [start, end]" Error, as for the
+same span in JSON). The failed JSON (`null`) is not scanned.
+
+**Rationale:** The location contract (`LintLocation::ability`) carries the ability's own
+well-formed span; the typed value still holds it even when another member breaks an invariant.
+Treating an unordered span as malformed is what the raw reader does for the same JSON, so a
+definition gives the same coverage findings whether its span is read from JSON or from the type.
+
+**Alternatives:** Treat an unordered typed span as absent (rejected: it would silently become a
+coverage gap with no finding naming the bad span).
+
+## Gate 06-turn F26 — Resolved selectors are rejected by GameState::register_effect
+
+**Decision:** `GameState::register_effect` refuses an effect with `origin: EffectOrigin::Resolved`
+and `affected: Affected::Selector(_)` with the new `StateError::UnlockedResolvedSelector` (its
+Display text names `register_effect_group`, which locks selectors, and `Affected::Objects`). Static
+effects keep live selectors (CR 611.3a) and a resolved effect with `Affected::Objects` is accepted.
+`register_effect_group` is unchanged: it locks a resolved part's selector against the registry as
+it is before the call (CR 611.2c). Test call sites in the layer and state suites that registered a
+resolved selector singly are migrated to the locked set the test expects or to
+`register_effect_group`, without weakening an assertion. No encoded byte, Merkle layout, wire
+schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry (R2) is needed.
+
+**Rationale:** CR 611.2c fixes a resolved effect's affected set when the effect begins. The
+single-effect path stored the selector unchanged, so an object that started matching later was
+affected too; the group path already implemented the rule. Refusing at the boundary keeps one
+locking path and makes the error visible to callers.
+
+**Alternatives:** An environment parameter on `register_effect` so it can lock (rejected: about 86
+call sites change and the group path already locks with an environment); silently locking to an
+empty set (rejected: a behaviour change nobody asked for, and it would hide the caller's mistake).
+
+## Gate 06-turn F25 F27 — Unissued timestamps are rejected at the state boundary
+
+**Decision:** New `StateError::TimestampNotIssued(Timestamp)`. `GameState::register_effect` and
+`GameState::register_effect_group` refuse an effect whose `timestamp`, or the `granted_at` of an
+`EffectOrigin::Static`, is 0 or above the state's last issued timestamp (for a group, the range
+before the call), before anything commits; parts may share an issued timestamp.
+`GameState::restamp_static_effects` refuses such a `new_object_ts` before touching anything. The
+predicate is the decoder's (`Issued::has_timestamp`, used by `Issued::timestamp`). No encoded byte,
+Merkle layout, wire schema or golden digest changes, so no `contracts/CHANGE_REQUESTS.md` entry
+(R2) is needed.
+
+**Rationale:** The version-2 decoder already refuses unissued timestamps (REQ-CORE-002: every
+timestamp comes from the state's single generator), so a state that accepted one serialized into
+an unrestorable snapshot. Checking at the boundary keeps every validated state restorable.
+
+**Alternatives:** Checking only on decode (rejected: the snapshot is then unrestorable and the
+fault surfaces far from its cause).
+
+## Gate 06-turn F31 — serialize refuses states deserialize refuses
+
+**Decision:** `GameState::serialize` returns `StateError::Encode(<decoder message>)` for a state
+whose layer components `deserialize` would refuse: an unissued effect id or timestamp (of an
+effect, its granting effect, an object, counters or a sticker), a non-CDA layer-7a effect, a
+static effect with a source without its generating-ability link, or a link for an unissued id, for
+any other registered effect or on another source. The checks are the decoder's own functions
+(`check_effects` / `check_effect_fields`, `check_ledger_wire`, `check_generators` in
+`state/effects_wire.rs`), called by both. The registry keeps accepting raw writes through
+`GameState::effects_mut`; `merkle_tree` and `state_hash` stay infallible and unchanged.
+
+**Rationale:** A state that serializes must decode to an equal state with the same hash
+(REQ-CORE-001, REQ-NFR-006). Only raw writes can make an inconsistent state, and the encoder is
+the one place every snapshot passes through.
+
+**Alternatives:** Making `effects_mut` validate (rejected: it is documented as raw, unvalidated
+access, and validating it would need the whole state); running the full decoder on every
+serialize (rejected: it re-registers every effect; the shared checks cover what raw writes can
+break).
+
+## Gate 06-turn F29 — Generator links need no cache invalidation through the validated API
+
+**Decision:** The layer cache keeps comparing only the `ContinuousEffects` snapshot. The
+invalidation table in `state/environment.rs` states the invariant that makes this sound and
+requires `Invalidation::EffectRegistration` for raw writes that change which ability generates an
+effect. Documentation only.
+
+**Rationale:** Through the validated API a link is written only together with its effect, effect
+ids are never reused, `link_effect_generator` rejects registered effects and `remove_effect`
+removes an effect and its link together, so equal registries imply equal links. Only raw
+`effects_mut` writes (which never touch links), or moving a generated effect between states, can
+break that.
+
+**Alternatives:** Snapshotting the links in the cache too (rejected: extra cost on every hit for a
+case only raw writes reach).
+
+## Gate 06-turn F39 — Plan identity of a PlannedTurn
+
+**Decision:** `TurnScheduler` keeps a plan serial, incremented by every installed plan, and
+`PlannedTurn` carries it as the public field `plan_serial`. `run_planned_turn` rejects a turn whose
+serial or player is not the installed plan's, or whose plan is already over, with
+`ChoiceError::Procedure` before any host call. A plan whose items were partly pulled by the caller
+is still accepted (changes between items are part of the driver contract).
+
+**Rationale:** Two successive turns can belong to the same player, so only plan identity separates
+a stale handle from the current one; checking before `begin_turn` keeps the host and the plan
+untouched. A public field keeps `PlannedTurn` constructible in tests like its other fields.
+
+**Alternatives:** A private field with an accessor (rejected: breaks struct-literal comparisons
+for no gain, the serial is not a security boundary); rejecting partly pulled plans (rejected: an
+existing driver test pulls items before handing the plan over).
+
+## Gate 06-turn F40 — Follow-up dispatch
+
+**Decision:** New `TurnHost::perform_follow_up(follow_up, choices)`, called by `run_planned_turn`
+for each entry of `PlannedTurn::follow_ups`, in order (the creation order of the skip effects),
+after `begin_turn` and before the first plan item. It is a required method: no implementor of
+`TurnHost` exists outside the turn module's own tests and spec support (the scenario `World`
+implements only `HeartbeatHost`), so the Orchestrator's default rule does not apply; a host that
+never creates follow-ups implements it as `Ok(())`.
+
+**Rationale:** CR 614.10b: "That action is considered to be the first thing that happens during
+the next step, phase, or turn to actually occur." The CR does not order the follow-up against
+turn-based actions or "beginning of" triggers (rules answer A-Q4, unsettled), so the brief's
+placement stands: the turn has begun (so the action happens during it) and no phase has begun yet.
+
+**Alternatives:** A defaulted no-op method (rejected while every implementor is in owned code: a
+forgotten override would silently drop follow-ups); dispatching inside the first phase (rejected:
+other work of that phase could happen first).
+
+## Gate 06-turn F44 — Rolled-back cast keeps priority
+
+**Decision:** `pub enum ActionOutcome { Taken, RolledBack }` and a defaulted
+`HeartbeatHost::try_take_action` (default: `take_action`, then `Taken`). The heartbeat calls
+`try_take_action`. On `RolledBack` the same player is asked again at once: no settle, the pass set
+is neither cleared nor extended, and no pass is recorded. An `Err` still propagates unchanged.
+
+**Rationale:** CR 734.2: "the player who had priority retains it and may take another action or
+pass"; CR 601.2 and CR 734.1 return the game to the moment before the action was proposed, with
+no abilities triggering, so there is nothing to settle. Whether an undone action counts as
+"taking actions in between passing" (CR 117.4) is not stated (rules answer A-Q6, inference); with
+the state restored, the undone action is treated as never taken, so earlier passes stand.
+
+**Alternatives:** Reporting the rollback as a distinct `Err` kind (rejected: errors abort the
+procedure; the heartbeat would need to match error variants); clearing the pass set (rejected: it
+would count a non-action as an action).
+
+## Gate 06-turn F45 — Departure and the pass log
+
+**Decision:** When the player who would be asked has left (before the request is published, after
+the answer, or between passes), the heartbeat forgets the departed passers and applies the CR 117.4
+test to the players still in the game. If all of them have passed in succession, the top object
+resolves (then the active player, or the next player still in the game, receives priority) or the
+step ends; nobody is asked. No `PassRecord` is written for the departure. Passes of the players
+still in the game stand (`forget_departed`).
+
+**Rationale:** CR 800.4a passes priority on; CR 800.4j: "the top object on the stack resolves, or
+the phase or step ends, whichever is appropriate". Nobody passed, so a pass record would be false.
+Whether earlier passes still count after a departure is not stated (rules answer A-Q7); the
+current behaviour (survivor passes stand) is kept as the brief directs.
+
+**Alternatives:** A synthetic pass record for the departure (rejected: the log records explicit
+passes only, SRS 5.1); a fresh round of passes after every departure (rejected: changes the
+existing pass counting of #44 FP-043).
+
+## Gate 06-turn F46 — No attackers skips to end of combat
+
+**Decision:** Defaulted `TurnHost::attackers_declared(&self) -> bool { true }`. `run_phase` and
+`run_planned_turn` read it once per combat phase, after the declare attackers step has ended
+(after its priority); `false` drops the not-yet-started declare blockers, first-strike combat
+damage and combat damage steps (extra ones too; `TurnScheduler::skip_blockers_and_damage` for the
+planned turn), so they have no boundary events, expiry, combat action or priority. End of combat
+and `EndPhase(Combat)` still run.
+
+**Rationale:** CR 508.8 and CR 506.1 skip the declare blockers and combat damage steps; CR 508.8
+names creatures "put onto the battlefield attacking", which can happen during declare-attackers
+priority, so the decision waits for that priority to end (rules answer A-Q2: the evaluation
+instant is an inference from step order). The default keeps every existing host on the normal
+path.
+
+**Alternatives:** Deciding when attackers are declared (rejected: misses creatures put onto the
+battlefield attacking during priority); keeping extra combat damage steps (rejected: CR 508.8
+skips "the combat damage steps").
+
+## Gate 06-turn F48 — The first draw step is skipped before it begins
+
+**Decision:** `run_segment` tests `first_turn_draw_skipped` before `begin_step`; a skipped draw step
+returns `SegmentReport { heartbeat_ran: false, cleanup_steps: 0 }` with no host call (no
+begin-step, expiry, registry entry, draw, priority, end-step expiry or mana emptying). The
+beginning phase's own boundary work is unchanged. The segment still appears in the turn report.
+
+**Rationale:** CR 103.8a skips "the draw step", not only the draw; CR 500.11: "To skip a step ... is
+to proceed past it as though it didn't exist" (rules answer A-Q3). Reporting the segment keeps the
+report's segment list stable and says through `heartbeat_ran` that nothing ran.
+
+**Alternatives:** Dropping the segment from the report (rejected: callers index the report by
+segment order).
+
+## Gate 06-turn F49 — First-strike decision at the damage boundary
+
+**Decision:** `run_phase` builds the combat phase without the first-strike step and calls
+`TurnHost::first_strike_damage_step()` once, when the declare blockers step has ended; `true`
+inserts `FirstStrikeDamage` before `CombatDamage`, and the decision holds for the rest of the phase.
+`run_planned_turn` does the same through the new `TurnScheduler::set_first_strike_damage_step`
+(insert before the first not-yet-started combat damage step, or remove the not-yet-started
+first-strike steps), for normal and added combat phases alike. The `first_strike_damage_step`
+argument of `TurnScheduler::next_turn` is kept (public API) and only shapes the provisional plan
+(normal and added combat phases), which the driver corrects at each damage boundary. If a step
+skip removes the declare blockers step of a planned turn, no decision is made and the provisional
+plan stands.
+
+**Rationale:** CR 510.4: "as the combat damage step begins"; the second combat damage step then
+follows without a new check (rules answer A-Q1). Declare-blockers priority is the last point at
+which first strike can change before damage.
+
+**Alternatives:** Removing the `next_turn` argument (rejected: public API); deciding as the damage
+step would be yielded by the scheduler (rejected: the scheduler has no host).
+
+## Gate 06-turn F47 — Cleanup with nobody in the game
+
+**Decision:** The sequencer's heartbeat adapter returns the `HeartbeatOutcome`. When the cleanup
+step's heartbeat ends with `NoPlayerInGame`, the cleanup step completes (end-step expiry, mana
+emptying) and no further cleanup step begins. `StepEnds` keeps the CR 514.3a repetition.
+
+**Rationale:** CR 514.3a repeats cleanup "once the stack is empty and all players pass in
+succession"; with nobody in the game no pass cycle can complete, so a repetition would loop on the
+same state until `MAX_CLEANUP_STEPS`.
+
+**Alternatives:** Treating `NoPlayerInGame` as a pass cycle (the old behaviour, rejected by the
+finding).
+
+## Gate 06-turn F95 — Cleanup guard test
+
+**Decision:** After F47 the `MAX_CLEANUP_STEPS` guard can be reached only by a live endless cycle,
+which needs one answered pass cycle per cleanup step. A `ChoiceSession` re-runs the procedure
+from its base after every answer, so driving 10 000 cleanup steps through a session is quadratic
+(measured: 400 answers take about 1 s). The guard is therefore driven through one additive
+test hook, `ChoiceContext::auto_default()` in `choice/session.rs`: `#[cfg(test)]` and
+`pub(crate)`, it builds a context with no recorded answers that answers every unrecorded ask with
+the request's `default_on_timeout` instead of suspending (asks are still checked for id,
+well-formedness and a valid default). The unit test
+`turn::steps_tests::req_turn_002_cleanup_live_endless_cycle_hits_the_guard` runs a live endless
+cleanup cycle in one run and asserts exactly `MAX_CLEANUP_STEPS` `BeginStep(Cleanup)` calls and
+`ChoiceError::Procedure`. The session tests keep (a) with every player gone the cleanup ends after
+one step with no error (F47) and (b) a live endless cycle begins exactly one more cleanup step per
+completed pass cycle (25 to 30 cycles).
+
+**Rationale:** Keeps the guard's error branch tested (R10, coverage) at linear cost. The hook is
+compiled only in the crate's own tests: no public API change and no change to session semantics
+(`ChoiceSession` never builds such a context). The Orchestrator authorised `choice/session.rs` for
+this one hook.
+
+**Alternatives:** A configurable guard (rejected: public constant, contract change); leaving the
+guard untested (rejected by the Orchestrator: R10/coverage); keeping the everyone-left loop
+(rejected: F47 removes it).
+
+## Gate 06-turn F6/F13 — per-child-batch evaluated provider refresh
+
+**Decision:** The replacement bus gets an opt-in refreshing entry point. `replacement::ProviderRefresh`
+(`fn refresh(&self, ctx: &EventContext<'_>) -> Box<dyn CharacteristicsProvider + '_>`) builds an
+evaluated provider over the live state; `process_batch_refreshing(ctx, registry, batch, sba,
+choices, refresh)` and `process_event_refreshing(ctx, registry, event, choices, refresh)` resolve
+and execute the submitted batch with `ctx.provider`, then call `refresh` once before each
+`Prevent` follow-up batch (depth > 0) and use the result for both that batch's choosers
+(CR 613.1b, CR 616.1) and its LKI capture (CR 603.10a, CR 608.2h). The provider is never rebuilt
+between events of one batch (CR 603.10a, CR 704.8). Plain `process_batch` / `process_event` keep
+their signatures and behaviour: every batch of the call, follow-ups included, uses the pre-call
+snapshot (documented on `process_batch` and `EventContext`). The test
+`req_event_001_f6_plain_process_batch_keeps_pre_call_snapshot` asserts that stale 2/2 on purpose:
+it pins the documented limit so the adoption of the refreshing entry point is a visible change.
+
+**Rationale:** `EventContext` is built with struct literals in about 20 files owned by other
+units (turn, scenario, sba, interp, triggers, memory, spec tests); a new field or a new
+`provider` type would break all of them. The factory is a pure function of the state (R3), so a
+`ChoiceSession` replay re-derives identical providers. #264 FP-175 (forwarding the evaluated
+controller through the event and SBA LKI wrappers) is untouched: `LkiProvider` and
+`CharacteristicsProvider` are unchanged. Callers still on the non-refreshing entry point, to be
+adopted by their owning units: production `sba/perform.rs:810`; tests
+`events/tests/state_based_destroy.rs:99`, `sba/tests.rs:4033`,
+`tests/spec_events_graveyard_order.rs:561`, `tests/spec_replacement_support.rs:515-516`,
+`tests/spec_sba_destroyed_cause.rs:206`, `tests/spec_layers_consumers_support.rs:585`,
+`tests/spec_evaluated_controller_support.rs:580`.
+
+**SBA adoption:** `sba/perform.rs` now submits the SBA batch through `process_batch_refreshing`
+when the pass has post-batch layer inputs, that is from `perform_all_relayered` and
+`perform_all_post_batch` (the heartbeat and scenario-host production path). Its
+`ProviderRefresh` (`PostBatchRefresh`) calls the caller's existing post-batch provider with the
+live context before each follow-up batch and builds an owned `EvaluatedSnapshot` from the inputs
+it supplies: one `evaluate_all` board pass over `layer_env.objects()`, plus a lone `evaluate` for
+any zone object outside it, by ascending id, answering what a `LayeredProvider` over the same
+inputs answers (characteristics, layer-2 controller, counters, attachments). The snapshot is
+owned because the provider's inputs never leave its call. Public signatures are unchanged; the
+post-batch provider's documentation now says it is also called once per follow-up batch, which
+an ordinary pass never has. `perform_all` keeps plain `process_batch`: its only post-batch inputs
+are the pre-batch `effects`/`layer_env`, which describe no later state, and switching away from
+the caller's own `ctx.provider` would change results without making them fresher. Test:
+`sba::tests::sba_f13_follow_up_chooser_is_controller_after_sba_batch` (P1 through
+`perform_all_relayered`, P2 through `perform_all`).
+
+**Alternatives:** A new `EventContext` field (rejected: breaks every literal site outside the
+owned paths); a mutable provider cell behind `provider` (rejected: interior mutability in a
+shared trait object, and still changes the field's type); rebuilding the provider inside
+`EventContext` (rejected: the events layer cannot evaluate layers itself and its own batch
+execution must keep one provider per call); refreshing on the plain entry point (rejected: it
+has no way to build a provider).
+
+## Gate 06-turn R3 — Unlocked resolved selectors are refused on the wire
+
+**Decision:** `check_effect_fields` (shared by `effect_from_wire` and `check_effects`, so by decode and `GameState::serialize`) refuses `EffectOrigin::Resolved` with `Affected::Selector` ("unlocked resolved selector"). Locked resolved sets, resolved linked groups (locked anchor plus `SameAsLayer` parts) and static selector effects stay valid; encoding and hashes of valid states are unchanged. The group-path check in `effects_from_wire` was dropped as redundant: every effect passes `effect_from_wire` before grouping.
+**Rationale:** CR 611.2c: a resolved effect affects the objects determined when it begins; `GameState::register_effect` already refuses an unlocked selector, so the wire and the raw registry API must not admit one that a later-matching object could join after restore.
+**Alternatives:** keep the group-path check as defence in depth (rejected: unreachable, an uncovered line); reject only in the decoder (rejected: serialize would emit states deserialize refuses, as F31 fixed).
+
+## Gate 06-turn R17 — Native-effect exemption applies to instructions only
+
+**Decision:** The look-back scan (`lint/walk.rs::scan`) refines F53: it carries a "keyword data" flag down the walk, set when it descends into the `params` member of an object whose `kind` is `KEYWORD`. Below that point no object is recognised as a `NATIVE_EFFECT` instruction, so its `params` are not marked opaque and look-back-like keys inside are reported (CR 603.10) at their path under the keyword's `params`. A `NATIVE_EFFECT` anywhere else (ability `effect`, mode `effect`, IF/ELSE/FOR_EACH bodies) keeps its `params` opaque as before. Separately (R16), the mana-ability library walk (`lint/mana_ability.rs::moves_library_card`, CR 605.1a) no longer descends into a `NATIVE_EFFECT`'s `params`.
+**Rationale:** Keyword parameter values are opaque JSON (REQ-DSL-005), so `{"op":"NATIVE_EFFECT","params":{...}}` there is keyword data, not an instruction; F53 explicitly keeps keyword `params` scanned. `NATIVE_EFFECT.params` is opaque data for the native effect (REQ-DSL-015, SRS §14.8) and must never be read as instructions by any lint. A flag on the existing iterative stack is the smallest change, stays iterative and total on arbitrary JSON (R12), and keeps every other fact recorded as before.
+**Alternatives:** Track exact instruction-list positions (`effect`, `then`, `else`, mode `effect`, ...) and recognise `NATIVE_EFFECT` only there: more precise but duplicates the decoder's schema in the lint and would drift with it; rejected. Leave F53 as it was: misses look-back flags hidden in keyword data; rejected.
+
+## Gate 06-turn R8 — Final mulligan request validator rejects TakeMulligan
+**Decision:** The existing `ValidatorRule::Payload` check for `MulliganDecision` rejects `TakeMulligan` when `to_bottom >= hand.len()` and the hand is non-empty (CR 103.5: whole hand to the bottom, no further mulligan). The payload, encoding and wire names are unchanged (F86 contract); `ask_mulligan` keeps its procedure-side rejection as defence in depth (R12); timeout default stays ascending ids. Recorded as CR-010.
+**Rationale:** REQ-NET-003 requires the request to describe the legal answers; rejecting at `submit` leaves the request pending without replaying game start into a procedure error. No payload flag is needed because the hand size and `to_bottom` already carry the information.
+**Alternatives:** A different request type or a can-mulligan flag (changes the payload contract); leaving it to the procedure (the finding).
+
+## Gate 06-turn R9 — First-turn draw skip covers the normal draw step only
+**Decision:** The CR 103.8a first-turn draw skip applies to one draw step per turn: `run_segment` skips the first `Step::Draw` segment it runs in a turn for which `first_turn_draw_skipped` holds (no host call, `SegmentReport { heartbeat_ran: false, cleanup_steps: 0 }`, F48 unchanged), and records that in a private `TurnState` flag; every later `Step::Draw` segment of the same turn (an extra draw step added with `add_extra_step_after` / `add_extra_step_before`, or a draw-only beginning phase added with `add_extra_step_after_phase`) runs normally: begin-step event and expiry, the draw, registry entries, priority, end-step expiry and mana emptying. The flag is reset at the start of `run_turn` and by `record_turn_taken` (end of `run_turn` / `run_planned_turn`). `first_turn_draw_skipped` stays a pure query with its signature, meaning "would this turn's normal draw step be skipped". Simplification: the skip is consumed by the first draw step run in the turn, not by the step that sits in the plan's normal beginning phase; when an effect adds a draw step directly before the normal one (CR 500.9), the added step is the skipped one and the normal one draws. The number of draws, priorities and step boundaries in the turn is the same either way; only which occurrence is skipped differs.
+**Rationale:** Rules-researcher answer R2-Q1: the CR "does not settle it explicitly. 103.8a's literal text refers to \"the draw step ... of their first turn\" (singular, normal step); no rule says it covers or exempts added draw steps", and "the natural literal reading is that only the normal draw step is skipped and an added draw step happens. This is an interpretation; the CR gives no explicit ruling." CR 103.8a: "In a two-player game, the player who plays first skips the draw step (see rule 504, “Draw Step”) of their first turn." The finding (Gate 06-turn round 2, R9) asks for exactly this reading. `run_segment` is not told which plan phase a segment belongs to, and the brief confines the fix to steps.rs without signature changes (control.rs is owned by another Fixer), so the "first draw step run" key is the smallest change; tracking the plan position would need `run_planned_turn` to pass it.
+**Alternatives:** Skip every draw step of the turn (the previous behaviour; contradicts the literal reading and the finding). Key the skip on the plan's beginning-phase draw step (exact for the before-the-normal-step case, but needs a change in control.rs or a new `run_segment` parameter; left for a later control-side change if a ruling ever distinguishes the two). Key on the host's current phase being `Beginning` (does not distinguish: a CR 500.10 added draw step also sits in a created beginning phase).
+
+## Gate 06-turn R4 — Follow-ups belong to the scheduler
+**Decision:** The follow-up actions (CR 614.10b) of the installed plan live in the `TurnScheduler`: `next_turn` records them (creation order) when it installs the plan, replacing those of the previous plan, and `run_planned_turn` takes them (`std::mem::take`) after `begin_turn` and before the first plan item and performs exactly those through `TurnHost::perform_follow_up`. It never performs `PlannedTurn::follow_ups`. That public field stays as informational output (the same list, for callers and the existing spec tests that construct or inspect `PlannedTurn`); its doc says the driver does not execute it. The plan-serial / player / turn-over checks are unchanged and still reject a saved earlier handle of the same scheduler before any host call. Because the driver takes the list, a follow-up runs once per plan: a second run of the finished turn is rejected by the turn-over check and performs no follow-up, and a re-entry after an interrupt without session restore would not repeat them. Public API: `PlannedTurn` and `run_planned_turn` signatures are unchanged; the semantics of `PlannedTurn::follow_ups` changed from "what the driver performs" to informational.
+**Rationale:** Two schedulers can both install plan 1 for the same player, so a handle of scheduler A passes scheduler B's serial and player checks; executing the handle's list ran A's follow-ups on B's plan and dropped B's (finding R4). Keeping the list with the plan that produced it makes the scheduler the single source of truth with no new identity scheme.
+**Alternatives:** A per-scheduler random or global identity in `PlannedTurn` (needs global state or the PRNG, R3); removing `PlannedTurn::follow_ups` (breaks spec tests and callers that read which follow-ups a turn carries, for no gain); comparing the handle's list with the scheduler's (still lets equal-looking handles pass and duplicates state).
+
+## Gate 06-turn R5 — First-strike decision at the first damage step
+**Decision:** Refines F49. The planned-turn driver no longer decides first strike after a declare blockers step. `TurnScheduler` tracks, per combat phase, whether a combat damage step (`FirstStrikeDamage` or `CombatDamage`) has begun: `next_item` sets it when it yields one and clears it when it yields `BeginPhase(Combat)` (and a new plan clears it). The new read-only query `TurnScheduler::first_damage_step_is_next()` is true when a combat phase is in progress, no damage step of it has begun, and the next segment `next_item` would yield (looking past steps that pending step skips would remove, CR 614.10) is a combat damage step. Before each `next_item`, `run_planned_turn` asks `host.first_strike_damage_step()` and passes the answer to `set_first_strike_damage_step` exactly when that query is true, so the host is asked at most once per combat phase, whatever step preceded the damage step (declare blockers, or declare attackers when declare blockers was skipped). With CR 508.8 (no attackers) no damage step is next and the host is never asked. `next_turn`'s `first_strike_damage_step` argument stays the provisional plan, not decisive. R6 (same state): once a damage step has begun in the current combat phase, `set_first_strike_damage_step` changes nothing and returns false for either argument; a still-pending provisional first-strike step keeps its behaviour (`true` does not duplicate it, `false` removes it). So an extra declare blockers step added before the combat damage step after the first-strike step ran can never add a second first-strike step. Public API added: `TurnScheduler::first_damage_step_is_next`. The non-planned `run_phase` (steps.rs) is unaffected: it has no step skips and decides once after declare blockers, and its only blockers skip (CR 508.8) also removes both damage steps.
+**Rationale:** Rules-researcher answer A-Q1: the first-strike question is "Evaluated once, at the moment the combat damage step begins", and "the second step is then unconditional". CR 510.4: "If at least one attacking or blocking creature has first strike (see rule 702.7) or double strike (see rule 702.4) as the combat damage step begins, the only creatures that assign combat damage in that step are those with first strike or double strike. After that step, instead of proceeding to the end of combat step, the phase gets a second combat damage step." CR 506.1: "There are two combat damage steps if any attacking or blocking creature has first strike (see rule 702.7) or double strike (see rule 702.4)." Asking at the damage boundary rather than after a particular step covers every plan shape, and the "damage step has begun" flag is the retention the rule describes.
+**Alternatives:** Also query after declare attackers when blockers are skipped (special-cases one shape; misses others such as extra steps); keep the declare-blockers query and add the boundary query (asks the host twice in the normal case); for R6, scan the plan's history for an already-run first-strike step (needs a step log; the flag is the same information).
+
+## Gate 06-turn Q2 — CR 508.8 when declare attackers is skipped
+**Decision:** `TurnScheduler` tracks, per combat phase, whether a declare attackers, declare blockers or combat damage step has begun (set by `next_item` when it yields one, cleared when it yields `BeginPhase(Combat)` and when a plan is installed). The new read-only query `TurnScheduler::attackers_check_is_next()` is true when a combat phase is in progress, none of those steps has begun in it, and the next segment `next_item` would yield (looking past steps pending step skips would remove, CR 614.10) is a declare blockers or combat damage step; that happens only when a step skip removed the declare attackers step. Before each `next_item`, and before the CR 510.4 first-strike check, `run_planned_turn` asks `host.attackers_declared()` exactly when the query is true; `false` calls the existing `skip_blockers_and_damage()` (end of combat and `EndPhase(Combat)` stay), `true` (a creature put onto the battlefield attacking) leaves blockers and damage to run. Because the query turns false once a blockers or damage step has begun, the host is asked at most once per combat phase on this path, and the existing end-of-declare-attackers check is unchanged. Public API added: `TurnScheduler::attackers_check_is_next`; no signature changes. The query and the R5 `first_damage_step_is_next` share one private "next combat segment" helper.
+**Rationale:** CR 508.8: "If no creatures are declared as attackers or put onto the battlefield attacking, skip the declare blockers and combat damage steps." CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it didn't exist." A skipped declare attackers step never yields a segment, so the check the driver made as that step ended never ran and the blockers and damage steps ran with no attackers (gate finding Q2). Rules-researcher answer A-Q2 places the evaluation when the declare attackers step ends; with that step skipped, the latest equivalent moment is just before the first blockers or damage step would begin, which also sees a creature put onto the battlefield attacking during beginning-of-combat priority.
+**Alternatives:** Check as `next_item` consumes the declare attackers skip (needs the host inside the scheduler, or a pending flag the driver must poll; same moment, more state); check at the end of the beginning of combat step (misses a beginning of combat step that is itself skipped); remove blockers and damage whenever declare attackers is skipped (wrong when a creature is put onto the battlefield attacking).
+
 ## #52 FP-050 tester — No `.pzl` scenarios; session-driven direct harness
 
 **Decision.** The casting announce spec tests are Rust black-box and property tests only
@@ -11496,7 +12187,63 @@ the brief fixes no precedence among `BadReductionOrder`, `BadChoice` and `Unpaya
 nor whether halves are checked for an unpayable basis.
 **Alternatives.** Pin an error precedence (not in the brief).
 
+## gate 06-turn round 5 - Mode legality probes cost choices (CR 700.2a, 601.2c)
+
+**Decision.** (CR-012; supersedes "#52 FP-050 — Mode legality and index translation" on the point
+that mode legality cannot depend on costs.) A mode (original index `m`) is offered when at least
+one probe gives every slot of `target_slots(req, &[m], &probe)` at least `min` legal candidates.
+`announce` calls `cost_spec(req, &[m])` and probes, in this order and stopping at the first
+success: `alternative` = `None`, then `Some(0)`..`Some(a-1)`; for each, the additional-cost
+subsets (every subset in ascending bit-mask order when there are at most 6 additional costs;
+otherwise none, each one alone ascending, then all); `x` = the low end of the X range if any,
+`symbol_options` empty, `harmonize: None`. At most `(a+1)*64` `target_slots` calls per mode; a spell
+without alternative or additional costs makes exactly one call per mode, as before. With more
+than 63 additional costs the singles are cut after the first 62 so that the subset list stays at
+64 and still ends with "all". `CastState::cost_spec` and `target_slots` are therefore called with
+one-mode lists and probe choices before the costs are chosen (they must stay pure, R3). An
+offered mode whose real costs leave a slot without enough legal targets rolls back at step 3
+with `MissingTarget` (the CR 601.2c check with the player's real `CostChoice` is unchanged).
+**Rationale.** CR 700.2a removes a mode only if it "would be illegal"; CR 601.2c lets targets
+depend on an alternative or additional cost, so a mode legal only under an alternative cost must
+stay choosable (CodeRabbit thread 4718412705). The bounded probe set keeps the cost of the check
+linear in the alternatives and avoids exponential subset enumeration. Cutting singles rather than
+"all" for very many additional costs keeps the bound of CR-012 and keeps the largest subset,
+which is the one most likely to add targets.
+**Alternatives.** Probing every subset (exponential); asking costs before modes (contradicts the
+CR 601.2b order and the choice protocol); a contract change in `ChoicePayload` with per-mode cost
+conditions (rejected: it changes the choice protocol contract); dropping "all" for more than 63
+additional costs (loses the largest configuration).
+
+## gate 06-turn round 5 - Symbol slots follow the chosen costs, representation of large X and division requests
+
+**Decision.** (CR-011; supersedes "#52 FP-050 — Choice request shapes" where it says one
+`CHOOSE_COSTS_AND_X` carries all symbol slots.) When the cost spec lists neither an alternative
+nor an additional cost, one `CHOOSE_COSTS_AND_X` carries everything as before. Otherwise the first
+`CHOOSE_COSTS_AND_X` carries an empty `symbol_slots`; `announce` then calls the new provided
+method `CastState::symbol_slots(req, modes, costs)` (default: no slot when `costs.alternative` is
+`Some`, CR 118.9; otherwise `cost_spec(req, modes).symbol_slots`) and, when the result is
+non-empty, asks a second `CHOOSE_COSTS_AND_X` ("CR 601.2b", next request id, chooser the caster,
+`min = max = 1`) whose payload has only the returned `symbol_slots` (empty cost lists and
+harmonize candidates, `x_range: None`), default option 0 per slot, options one `Text` per slot
+option below `ENUMERATION_LIMIT` answers or a `Payload` validator; its `symbol_options` replace the
+first answer's (empty) ones. An empty returned slot is a procedure error. Both answers are checked
+against their requests (R12). A cost request whose X range ends above `i64::MAX` uses a `Payload`
+validator (the payload carries the exact `u64` range) instead of clamped `Number` options; small
+ranges are still enumerated. A `DIVIDE_VALUE` request enumerates the recipients when the number of
+positive splits `C(total - 1, n - 1)` (capped) is below `ENUMERATION_LIMIT`, otherwise it carries
+`ValidatorRule::Division { total, recipients: (t, 1)... }` with `min = max = n`.
+**Rationale.** CR 601.2b asks the hybrid and Phyrexian announcement only for "a cost that will be
+paid", and the payload validator requires one option per slot, so the slots can only be known
+after the alternative and additional costs are chosen (CodeRabbit thread 4718412739). The X and
+division changes keep `Enumerated` reserved for fewer than `ENUMERATION_LIMIT` valid answers that
+the options can represent exactly (threads 4718412720, 4718412751); the `Division` validator is
+the representation `choice/generate.rs` already uses.
+**Alternatives.** A contract change in `ChoicePayload` with per-option conditional slots (rejected:
+it changes the choice protocol contract); always asking two requests (changes the shape of every
+spell with symbols for no reason); clamping X values (lossy, rejected by the finding).
+
 ## #54 FP-052 tester - dependent mana ability and late-item order
+**Superseded in part (gate 06-turn round 7).** The first sentence of the Rationale below ("The pinned procedure commits each non-library activation with `commit`, so X is reversed with the action, while CR 734.1 lets a player keep X when its mana was spent on a mana ability that is not reversed") is superseded by "#54 FP-052 — SRS 2.5 category (b) vs CR 605.1a and 734.1" and by SRS 2.5(a). Retaining X is not an option the engine may decline: by default legal mana abilities are reversed with the action, EXCEPT that a producer whose mana was spent on a mana ability that is not reversed is retained (mandatory, SRS 2.5(a)). The Decision of this entry is a limit of what the test checks (Y survives, the pool equals the pre-cast pool, X is neither asserted kept nor reversed), not a statement of the required engine behaviour; the required behaviour is asserted by `req_core_005_dependent_activation_kept` (unit tests, crates/fineprint-core/src/mana/pay_unit_tests.rs).
 
 **Decision.** For ability X (not library-touching) whose mana pays the cost of library-touching
 ability Y, the spec test asserts only that Y's effect survives the rollback and that the pool
@@ -11633,6 +12380,19 @@ equivalent for a correct host and never adds mana).
 
 **Alternatives.** Keep the stricter test: rejected, it asserts something the CR does not say. This is an R10 correction toward the brief and the CR, with brief clause D11 as the evidence of the correction.
 
+## gate 06-turn round 6 - Mode legality probes every additional-cost subset within a 4096-call budget (CR 700.2a, 601.2c)
+
+**Decision.** (CR-013, amending CR-012; supersedes "gate 06-turn round 5 - Mode legality probes cost choices (CR 700.2a, 601.2c)" on the probe set and the 64 bound: "none, each alone, all" for more than 6 additional costs is withdrawn.) For a mode (original index `m`), with `a` alternative and `n` additional costs in `cost_spec(req, &[m])`, `announce` probes exhaustively only when `(a + 1) * 2^n <= 4096` (`PROBE_BUDGET`; computed without overflow, `n >= usize::BITS - 1` or an overflowing product is over budget). Exhaustive order: alternative `None`, then `Some(0)`..`Some(a-1)` (outer), every additional-cost subset in ascending bit-mask order, empty subset first, indices ascending (inner); `x` = low end of the X range, empty `symbol_options`, `harmonize: None`; the mode is offered at the first probe that gives every slot at least `min` legal candidates, and not offered after the last. Over the budget the mode is offered without any `target_slots` call. A spell with no alternative and no additional cost still makes exactly one call per mode.
+
+**Rationale.** No legal mode may be omitted: CR 700.2a's "can't be chosen" applies only to a mode that would be illegal, and CR 601.2c lets alternative or additional costs create the targets, so an unprobed subset (the pair [2, 5] of seven) could be the legal one. Untrusted host data must not force unbounded work (R12), so the work is bounded at 4096 calls per mode (total across modes: modes * 4096). Over the budget, sampled probes could never prove a mode illegal, so they would only cost calls; the mode is offered and the CR 601.2c check of step 3 with the player's real costs rolls the cast back (CR 601.2, 734.1) with `MissingTarget` if the choice leaves a slot short. Known cost: over the budget the CR 700.2a filter is not applied before the mode request (a pathological shape: more than 12 additional costs, or alternatives times subsets above 4096).
+
+**Alternatives.** A host-supplied legality hook (rejected: an extra host method for what `target_slots` already answers); a per-alternative budget (rejected: unbounded in the number of alternatives, which is also host data); keeping none/each/all (rejected: omits legal modes, the review finding); dropping modes only when proven illegal by a sampled subset (rejected: unsound, an unsampled subset may make the mode legal).
+
+## gate 06-turn round 6 tester - Option kinds checked in cost requests
+**Decision:** The property check `check_request` in `tests/spec_casting_announce_property.rs` treats the enumerated options of a `CHOOSE_COSTS_AND_X` request by kind. `Number` is an exact X value in the payload's range. `Object` must be one of `harmonize_candidates`. `Text` must be an alternative-cost label, an additional-cost label or an option of a symbol slot. Any other kind fails the property.
+**Rationale:** CodeRabbit thread 4719167694 asked for explicit handling instead of a catch-all arm. The choice contract does not name the option kind per field, so the kinds are taken from the requests the procedure emits (black-box). A new kind then fails loudly instead of passing unchecked.
+**Alternatives:** keep the catch-all arm (hides an illegal displayed option); assert only `Object` (leaves `Text` unchecked).
+
 ## #55 FP-053 — auto-tap solver input: a host-supplied mana-source description
 
 **Decision.** `preview_auto_tap` takes the activatable mana abilities as a slice of `ManaSource`
@@ -11755,3 +12515,66 @@ inputs inside the exact range only.
 **Rationale.** Inside the exact range, the result is the reference list truncated to
 `min(n, 32)` (requirement 10), so a short list must already be complete.
 **Alternatives.** Asserting the prefix relation alone.
+
+## gate 06-turn round 7 - Mode legality probes X (CR 700.2a, 601.2b, 601.2c, 107.3a)
+
+Supersedes "gate 06-turn round 6 - Mode legality probes every additional-cost subset within a
+4096-call budget (CR 700.2a, 601.2c)" and "gate 06-turn round 5 - Mode legality probes cost
+choices (CR 700.2a, 601.2c)" on the point "`x` = low end of the X range" (CodeRabbit threads
+4720021411 and 4718412705).
+
+**Decision.** The rule of CR-014. `casting::announce::mode_legal` probes `target_slots(req,
+&[m], &probe)` over the product of {normal cost, each alternative cost} (outermost), every
+additional-cost subset in ascending bit-mask order (middle) and every X of `lo..=hi` ascending
+(innermost); `x: None` without an X range and the single value `lo` when `lo > hi`; empty
+`symbol_options` and `harmonize: None`. It stops at the first probe that gives every slot at
+least `min` legal candidates. The product `(alternatives + 1) * 2^additional * x_count` is
+computed with checked arithmetic (`x_count = (hi - lo).checked_add(1)` converted with
+`usize::try_from`, so `0..=u64::MAX` is over budget) and the probe is exhaustive only when it
+is at most 4096; otherwise the mode is offered with no `target_slots` call and step 3 checks the
+real choices.
+**Rationale.** X is announced at 601.2b, before targets (601.2c), and a target restriction can
+depend on X, so a mode legal at some permitted X is not illegal under 700.2a. The 4096 budget
+now covers the full product. Over budget (or with an X range too wide to enumerate) the mode is
+offered and step 3 rolls an illegal choice back (601.2, 734.1).
+**Alternatives.** Probing only the ends of the range (rejected: unsound, a legal middle X would
+be omitted); probing symbol options and the harmonize creature (rejected: they do not change
+the required targets, 601.2c, 601.2h); a host legality hook (rejected, as in round 6).
+
+## gate 06-turn round 7 - Mana-ability window re-asked; removal provenance (CR 601.2g, 605.3a, 734.1)
+
+Work item gate7-implp, threads 4720021419 and 4720021426 (and CodeRabbit comment 4720082538).
+Supersedes two statements of "#54 FP-052" (the `casting::pay` module doc and "SRS 2.5 category
+(b) vs CR 605.1a and 734.1"): "one ask, before anything changes" and "a removed unit is matched
+to the earliest equal unit". Now: the step-7 window may ask several times; which units an
+activation removed is host-reported provenance (`PayState::last_activation_removed`), with the
+earliest-equal inference only as the documented fallback. The scratch window keeps the rule that
+nothing in the real state changes before the window has ended, and keeps the rejection of nested
+open checkpoints.
+
+**Decision.** CR-015 and CR-016. `casting::pay_total_cost` asks PAY_MANA_AND_COSTS on a scratch
+copy of the state, at most 256 times (the 256th request lists no ability); an answer in which at
+least one listed ability is activated (available, not in progress, accepted by the host, in
+listed order) is followed by a new request and its methods and auto-pay are discarded; the
+window ends on auto-pay, an answer that lists no ability, an answer none of whose abilities ran,
+or a cancel. Then the concatenation of every listed ability is activated for real by the
+unchanged `activate_all` (availability checked per activation; the CR 734.1 dependent-activation
+probe covers the concatenation) and the payment-method offers are recomputed on the real state.
+`PayState` gets the provided method `last_activation_removed` (default `None`); `follow_units`
+uses a valid report (strictly ascending, every index below the pool length before,
+`before - removed <= after`) and otherwise infers: per distinct unit value, the
+`count_before - count_after` earliest equal units are removed.
+**Rationale.** CR 601.2g gives a chance (a window) to activate mana abilities, and CR 605.3a-c
+let the player activate whenever a payment is asked; one snapshot offer made an ability that
+becomes available only after an earlier activation unselectable. Equal units hide production
+history and SRS 2.5(a) is mandatory, so the producer of a removed unit must come from the removal
+itself. A scratch simulation keeps the durable-commit rule (only the innermost checkpoint can be
+committed, a normally committed activation cannot become durable later: the earlier rejection of
+nested open checkpoints), because the real activations happen once, after the window, with the
+probe over the whole list.
+**Alternatives.** Option 2 "offerable_mana_abilities" (rejected: the client cannot tell legal
+from potential); a conditional payload field (rejected: breaking); inference only (rejected by
+CodeRabbit comment 4720082538: relies on an unstated host invariant); a `consumed` field on
+`ManaActivation` (rejected: breaking). Note: the finding's literal example (B spends the red A
+produces) reproduces only on hosts that leave out abilities they cannot pay for yet; the untap
+case reproduces on any host.

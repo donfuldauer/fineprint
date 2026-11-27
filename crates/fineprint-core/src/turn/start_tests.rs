@@ -175,6 +175,11 @@ impl GameStartHost for Host {
     ) -> Result<(), Interrupt> {
         self.log.push(("pregame", player));
         self.performed.push((player, cards.to_vec()));
+        // A pregame action puts the card onto the battlefield: it leaves the hand.
+        self.hands
+            .entry(player)
+            .or_default()
+            .retain(|c| !cards.contains(c));
         Ok(())
     }
 }
@@ -290,7 +295,7 @@ fn req_fmt_001_cr_103_1_unknown_starting_player_is_an_error() {
 
 #[test]
 fn cr_103_3_libraries_are_shuffled_in_stored_turn_order() {
-    // CR 103.3: one shuffle per player in stored order, after the starting-player draw; the
+    // REQ-FMT-001, CR 103.3: one shuffle per player in stored order, after the starting-player draw; the
     // starting player is not stored-first here.
     let host = Host::new(3, base_format(20, 2, false));
     let opts = StartOptions {
@@ -326,7 +331,7 @@ fn req_fmt_001_cr_103_4_cr_103_5_life_and_hand_size_come_from_the_format() {
 
 #[test]
 fn cr_103_5_no_mulligan_keeps_the_top_cards() {
-    // CR 103.5: all keep; to_bottom 0, KEEP_HAND{[]}; hand = top 7 of the shuffled library.
+    // REQ-FMT-001, REQ-NET-003, CR 103.5: all keep; to_bottom 0, KEEP_HAND{[]}; hand = top 7 of the shuffled library.
     let host = Host::new(2, base_format(20, 7, false));
     let run = drive(host, &StartOptions::default(), &keep);
     assert_eq!(run.asked.len(), 2);
@@ -403,7 +408,7 @@ fn mulligan_script(
 
 #[test]
 fn cr_103_5_one_and_two_mulligans_give_exact_hands_and_library_order() {
-    // CR 103.5: mulligan shuffles the hand back, draws a new hand, bottoms one card per
+    // REQ-FMT-001, REQ-NET-003, CR 103.5: mulligan shuffles the hand back, draws a new hand, bottoms one card per
     // mulligan taken, in the order given (the last listed is bottom-most).
     for takes in 1..=2usize {
         let host = Host::new(2, base_format(20, 7, false));
@@ -441,7 +446,7 @@ fn cr_103_5_one_and_two_mulligans_give_exact_hands_and_library_order() {
 
 #[test]
 fn cr_103_5_declarations_start_with_the_starting_player_in_turn_order() {
-    // CR 103.5: the starting player declares first, then the others in turn order; the starting
+    // REQ-NET-003, CR 103.5: the starting player declares first, then the others in turn order; the starting
     // player is not stored-first. All declarations of a round come before any mulligan.
     let host = Host::new(3, base_format(20, 7, false));
     let (p0, p1, p2) = (host.p(0), host.p(1), host.p(2));
@@ -464,7 +469,7 @@ fn cr_103_5_declarations_start_with_the_starting_player_in_turn_order() {
 
 #[test]
 fn cr_103_5c_mulligan_to_bottom_table() {
-    // CR 103.5c: the free first mulligan only in multiplayer and only with the flag.
+    // REQ-FMT-001, CR 103.5c: the free first mulligan only in multiplayer and only with the flag.
     assert_eq!(mulligan_to_bottom(0, 3, true), 0);
     assert_eq!(mulligan_to_bottom(1, 3, true), 0);
     assert_eq!(mulligan_to_bottom(2, 3, true), 1);
@@ -488,7 +493,7 @@ fn to_bottoms_for(run: &Run, who: PlayerId) -> Vec<u64> {
 
 #[test]
 fn cr_103_5c_free_first_mulligan_in_multiplayer() {
-    // CR 103.5c: 3 players with the flag: after one mulligan 0 to bottom, after two 1.
+    // REQ-FMT-001, CR 103.5c: 3 players with the flag: after one mulligan 0 to bottom, after two 1.
     let host = Host::new(3, base_format(20, 7, true));
     let p0 = host.p(0);
     let script = mulligan_script(p0, 2);
@@ -510,24 +515,124 @@ fn cr_103_5c_free_first_mulligan_in_multiplayer() {
 }
 
 #[test]
-fn cr_103_5_zero_hand_limit_bottoms_the_whole_hand_without_asking() {
-    // CR 103.5: when the counted mulligans reach the hand size no further mulligan is offered;
-    // the player keeps and the whole hand (ascending ids) goes to the bottom.
+fn req_fmt_001_req_net_003_cr_103_5_last_mulligan_asks_for_the_bottom_order() {
+    // REQ-FMT-001, REQ-NET-003, CR 103.5 (F86): when the counted mulligans reach the hand size
+    // no further mulligan is offered; the player is asked once for the order in which the whole
+    // hand goes to the bottom ("in any order"); the timeout default is ascending ids.
     let mut host = Host::new(2, base_format(20, 2, false));
     let a = host.p(0);
     host.sizes.insert(a, 2);
-    let script = mulligan_script(a, 100);
+    let script = mulligan_script(a, 2);
     let run = drive(host, &StartOptions::default(), &script);
-    // Asks for a: taken 0 (c 0), 1 (c 1); at taken 2, c == size 2: no ask.
-    assert_eq!(to_bottoms_for(&run, a), vec![0, 1]);
+    // Asks for a: taken 0 (c 0), 1 (c 1), then the forced bottom of the whole hand (2).
+    assert_eq!(to_bottoms_for(&run, a), vec![0, 1, 2]);
+    let last = run.asked.iter().rfind(|q| q.chooser == a).unwrap();
+    assert_eq!((last.min, last.max), (2, 2));
+    let ChoicePayload::MulliganDecision { hand, .. } = &last.payload else {
+        panic!("payload");
+    };
+    // The reversed answer of the script reaches the bottom in that order.
+    let mut reversed = hand.clone();
+    reversed.reverse();
+    assert_ne!(reversed, *hand);
+    assert_eq!(
+        last.default_on_timeout,
+        ChoiceResponse::KeepHand {
+            bottom: hand.clone()
+        }
+    );
     assert_eq!(run.report.mulligans[0], (a, 2));
     assert!(run.report.opening_hands[0].1.is_empty());
     assert!(run.host.hands[&a].is_empty());
     let lib = &run.host.libs[&a];
     assert_eq!(lib.len(), 20);
-    // The last two cards are the two drawn after the second mulligan, ascending ids.
-    let tail = lib[18..].to_vec();
+    assert_eq!(lib[18..].to_vec(), reversed);
+    // The timeout default keeps the ascending order.
+    let mut host = Host::new(2, base_format(20, 2, false));
+    let a = host.p(0);
+    host.sizes.insert(a, 2);
+    let take_twice = |req: &PendingChoiceRequest| match &req.payload {
+        ChoicePayload::MulliganDecision {
+            mulligans_taken, ..
+        } if req.chooser == a && *mulligans_taken < 2 => ChoiceResponse::TakeMulligan,
+        _ => keep(req),
+    };
+    let run = drive(host, &StartOptions::default(), &take_twice);
+    let tail = run.host.libs[&a][18..].to_vec();
     assert_eq!(tail, sorted(tail.clone()));
+}
+
+#[test]
+fn req_net_003_r12_take_mulligan_is_rejected_on_the_last_mulligan() {
+    // REQ-NET-003, REQ-FMT-001, CR 103.5, R12: at the last mulligan TAKE_MULLIGAN is a procedure
+    // error (the payload has no can-mulligan flag).
+    let mut host = Host::new(2, base_format(20, 2, false));
+    let a = host.p(0);
+    host.sizes.insert(a, 2);
+    let mut session = ChoiceSession::start(host, procedure(StartOptions::default())).unwrap();
+    for _ in 0..8 {
+        let req = session.pending().unwrap().clone();
+        let ChoicePayload::MulliganDecision {
+            mulligans_taken,
+            to_bottom,
+            ..
+        } = &req.payload
+        else {
+            panic!("payload");
+        };
+        if req.chooser == a && *to_bottom == 2 {
+            assert_eq!(*mulligans_taken, 2);
+            // R8 (gate 06-turn round 2, REQ-NET-003): the payload validator itself rejects
+            // TAKE_MULLIGAN here, so `submit` refuses it and the request stays pending
+            // unchanged; ordinary requests (the loop's earlier answers) accepted it.
+            let result = session.submit(req.request_id, ChoiceResponse::TakeMulligan);
+            assert!(result.is_err());
+            assert_eq!(session.pending().unwrap(), &req);
+            let ChoicePayload::MulliganDecision { hand, .. } = &req.payload else {
+                unreachable!()
+            };
+            let whole = ChoiceResponse::KeepHand {
+                bottom: hand.iter().rev().copied().collect(),
+            };
+            session.submit(req.request_id, whole).unwrap();
+            return;
+        }
+        let answer = if req.chooser == a {
+            ChoiceResponse::TakeMulligan
+        } else {
+            keep(&req)
+        };
+        session.submit(req.request_id, answer).unwrap();
+    }
+    panic!("the last-mulligan request was never issued");
+}
+
+#[test]
+fn req_net_003_cr_103_5_cr_103_6_opening_hands_are_read_before_pregame_actions() {
+    // REQ-NET-003, REQ-FMT-001, CR 103.5, CR 103.6 (F85): the report lists the hand kept after
+    // the last mulligan even when a pregame action then moves a card out of the hand.
+    let mut host = Host::new(2, base_format(20, 2, false));
+    let a = host.p(0);
+    let opts = StartOptions {
+        starting_player: Some(a),
+    };
+    let probe = drive(host.clone(), &opts, &keep);
+    let kept = probe.host.hands[&a].clone();
+    assert_eq!(kept.len(), 2);
+    host.eligible.insert(a, vec![kept[0]]);
+    let script = |req: &PendingChoiceRequest| match &req.payload {
+        ChoicePayload::PregameAction { eligible } => ChoiceResponse::SubmitPregame {
+            objects: eligible.clone(),
+        },
+        _ => keep(req),
+    };
+    let run = drive(host, &opts, &script);
+    assert_eq!(run.host.performed, vec![(a, vec![kept[0]])]);
+    assert_eq!(run.report.opening_hands[0], (a, kept.clone()));
+    assert!(
+        !run.host.hands[&a].contains(&kept[0]),
+        "the host state reflects the move"
+    );
 }
 
 #[test]
@@ -552,7 +657,7 @@ fn req_net_003_defaults_validate_and_bad_answers_are_rejected() {
         .unwrap();
     let mut second = None;
     // The same player (or the other) is asked again; find a's request for taken 1.
-    for _ in 0..3 {
+    for _ in 0..6 {
         let req = session.pending().unwrap().clone();
         let ChoicePayload::MulliganDecision {
             hand,
@@ -563,22 +668,35 @@ fn req_net_003_defaults_validate_and_bad_answers_are_rejected() {
             panic!("payload")
         };
         if req.chooser == a && *mulligans_taken == 1 {
+            // Take a second mulligan: then two cards must go to the bottom.
+            session
+                .submit(req.request_id, ChoiceResponse::TakeMulligan)
+                .unwrap();
+            continue;
+        }
+        if req.chooser == a && *mulligans_taken == 2 {
             second = Some((req.clone(), hand.clone()));
             break;
         }
         session.submit_default(req.request_id).unwrap();
     }
     let (req, hand) = second.expect("a is asked again");
+    // R7 (gate 06-turn round 2, REQ-NET-003): the pair has the right count (2), so the foreign
+    // id is the only reason for the rejection (the validator checks the count first).
+    assert_eq!((req.min, req.max), (2, 2));
+    assert!(!hand.contains(&o(9999)));
     let outside = ChoiceResponse::KeepHand {
-        bottom: vec![o(9999)],
+        bottom: vec![hand[0], o(9999)],
     };
     assert!(session.submit(req.request_id, outside).is_err());
+    // The duplicate pair has the right count, so the duplicate is the only reason for the
+    // rejection.
     let dup = ChoiceResponse::KeepHand {
         bottom: vec![hand[0], hand[0]],
     };
     assert!(session.submit(req.request_id, dup).is_err());
     let good = ChoiceResponse::KeepHand {
-        bottom: vec![hand[3]],
+        bottom: vec![hand[0], hand[1]],
     };
     session.submit(req.request_id, good).unwrap();
 }

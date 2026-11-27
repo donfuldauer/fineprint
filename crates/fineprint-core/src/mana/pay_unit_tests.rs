@@ -52,6 +52,8 @@ struct FakeAbility {
     mills: usize,
     /// The host refuses the activation.
     refuses: bool,
+    /// Effect: untaps this object.
+    untaps: Option<u64>,
 }
 
 /// How the host pays a non-mana item.
@@ -98,6 +100,12 @@ struct Table {
     history: Option<SpellHistory>,
     cast: bool,
     queued: Vec<u64>,
+    /// An ability with a mana cost is available only while the pool can pay it.
+    payable_only: bool,
+    /// The host reports the removed units (`PayState::last_activation_removed`, CR-016).
+    report_removed: bool,
+    /// The pool indices the last activation removed (transient; not in the state hash).
+    last_removed: Option<Vec<usize>>,
 }
 
 fn slot(player: PlayerId) -> usize {
@@ -123,6 +131,9 @@ impl Table {
             history: None,
             cast: false,
             queued: Vec::new(),
+            payable_only: false,
+            report_removed: false,
+            last_removed: None,
         }
     }
 
@@ -154,6 +165,14 @@ fn green(source: u64) -> ManaUnit {
 
 fn black(source: u64) -> ManaUnit {
     ManaUnit::new(ManaType::Black, o(source))
+}
+
+fn blue(source: u64) -> ManaUnit {
+    ManaUnit::new(ManaType::Blue, o(source))
+}
+
+fn colorless(source: u64) -> ManaUnit {
+    ManaUnit::new(ManaType::Colorless, o(source))
 }
 
 /// Taps source 10 for one red.
@@ -201,6 +220,48 @@ fn convert() -> FakeAbility {
             ..ManaComponent::default()
         },
         produces: vec![green(13)],
+        mills: 1,
+        ..FakeAbility::default()
+    }
+}
+
+/// Source 14: taps for {C} and untaps source 10.
+fn untapper() -> FakeAbility {
+    FakeAbility {
+        source: 14,
+        id: "untapper",
+        taps: true,
+        produces: vec![colorless(14)],
+        untaps: Some(10),
+        ..FakeAbility::default()
+    }
+}
+
+/// Source 15: pays {R} from the pool for one blue (no tap).
+fn to_blue() -> FakeAbility {
+    FakeAbility {
+        source: 15,
+        id: "to_blue",
+        cost: ManaComponent {
+            red: 1,
+            ..ManaComponent::default()
+        },
+        produces: vec![blue(15)],
+        ..FakeAbility::default()
+    }
+}
+
+/// Source 10: pays {R} from the pool for one red from source 10 (an equal unit); its triggered
+/// mana ability mills (library-touching).
+fn recycle() -> FakeAbility {
+    FakeAbility {
+        source: 10,
+        id: "recycle",
+        cost: ManaComponent {
+            red: 1,
+            ..ManaComponent::default()
+        },
+        produces: vec![red(10)],
         mills: 1,
         ..FakeAbility::default()
     }
@@ -283,11 +344,17 @@ impl PayState for Table {
         &mut self.pools[slot(player)]
     }
 
-    fn available_mana_abilities(&self, _player: PlayerId) -> Vec<(ObjectId, String)> {
+    fn available_mana_abilities(&self, player: PlayerId) -> Vec<(ObjectId, String)> {
+        let purpose = SpendPurpose::new(["ability"]);
         let mut v: Vec<(ObjectId, String)> = self
             .abilities
             .iter()
             .filter(|a| !(a.taps && self.tapped.contains(&a.source)))
+            .filter(|a| {
+                !self.payable_only
+                    || a.cost.is_zero()
+                    || plan_payment(self.mana_pool(player), &a.cost, &purpose).is_some()
+            })
             .map(|a| (o(a.source), a.id.to_owned()))
             .collect();
         v.sort();
@@ -319,6 +386,10 @@ impl PayState for Table {
         if a.taps {
             self.tapped.insert(a.source);
         }
+        if let Some(u) = a.untaps {
+            self.tapped.remove(&u);
+        }
+        self.last_removed = Some(plan.spent.clone());
         for u in &a.produces {
             self.mana_pool_mut(player).add(u.clone());
         }
@@ -328,6 +399,14 @@ impl PayState for Table {
         Ok(ManaActivation {
             library_touching: a.mills > 0,
         })
+    }
+
+    fn last_activation_removed(&self, _player: PlayerId) -> Option<Vec<usize>> {
+        if self.report_removed {
+            self.last_removed.clone()
+        } else {
+            None
+        }
     }
 
     fn cost_is_late(&self, _player: PlayerId, item: &CostAST) -> bool {
@@ -462,6 +541,11 @@ fn unpayable() -> LockedCost {
         &[],
     )
     .expect("locked")
+}
+
+/// An answer that lists no mana ability and no method: it ends the step-7 window (CR-015).
+fn plain() -> ChoiceResponse {
+    pay(&[], Vec::new())
 }
 
 fn pay(abilities: &[(u64, &str)], methods: Vec<(u32, Vec<ObjectId>)>) -> ChoiceResponse {
@@ -629,7 +713,10 @@ fn req_cast_001_committed_payment() {
         &t,
         &cost,
         &base,
-        &[pay(&[(10, "tap_red"), (11, "tap_green")], Vec::new())],
+        &[
+            pay(&[(10, "tap_red"), (11, "tap_green")], Vec::new()),
+            plain(),
+        ],
     );
     let PayOutcome::Committed {
         spent,
@@ -728,7 +815,7 @@ fn req_cast_001_restricted_mana_in_payment() {
 fn req_core_005_unpayable_mana_rolls_back_identically() {
     let t = Table::new().with(tap_red());
     let cost = locked(mana(|c| c.green = 1), 0, Vec::new());
-    let (s, out) = run(&t, &cost, &[pay(&[(10, "tap_red")], Vec::new())]);
+    let (s, out) = run(&t, &cost, &[pay(&[(10, "tap_red")], Vec::new()), plain()]);
     let r = rolled(&out);
     assert_eq!(r.reason, PayStopReason::UnpayableMana);
     assert_eq!(r.state_hash, t.state_hash());
@@ -761,7 +848,7 @@ fn req_core_005_library_touching_activation_survives_rollback() {
     let (s, out) = run(
         &t,
         &cost,
-        &[pay(&[(10, "tap_red"), (12, "dig")], Vec::new())],
+        &[pay(&[(10, "tap_red"), (12, "dig")], Vec::new()), plain()],
     );
     let r = rolled(&out);
     assert_eq!(r.reason, PayStopReason::UnpayableMana);
@@ -779,7 +866,7 @@ fn req_core_005_library_touching_activation_survives_rollback() {
     let (s2, _) = run(
         &t,
         &cost,
-        &[pay(&[(12, "dig"), (10, "tap_red")], Vec::new())],
+        &[pay(&[(12, "dig"), (10, "tap_red")], Vec::new()), plain()],
     );
     assert_eq!(s2.tapped, BTreeSet::from([12]));
     assert_eq!(s2.pool().units(), &[black(12)]);
@@ -795,7 +882,10 @@ fn req_core_005_dependent_activation_kept() {
     let (s, out) = run(
         &t,
         &cost,
-        &[pay(&[(10, "tap_red"), (13, "convert")], Vec::new())],
+        &[
+            pay(&[(10, "tap_red"), (13, "convert")], Vec::new()),
+            plain(),
+        ],
     );
     assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
     // Both survive: the red was consumed by the durable conversion.
@@ -809,7 +899,10 @@ fn req_core_005_dependent_activation_kept() {
     let (s2, _) = run(
         &t2,
         &cost,
-        &[pay(&[(10, "tap_red"), (13, "convert")], Vec::new())],
+        &[
+            pay(&[(10, "tap_red"), (13, "convert")], Vec::new()),
+            plain(),
+        ],
     );
     assert!(s2.tapped.contains(&13));
     assert!(!s2.tapped.contains(&10));
@@ -988,17 +1081,20 @@ fn req_cast_001_listed_twice_and_refused() {
     let (s, out) = run(
         &t,
         &rr,
-        &[pay(
-            &[(10, "tap_red"), (10, "tap_red"), (15, "refused")],
-            Vec::new(),
-        )],
+        &[
+            pay(
+                &[(10, "tap_red"), (10, "tap_red"), (15, "refused")],
+                Vec::new(),
+            ),
+            plain(),
+        ],
     );
     assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
     assert_eq!(s.state_hash(), t.state_hash());
     let (s, out) = run(
         &t,
         &rr,
-        &[pay(&[(14, "repeat"), (14, "repeat")], Vec::new())],
+        &[pay(&[(14, "repeat"), (14, "repeat")], Vec::new()), plain()],
     );
     assert!(matches!(out, PayOutcome::Committed { .. }));
     assert!(s.pool().is_empty());
@@ -1012,7 +1108,7 @@ fn req_cast_001_follow_units() {
     let before = vec![red(1), green(2), red(1)];
     let origin = vec![None, Some(0), Some(1)];
     let after = vec![red(1), red(1), black(3)];
-    let (gone, next) = follow_units(&before, &after, &origin, 2);
+    let (gone, next) = follow_units(&before, &after, &origin, None, 2);
     assert_eq!(gone, vec![0]);
     assert_eq!(next, vec![None, Some(1), Some(2)]);
 }
@@ -1120,7 +1216,7 @@ fn req_cast_001_payment_method_clamped() {
 fn req_net_003_pay_replay_round_trip() {
     let t = Table::new().with(tap_red()).with(dig());
     let cost = locked(mana(|c| c.generic = 2), 0, Vec::new());
-    let answer = pay(&[(12, "dig"), (10, "tap_red")], Vec::new());
+    let answers = vec![pay(&[(12, "dig"), (10, "tap_red")], Vec::new()), plain()];
     let c2 = cost.clone();
     let mut session = ChoiceSession::start(
         t.clone(),
@@ -1130,25 +1226,31 @@ fn req_net_003_pay_replay_round_trip() {
     )
     .expect("start");
     assert_eq!(session.state_hash(), t.state_hash());
-    let id = session.pending().expect("pending").request_id;
-    session.submit(id, answer.clone()).expect("submit");
+    for answer in &answers {
+        let id = session.pending().expect("pending").request_id;
+        session.submit(id, answer.clone()).expect("submit");
+        if session.pending().is_some() {
+            // CR-015: nothing in the real state changes while the window is open.
+            assert_eq!(session.state_hash(), t.state_hash());
+        }
+    }
     let Status::Done { state, output } = session.status().clone() else {
         panic!("not done");
     };
     assert!(matches!(output, PayOutcome::Committed { .. }));
-    let (replayed, out) = run(&t, &cost, std::slice::from_ref(&answer));
+    let (replayed, out) = run(&t, &cost, &answers);
     assert_eq!(out, output);
     assert_eq!(replayed.state_hash(), state.state_hash());
     for _ in 0..10 {
-        let (again, out) = run(&t, &cost, std::slice::from_ref(&answer));
+        let (again, out) = run(&t, &cost, &answers);
         assert_eq!(out, output);
         assert_eq!(again.state_hash(), state.state_hash());
     }
     let big = locked(mana(|c| c.generic = 7), 0, Vec::new());
-    let (first, out1) = run(&t, &big, std::slice::from_ref(&answer));
+    let (first, out1) = run(&t, &big, &answers);
     assert!(matches!(out1, PayOutcome::RolledBack(_)));
     for _ in 0..10 {
-        let (again, out) = run(&t, &big, std::slice::from_ref(&answer));
+        let (again, out) = run(&t, &big, &answers);
         assert_eq!(out, out1);
         assert_eq!(again.state_hash(), first.state_hash());
     }
@@ -1266,4 +1368,423 @@ fn req_cast_001_refused_payment_method_spends_nothing() {
     assert_eq!(s.state_hash(), t.state_hash());
     assert_eq!(s.pool().units(), &[green(1)]);
     assert!(s.tapped.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The step-7 window is asked again after each answer that activates (contract CR-015)
+// ---------------------------------------------------------------------------------------------
+
+/// A suspendable run of the whole-cast procedure on `t`, answered one request at a time.
+fn session(
+    t: &Table,
+    cost: &LockedCost,
+) -> ChoiceSession<
+    Table,
+    PayOutcome,
+    impl Fn(&mut Table, &mut ChoiceContext<'_>) -> Result<PayOutcome, Interrupt>,
+> {
+    let cost = cost.clone();
+    ChoiceSession::start(
+        t.clone(),
+        move |s: &mut Table, ctx: &mut ChoiceContext<'_>| {
+            procedure(s, ctx, &cost, &SpellHistory::default())
+        },
+    )
+    .expect("start")
+}
+
+/// The mana abilities a PAY_MANA_AND_COSTS request lists.
+fn listed(r: &PendingChoiceRequest) -> Vec<(ObjectId, String)> {
+    match &r.payload {
+        ChoicePayload::PayManaAndCosts { mana_abilities, .. } => mana_abilities.clone(),
+        other => panic!("payload {other:?}"),
+    }
+}
+
+fn ability(source: u64, id: &str) -> (ObjectId, String) {
+    (o(source), id.to_owned())
+}
+
+/// REQ-CAST-001, CR 601.2g, 605.3a, 605.3b (thread 4720021419, CR-015): an ability that becomes
+/// available only after an earlier activation of the same window (its source is untapped by
+/// it) is offered in the next request and can pay the cost; the first request does not list it
+/// and rejects it by membership (R12) without changing anything.
+#[test]
+fn req_cast_001_window_untap_then_activate() {
+    let mut t = Table::new().with(untapper()).with(tap_red());
+    t.tapped.insert(10);
+    let cost = locked(mana(|c| c.red = 1), 0, Vec::new());
+    let mut s = session(&t, &cost);
+    let first = s.pending().expect("pending").clone();
+    assert_eq!(listed(&first), vec![ability(14, "untapper")]);
+    // R12: the request rejects an ability it does not list; nothing changes.
+    let both = pay(&[(14, "untapper"), (10, "tap_red")], Vec::new());
+    assert!(s.submit(first.request_id, both).is_err());
+    assert_eq!(
+        s.pending().expect("still pending").request_id,
+        first.request_id
+    );
+    assert_eq!(s.state_hash(), t.state_hash());
+    s.submit(first.request_id, pay(&[(14, "untapper")], Vec::new()))
+        .expect("untapper");
+    let second = s.pending().expect("second request").clone();
+    assert_ne!(second.request_id, first.request_id);
+    assert_eq!(listed(&second), vec![ability(10, "tap_red")]);
+    assert_eq!(s.state_hash(), t.state_hash());
+    s.submit(second.request_id, pay(&[(10, "tap_red")], Vec::new()))
+        .expect("tap_red");
+    let third = s.pending().expect("third request").clone();
+    assert!(listed(&third).is_empty());
+    assert!(matches!(
+        third.payload,
+        ChoicePayload::PayManaAndCosts { auto_pay: true, .. }
+    ));
+    s.submit(third.request_id, plain()).expect("plain");
+    let Status::Done { state, output } = s.status().clone() else {
+        panic!("not done");
+    };
+    let PayOutcome::Committed { spent, .. } = &output else {
+        panic!("not committed: {output:?}");
+    };
+    assert_eq!(spent, &vec![red(10)]);
+    assert_eq!(state.tapped, BTreeSet::from([10, 14]));
+    assert_eq!(state.pool().units(), &[colorless(14)]);
+    assert_eq!(state.log, vec!["activate untapper", "activate tap_red"]);
+    // A replay of the same answers reaches the same final state (REQ-CORE-001).
+    let (replayed, out) = run(
+        &t,
+        &cost,
+        &[
+            pay(&[(14, "untapper")], Vec::new()),
+            pay(&[(10, "tap_red")], Vec::new()),
+            plain(),
+        ],
+    );
+    assert_eq!(out, output);
+    assert_eq!(replayed.state_hash(), state.state_hash());
+}
+
+/// REQ-CAST-001, CR 601.2g, 605.3a (CR-015): on a host that lists an ability only while its
+/// mana cost can be paid, the ability paid with the mana of an earlier activation is offered in
+/// the next request.
+#[test]
+fn req_cast_001_window_payable_conditional() {
+    let mut t = Table::new().with(tap_red()).with(to_blue());
+    t.payable_only = true;
+    let cost = locked(mana(|c| c.blue = 1), 0, Vec::new());
+    let first = first_request(&t, &cost);
+    assert_eq!(listed(&first), vec![ability(10, "tap_red")]);
+    let (s, out) = run(
+        &t,
+        &cost,
+        &[
+            pay(&[(10, "tap_red")], Vec::new()),
+            pay(&[(15, "to_blue")], Vec::new()),
+            plain(),
+        ],
+    );
+    let PayOutcome::Committed { spent, .. } = out else {
+        panic!("not committed: {out:?}");
+    };
+    assert_eq!(spent, vec![blue(15)]);
+    assert!(s.pool().is_empty());
+    assert_eq!(s.log, vec!["activate tap_red", "activate to_blue"]);
+}
+
+/// REQ-CAST-001, CR 601.2g, 118.3c (CR-015): an answer that lists abilities none of which is
+/// activated (the host refuses) ends the window: no further request, and its payment methods
+/// are applied.
+#[test]
+fn req_cast_001_window_ends_when_nothing_activates() {
+    let refused = FakeAbility {
+        source: 15,
+        id: "refused",
+        refuses: true,
+        produces: vec![red(15)],
+        ..FakeAbility::default()
+    };
+    let mut t = Table::new().with(refused);
+    t.methods = vec![offer()];
+    let cost = locked(mana(|c| c.generic = 1), 0, Vec::new());
+    let (s, out) = run(
+        &t,
+        &cost,
+        &[pay(&[(15, "refused")], vec![(0, vec![o(20)])])],
+    );
+    assert!(matches!(out, PayOutcome::Committed { .. }));
+    assert_eq!(s.tapped, BTreeSet::from([20]));
+    assert_eq!(
+        s.history.expect("history").costs_paid,
+        vec!["method.method_tap", "mana"]
+    );
+    // The methods of an answer that activated something are discarded.
+    let mut t2 = Table::new().with(tap_red());
+    t2.methods = vec![offer()];
+    let (s2, out2) = run(
+        &t2,
+        &cost,
+        &[pay(&[(10, "tap_red")], vec![(0, vec![o(20)])]), plain()],
+    );
+    assert!(matches!(out2, PayOutcome::Committed { .. }));
+    assert_eq!(s2.tapped, BTreeSet::from([10]));
+    assert_eq!(s2.history.expect("history").costs_paid, vec!["mana"]);
+}
+
+/// REQ-CAST-001, CR 601.2g, 601.2h (CR-015): an auto-pay answer in the second request ends the
+/// window, and the activation of the first answer still happens for real.
+#[test]
+fn req_cast_001_window_auto_pay_in_second_request() {
+    let t = Table::new().with(tap_red());
+    let cost = locked(mana(|c| c.red = 1), 0, Vec::new());
+    let auto = ChoiceResponse::PayCosts {
+        auto_pay: true,
+        methods: Vec::new(),
+        mana_abilities: Vec::new(),
+    };
+    let (s, out) = run(&t, &cost, &[pay(&[(10, "tap_red")], Vec::new()), auto]);
+    let PayOutcome::Committed { spent, .. } = out else {
+        panic!("not committed: {out:?}");
+    };
+    assert_eq!(spent, vec![red(10)]);
+    assert_eq!(s.tapped, BTreeSet::from([10]));
+    assert_eq!(s.log, vec!["activate tap_red"]);
+}
+
+/// REQ-CAST-001, REQ-CORE-005, CR 734.1 (CR-015): cancelling in the second request restores the
+/// exact pre-cast state.
+#[test]
+fn req_core_005_window_cancel_in_second_request() {
+    let t = Table::new().with(tap_red()).with(dig());
+    let cost = locked(mana(|c| c.red = 1), 0, Vec::new());
+    let (s, out) = run(
+        &t,
+        &cost,
+        &[
+            pay(&[(12, "dig")], Vec::new()),
+            ChoiceResponse::CancelAndRollback,
+        ],
+    );
+    let PayOutcome::Cancelled(r) = out else {
+        panic!("not cancelled: {out:?}");
+    };
+    assert_eq!(r.reason, PayStopReason::Cancelled);
+    assert_eq!(r.state_hash, t.state_hash());
+    assert_eq!(s.state_hash(), t.state_hash());
+    assert_eq!(s.graveyard, Vec::<u64>::new());
+}
+
+/// REQ-CAST-001, CR 601.2g (CR-015): at most 256 requests per window; with an ability that is
+/// always available again, the 256th request lists no ability and ends the window.
+#[test]
+fn req_cast_001_window_request_cap() {
+    let repeat = FakeAbility {
+        source: 14,
+        id: "repeat",
+        produces: vec![red(14)],
+        ..FakeAbility::default()
+    };
+    let t = Table::new().with(repeat);
+    let cost = locked(mana(|c| c.red = 1), 0, Vec::new());
+    let mut answers: Vec<ChoiceResponse> = (0..255)
+        .map(|_| pay(&[(14, "repeat")], Vec::new()))
+        .collect();
+    let probe = ChoiceSession::replay(
+        t.clone(),
+        {
+            let cost = cost.clone();
+            move |s: &mut Table, ctx: &mut ChoiceContext<'_>| {
+                procedure(s, ctx, &cost, &SpellHistory::default())
+            }
+        },
+        &answers,
+    )
+    .expect("255 rounds");
+    let last = probe.pending().expect("256th request").clone();
+    assert_eq!(last.request_id.get(), 255);
+    assert!(listed(&last).is_empty());
+    let mut probe = probe;
+    assert!(
+        probe
+            .submit(last.request_id, pay(&[(14, "repeat")], Vec::new()))
+            .is_err()
+    );
+    answers.push(plain());
+    let (s, out) = run(&t, &cost, &answers);
+    assert!(matches!(out, PayOutcome::Committed { .. }));
+    assert_eq!(s.log.len(), 255);
+    assert_eq!(s.pool().len(), 254);
+}
+
+/// REQ-CORE-005, REQ-CAST-001, CR 734.1, SRS 2.5(a) (CR-015): a dependency across two answers of
+/// the window is followed: the library-touching activation of round 2 spent the mana of round
+/// 1's activation, so both survive the rollback exactly as if one answer had listed both.
+#[test]
+fn req_core_005_window_cross_round_dependency() {
+    let mut t = Table::new().with(tap_red()).with(convert());
+    t.payable_only = true;
+    let cost = locked(mana(|c| c.generic = 9), 0, Vec::new());
+    assert_eq!(
+        listed(&first_request(&t, &cost)),
+        vec![ability(10, "tap_red")]
+    );
+    let (s, out) = run(
+        &t,
+        &cost,
+        &[
+            pay(&[(10, "tap_red")], Vec::new()),
+            pay(&[(13, "convert")], Vec::new()),
+            plain(),
+        ],
+    );
+    let r = rolled(&out);
+    assert_eq!(r.reason, PayStopReason::UnpayableMana);
+    assert_eq!(s.tapped, BTreeSet::from([10, 13]));
+    assert_eq!(s.pool().units(), &[green(13)]);
+    assert_eq!(s.graveyard, vec![4]);
+    // The same as one answer listing both on a host that offers both at once.
+    let mut both = t.clone();
+    both.payable_only = false;
+    let (s1, out1) = run(
+        &both,
+        &cost,
+        &[
+            pay(&[(10, "tap_red"), (13, "convert")], Vec::new()),
+            plain(),
+        ],
+    );
+    assert_eq!(out1, out);
+    assert_eq!(s1.state_hash(), s.state_hash());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Removal provenance (contract CR-016, CR 734.1, SRS 2.5(a))
+// ---------------------------------------------------------------------------------------------
+
+/// Runs `[tap_red, convert]` with cost {9} (always rolled back) on `t`.
+fn tap_red_then_convert(t: &Table) -> Table {
+    let cost = locked(mana(|c| c.generic = 9), 0, Vec::new());
+    let (s, out) = run(
+        t,
+        &cost,
+        &[
+            pay(&[(10, "tap_red"), (13, "convert")], Vec::new()),
+            plain(),
+        ],
+    );
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
+    s
+}
+
+/// REQ-CORE-005, REQ-CAST-001, CR 734.1 (thread 4720021426, CR-016): with a red equal to
+/// tap_red's already in the pool, the conversion spends the earlier (pre-existing) unit, so
+/// tap_red's mana was not spent and tap_red is reversed. The same with the inference fallback and
+/// with a reporting host; the controls (a distinct pre-existing red; an empty pool, where the
+/// conversion spends tap_red's own red) keep their results.
+#[test]
+fn req_core_005_removal_attribution_equal_units() {
+    for report in [false, true] {
+        let mut base = Table::new().with(tap_red()).with(convert());
+        base.report_removed = report;
+        // Case A: an equal red(10) is already in the pool.
+        let mut a = base.clone();
+        a.pools[0].add(red(10));
+        let s = tap_red_then_convert(&a);
+        assert_eq!(s.tapped, BTreeSet::from([13]), "report {report}");
+        assert_eq!(s.pool().units(), &[green(13)], "report {report}");
+        assert_eq!(s.graveyard, vec![4]);
+        // Control B: a distinct pre-existing red(1).
+        let mut b = base.clone();
+        b.pools[0].add(red(1));
+        let s = tap_red_then_convert(&b);
+        assert_eq!(s.tapped, BTreeSet::from([13]), "report {report}");
+        assert_eq!(s.pool().units(), &[green(13)], "report {report}");
+        // Case C: an empty pool; the conversion spends tap_red's own red.
+        let s = tap_red_then_convert(&base);
+        assert_eq!(s.tapped, BTreeSet::from([10, 13]), "report {report}");
+        assert_eq!(s.pool().units(), &[green(13)], "report {report}");
+    }
+}
+
+/// REQ-CORE-005, REQ-CAST-001, CR 734.1 (CodeRabbit comment 4720082538, CR-016): a durable
+/// activation that spends tap_red's red and produces an equal red leaves the pool identical; a
+/// reporting host lets the procedure see the dependency, so tap_red is kept durably.
+#[test]
+fn req_core_005_spend_and_reproduce() {
+    let cost = locked(mana(|c| c.generic = 9), 0, Vec::new());
+    let answers = [
+        pay(&[(10, "tap_red"), (10, "recycle")], Vec::new()),
+        plain(),
+    ];
+    let mut t = Table::new().with(tap_red()).with(recycle());
+    t.report_removed = true;
+    let (s, out) = run(&t, &cost, &answers);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
+    assert!(s.tapped.contains(&10));
+    assert_eq!(s.graveyard, vec![4]);
+    assert_eq!(s.pool().units(), &[red(10)]);
+    // Without the report the inference fallback cannot see the dependency (the pool is the same
+    // before and after the recycle); CR-016 requires such a host to override
+    // `last_activation_removed`. Here only: no panic, and no more mana than was produced.
+    t.report_removed = false;
+    let (s, out) = run(&t, &cost, &answers);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
+    assert!(s.pool().len() <= 1);
+    assert!(s.pool().units().iter().all(|u| *u == red(10)));
+    assert_eq!(s.graveyard, vec![4]);
+}
+
+/// REQ-CORE-005, CR 734.1 (CR-016): `follow_units` with and without a removal report, for equal
+/// units, a spend-and-reproduce, and invalid reports (which fall back without panicking).
+#[test]
+fn req_core_005_follow_units_provenance() {
+    let before = vec![red(1), red(1)];
+    let origin = vec![None, Some(0)];
+    let after = vec![red(1), green(2)];
+    // Fallback: the earliest equal unit is the removed one.
+    assert_eq!(
+        follow_units(&before, &after, &origin, None, 1),
+        (vec![], vec![Some(0), Some(1)])
+    );
+    assert_eq!(
+        follow_units(&before, &after, &origin, Some(&[0]), 1),
+        (vec![], vec![Some(0), Some(1)])
+    );
+    assert_eq!(
+        follow_units(&before, &after, &origin, Some(&[1]), 1),
+        (vec![0], vec![None, Some(1)])
+    );
+    // Spend-and-reproduce: the pool is identical, the report tells.
+    assert_eq!(
+        follow_units(&[red(1)], &[red(1)], &[Some(0)], Some(&[0]), 1),
+        (vec![0], vec![Some(1)])
+    );
+    assert_eq!(
+        follow_units(&[red(1)], &[red(1)], &[Some(0)], None, 1),
+        (vec![], vec![Some(0)])
+    );
+    // Invalid reports fall back: out of range, not ascending, duplicate, more indices than units.
+    let fallback = follow_units(&before, &after, &origin, None, 1);
+    let invalid: [&[usize]; 4] = [&[2], &[1, 0], &[0, 0], &[0, 1, 2]];
+    for v in invalid {
+        let got = follow_units(&before, &after, &origin, Some(v), 1);
+        assert_eq!(got, fallback, "report {v:?}");
+    }
+    // A valid report that removes both units (and the activation adds two) is used as is.
+    assert_eq!(
+        follow_units(&before, &after, &origin, Some(&[0, 1]), 1),
+        (vec![0], vec![Some(1), Some(1)])
+    );
+    // Too few removed for `after` (more survivors than units after): falls back.
+    let three = vec![red(1), red(1), red(1)];
+    let got = follow_units(&three, &[red(1)], &[None, Some(0), None], Some(&[0]), 2);
+    assert_eq!(
+        got,
+        follow_units(&three, &[red(1)], &[None, Some(0), None], None, 2)
+    );
+    // Origins shorter than the pool and empty pools do not panic.
+    assert_eq!(follow_units(&three, &[], &[], None, 0), (vec![], vec![]));
+    assert_eq!(
+        follow_units(&[], &[red(1)], &[], Some(&[]), 3),
+        (vec![], vec![Some(3)])
+    );
 }

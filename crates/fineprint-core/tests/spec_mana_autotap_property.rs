@@ -354,7 +354,8 @@ fn locked(cost: &ManaComponent) -> LockedCost {
 }
 
 /// Submits `s` to `pay_total_cost` on a fresh fake host: activates the solution's mana abilities
-/// in order, then pays. Returns the outcome (`None` for a procedure error) and the final host.
+/// in order in one answer, then (CR-015) answers the follow-up request with a plain payment.
+/// Returns the outcome (`None` for a procedure error) and the final host.
 fn submit(
     pool: &ManaPool,
     sources: &[ManaSource],
@@ -391,6 +392,20 @@ fn submit(
                 .collect(),
         };
         session.submit(id, answer).expect("a valid answer");
+        // CR-015 (CR 601.2g, 605.3a): an answer that activated at least one listed ability is
+        // followed by a new PAY_MANA_AND_COSTS request; the plain answer ends the window and pays.
+        if !s.activations.is_empty() {
+            let id = session
+                .pending()
+                .expect("CR-015: a second request after the activating answer")
+                .request_id;
+            let plain = ChoiceResponse::PayCosts {
+                auto_pay: false,
+                methods: Vec::new(),
+                mana_abilities: Vec::new(),
+            };
+            session.submit(id, plain).expect("a valid answer");
+        }
     } else {
         // CR 601.2g: nothing to ask only when there is nothing to pay.
         assert!(cost.is_zero(), "no ask for {cost:?}");

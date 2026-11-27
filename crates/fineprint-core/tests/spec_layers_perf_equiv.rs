@@ -1392,6 +1392,16 @@ fn req_layer_005_unlisted_asked_object() {
         vec![o(1), o(2), o(3)]
     );
     let four = evaluate(&reg, &env, o(4)).expect("object 4 has a base");
+    // The asked object's own expected value, independent of the cache: base 3/3, layer 7b sets
+    // 4/1 (locked {2, 4}), layer 7c +1/+1 from source 4's own generating ability (visible).
+    assert_eq!(
+        (
+            four.characteristics.power.as_ref().and_then(literal_of),
+            four.characteristics.toughness.as_ref().and_then(literal_of)
+        ),
+        (Some(5), Some(2)),
+        "evaluate(o(4)) is 5/2"
+    );
     let five = evaluate(&reg, &env, o(5)).expect("object 5 has a base");
     let mut cache = LayerCache::new();
     assert_eq!(cache.evaluate(&reg, &env, o(4)), Ok(four.clone()));
