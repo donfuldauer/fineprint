@@ -11,6 +11,10 @@
 
 #![allow(dead_code)]
 
+#[path = "typed_ast_support/mod.rs"]
+mod typed_ast_support;
+use typed_ast_support::{synthetic_ability, tx};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fineprint_base::hash::{ComponentPath, Label};
@@ -60,9 +64,10 @@ pub fn objs(ids: &[u64]) -> BTreeSet<ObjectId> {
 // synthetic abilities and characteristics
 // ---------------------------------------------------------------------------------------------
 
-/// A synthetic ability identified by value (`{"synthetic": name}`).
+/// A synthetic ability identified by value (#232 FP-164: a valid inert KEYWORD ability instead
+/// of the former free-form `{"synthetic": name}` placeholder).
 pub fn ability(name: &str) -> AbilityAST {
-    AbilityAST(serde_json::json!({ "synthetic": name }))
+    synthetic_ability(name)
 }
 
 /// The marker ability granted in the PR #187 scenario.
@@ -80,7 +85,7 @@ pub fn chars(name: &str, types: &[&str], abilities: Vec<AbilityAST>) -> Characte
         supertypes: BTreeSet::new(),
         card_types: set(types),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities,
         power: None,
         toughness: None,
@@ -463,7 +468,10 @@ pub fn rich_state() -> GameState {
         (Layer::L2, LayerModification::SetController(P2)),
         (
             Layer::L3,
-            LayerModification::SetText(TextTokenStream(vec![serde_json::json!("test.word")])),
+            // #232 FP-164: a valid LITERAL token instead of the bare string `"test.word"`.
+            LayerModification::SetText(tx(vec![
+                serde_json::json!({"id": "w0", "kind": "LITERAL", "text": "test.word"}),
+            ])),
         ),
         (
             Layer::L4,

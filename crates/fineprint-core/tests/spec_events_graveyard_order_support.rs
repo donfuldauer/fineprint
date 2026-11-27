@@ -292,9 +292,9 @@ pub struct Snap {
 // characteristics
 // ---------------------------------------------------------------------------------------------
 
+/// A printed value `Literal(n)` (#232 FP-164: formerly the bare JSON integer placeholder).
 fn printed(n: i64) -> ValueExpressionAST {
-    let bytes = rmp_serde::to_vec(&n).expect("encode");
-    rmp_serde::from_slice(&bytes).expect("decode")
+    ValueExpressionAST::Literal(n)
 }
 
 /// A synthetic creature `Characteristics` with the given name, power and toughness.
@@ -307,7 +307,7 @@ pub fn chars(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: Default::default(),
         card_types: ["Creature".to_string()].into_iter().collect(),
         subtypes: Default::default(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(printed(power)),
         toughness: Some(printed(toughness)),

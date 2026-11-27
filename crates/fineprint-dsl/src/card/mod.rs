@@ -6,25 +6,25 @@
 //!
 //! Field names are snake_case in Rust and camelCase in JSON, exactly as the SRS schema. Every
 //! struct rejects unknown members (`deny_unknown_fields`), the string enums accept only their
-//! declared strings, and optional members must be omitted rather than given as `null`. (Plain
-//! serde still decodes a `null` `power` or `toughness` as `Some(ValueExpressionAST(Value::Null))`,
-//! but that is not a valid value expression, so neither [`CardDefinitionDSL::seal`] nor
-//! [`CardDefinitionDSL::from_json`] accepts it.)
+//! declared strings, and optional members must be omitted rather than given as `null` (a
+//! `null` `power` or `toughness` is refused by the value-expression decoder itself).
 //!
-//! The AST positions (`power`, `toughness`, `text`, `abilities`,
-//! `commanderEligibility.partnerAbilities`) hold permissive wrappers around `serde_json::Value`
-//! ([`ValueExpressionAST`], [`TextTokenStream`], [`AbilityAST`], [`PartnerAbilityDSL`]); each
-//! has a typed view `to_real` into the real DSL type, and
-//! [`CardDefinitionDSL::validate_asts`] checks them all (REQ-DSL-003, REQ-DSL-010,
-//! REQ-DSL-012).
+//! The AST positions hold the real typed ASTs (REQ-DSL-003, REQ-DSL-010, REQ-DSL-012;
+//! docs/DECISIONS.md, "#232 FP-164 — Typed card AST positions"): `power` and `toughness` are
+//! [`ValueExpressionAST`] (a re-export of [`crate::expr::ValueExpressionAST`]), `text` is
+//! [`TextTokenStream`] (a re-export of [`crate::text::TextTokenStream`]), `abilities` are
+//! [`AbilityAST`] (a re-export of [`crate::ability::AbilityAST`]) and
+//! `commanderEligibility.partnerAbilities` are [`PartnerAbilityDSL`], a `KEYWORD` ability. Plain
+//! serde therefore decodes every AST position with the strict decoder of its real type: invalid
+//! AST content is a decode error, and a value of these types always holds valid ASTs.
 //!
-//! Plain serde `Deserialize` performs no version, AST or hash check and is not lossless on its
-//! own (for example it accepts a positional array for a struct); it is the unchecked building
-//! block for value → JSON → value round trips. [`CardDefinitionDSL::from_json`] is the strict
-//! loader for untrusted input: it also requires that decoding lost nothing, that every AST
-//! position holds a valid real AST, and verifies the hash over the checked input. Only sealed
-//! values ([`CardDefinitionDSL::seal`]) carry the guarantee
-//! `from_json(&v.to_canonical_json()?) == v`; only `seal` and `from_json` validate ASTs.
+//! Plain serde `Deserialize` performs no version or hash check and is not lossless on its own
+//! (for example it accepts a positional array for a struct); it is the unchecked building block
+//! for value → JSON → value round trips. [`CardDefinitionDSL::from_json`] is the strict loader
+//! for untrusted input: it also requires that decoding lost nothing (which rejects a
+//! non-canonical spelling of a valid AST) and verifies the hash over the checked input. Only
+//! sealed values ([`CardDefinitionDSL::seal`]) carry the guarantee
+//! `from_json(&v.to_canonical_json()?) == v`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -36,7 +36,6 @@ use serde_json::Value;
 use crate::canonical::{self, CanonicalError};
 use crate::mana::ManaCostDSL;
 
-mod validate;
 mod version;
 
 pub use version::{DSL_MAJOR, DSL_VERSION, DslVersion, DslVersionError, check_dsl_version};
@@ -281,48 +280,65 @@ impl<'de> Deserialize<'de> for ColorBitmask {
     }
 }
 
-/// A value expression (SRS §14.4) as raw JSON. Plain serde accepts any JSON value (the
-/// unchecked building block); [`ValueExpressionAST::to_real`] is the typed view as a real
-/// [`crate::expr::ValueExpressionAST`], and [`CardDefinitionDSL::seal`] and
-/// [`CardDefinitionDSL::from_json`] reject content that is not one. Its content participates in
-/// canonical JSON and the hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ValueExpressionAST(pub Value);
+pub use crate::ability::AbilityAST;
+pub use crate::expr::ValueExpressionAST;
+pub use crate::text::TextTokenStream;
 
-/// An ability (SRS §14.3) as raw JSON. Plain serde accepts any JSON value (the unchecked
-/// building block); [`AbilityAST::to_real`] is the typed view as a real
-/// [`crate::ability::AbilityAST`], and [`CardDefinitionDSL::seal`] and
-/// [`CardDefinitionDSL::from_json`] reject content that is not one. Its content participates in
-/// canonical JSON and the hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AbilityAST(pub Value);
+/// The `kind` every partner ability must have (docs/DECISIONS.md, "#159 FP-140 —
+/// PartnerAbilityDSL is a KEYWORD ability").
+const PARTNER_KIND: &str = "KEYWORD";
 
-/// A partner ability (commander eligibility) as raw JSON. Plain serde accepts any JSON value
-/// (the unchecked building block); [`PartnerAbilityDSL::to_real`] is the typed view as a real
-/// [`crate::ability::AbilityAST`] of kind `KEYWORD`, and [`CardDefinitionDSL::seal`] and
-/// [`CardDefinitionDSL::from_json`] reject content that is not one. Its content participates in
-/// canonical JSON and the hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A partner ability (commander eligibility, REQ-DSL-010): a real [`AbilityAST`] whose `kind`
+/// is `KEYWORD` (docs/DECISIONS.md, "#232 FP-164 — PartnerAbilityDSL newtype"). The field is
+/// private, so every value holds a `KEYWORD` ability: [`PartnerAbilityDSL::new`] and the
+/// decoder both refuse any other kind. Its JSON form is the ability's JSON form, unchanged; it
+/// participates in canonical JSON and the hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct PartnerAbilityDSL(pub Value);
+pub struct PartnerAbilityDSL(AbilityAST);
 
-/// The rules-text token stream (SRS §14.5) as raw JSON tokens. Plain serde accepts an array of
-/// any JSON values (the unchecked building block); [`TextTokenStream::to_real`] is the typed
-/// view as a real [`crate::text::TextTokenStream`], and [`CardDefinitionDSL::seal`] and
-/// [`CardDefinitionDSL::from_json`] reject content that is not one. Its content participates in
-/// canonical JSON and the hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TextTokenStream(pub Vec<Value>);
+impl PartnerAbilityDSL {
+    /// Wraps `ability` as a partner ability (REQ-DSL-010).
+    ///
+    /// # Errors
+    /// `a partner ability must be a KEYWORD ability, found kind <kind>` if `ability` is not a
+    /// `KEYWORD` ability.
+    pub fn new(ability: AbilityAST) -> Result<PartnerAbilityDSL, String> {
+        if ability.kind() == PARTNER_KIND {
+            Ok(PartnerAbilityDSL(ability))
+        } else {
+            Err(format!(
+                "a partner ability must be a {PARTNER_KIND} ability, found kind {}",
+                ability.kind()
+            ))
+        }
+    }
+
+    /// The wrapped `KEYWORD` ability.
+    #[must_use]
+    pub const fn as_ability(&self) -> &AbilityAST {
+        &self.0
+    }
+
+    /// The wrapped `KEYWORD` ability, by value.
+    #[must_use]
+    pub fn into_ability(self) -> AbilityAST {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PartnerAbilityDSL {
+    /// Decodes a real [`AbilityAST`] with its strict decoder, then requires kind `KEYWORD`.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let ability = AbilityAST::deserialize(deserializer)?;
+        PartnerAbilityDSL::new(ability).map_err(de::Error::custom)
+    }
+}
 
 /// Deserialises a present member as `Some(T)`; an absent member is `None` through
-/// `#[serde(default)]`. A present JSON `null` is decoded by `T` itself: for `power` and
-/// `toughness` plain serde gives `Some(ValueExpressionAST(Value::Null))`, which survives a
-/// value → JSON → value round trip but is not a valid value expression, so `seal` and
-/// `from_json` reject it; for every other optional member (`manaCost`, `loyalty`, `knownGaps`,
-/// ...) `T` refuses `null`, so `null` is an error rather than a silent `None`.
+/// `#[serde(default)]`. A present JSON `null` is decoded by `T` itself, and every `T` used here
+/// (the real [`ValueExpressionAST`] for `power` and `toughness`, and `manaCost`, `loyalty`,
+/// `knownGaps`, ...) refuses `null`, so `null` is an error rather than a silent `None`.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
@@ -513,19 +529,18 @@ const DSL_VERSION_MEMBER: &str = "dslVersion";
 
 impl CardDefinitionDSL {
     /// RFC 8785 canonical JSON of the whole definition, including the current
-    /// `definitionHash` value (REQ-NFR-006). Works on any value; it does not validate ASTs.
+    /// `definitionHash` value (REQ-NFR-006). Works on any value.
     ///
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised (for example an integer outside
-    /// the safe range inside an AST wrapper).
+    /// the safe range inside an opaque keyword parameter, or nesting beyond the depth budget).
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, CanonicalError> {
         canonical::to_canonical_vec(self)
     }
 
     /// SHA-256 (64 lowercase hex characters) of the RFC 8785 bytes of this definition with the
     /// `definitionHash` member omitted, so the result does not depend on the current
-    /// `definition_hash` value (REQ-DSL-002, REQ-NFR-006). Works on any value; it does not
-    /// validate ASTs.
+    /// `definition_hash` value (REQ-DSL-002, REQ-NFR-006). Works on any value.
     ///
     /// # Errors
     /// [`CanonicalError`] if the value cannot be canonicalised.
@@ -539,24 +554,25 @@ impl CardDefinitionDSL {
         )?)
     }
 
-    /// Returns `self` normalised, with its ASTs validated and with `definition_hash` set to
+    /// Returns `self` normalised, with `definition_hash` set to
     /// [`CardDefinitionDSL::compute_hash`].
     ///
-    /// Normalising means replacing the value by what its canonical JSON decodes to, so numbers
-    /// inside the AST wrappers take their canonical form (`-0.0` becomes `0`, `1.0` becomes
-    /// `1`). The canonical bytes and the hash are unchanged by this. The normalised value is
-    /// then checked with [`CardDefinitionDSL::validate_asts`] (REQ-DSL-003, REQ-DSL-010,
-    /// REQ-DSL-012), which does not change it either. Because the version, the lossless schema
-    /// and the ASTs are all checked, the result `v` satisfies
-    /// `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`. The previous
+    /// Normalising means replacing the value by what its canonical JSON decodes to, through the
+    /// typed decoders of every AST position (REQ-DSL-003, REQ-DSL-010, REQ-DSL-012). The
+    /// canonical bytes and the hash are unchanged by this; a typed AST that its own serializer
+    /// refuses (for example a hand-built keyword parameter holding a non-integral number) cannot
+    /// be sealed. Because the
+    /// version, the lossless schema and the typed ASTs are all checked, the result `v`
+    /// satisfies `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`. The previous
     /// `definition_hash` is ignored, whatever it contains.
     ///
     /// # Errors
     /// [`CanonicalError::Serialize`] carrying the [`DslVersionError`] message if `dsl_version`
     /// is one [`CardDefinitionDSL::from_json`] would reject (malformed, or a different major
-    /// version); [`CanonicalError`] if the value cannot be canonicalised;
-    /// [`CanonicalError::Serialize`] carrying the located message of
-    /// [`CardDefinitionDSL::validate_asts`] if an AST position does not hold a valid real AST.
+    /// version); [`CanonicalError`] if the value cannot be canonicalised (a hand-built AST that
+    /// breaks an invariant of its type fails here, in its serializer);
+    /// [`CanonicalError::Serialize`] carrying the decoder's message if the canonical JSON does
+    /// not decode again.
     pub fn seal(mut self) -> Result<CardDefinitionDSL, CanonicalError> {
         check_dsl_version(&self.dsl_version)
             .map_err(|e| CanonicalError::Serialize(e.to_string()))?;
@@ -565,7 +581,6 @@ impl CardDefinitionDSL {
         let value = canonical::parse_checked(&bytes)?;
         let mut sealed: CardDefinitionDSL =
             serde_json::from_value(value).map_err(|e| CanonicalError::Serialize(e.to_string()))?;
-        sealed.check_asts().map_err(CanonicalError::Serialize)?;
         sealed.definition_hash = sealed.compute_hash()?;
         Ok(sealed)
     }
@@ -595,15 +610,17 @@ impl CardDefinitionDSL {
     /// canonical form (numbers normalised, so `1.0` and `1` load the same);
     /// (b) a top-level object whose `dslVersion` is a string with the engine's major version,
     /// checked before anything else is decoded;
-    /// (c) the typed schema, with unknown and missing members rejected, and decoding must be
-    /// lossless: the decoded definition re-serialised must equal the document exactly, which
-    /// rejects `null` for an optional member, a positional array where an object is required,
-    /// a non-string enum and any other content the typed value would not reproduce;
-    /// (d) every AST position holds a valid real AST in its canonical spelling
-    /// ([`CardDefinitionDSL::validate_asts`]: value expressions for `power` and `toughness`, a
-    /// token stream for `text`, abilities for `abilities`, `KEYWORD` abilities for
-    /// `commanderEligibility.partnerAbilities`), which rejects for example a `null` `power`;
-    /// (e) the `definitionHash`, compared exactly with the SHA-256 of the RFC 8785 bytes of the
+    /// (c) the typed schema, with unknown and missing members rejected; every AST position is
+    /// decoded by its real type (value expressions for `power` and `toughness`, a token stream
+    /// for `text`, abilities for `abilities`, `KEYWORD` abilities for
+    /// `commanderEligibility.partnerAbilities`), so invalid AST content, for example a `null`
+    /// `power`, is a [`CardDefinitionError::Schema`] carrying the decoder's message;
+    /// decoding must also be lossless: the decoded definition re-serialised must equal the
+    /// document exactly, which rejects `null` for an optional member, a positional array where
+    /// an object is required, a non-string enum, a non-canonical spelling of a valid AST (for
+    /// example an explicit member the type omits) and any other content the typed value would
+    /// not reproduce;
+    /// (d) the `definitionHash`, compared exactly with the SHA-256 of the RFC 8785 bytes of the
     /// checked document with only the `definitionHash` member removed.
     ///
     /// # Errors
@@ -637,11 +654,11 @@ impl CardDefinitionDSL {
         if canonical::to_checked_value(&definition)? != value {
             return Err(CardDefinitionError::Schema(
                 "decoding changed the content (for example a null member, a positional array \
-                 or a non-object where an object is required, or a non-string enum value)"
+                 or a non-object where an object is required, a non-string enum value, or an \
+                 AST that is not in its canonical spelling)"
                     .to_owned(),
             ));
         }
-        definition.validate_asts()?;
         let computed = hash_without_member(value)?;
         if computed != definition.definition_hash {
             return Err(CardDefinitionError::HashMismatch {

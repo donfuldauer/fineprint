@@ -11,10 +11,11 @@ use fineprint_base::prng::Pcg64Dxsm;
 use serde_json::{Map, Value, json};
 
 use super::*;
+use crate::ability::{AbilityBase, KeywordInstanceAST};
 use crate::card::{
-    AbilityAST, CardDefinitionDSL, CardFaceDSL, ColorBitmask, CommanderEligibilityDSL, DSL_VERSION,
-    FaceKind, LayoutBehavior, Legality, Origin, PartnerAbilityDSL, ProvenanceDSL, SupportStatus,
-    TextTokenStream, ValueExpressionAST,
+    AbilityAST, CardDefinitionDSL, CardDefinitionError, CardFaceDSL, ColorBitmask,
+    CommanderEligibilityDSL, DSL_VERSION, FaceKind, LayoutBehavior, Legality, Origin,
+    PartnerAbilityDSL, ProvenanceDSL, SupportStatus, TextTokenStream, ValueExpressionAST,
 };
 use crate::mana::ManaCostDSL;
 
@@ -23,11 +24,25 @@ use crate::mana::ManaCostDSL;
 
 /// `n` synthetic LITERAL text tokens.
 fn tokens(n: usize) -> TextTokenStream {
-    TextTokenStream(
+    serde_json::from_value(Value::Array(
         (0..n)
             .map(|k| json!({"id": format!("t{k}"), "kind": "LITERAL", "text": "word"}))
             .collect(),
-    )
+    ))
+    .expect("valid tokens")
+}
+
+/// `v` decoded as a real ability (panics on invalid test content: the typed positions cannot
+/// hold it, #232).
+fn ability(v: Value) -> AbilityAST {
+    serde_json::from_value(v.clone())
+        .unwrap_or_else(|e| panic!("fixture does not decode: {e}: {v}"))
+}
+
+/// `v` decoded as a partner ability (panics on invalid test content).
+fn partner(v: Value) -> PartnerAbilityDSL {
+    serde_json::from_value(v.clone())
+        .unwrap_or_else(|e| panic!("partner does not decode: {e}: {v}"))
 }
 
 /// A synthetic face of `kind` with `cost`, `n` text tokens and `abilities`.
@@ -40,14 +55,14 @@ fn face_of(kind: FaceKind, cost: Option<&str>, n: usize, abilities: Vec<Value>) 
         supertypes: Vec::new(),
         card_types: vec!["Creature".to_owned()],
         subtypes: Vec::new(),
-        power: Some(ValueExpressionAST(json!({"LITERAL": 2}))),
-        toughness: Some(ValueExpressionAST(json!({"LITERAL": 2}))),
+        power: Some(ValueExpressionAST::Literal(2)),
+        toughness: Some(ValueExpressionAST::Literal(2)),
         loyalty: None,
         defense: None,
         hand_modifier: None,
         life_modifier: None,
         text: tokens(n),
-        abilities: abilities.into_iter().map(AbilityAST).collect(),
+        abilities: abilities.into_iter().map(ability).collect(),
     }
 }
 
@@ -177,10 +192,54 @@ fn slot() -> Value {
 }
 
 /// Asserts `ability` decodes (so no FPL-SCHEMA finding).
-fn decodes(ability: &Value) {
-    if let Err(e) = AbilityAST(ability.clone()).to_real() {
-        panic!("fixture does not decode: {e}: {ability}");
+fn decodes(v: &Value) {
+    let _ = ability(v.clone());
+}
+
+/// A hand-built keyword ability whose `keyword` breaks the `[A-Z][A-Z0-9_]*` rule, so it does
+/// not encode: since #232 the only way an AST position of a definition can be invalid.
+fn broken_keyword(id: &str, keyword: &str) -> AbilityAST {
+    AbilityAST::Keyword(KeywordInstanceAST::new(AbilityBase::new(id), keyword))
+}
+
+/// Asserts that the clean definition with `raw` as its only ability is refused by plain serde
+/// and by `from_json` (`Schema`): JSON the typed positions cannot hold never reaches the lints
+/// (#232, docs/DECISIONS.md "#232 FP-164 — Lint schema check after typed storage").
+fn assert_rejected_at_load(raw: &Value) {
+    let mut v = serde_json::to_value(clean().seal().expect("seal")).expect("value");
+    v["faces"][0]["abilities"] = json!([raw]);
+    assert!(
+        serde_json::from_value::<CardDefinitionDSL>(v.clone()).is_err(),
+        "{raw}"
+    );
+    let bytes = serde_json::to_vec(&v).expect("bytes");
+    match CardDefinitionDSL::from_json(&bytes) {
+        Err(CardDefinitionError::Schema(_)) => {}
+        r => panic!("{raw}: unexpected {r:?}"),
     }
+}
+
+/// Runs every check over the JSON forms `raws` as the abilities of face 0 of `def`, bypassing
+/// the typed decode (each fact's typed ability is a plain keyword, so only the checks that read
+/// JSON can report). This exercises the raw-JSON checks (`FPL-LAYER-KIND`, `FPL-LOOK-BACK`,
+/// `FPL-MAX-ITER`, `FPL-LINK-ID`, `FPL-TOKEN-REF`, the `FPL-TEXT-COVERAGE` spans) on JSON the
+/// typed positions cannot hold (#232).
+fn run_raw_with(def: &CardDefinitionDSL, raws: &[Value], ctx: &LintContext) -> LintReport {
+    let typed = ability(json!({"abilityId": "raw", "kind": "KEYWORD", "keyword": "RAW"}));
+    let facts = walk::CardFacts {
+        abilities: raws
+            .iter()
+            .enumerate()
+            .map(|(j, raw)| walk::AbilityFacts::new(0, j, &typed, raw, None))
+            .collect(),
+        partners: Vec::new(),
+    };
+    lint_facts(def, &facts, ctx)
+}
+
+/// [`run_raw_with`] on a one-face definition with no typed abilities and an empty context.
+fn run_raw(raws: &[Value]) -> LintReport {
+    run_raw_with(&one_face(vec![]), raws, &LintContext::default())
 }
 
 /// A context with source faces `(mana value, colors)` and source identity.
@@ -261,7 +320,7 @@ fn req_ing_009_display_format() {
 #[test]
 fn req_ing_009_clean_definition_passes_every_check() {
     let def = clean();
-    assert!(def.validate_asts().is_ok());
+    assert!(def.clone().seal().is_ok());
     let report = run(&def);
     assert!(report.is_empty(), "{report:#?}");
     assert!(!report.has_errors());
@@ -277,9 +336,11 @@ fn req_ing_009_clean_definition_passes_every_check() {
 #[test]
 fn req_ing_009_report_accessors() {
     let mut def = one_face(vec![
-        json!({"abilityId": "x"}),
         json!({"abilityId": "l1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "linkIds": ["solo"]}),
     ]);
+    def.faces[0]
+        .abilities
+        .insert(0, broken_keyword("x", "lowercase"));
     def.faces[0].text = tokens(0);
     let report = run(&def);
     assert!(report.has_errors());
@@ -293,27 +354,26 @@ fn req_ing_009_report_accessors() {
 // ---------------------------------------------------------------------------------------------
 // FPL-SCHEMA
 
-/// REQ-ING-009 (schema validity), REQ-DSL-003, REQ-DSL-010, REQ-DSL-012: every failing
-/// position is reported, not only the first.
+/// REQ-ING-009 (schema validity), REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232): every position
+/// whose typed value does not encode (a hand-built value breaking an invariant of its type) is
+/// reported, not only the first.
 #[test]
 fn req_ing_009_schema_reports_every_position() {
-    let mut def = one_face(vec![
-        keyword("a1", 0, 0),
-        json!({"kind": "NOPE"}),
-        json!(null),
-    ]);
-    def.faces[0].power = Some(ValueExpressionAST(Value::Null));
-    def.faces[0].toughness = Some(ValueExpressionAST(json!("x")));
-    def.faces[0].text = TextTokenStream(vec![
-        json!({"id": "t0", "kind": "LITERAL", "text": "w"}),
-        json!(7),
-    ]);
-    def.faces[0].abilities[0] = AbilityAST(keyword("a1", 0, 1));
+    let mut def = one_face(vec![keyword("a1", 0, 0)]);
+    def.faces[0]
+        .abilities
+        .push(broken_keyword("a2", "not upper"));
+    def.faces[0]
+        .abilities
+        .push(broken_keyword("", "TEST_KEYWORD"));
+    // Literals beyond the safe integer range do not encode (REQ-NFR-006).
+    def.faces[0].power = Some(ValueExpressionAST::Literal(i64::MAX));
+    def.faces[0].toughness = Some(ValueExpressionAST::Literal(i64::MIN));
     def.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
         partner_abilities: vec![
-            PartnerAbilityDSL(json!({"abilityId": "p0", "kind": "KEYWORD", "keyword": "PARTNER"})),
-            PartnerAbilityDSL(json!({"abilityId": "p1", "kind": "SPELL", "effect": []})),
+            partner(json!({"abilityId": "p0", "kind": "KEYWORD", "keyword": "PARTNER"})),
+            PartnerAbilityDSL::new(broken_keyword("p1", "partner")).expect("a KEYWORD ability"),
         ],
     });
     let report = run(&def);
@@ -327,7 +387,6 @@ fn req_ing_009_schema_reports_every_position() {
                 None
             ),
             (Severity::Error, "faces[0].power".to_owned(), Some(0), None),
-            (Severity::Error, "faces[0].text".to_owned(), Some(0), None),
             (
                 Severity::Error,
                 "faces[0].toughness".to_owned(),
@@ -349,16 +408,62 @@ fn req_ing_009_schema_reports_every_position() {
         ]
     );
     let partner = report.with_id(LintId::SCHEMA).next().expect("partner");
-    assert!(partner.message.contains("KEYWORD"), "{}", partner.message);
+    assert!(partner.message.contains("keyword"), "{}", partner.message);
 }
 
-/// REQ-ING-009: a schema-valid definition has no FPL-SCHEMA finding; decoder messages are
+/// REQ-ING-009 (schema validity), REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232, replaces the
+/// lint test over undecodable JSON positions): the same invalid JSON (a `null` power, a string
+/// toughness, a non-object text token, an ability of an unknown kind, a `null` ability, a SPELL
+/// partner) can no longer be held by a definition: each is refused at load with `Schema`.
+#[test]
+fn req_ing_009_schema_invalid_json_rejected_at_load() {
+    let good = serde_json::to_value(clean().seal().expect("seal")).expect("value");
+    let edits: Vec<(&str, Value)> = vec![
+        ("/faces/0/power", Value::Null),
+        ("/faces/0/toughness", json!("x")),
+        (
+            "/faces/0/text",
+            json!([{"id": "t0", "kind": "LITERAL", "text": "w"}, 7]),
+        ),
+        ("/faces/0/abilities/0", json!({"kind": "NOPE"})),
+        ("/faces/0/abilities/0", Value::Null),
+        (
+            "/commanderEligibility",
+            json!({"eligible": true, "partnerAbilities": [
+                {"abilityId": "p1", "kind": "SPELL", "effect": []}]}),
+        ),
+    ];
+    for (pointer, bad) in edits {
+        let mut v = good.clone();
+        if pointer == "/commanderEligibility" {
+            v["commanderEligibility"] = bad.clone();
+        } else {
+            *v.pointer_mut(pointer).expect("pointer") = bad.clone();
+        }
+        assert!(
+            serde_json::from_value::<CardDefinitionDSL>(v.clone()).is_err(),
+            "{pointer} {bad}"
+        );
+        let bytes = serde_json::to_vec(&v).expect("bytes");
+        match CardDefinitionDSL::from_json(&bytes) {
+            Err(CardDefinitionError::Schema(msg)) => {
+                if pointer == "/commanderEligibility" {
+                    assert!(msg.contains("KEYWORD"), "{msg}");
+                }
+            }
+            r => panic!("{pointer} {bad}: unexpected {r:?}"),
+        }
+    }
+}
+
+/// REQ-ING-009: a schema-valid definition has no FPL-SCHEMA finding; encoder messages are
 /// clipped.
 #[test]
 fn req_ing_009_schema_passes_and_clips() {
     none_of(&run(&clean()), LintId::SCHEMA);
-    let long = "Z".repeat(5000);
-    let def = one_face(vec![json!({"abilityId": "a", "kind": long})]);
+    let long = "z".repeat(5000);
+    let mut def = one_face(vec![]);
+    def.faces[0].abilities.push(broken_keyword("a", &long));
     let report = run(&def);
     let lint = report.with_id(LintId::SCHEMA).next().expect("schema");
     assert!(
@@ -366,6 +471,7 @@ fn req_ing_009_schema_passes_and_clips() {
         "{}",
         lint.message.len()
     );
+    assert_rejected_at_load(&json!({"abilityId": "a", "kind": "Z".repeat(5000)}));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -561,10 +667,10 @@ fn req_ing_009_mana_ability_other_kinds() {
         "isManaAbility": true});
     decodes(&kw);
     none_of(&run(&one_face(vec![kw])), LintId::MANA_ABILITY);
+    // An undecodable ability is refused at load (#232) and its JSON alone is not checked.
     let broken = activated(json!({"targets": [slot()], "bogus": 1}));
-    let report = run(&one_face(vec![broken]));
-    none_of(&report, LintId::MANA_ABILITY);
-    assert_eq!(report.with_id(LintId::SCHEMA).count(), 1);
+    assert_rejected_at_load(&broken);
+    none_of(&run_raw(&[broken]), LintId::MANA_ABILITY);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -667,7 +773,8 @@ fn req_ing_009_layer_kind_passes() {
 
 /// REQ-ING-009, REQ-DSL-008: raw static effects without a layer or kind, with a missing or
 /// unknown type, non-object elements and a non-array `effects` are Errors; non-STATIC
-/// abilities are not checked.
+/// abilities are not checked. Since #232 such JSON is refused at load, so the check is
+/// exercised on the JSON form alone ([`run_raw`]).
 #[test]
 fn req_ing_009_layer_kind_fails() {
     let s = json!({"abilityId": "s1", "kind": "STATIC", "effects": [
@@ -679,7 +786,7 @@ fn req_ing_009_layer_kind_fails() {
         5,
         {"type": "PLAYER"},
     ]});
-    let report = run(&one_face(vec![s]));
+    let report = run_raw(std::slice::from_ref(&s));
     let found = of(&report, LintId::LAYER_KIND);
     assert_eq!(found.len(), 6, "{report:#?}");
     assert!(
@@ -688,19 +795,18 @@ fn req_ing_009_layer_kind_fails() {
             .all(|f| f.0 == Severity::Error && f.1 == "faces[0].abilities[0]")
     );
     // The typed decoder refuses it too.
-    assert_eq!(report.with_id(LintId::SCHEMA).count(), 1);
+    assert_rejected_at_load(&s);
     for effects in [json!({"type": "RULE"}), Value::Null] {
         let mut s = json!({"abilityId": "s1", "kind": "STATIC"});
         if !effects.is_null() {
             s["effects"] = effects;
         }
-        assert_eq!(
-            run(&one_face(vec![s])).with_id(LintId::LAYER_KIND).count(),
-            1
-        );
+        assert_rejected_at_load(&s);
+        assert_eq!(run_raw(&[s]).with_id(LintId::LAYER_KIND).count(), 1);
     }
     let not_static = json!({"abilityId": "x", "kind": "SPELL", "effects": [{"type": "CHAR"}]});
-    none_of(&run(&one_face(vec![not_static])), LintId::LAYER_KIND);
+    assert_rejected_at_load(&not_static);
+    none_of(&run_raw(&[not_static]), LintId::LAYER_KIND);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -765,20 +871,36 @@ fn req_ing_009_text_coverage_gaps_by_status() {
 
 /// REQ-ING-009 (SRS §14.3): a span past the last token or a malformed span is an Error at the
 /// ability (except UNSUPPORTED); a well-formed overlong span still covers its in-range part.
+/// Since #232 a malformed span is refused at load, so the spans are read from the JSON forms
+/// alone ([`run_raw_with`]); the in-range overlong span is also checked on a typed definition.
 #[test]
 fn req_ing_009_text_coverage_bad_spans() {
     let kw = |id: &str, span: Value| json!({"abilityId": id, "kind": "KEYWORD", "keyword": "TEST_KEYWORD", "textSpan": span});
-    let mut def = one_face(vec![
+    let raws = [
         keyword("a", 0, 5),
         kw("b", json!([3, 1])),
         kw("c", json!("x")),
         kw("d", json!([-1, 1])),
         kw("e", json!([0])),
         kw("f", json!([9, 99_999_999_999u64])),
-    ]);
+    ];
+    for bad in &raws[1..] {
+        assert_rejected_at_load(bad);
+    }
+    let mut def = one_face(vec![raws[0].clone()]);
     def.faces[0].text = tokens(3);
     def.support_status = SupportStatus::Partial;
-    let report = run(&def);
+    let typed = run(&def);
+    assert_eq!(
+        of(&typed, LintId::TEXT_COVERAGE),
+        vec![(
+            Severity::Error,
+            "faces[0].abilities[0]".to_owned(),
+            Some(0),
+            Some(0)
+        )]
+    );
+    let report = run_raw_with(&def, &raws, &LintContext::default());
     let found = of(&report, LintId::TEXT_COVERAGE);
     let abilities: Vec<_> = found.iter().map(|f| (f.0, f.3)).collect();
     assert_eq!(
@@ -796,22 +918,39 @@ fn req_ing_009_text_coverage_bad_spans() {
     assert_eq!(spans[5], None);
     def.support_status = SupportStatus::Unsupported;
     none_of(&run(&def), LintId::TEXT_COVERAGE);
+    none_of(
+        &run_raw_with(&def, &raws, &LintContext::default()),
+        LintId::TEXT_COVERAGE,
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
 // FPL-LOOK-BACK
 
 /// REQ-ING-009 (CR 603.10): look-back keys at any depth, in any spelling, are Errors naming the
-/// key and path; ordinary keys are not.
+/// key and path; ordinary keys are not. Since #232 the typed decoder refuses a look-back member
+/// outside opaque parameters, so the full example is refused at load and checked on its JSON
+/// form alone ([`run_raw`]); a look-back key inside opaque keyword parameters still reaches the
+/// check on a typed definition.
 #[test]
 fn req_ing_009_look_back() {
     none_of(&run(&clean()), LintId::LOOK_BACK);
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"lookBack": 1}});
+    let typed = run(&one_face(vec![kw]));
+    let messages: Vec<&str> = typed
+        .with_id(LintId::LOOK_BACK)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{typed:#?}");
+    assert!(messages[0].contains("$.params.lookBack"), "{}", messages[0]);
     let t = json!({"abilityId": "t1", "kind": "TRIGGERED", "lookBack": true, "textSpan": [0, 0],
         "trigger": {"mode": "EVENT", "event": {"kind": "DIES", "subject": {"ref": "SELF"},
             "filters": {"look_back": true, "Look-Back-Mode": 1, "lookingBack": 1}}},
         "effect": [{"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
             "params": {"x": [{"LOOKBACK": 1}]}}]});
-    let report = run(&one_face(vec![t]));
+    assert_rejected_at_load(&t);
+    let report = run_raw(&[t]);
     let messages: Vec<&str> = report
         .with_id(LintId::LOOK_BACK)
         .map(|l| l.message.as_str())
@@ -850,7 +989,9 @@ fn req_ing_009_look_back_deep_path_is_bounded() {
     for _ in 0..50 {
         v = json!({"k": v});
     }
-    let report = run(&one_face(vec![v]));
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"n": v}});
+    let report = run(&one_face(vec![kw]));
     let lint = report.with_id(LintId::LOOK_BACK).next().expect("found");
     assert!(lint.message.contains("$...."), "{}", lint.message);
     assert!(lint.message.len() < 300);
@@ -871,13 +1012,23 @@ fn repeat_while(max_iter: Value) -> Value {
 }
 
 /// REQ-ING-009, REQ-DSL-010 (SRS §14.4.5): every REPEAT_WHILE declares an integer maxIter >= 1.
+/// Since #232 the typed decoder refuses a bad maxIter, so each bad example is refused at load
+/// and checked on its JSON form alone ([`run_raw`]); an opaque keyword parameter shaped like a
+/// bad REPEAT_WHILE still reaches the check on a typed definition.
 #[test]
 fn req_ing_009_max_iter() {
     let ok = repeat_while(json!(3));
     decodes(&ok);
     none_of(&run(&one_face(vec![ok])), LintId::MAX_ITER);
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0], "params": {"n": {"op": "REPEAT_WHILE"}}});
+    assert_eq!(
+        run(&one_face(vec![kw])).with_id(LintId::MAX_ITER).count(),
+        1
+    );
     for bad in [Value::Null, json!(0), json!(-2), json!("3"), json!(1.5)] {
-        let report = run(&one_face(vec![repeat_while(bad.clone())]));
+        assert_rejected_at_load(&repeat_while(bad.clone()));
+        let report = run_raw(&[repeat_while(bad.clone())]);
         assert_eq!(
             of(&report, LintId::MAX_ITER),
             vec![(
@@ -895,11 +1046,8 @@ fn req_ing_009_max_iter() {
             .message;
         assert!(msg.contains("$.effect[0].then[0]"), "{msg}");
     }
-    // A huge maxIter is not this check's concern (FPL-SCHEMA bounds it).
-    none_of(
-        &run(&one_face(vec![repeat_while(json!(u64::MAX))])),
-        LintId::MAX_ITER,
-    );
+    // A huge maxIter is not this check's concern (the typed decoder bounds it).
+    none_of(&run_raw(&[repeat_while(json!(u64::MAX))]), LintId::MAX_ITER);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -931,14 +1079,14 @@ fn req_ing_009_token_ref() {
     };
     decodes(&create("x"));
     none_of(&lint_definition(&def, &known), LintId::TOKEN_REF);
-    def.faces[0].abilities[0] = AbilityAST(create("test.token_missing"));
+    def.faces[0].abilities[0] = ability(create("test.token_missing"));
     def.related_tokens = Some(vec![
         "test.token_known".to_owned(),
         "test.token_gone".to_owned(),
     ]);
     def.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: true,
-        partner_abilities: vec![PartnerAbilityDSL(
+        partner_abilities: vec![partner(
             json!({"abilityId": "p", "kind": "KEYWORD", "keyword": "PARTNER",
                 "params": {"x": {"op": "CREATE_TOKEN", "tokenDef": "test.token_p"}}}),
         )],
@@ -1013,14 +1161,16 @@ fn req_ing_009_link_id_passes() {
 }
 
 /// REQ-ING-009 (CR 607.1): a reference to an undeclared id is an Error at the referencing
-/// ability; an id declared once and never referenced is a Warning at the declarer.
+/// ability; an id declared once and never referenced is a Warning at the declarer. A repeated
+/// id within one declarer (refused at load since #232) counts once on its JSON form.
 #[test]
 fn req_ing_009_link_id_fails() {
-    let mut def = one_face(vec![
-        refers("r", "ghost"),
-        declares("d", &["lonely", "lonely"]),
-    ]);
+    let mut def = one_face(vec![refers("r", "ghost"), declares("d", &["lonely"])]);
     def.faces[0].text = tokens(0);
+    let repeated = [refers("r", "ghost"), declares("d", &["lonely", "lonely"])];
+    assert_rejected_at_load(&repeated[1]);
+    let raw = run_raw_with(&def, &repeated, &LintContext::default());
+    assert_eq!(of(&raw, LintId::LINK_ID), of(&run(&def), LintId::LINK_ID));
     let report = run(&def);
     assert_eq!(
         of(&report, LintId::LINK_ID),
@@ -1235,14 +1385,16 @@ fn req_ing_009_color_identity_fails() {
     let found: Vec<_> = report.with_id(LintId::COLOR_IDENTITY).collect();
     assert_eq!(found.len(), 1);
     assert!(found[0].message.contains("source"), "{}", found[0].message);
-    // LITERAL text with symbols and an undecodable ability contribute nothing.
-    let mut f = face(
-        Some("{W}"),
-        0,
-        vec![json!({"abilityId": "x", "kind": "ACTIVATED",
-            "cost": [{"cost": "PAY_MANA", "mana": "{G}"}], "effect": [], "bogus": 1})],
-    );
-    f.text = TextTokenStream(vec![json!({"id": "t0", "kind": "LITERAL", "text": "{U}"})]);
+    // LITERAL text with symbols contributes nothing; an ability that does not encode
+    // contributes nothing either (FPL-SCHEMA reports it); the undecodable JSON of the old test
+    // is refused at load (#232).
+    let undecodable = json!({"abilityId": "x", "kind": "ACTIVATED",
+        "cost": [{"cost": "PAY_MANA", "mana": "{G}"}], "effect": [], "bogus": 1});
+    assert_rejected_at_load(&undecodable);
+    let mut f = face(Some("{W}"), 0, vec![]);
+    f.abilities.push(broken_keyword("x", "pay {G}"));
+    f.text = serde_json::from_value(json!([{"id": "t0", "kind": "LITERAL", "text": "{U}"}]))
+        .expect("text");
     let def = def_of(vec![f], ColorBitmask::WHITE);
     none_of(&run(&def), LintId::COLOR_IDENTITY);
 }
@@ -1261,7 +1413,8 @@ fn req_ing_009_report_is_sorted_by_total_key() {
                 4,
                 vec![
                     refers("r", "ghost"),
-                    json!({"abilityId": "z", "lookBack": 1}),
+                    json!({"abilityId": "z", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+                        "params": {"lookBack": 1}}),
                 ],
             ),
             face(Some("{U}"), 2, vec![declares("d", &["lonely"])]),
@@ -1333,7 +1486,8 @@ fn req_ing_009_determinism_and_reordering() {
     let abilities = vec![
         activated(json!({"targets": [slot()]})),
         refers("r", "ghost"),
-        json!({"abilityId": "z", "lookBack": 1, "textSpan": [9, 9]}),
+        json!({"abilityId": "z", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+            "params": {"lookBack": 1}, "textSpan": [9, 9]}),
         declares("d", &["lonely"]),
     ];
     let def = def_of(
@@ -1350,7 +1504,7 @@ fn req_ing_009_determinism_and_reordering() {
     let mut reordered = def.clone();
     reordered.faces[0].abilities = order
         .iter()
-        .map(|&k| AbilityAST(abilities[k].clone()))
+        .map(|&k| ability(abilities[k].clone()))
         .collect();
     let second = lint_definition(&reordered, &ctx);
     assert_eq!(
@@ -1399,46 +1553,96 @@ fn drop_deep(v: Value) {
     }
 }
 
-/// Drops every raw wrapper of `def` without recursion.
+/// A keyword ability whose parameter `n` is `value` (hand-built: deep or unsafe values do not
+/// encode).
+fn keyword_with_param(id: &str, value: Value) -> AbilityAST {
+    let mut k = KeywordInstanceAST::new(AbilityBase::new(id), "TEST_KEYWORD");
+    k.params = Some(BTreeMap::from([("n".to_owned(), value)]));
+    AbilityAST::Keyword(k)
+}
+
+/// Drops the keyword parameters of every face and partner ability of `def` without recursion.
 fn drop_def(mut def: CardDefinitionDSL) {
+    let mut take = |a: AbilityAST| {
+        if let AbilityAST::Keyword(k) = a {
+            k.params
+                .into_iter()
+                .flat_map(BTreeMap::into_values)
+                .for_each(drop_deep);
+        }
+    };
     for face in std::mem::take(&mut def.faces) {
-        face.abilities.into_iter().for_each(|a| drop_deep(a.0));
-        face.power.into_iter().for_each(|p| drop_deep(p.0));
-        face.toughness.into_iter().for_each(|p| drop_deep(p.0));
-        face.text.0.into_iter().for_each(drop_deep);
+        face.abilities.into_iter().for_each(&mut take);
     }
     if let Some(e) = def.commander_eligibility.take() {
-        e.partner_abilities.into_iter().for_each(|p| drop_deep(p.0));
+        e.partner_abilities
+            .into_iter()
+            .map(PartnerAbilityDSL::into_ability)
+            .for_each(&mut take);
     }
 }
 
-/// REQ-ING-009, R12: deep nesting far beyond MAX_DEPTH, wrong types, null, huge integers and
-/// an empty face list never panic.
+/// REQ-ING-009, R12: deep nesting far beyond MAX_DEPTH, null, huge integers and an empty face
+/// list never panic. Since #232 such content can only reach a definition as hand-built typed
+/// values (it does not encode, so FPL-SCHEMA reports each position and nothing else is walked);
+/// the JSON walker itself still walks the same deep JSON without recursion, and the JSON is
+/// refused at load.
 #[test]
 fn req_ing_009_robust_on_hostile_values() {
     let depth = crate::canonical::MAX_DEPTH * 40;
     let deep = nested(depth, json!({"lookBack": 1, "op": "REPEAT_WHILE"}));
-    let mut def = one_face(vec![
-        deep,
-        json!(null),
-        json!(18_446_744_073_709_551_615u64),
-        json!("x"),
-        json!([1, [2]]),
-    ]);
-    def.faces[0].power = Some(ValueExpressionAST(nested(depth, json!(1))));
-    def.faces[0].text = TextTokenStream(vec![nested(depth, Value::Null), json!(-1)]);
+    let deep_partner = nested(depth, json!({"look_back": 0}));
+    // The walker: one look-back key and one bad REPEAT_WHILE at the bottom of each.
+    let scanned = walk::scan(&deep);
+    assert_eq!(scanned.lookback.len(), 1);
+    assert_eq!(scanned.bad_repeat.len(), 1);
+    assert_eq!(walk::scan(&deep_partner).lookback.len(), 1);
+    let paths = scanned.lookback.iter().map(|(_, p)| p);
+    for path in paths.chain(scanned.bad_repeat.iter().map(|(p, _)| p)) {
+        assert!(path.len() < 400, "{path}");
+    }
+    drop(scanned);
+    let mut def = one_face(vec![]);
+    def.faces[0].abilities = vec![
+        keyword_with_param("a0", deep),
+        keyword_with_param("a1", Value::Null),
+        keyword_with_param("a2", json!(18_446_744_073_709_551_615u64)),
+        broken_keyword("a3", "x"),
+    ];
+    // A value expression just past the depth budget, and literals beyond the safe range.
+    let mut power = ValueExpressionAST::X;
+    for _ in 0..crate::canonical::MAX_DEPTH {
+        power = ValueExpressionAST::Math {
+            op: crate::expr::MathOp::Add,
+            lhs: Box::new(power),
+            rhs: Box::new(ValueExpressionAST::Literal(1)),
+        };
+    }
+    def.faces[0].power = Some(power);
+    def.faces[0].toughness = Some(ValueExpressionAST::Literal(-i64::MAX));
     def.commander_eligibility = Some(CommanderEligibilityDSL {
         eligible: false,
-        partner_abilities: vec![PartnerAbilityDSL(nested(depth, json!({"look_back": 0})))],
+        partner_abilities: vec![
+            PartnerAbilityDSL::new(keyword_with_param("p0", deep_partner)).expect("keyword"),
+        ],
     });
     let report = run(&def);
-    assert!(report.with_id(LintId::SCHEMA).count() >= 7, "{report:#?}");
-    assert_eq!(report.with_id(LintId::LOOK_BACK).count(), 2);
-    assert_eq!(report.with_id(LintId::MAX_ITER).count(), 1);
+    assert_eq!(report.with_id(LintId::SCHEMA).count(), 7, "{report:#?}");
+    assert_eq!(report.with_id(LintId::LOOK_BACK).count(), 0);
+    assert_eq!(report.with_id(LintId::MAX_ITER).count(), 0);
     for l in &report.lints {
         assert!(l.message.len() < 400, "{}", l.message);
     }
     drop_def(def);
+    // The JSON forms are refused at load.
+    for raw in [
+        json!(null),
+        json!("x"),
+        json!([1, [2]]),
+        json!({"abilityId": "z", "lookBack": 1}),
+    ] {
+        assert_rejected_at_load(&raw);
+    }
     let mut empty = one_face(vec![]);
     empty.faces.clear();
     empty.color_identity = ColorBitmask::NONE;
@@ -1536,8 +1740,21 @@ fn random_value(rng: &mut Pcg64Dxsm, budget: &mut u32, depth: u32) -> Value {
     }
 }
 
+/// Asserts `report` is sorted by its key, de-duplicated and equal to `again`.
+fn assert_sorted_and_stable(report: &LintReport, again: &LintReport) {
+    let keys: Vec<_> = report.lints.iter().map(Lint::key).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(keys, sorted);
+    assert_eq!(report, again);
+}
+
 /// REQ-ING-009, R12 (bounded pseudo-random run): random raw abilities, text tokens and value
-/// expressions never panic, and the report is sorted, de-duplicated and stable.
+/// expressions never panic. Since #232 the typed positions take only what decodes, so each
+/// random value is decoded into its position when it can be (the definition is then linted)
+/// and the raw abilities are also linted by their JSON form alone ([`run_raw_with`]); every
+/// report is sorted, de-duplicated and stable.
 #[test]
 fn req_ing_009_random_values_never_panic() {
     let mut rng = Pcg64Dxsm::from_u64_seed(0x0016_1157_0000_0001);
@@ -1546,27 +1763,34 @@ fn req_ing_009_random_values_never_panic() {
         let abilities: Vec<Value> = (0..3)
             .map(|_| random_value(&mut rng, &mut budget, 0))
             .collect();
-        let mut def = one_face(abilities);
+        let mut def = one_face(vec![]);
+        def.faces[0].abilities = abilities
+            .iter()
+            .filter_map(|a| serde_json::from_value(a.clone()).ok())
+            .collect();
         let mut budget = 20;
-        def.faces[0].text = TextTokenStream(
+        let text = Value::Array(
             (0..2)
                 .map(|_| random_value(&mut rng, &mut budget, 0))
                 .collect(),
         );
-        def.faces[0].toughness = Some(ValueExpressionAST(random_value(&mut rng, &mut budget, 0)));
+        if let Ok(text) = serde_json::from_value(text) {
+            def.faces[0].text = text;
+        }
+        if let Ok(t) = serde_json::from_value(random_value(&mut rng, &mut budget, 0)) {
+            def.faces[0].toughness = Some(t);
+        }
         def.related_tokens = Some(vec!["test.t".to_owned()]);
         let mut ctx = source(
             vec![(Some(1), Some(ColorBitmask::BLUE))],
             Some(ColorBitmask::GREEN),
         );
         ctx.known_token_ids = Some(BTreeSet::from(["l1".to_owned()]));
-        let report = lint_definition(&def, &ctx);
-        let keys: Vec<_> = report.lints.iter().map(Lint::key).collect();
-        let mut sorted = keys.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(keys, sorted);
-        assert_eq!(report, lint_definition(&def, &ctx));
+        assert_sorted_and_stable(&lint_definition(&def, &ctx), &lint_definition(&def, &ctx));
+        assert_sorted_and_stable(
+            &run_raw_with(&def, &abilities, &ctx),
+            &run_raw_with(&def, &abilities, &ctx),
+        );
     }
 }
 

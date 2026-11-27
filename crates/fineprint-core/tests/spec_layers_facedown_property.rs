@@ -142,7 +142,7 @@ fn up(w: &mut FdWorld, effect: EffectId, object: ObjectId) -> Result<Timestamp, 
 /// Every string a leak of `c` would show: names, rules-text words, abilities' Debug text.
 fn leak_markers(c: &Characteristics) -> Vec<String> {
     let mut v: Vec<String> = c.names.iter().cloned().collect();
-    v.extend(c.rules_text.0.iter().map(|w| format!("{w:?}")));
+    v.extend(c.rules_text.tokens().iter().map(|w| format!("{w:?}")));
     v.extend(c.abilities.iter().map(|a| format!("{a:?}")));
     v.push("Hydra".to_string());
     v

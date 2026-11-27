@@ -623,13 +623,17 @@ fn evaluated_pt_is_literal_and_a_fixpoint() {
     assert_eq!(e2.characteristics, e.characteristics);
 }
 
-// REQ-LAYER-001, CR 613.4a: evaluated P/T are `ValueExpressionAST::Literal(n)`. The
-// `Characteristics` fields hold the DSL placeholder (a JSON value); decision "#32 FP-031 —
-// Placeholder DSL trees in `Characteristics`" fixes the placeholder form of `Literal(n)` as the
-// bare JSON integer `n` and has both `n` and `{"LITERAL": n}` read as literals. This test asserts
-// the emitted form exactly, and that a base in either form reads as the same number.
+// REQ-LAYER-001, REQ-DSL-003, CR 613.4a: evaluated P/T are `ValueExpressionAST::Literal(n)`.
+// #232 FP-164: the `Characteristics` fields hold the typed AST, so the former bare-JSON-integer
+// placeholder form (decision "#32 FP-031") no longer exists: its JSON is refused as a typed value
+// expression, and the emitted form is asserted to be exactly `Literal(n)` (`{"LITERAL": n}`).
 #[test]
 fn evaluated_pt_uses_the_logged_literal_form() {
+    assert!(serde_json::from_value::<ValueExpressionAST>(serde_json::json!(5)).is_err());
+    assert_eq!(
+        serde_json::to_value(lit(5)).unwrap(),
+        serde_json::json!({"LITERAL": 5})
+    );
     let mut env = TestEnv::new();
     let a = env.put(
         oid(1),
@@ -640,21 +644,21 @@ fn evaluated_pt_uses_the_logged_literal_form() {
     );
     env.values.push((non_literal_x(), a, Some(5)));
     let e = evaluate(&ContinuousEffects::new(), &env, a).unwrap();
-    assert_eq!(e.characteristics.power, Some(bare(5)));
-    assert_eq!(e.characteristics.toughness, Some(bare(4)));
+    assert_eq!(e.characteristics.power, Some(lit(5)));
+    assert_eq!(e.characteristics.toughness, Some(lit(4)));
     let r = registry(&[(1, eff(Layer::L7b, 1, objs(&[a]), set_pt(Some(2), None)))]);
     let e = evaluate(&r, &env, a).unwrap();
-    assert_eq!(e.characteristics.power, Some(bare(2)));
+    assert_eq!(e.characteristics.power, Some(lit(2)));
 
     let b = env.put(
         oid(2),
         Characteristics {
-            power: Some(bare(3)),
+            power: Some(lit(3)),
             toughness: Some(lit(6)),
             ..creature("test.mixed_forms", 0, 0)
         },
     );
     let e = evaluate(&ContinuousEffects::new(), &env, b).unwrap();
-    assert_eq!(e.characteristics.power, Some(bare(3)));
-    assert_eq!(e.characteristics.toughness, Some(bare(6)));
+    assert_eq!(e.characteristics.power, Some(lit(3)));
+    assert_eq!(e.characteristics.toughness, Some(lit(6)));
 }

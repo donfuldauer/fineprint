@@ -53,7 +53,7 @@ fn creature(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: set(&["Bear"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -79,7 +79,7 @@ fn artifact(name: &str) -> Characteristics {
 /// A creature whose power and toughness are a characteristic-defining expression (CR 604.3)
 /// whose value the environment supplies per object.
 fn cda_creature(name: &str) -> Characteristics {
-    let expr = ValueExpressionAST("test.cda".into());
+    let expr = ValueExpressionAST::Memory("test.cda".to_owned());
     Characteristics {
         power: Some(expr.clone()),
         toughness: Some(expr),
@@ -116,16 +116,12 @@ fn artifacts() -> ObjectSelectorAST {
     })
 }
 
+/// A synthetic keyword ability with the keyword name of `word` ([`keyword_id`]).
 fn keyword(word: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", format!("test.{word}")),
-            ("keyword", word.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(format!("test.{word}")),
+        keyword_id(word),
+    ))
 }
 
 /// A resolved effect controlled by player 1 without a source.
@@ -819,7 +815,10 @@ fn digest_is_canonical_and_sensitive() {
             v.characteristics.subtypes.insert("Wolf".to_owned());
         }),
         ("rules_text", |v| {
-            v.characteristics.rules_text = TextTokenStream(vec!["t".into()]);
+            v.characteristics.rules_text = serde_json::from_value(
+                serde_json::json!([{"id": "t", "kind": "LITERAL", "text": "t"}]),
+            )
+            .unwrap();
         }),
         ("abilities", |v| {
             v.characteristics.abilities.push(keyword("reach"))
@@ -852,15 +851,30 @@ fn digest_is_canonical_and_sensitive() {
     assert_ne!(evaluated_digest(&moved), d);
 }
 
-// REQ-LAYER-005: a DSL tree that RFC 8785 canonical JSON cannot encode (an integer outside the
-// safe range) still has a deterministic encoding (the MessagePack fallback) that tells values
-// apart.
+/// A typed value expression of `levels` nested `MATH` nodes around `leaf`, deeper than the
+/// canonical JSON depth budget when `levels` is large.
+fn deep_value(levels: usize, leaf: i64) -> ValueExpressionAST {
+    let mut v = literal(leaf);
+    for _ in 0..levels {
+        v = ValueExpressionAST::Math {
+            op: fineprint_dsl::expr::MathOp::Add,
+            lhs: Box::new(v),
+            rhs: Box::new(ValueExpressionAST::X),
+        };
+    }
+    v
+}
+
+// REQ-LAYER-005: a DSL tree that RFC 8785 canonical JSON cannot encode (#232: a typed value
+// expression nested past the depth budget; the former example, an integer outside the safe
+// range, can no longer be held by a typed ability) still has a deterministic encoding (the
+// MessagePack fallback) that tells values apart.
 #[test]
 fn digest_encodes_values_outside_canonical_json() {
     let mut a = creature("test.big", 1, 1);
-    a.abilities = vec![AbilityAST(u64::MAX.into())];
+    a.power = Some(deep_value(200, 1));
     let mut b = a.clone();
-    b.abilities = vec![AbilityAST((u64::MAX - 1).into())];
+    b.power = Some(deep_value(200, 2));
     let one = |c: Characteristics| {
         BTreeMap::from([(
             o(1),
@@ -871,7 +885,7 @@ fn digest_encodes_values_outside_canonical_json() {
             },
         )])
     };
-    assert!(fineprint_dsl::canonical::to_canonical_vec(&a.abilities).is_err());
+    assert!(fineprint_dsl::canonical::to_canonical_vec(&a.power).is_err());
     let da = evaluated_digest(&one(a.clone()));
     assert_eq!(da, evaluated_digest(&one(a)));
     assert_ne!(da, evaluated_digest(&one(b)));

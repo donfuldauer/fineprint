@@ -51,7 +51,7 @@ fn chars(name: &str, types: &[&str], colors: ColorBitmask) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: types.iter().map(|s| (*s).to_owned()).collect(),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,

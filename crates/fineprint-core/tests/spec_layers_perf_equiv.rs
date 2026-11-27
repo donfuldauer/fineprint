@@ -41,17 +41,24 @@ use fineprint_dsl::expr::{ObjectSelectorAST, PredicateAST, SelectorFilter, WordR
 // =============================================================================================
 // Goldens (recorded at commit 1360900, the unmodified base; identical in both modes)
 // =============================================================================================
+//
+// #232 FP-164: the five `GOLDEN_DIGEST_*` values were re-recorded when the boards' content moved
+// from invalid placeholders to valid typed ASTs (literal P/T from the bare JSON integer to
+// `{"LITERAL": n}`, keyword abilities to upper-case keyword names, the counting CDA from
+// `{COUNT_KEY: 0}` to `{"MEMORY": COUNT_KEY}`); the `GOLDEN_ORDER_*` values (application order)
+// are unchanged. Old and new values: docs/DECISIONS.md "#232 FP-164 — Golden changes and replaced
+// tests".
 
 /// `evaluated_digest(evaluate_all)` of board a ("bench-like", 200 permanents).
-const GOLDEN_DIGEST_A: &str = "c038ff1139778fbd2c2a9c7cfcaf840a6cbdb53b5842f3506fd7d8ed81feb831";
+const GOLDEN_DIGEST_A: &str = "a4d874274de7e5f515d13433bb364ea4ebeba558f511bc2f054fde5deffd7687";
 /// `evaluated_digest(evaluate_all)` of board b ("foreign-source"), timestamp order 1.
-const GOLDEN_DIGEST_B1: &str = "32671421b1a093f82a294a418fc3da2ec1b73882fdb4cd65c34eae98abd438bc";
+const GOLDEN_DIGEST_B1: &str = "6f351ff80d9fc0880e18cc0fb3a100adecd8bc7c7d45244ff11bf097140711d3";
 /// `evaluated_digest(evaluate_all)` of board b, timestamps swapped (order 2).
-const GOLDEN_DIGEST_B2: &str = "56c0ba78c66eb37dad2f3c7ff6672645c1d11d51e8ad18c51810fdbf7d6d3eca";
+const GOLDEN_DIGEST_B2: &str = "c52b0fcf6fe49236ac0d9ae397fbb7d7249d6de0732b756a045c50fc8102e5ab";
 /// `evaluated_digest(evaluate_all)` of board c ("CDA and view"), timestamp order 1.
-const GOLDEN_DIGEST_C1: &str = "9b2b2c6b0ea2fc1f6265aa8afdc5ec7ac84e6cafd84a8e14d3fa4479b2e92489";
+const GOLDEN_DIGEST_C1: &str = "42b5e16f9cca6ee0c296bacab878e83ee6b220b9c95c67d5f13deaf67724e6aa";
 /// `evaluated_digest(evaluate_all)` of board c, timestamps swapped (order 2).
-const GOLDEN_DIGEST_C2: &str = "2c8ecb76ef5f280ed76f8a08f40b18e15185236d79fdb0680cce0eaaaeec3204";
+const GOLDEN_DIGEST_C2: &str = "9c3ba17860422d9cb892bb758938b2fc491edcaf2c5b3770c2e93279f2261287";
 
 /// SHA-256 (hex) over `"<id>:<Debug of OrderRecord::steps>\n"` for the sample objects of board a
 /// (see [`Board::sample`]), in sample order.
@@ -90,24 +97,45 @@ fn words(items: &[&str]) -> BTreeSet<String> {
 const COUNT_KEY: &str = "TEST_COUNT_CREATURES_CONTROLLED";
 
 /// The synthetic characteristic-defining expression "creatures its controller controls".
+/// #232 FP-164: the valid typed expression `{"MEMORY": COUNT_KEY}` (formerly the free-form
+/// placeholder `{COUNT_KEY: 0}`).
 fn count_expr() -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!({ COUNT_KEY: 0 }))
+    ValueExpressionAST::Memory(COUNT_KEY.to_owned())
 }
 
-/// A synthetic keyword ability whose `abilityId` equals its keyword.
+/// The DSL keyword name of a synthetic keyword word: upper case, every character outside
+/// `[A-Z0-9]` as `_` (#232 FP-164: a typed KEYWORD holds `[A-Z][A-Z0-9_]*`).
+fn kw_name(word: &str) -> String {
+    let s: String = word
+        .chars()
+        .map(|c| {
+            let u = c.to_ascii_uppercase();
+            if u.is_ascii_uppercase() || u.is_ascii_digit() {
+                u
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+        s
+    } else {
+        format!("K{s}")
+    }
+}
+
+/// A synthetic keyword ability whose `abilityId` is the word and whose keyword is its DSL name.
 fn kw(word: &str) -> AbilityAST {
-    AbilityAST(serde_json::json!({ "kind": "KEYWORD", "abilityId": word, "keyword": word }))
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(word),
+        kw_name(word),
+    ))
 }
 
 fn ability_ids(c: &Characteristics) -> Vec<String> {
     c.abilities
         .iter()
-        .map(|a| {
-            a.0.get("abilityId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_owned()
-        })
+        .map(|a| a.base().ability_id.clone())
         .collect()
 }
 
@@ -128,7 +156,7 @@ fn card(
         supertypes: BTreeSet::new(),
         card_types: words(types),
         subtypes: words(subtypes),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: abilities.iter().map(|w| kw(w)).collect(),
         power: pt.map(|(pw, _)| literal(pw)),
         toughness: pt.map(|(_, t)| literal(t)),
@@ -206,7 +234,7 @@ fn holds(pred: &PredicateAST, view: &Evaluated) -> bool {
         PredicateAST::HasKeyword { keyword } => c
             .abilities
             .iter()
-            .any(|a| a.0.get("keyword").and_then(|k| k.as_str()) == Some(keyword.as_str())),
+            .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == kw_name(keyword))),
         _ => false,
     }
 }
@@ -360,7 +388,7 @@ impl LayerEnvironment for Env {
         object: ObjectId,
         view: &EvaluatedView<'_>,
     ) -> Option<i64> {
-        if expr.0.get(COUNT_KEY).is_none() {
+        if *expr != count_expr() {
             return literal_of(expr);
         }
         let me = view.get(object)?.controller;

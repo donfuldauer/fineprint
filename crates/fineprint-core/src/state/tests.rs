@@ -339,7 +339,7 @@ fn mutators() -> Vec<(&'static str, Mutator)> {
             let id = s.issue_effect_id().unwrap();
             let g = GeneratingAbility::new(
                 fineprint_base::ids::ObjectId::new(900),
-                fineprint_dsl::card::AbilityAST("test.ability.link".into()),
+                synthetic_ability("test.ability.link"),
             );
             ok(s.link_effect_generator(id, g));
         }),
@@ -690,7 +690,7 @@ fn hash_per_component_sensitivity() {
         a.stamp_counters(CounterHolder::Object(object), "test.counter_l")
             .unwrap();
         let etb = a.issue_effect_id().unwrap();
-        let ability = |t: &str| fineprint_dsl::card::AbilityAST(t.into());
+        let ability = synthetic_ability;
         a.link_effect_generator(etb, GeneratingAbility::new(object, ability("test.l1")))
             .unwrap();
         let mut b = a.clone();
@@ -1481,4 +1481,12 @@ fn deserialize_counter_bounds() {
         GameState::deserialize(&spliced(i64::MAX.cast_unsigned())).unwrap(),
         with_max
     );
+}
+
+/// A synthetic `KEYWORD` ability with ability id `id` (R5).
+fn synthetic_ability(id: &str) -> fineprint_dsl::card::AbilityAST {
+    fineprint_dsl::card::AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(id),
+        "TEST_KEYWORD",
+    ))
 }

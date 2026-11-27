@@ -16,7 +16,7 @@ use crate::card::CardDefinitionDSL;
 /// Checks every typed REPLACEMENT ability with a `tierHint`.
 pub(super) fn check(_def: &CardDefinitionDSL, facts: &CardFacts<'_>, out: &mut Vec<Lint>) {
     for a in &facts.abilities {
-        let Ok(AbilityAST::Replacement(r)) = &a.typed else {
+        let AbilityAST::Replacement(r) = a.typed else {
             continue;
         };
         let Some(hint) = r.tier_hint else { continue };

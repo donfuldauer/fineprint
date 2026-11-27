@@ -10,6 +10,7 @@ use fineprint_dsl::card::{
     CardDefinitionDSL, CardFaceDSL, ColorBitmask, FaceKind, LayoutBehavior, TextTokenStream,
 };
 use fineprint_dsl::mana::{ManaCostDSL, ManaSymbol};
+use fineprint_dsl::text::TextToken;
 use fineprint_dsl::vocab::RulesVocabulary;
 
 use super::faces::{chars, effective_ctx, faces};
@@ -53,6 +54,39 @@ fn select<'a>(
     Ok((left, right, state))
 }
 
+/// The rules text of both halves (CR 709.4c): the left half's tokens, then the right half's.
+/// Token ids must stay unique in one stream, so a right-half token whose id is already used is
+/// given the id with `'` appended (repeated until it is unique); every other token keeps its
+/// id (docs/DECISIONS.md "#232 FP-164 — Typed card AST positions").
+fn combined_text(left: &TextTokenStream, right: &TextTokenStream) -> TextTokenStream {
+    let mut used: BTreeSet<String> = left.tokens().iter().map(|t| t.id().to_owned()).collect();
+    let mut tokens = left.tokens().to_vec();
+    for token in right.tokens() {
+        let mut token = token.clone();
+        let mut id = token.id().to_owned();
+        while used.contains(&id) {
+            id.push('\'');
+        }
+        set_token_id(&mut token, id.clone());
+        used.insert(id);
+        tokens.push(token);
+    }
+    // Every id is unique and every token was valid in its own stream, so this succeeds; the
+    // left half's text alone is a defensive fallback.
+    TextTokenStream::new(tokens).unwrap_or_else(|_| left.clone())
+}
+
+/// Sets the id of `token`.
+fn set_token_id(token: &mut TextToken, new_id: String) {
+    match token {
+        TextToken::Literal { id, .. }
+        | TextToken::Word { id, .. }
+        | TextToken::NameRef { id, .. } => {
+            *id = new_id;
+        }
+    }
+}
+
 /// The characteristics of the two halves combined (CR 709.4, 709.4a, 709.4b, 709.4c).
 pub(super) fn combined(left: Characteristics, right: Characteristics) -> Characteristics {
     // CR 709.4b: the combined mana cost keeps the separate symbols, left then right; a half
@@ -71,8 +105,7 @@ pub(super) fn combined(left: Characteristics, right: Characteristics) -> Charact
             r.unwrap_or(ColorBitmask::NONE),
         )),
     };
-    let mut rules_text = left.rules_text.0;
-    rules_text.extend(right.rules_text.0);
+    let rules_text = combined_text(&left.rules_text, &right.rules_text);
     let mut abilities = left.abilities;
     abilities.extend(right.abilities);
     Characteristics {
@@ -87,7 +120,7 @@ pub(super) fn combined(left: Characteristics, right: Characteristics) -> Charact
         card_types: union(left.card_types, right.card_types),
         subtypes: union(left.subtypes, right.subtypes),
         // CR 709.4c: each ability in the text box of each half.
-        rules_text: TextTokenStream(rules_text),
+        rules_text,
         abilities,
         power: None,
         toughness: None,

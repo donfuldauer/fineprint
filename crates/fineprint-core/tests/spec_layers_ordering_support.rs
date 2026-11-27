@@ -69,7 +69,7 @@ pub fn creature(power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(literal(power)),
         toughness: Some(literal(toughness)),
@@ -91,22 +91,43 @@ pub fn noncreature(card_type: &str) -> Characteristics {
     c
 }
 
-/// A synthetic keyword-style ability: `{"kind":"KEYWORD","abilityId":id,"keyword":kw}`.
-pub fn keyword_ability(kw: &str, id: &str) -> AbilityAST {
-    AbilityAST(
-        [
-            ("kind", "KEYWORD".to_owned()),
-            ("abilityId", id.to_owned()),
-            ("keyword", kw.to_owned()),
-        ]
-        .into_iter()
-        .collect(),
-    )
+/// The DSL keyword name of a synthetic keyword string: upper case, every character outside
+/// `[A-Z0-9]` as `_` (#232 FP-164: a typed KEYWORD ability holds `[A-Z][A-Z0-9_]*`; a keyword
+/// counter kind such as `first strike` becomes `FIRST_STRIKE`).
+pub fn kw_name(kw: &str) -> String {
+    let s: String = kw
+        .chars()
+        .map(|c| {
+            let u = c.to_ascii_uppercase();
+            if u.is_ascii_uppercase() || u.is_ascii_digit() {
+                u
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+        s
+    } else {
+        format!("K{s}")
+    }
 }
 
-/// A synthetic rules text of one token.
+/// A synthetic keyword ability: `{"kind":"KEYWORD","abilityId":id,"keyword":kw_name(kw)}`.
+pub fn keyword_ability(kw: &str, id: &str) -> AbilityAST {
+    AbilityAST::Keyword(fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new(id),
+        kw_name(kw),
+    ))
+}
+
+/// A synthetic rules text of one LITERAL token (#232 FP-164: formerly the bare string).
 pub fn text(word: &str) -> TextTokenStream {
-    TextTokenStream(vec![word.into()])
+    TextTokenStream::new(vec![fineprint_dsl::text::TextToken::Literal {
+        id: "w0".to_owned(),
+        text: word.to_owned(),
+    }])
+    .expect("valid synthetic text")
 }
 
 /// The literal P/T of `c`, if both are literals.
@@ -117,11 +138,11 @@ pub fn pt(c: &Characteristics) -> Option<(i64, i64)> {
     ))
 }
 
-/// Whether `c` has an ability whose `keyword` member is `kw`.
+/// Whether `c` has a KEYWORD ability whose keyword is `kw_name(kw)`.
 pub fn has_keyword(c: &Characteristics, kw: &str) -> bool {
     c.abilities
         .iter()
-        .any(|a| a.0.get("keyword").and_then(|k| k.as_str()) == Some(kw))
+        .any(|a| matches!(a, AbilityAST::Keyword(k) if k.keyword == kw_name(kw)))
 }
 
 // ---------------------------------------------------------------------------------------------

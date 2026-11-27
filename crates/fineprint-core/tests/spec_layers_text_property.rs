@@ -4,10 +4,12 @@
 
 //! Property and bounded random-input tests for the layer 3 text-token helpers (REQ-DSL-012,
 //! REQ-CORE-001; CR 612.1, 612.2, 201.5): `rewrite_text_words` preserves the stream's shape and
-//! changes exactly the matching words; results stay valid streams; `decode_rules_text` inverts
-//! `encode_rules_text`; an absent `from` is a no-op; resolved predicates hold no token
-//! references; and `decode_rules_text` and `evaluate` never panic on arbitrary placeholder
-//! content (R12).
+//! changes exactly the matching words; results stay valid streams; the typed stream's wire form
+//! round-trips; an absent `from` is a no-op; resolved predicates hold no token references; and
+//! decoding arbitrary placeholder content as the typed stream never panics, nor does `evaluate`
+//! on whatever decodes (R12). #232 FP-164: `decode_rules_text`/`encode_rules_text` were removed
+//! (the rules text of `Characteristics` is the typed stream), so their properties are stated on
+//! the typed stream's serde.
 //!
 //! Black-box: written from the FP-036 brief only. Deterministic: a seeded LCG with fixed seeds,
 //! no clock and no OS randomness (R3, R7). Synthetic values only (R5).
@@ -16,8 +18,7 @@
 mod support;
 
 use fineprint_core::layers::{
-    LayerModification, decode_rules_text, encode_rules_text, evaluate, resolve_predicate_words,
-    resolve_word_ref, rewrite_text_words,
+    LayerModification, evaluate, resolve_predicate_words, resolve_word_ref, rewrite_text_words,
 };
 use fineprint_core::objects::Characteristics;
 use fineprint_dsl::ability::Layer;
@@ -156,12 +157,17 @@ fn prop_card_name_never_rewritten() {
     });
 }
 
-/// REQ-DSL-012: (c) decode(encode(s)) == s for generated valid streams.
+/// REQ-DSL-012: (c) decode(encode(s)) == s for generated valid streams, through JSON and
+/// through MessagePack, as the typed rules-text position `card::TextTokenStream`.
 #[test]
 fn prop_encode_decode_round_trip() {
     for_cases(|rng| {
         let s = gen_stream(rng);
-        assert_eq!(decode_rules_text(&encode_rules_text(&s)), Ok(s));
+        let j: card::TextTokenStream =
+            serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(j, s);
+        let m: card::TextTokenStream = via_msgpack(&s);
+        assert_eq!(m, s);
     });
 }
 
@@ -393,7 +399,9 @@ fn gen_token_like(rng: &mut Lcg) -> J {
     J::Obj(fields)
 }
 
-fn gen_placeholder(rng: &mut Lcg) -> card::TextTokenStream {
+/// Arbitrary placeholder-like content decoded as the typed stream through MessagePack, if it
+/// decodes (#232 FP-164: formerly every value was accepted as a placeholder).
+fn gen_placeholder(rng: &mut Lcg) -> Option<card::TextTokenStream> {
     let n = rng.below(5);
     let elems: Vec<J> = (0..n)
         .map(|_| {
@@ -404,26 +412,27 @@ fn gen_placeholder(rng: &mut Lcg) -> card::TextTokenStream {
             }
         })
         .collect();
-    via_msgpack(&elems)
+    let bytes = rmp_serde::to_vec_named(&elems).ok()?;
+    rmp_serde::from_slice(&bytes).ok()
 }
 
-/// REQ-DSL-012, REQ-CORE-001 (R12): `decode_rules_text` never panics on arbitrary JSON-like
-/// placeholder content (Ok or Err), and an Ok result re-encodes and decodes to itself.
+/// REQ-DSL-012, REQ-CORE-001 (R12): decoding arbitrary JSON-like placeholder content as the
+/// typed stream never panics (Ok or Err), and an Ok result re-encodes and decodes to itself.
 #[test]
 fn prop_decode_never_panics() {
     for seed in SEEDS {
         let mut rng = Lcg::new(seed ^ 0x5EED);
         for _ in 0..(CASES * 4) {
-            let p = gen_placeholder(&mut rng);
-            if let Ok(s) = decode_rules_text(&p) {
-                assert_eq!(decode_rules_text(&encode_rules_text(&s)), Ok(s));
+            if let Some(s) = gen_placeholder(&mut rng) {
+                let back: card::TextTokenStream = via_msgpack(&s);
+                assert_eq!(back, s);
             }
         }
     }
 }
 
-/// REQ-DSL-012, REQ-CORE-001 (R12): random MessagePack bytes that deserialise as a placeholder
-/// never make `decode_rules_text` panic.
+/// REQ-DSL-012, REQ-CORE-001 (R12): random MessagePack bytes never make the typed stream's
+/// decoder panic, and whatever decodes round-trips.
 #[test]
 fn prop_decode_random_bytes_never_panics() {
     for seed in SEEDS {
@@ -438,20 +447,25 @@ fn prop_decode_random_bytes_never_panics() {
                 bytes[0] = 0x90 | u8::try_from(rng.below(16)).expect("fits");
             }
             if let Ok(p) = rmp_serde::from_slice::<card::TextTokenStream>(&bytes) {
-                let _ = decode_rules_text(&p);
+                let back: card::TextTokenStream = via_msgpack(&p);
+                assert_eq!(back, p);
             }
         }
     }
 }
 
 /// REQ-DSL-012, REQ-CORE-001 (R12): full `evaluate` under a ReplaceTextWord effect never panics
-/// and always returns Ok on arbitrary placeholder text; undecodable text is left unchanged.
+/// and always returns Ok on arbitrary placeholder text that decodes as the typed stream, with the
+/// result `rewrite_text_words` gives. #232 FP-164: undecodable text can no longer be held by
+/// `Characteristics` (formerly "left unchanged").
 #[test]
 fn prop_evaluate_never_panics_on_placeholder_text() {
     for seed in SEEDS {
         let mut rng = Lcg::new(seed ^ 0xE7A1);
         for _ in 0..CASES {
-            let p = gen_placeholder(&mut rng);
+            let Some(p) = gen_placeholder(&mut rng) else {
+                continue;
+            };
             let mut env = TestEnv::new();
             let a = env.put(
                 oid(1),
@@ -461,6 +475,8 @@ fn prop_evaluate_never_panics_on_placeholder_text() {
                 },
             );
             let cat = *pick(&mut rng, &SUPPORTED);
+            let from = *pick(&mut rng, &VALUES);
+            let to = *pick(&mut rng, &VALUES);
             let r = registry(&[(
                 1,
                 eff(
@@ -469,14 +485,14 @@ fn prop_evaluate_never_panics_on_placeholder_text() {
                     objs(&[a]),
                     LayerModification::ReplaceTextWord {
                         category: cat,
-                        from: (*pick(&mut rng, &VALUES)).into(),
-                        to: (*pick(&mut rng, &VALUES)).into(),
+                        from: from.into(),
+                        to: to.into(),
                     },
                 ),
             )]);
             let e = evaluate(&r, &env, a).expect("evaluate is Ok");
-            if decode_rules_text(&p).is_err() {
-                assert_eq!(e.characteristics.rules_text, p);
+            if let Ok(want) = rewrite_text_words(&p, cat, from, to) {
+                assert_eq!(e.characteristics.rules_text, want);
             }
         }
     }
@@ -488,7 +504,7 @@ fn prop_evaluate_never_panics_on_placeholder_text() {
 fn prop_pipeline_matches_helper() {
     for_cases(|rng| {
         let s = gen_stream(rng);
-        let base = encode_rules_text(&s);
+        let base = s.clone();
         let mut env = TestEnv::new();
         let a = env.put(
             oid(1),
@@ -518,7 +534,7 @@ fn prop_pipeline_matches_helper() {
         if want == s {
             assert_eq!(e.characteristics.rules_text, base);
         } else {
-            assert_eq!(decode_rules_text(&e.characteristics.rules_text), Ok(want));
+            assert_eq!(e.characteristics.rules_text, want);
         }
     });
 }

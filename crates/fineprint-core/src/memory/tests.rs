@@ -142,7 +142,7 @@ fn chars(name: &str) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: BTreeSet::from(["Creature".to_owned()]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: None,
         toughness: None,
@@ -154,9 +154,29 @@ fn chars(name: &str) -> Characteristics {
 }
 
 /// A placeholder DSL tree decoded from MessagePack: a one-member map `key -> n`.
+/// A synthetic keyword ability whose parameter `key` is `n` (#232: replaces the former
+/// placeholder JSON object `{key: n}`).
 fn tree(key: &str, n: u64) -> AbilityAST {
-    let bytes = rmp_serde::to_vec(&BTreeMap::from([(key.to_owned(), n)])).unwrap();
-    rmp_serde::from_slice(&bytes).unwrap()
+    let mut k = fineprint_dsl::ability::KeywordInstanceAST::new(
+        fineprint_dsl::ability::AbilityBase::new("test.tree"),
+        "TEST_KEYWORD",
+    );
+    k.params = Some(BTreeMap::from([(key.to_owned(), n.into())]));
+    AbilityAST::Keyword(k)
+}
+
+/// A typed value expression nested past the canonical JSON depth budget (its encoding is the
+/// MessagePack fallback).
+fn deep_power() -> ValueExpressionAST {
+    let mut v = ValueExpressionAST::Literal(1);
+    for _ in 0..200 {
+        v = ValueExpressionAST::Math {
+            op: fineprint_dsl::expr::MathOp::Add,
+            lhs: Box::new(v),
+            rhs: Box::new(ValueExpressionAST::X),
+        };
+    }
+    v
 }
 
 fn kicked_history() -> SpellHistory {
@@ -928,18 +948,20 @@ fn lki_encoding_is_deterministic_and_sensitive() {
             ch.subtypes = BTreeSet::from(["Test".to_owned()]);
         }),
         ("abilities", |ch| ch.abilities = vec![tree("k", 1)]),
-        // Outside the JSON safe-integer range: the MessagePack fallback.
-        ("abilities_unsafe_int", |ch| {
-            ch.abilities = vec![tree("k", u64::MAX)];
-        }),
+        // Beyond the canonical JSON depth budget: the MessagePack fallback (#232: a typed
+        // ability can no longer hold an integer outside the JSON safe range).
+        ("power_too_deep", |ch| ch.power = Some(deep_power())),
         ("power", |ch| {
-            ch.power = Some(ValueExpressionAST(tree("p", 2).0))
+            ch.power = Some(ValueExpressionAST::Memory("test.p".to_owned()));
         }),
         ("toughness", |ch| {
-            ch.toughness = Some(ValueExpressionAST(tree("t", 2).0));
+            ch.toughness = Some(ValueExpressionAST::Memory("test.t".to_owned()));
         }),
         ("rules_text", |ch| {
-            ch.rules_text = TextTokenStream(vec![tree("x", 1).0]);
+            ch.rules_text = serde_json::from_value(serde_json::json!([
+                {"id": "x", "kind": "LITERAL", "text": "x"}
+            ]))
+            .unwrap();
         }),
         ("loyalty", |ch| ch.loyalty = Some(3)),
         ("defense", |ch| ch.defense = Some(3)),

@@ -33,8 +33,8 @@
 //! structural encoding of its JSON tree: `null` `0`; `bool` `1` + byte; number `2` + its decimal
 //! JSON text; string `3` + string; array `4` + count + items; object `5` + count + (key, value)
 //! in ascending key order. A value that cannot be represented as JSON at all is tag `2` alone.
-//! MessagePack is never written into a hash input; it is used only to turn a typed selector into
-//! its JSON tree for the structural form. Equal values always give equal bytes.
+//! MessagePack is never written into a hash input; it is used only to turn a typed DSL value
+//! into its JSON tree for the structural form. Equal values always give equal bytes.
 //!
 //! **Characteristics** (inside copy and face-down modifications): names, mana cost (its canonical
 //! text, or none), color indicator bits (or none), color bits, supertypes, card types, subtypes,
@@ -60,6 +60,7 @@ use fineprint_dsl::card::{AbilityAST, TextTokenStream, ValueExpressionAST};
 use fineprint_dsl::expr::ObjectSelectorAST;
 use fineprint_dsl::text::RewritableCategory;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::copy::{CopiedCharacteristic, CopyException};
 use super::registry::{
@@ -73,9 +74,9 @@ use crate::objects::Characteristics;
 // DSL values
 // ---------------------------------------------------------------------------------------------
 
-/// Appends the canonical encoding of a JSON tree carried as an [`AbilityAST`]: tag 0 and its
-/// RFC 8785 canonical JSON, else tag 1 and its structural encoding (module documentation).
-pub(crate) fn put_json(out: &mut Vec<u8>, value: &AbilityAST) {
+/// Appends the canonical encoding of a JSON tree: tag 0 and its RFC 8785 canonical JSON, else
+/// tag 1 and its structural encoding (module documentation).
+pub(crate) fn put_json(out: &mut Vec<u8>, value: &Value) {
     if let Ok(bytes) = to_canonical_vec(value) {
         put_variant(out, 0);
         put_bytes(out, &bytes);
@@ -88,40 +89,46 @@ pub(crate) fn put_json(out: &mut Vec<u8>, value: &AbilityAST) {
 /// The structural encoding of a JSON tree (module documentation), used only when the value has
 /// no RFC 8785 form. Object members are sorted by key, so the result never depends on the
 /// map's iteration order.
-fn put_structural(out: &mut Vec<u8>, value: &AbilityAST) {
-    let v = &value.0;
-    if v.is_null() {
-        put_variant(out, 0);
-    } else if let Some(b) = v.as_bool() {
-        put_variant(out, 1);
-        b.encode_canonical(out);
-    } else if v.is_number() {
-        put_variant(out, 2);
-        put_bytes(out, v.to_string().as_bytes());
-    } else if let Some(s) = v.as_str() {
-        put_variant(out, 3);
-        s.encode_canonical(out);
-    } else if let Some(items) = v.as_array() {
-        put_variant(out, 4);
-        put_len(out, items.len());
-        for item in items {
-            put_structural(out, &AbilityAST(item.clone()));
+fn put_structural(out: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => put_variant(out, 0),
+        Value::Bool(b) => {
+            put_variant(out, 1);
+            b.encode_canonical(out);
         }
-    } else if let Some(members) = v.as_object() {
-        put_variant(out, 5);
-        let mut entries: Vec<_> = members.iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
-        put_len(out, entries.len());
-        for (key, item) in entries {
-            key.encode_canonical(out);
-            put_structural(out, &AbilityAST(item.clone()));
+        Value::Number(n) => {
+            put_variant(out, 2);
+            put_bytes(out, n.to_string().as_bytes());
+        }
+        Value::String(s) => {
+            put_variant(out, 3);
+            s.encode_canonical(out);
+        }
+        Value::Array(items) => {
+            put_variant(out, 4);
+            put_len(out, items.len());
+            for item in items {
+                put_structural(out, item);
+            }
+        }
+        Value::Object(members) => {
+            put_variant(out, 5);
+            let mut entries: Vec<_> = members.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            put_len(out, entries.len());
+            for (key, item) in entries {
+                key.encode_canonical(out);
+                put_structural(out, item);
+            }
         }
     }
 }
 
 /// Appends the canonical encoding of a typed DSL value (module documentation): its RFC 8785
 /// canonical JSON (tag 0); else the structural encoding of its JSON tree (tag 1); else tag 2.
-pub(super) fn put_typed<T: Serialize>(out: &mut Vec<u8>, value: &T) {
+/// Equal values give equal bytes, and a value whose JSON tree is `t` gives the bytes of
+/// [`put_json`] of `t` (REQ-NFR-006).
+pub(crate) fn put_typed<T: Serialize>(out: &mut Vec<u8>, value: &T) {
     if let Ok(bytes) = to_canonical_vec(value) {
         put_variant(out, 0);
         put_bytes(out, &bytes);
@@ -130,24 +137,27 @@ pub(super) fn put_typed<T: Serialize>(out: &mut Vec<u8>, value: &T) {
     // Only to obtain the JSON tree; these bytes are never hashed.
     let tree = rmp_serde::to_vec_named(value)
         .ok()
-        .and_then(|bytes| rmp_serde::from_slice::<AbilityAST>(&bytes).ok());
+        .and_then(|bytes| rmp_serde::from_slice::<Value>(&bytes).ok());
     match tree {
-        Some(tree) => {
-            put_variant(out, 1);
-            put_structural(out, &tree);
-        }
+        // The tree has no canonical JSON either, so this writes tag 1 and its structure.
+        Some(tree) => put_json(out, &tree),
         None => put_variant(out, 2),
     }
 }
 
 /// A [`ValueExpressionAST`] as a DSL value.
 fn put_value_expr(out: &mut Vec<u8>, value: &ValueExpressionAST) {
-    put_json(out, &AbilityAST(value.0.clone()));
+    put_typed(out, value);
 }
 
 /// A [`TextTokenStream`] as a DSL value (its JSON array of tokens).
 fn put_text(out: &mut Vec<u8>, text: &TextTokenStream) {
-    put_json(out, &AbilityAST(text.0.clone().into()));
+    put_typed(out, text);
+}
+
+/// An [`AbilityAST`] as a DSL value.
+fn put_ability(out: &mut Vec<u8>, ability: &AbilityAST) {
+    put_typed(out, ability);
 }
 
 /// An `Option` of a [`ValueExpressionAST`]: `0x00`, or `0x01` and the value.
@@ -212,7 +222,7 @@ fn put_characteristics(out: &mut Vec<u8>, c: &Characteristics) {
     put_text(out, &c.rules_text);
     put_len(out, c.abilities.len());
     for ability in &c.abilities {
-        put_json(out, ability);
+        put_ability(out, ability);
     }
     put_opt_value_expr(out, c.power.as_ref());
     put_opt_value_expr(out, c.toughness.as_ref());
@@ -300,7 +310,7 @@ impl CanonicalEncode for CopyException {
         match self {
             CopyException::GainAbility(a) => {
                 put_variant(out, 0);
-                put_json(out, a);
+                put_ability(out, a);
             }
             CopyException::SetNames(names) => {
                 put_variant(out, 1);
@@ -464,7 +474,7 @@ impl CanonicalEncode for LayerModification {
             }
             LayerModification::AddAbility(a) => {
                 put_variant(out, 12);
-                put_json(out, a);
+                put_ability(out, a);
             }
             LayerModification::RemoveAllAbilities => put_variant(out, 13),
             LayerModification::RemoveKeyword(k) => {

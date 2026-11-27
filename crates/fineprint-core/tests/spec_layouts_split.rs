@@ -29,8 +29,8 @@ fn split_def() -> fineprint_dsl::card::CardDefinitionDSL {
 
 /// The literal combined characteristics of the sample split card.
 fn expected_combined() -> Characteristics {
-    let mut tokens = text(&["test.split_left"]).0;
-    tokens.extend(text(&["test.split_right"]).0);
+    let mut tokens = text(&["test.split_left"]).tokens().to_vec();
+    tokens.extend(text(&["test.split_right"]).tokens().iter().cloned());
     Characteristics {
         names: set(&["test.split_left", "test.split_right"]),
         mana_cost: some_cost("{X}{R}{2}{U}{U}"),
@@ -39,7 +39,7 @@ fn expected_combined() -> Characteristics {
         supertypes: set(&[]),
         card_types: set(&["Instant", "Sorcery"]),
         subtypes: set(&["Arcane"]),
-        rules_text: TextTokenStream(tokens),
+        rules_text: TextTokenStream::new(tokens).expect("distinct token ids"),
         abilities: vec![
             ability("test.split_left", 1),
             ability("test.split_right", 1),

@@ -333,7 +333,7 @@ fn placeholder() -> Evaluated {
             supertypes: BTreeSet::new(),
             card_types: BTreeSet::new(),
             subtypes: BTreeSet::new(),
-            rules_text: TextTokenStream(Vec::new()),
+            rules_text: TextTokenStream::default(),
             abilities: Vec::new(),
             power: None,
             toughness: None,

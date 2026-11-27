@@ -10498,6 +10498,339 @@ its own list (the independent spec test asserts the list is passed unchanged).
 **Alternatives.** Always sorting and skipping empty calls (rejected: contradicts the pinned call
 order).
 
+## #232 FP-164 — Typed card AST positions
+
+**Decision.** `card::ValueExpressionAST`, `card::TextTokenStream` and `card::AbilityAST` are now
+`pub use` re-exports of `expr::ValueExpressionAST`, `text::TextTokenStream` and
+`ability::AbilityAST`; `FaceDSL.power`/`toughness`/`text`/`abilities` hold the real types, and
+`commanderEligibility.partnerAbilities` holds the typed newtype `PartnerAbilityDSL` (next
+entry). The `to_real` views, `CardDefinitionDSL::validate_asts`, `check_asts`,
+`single_spelling` and `card/validate.rs` are removed. `from_json` keeps its order (canonical →
+version → typed schema decode → lossless re-serialisation check → hash): invalid AST content now
+fails at the typed decode as `CardDefinitionError::Schema(<decoder message>)` (no location
+prefix any more), and a non-canonical spelling of a valid AST is refused by the lossless check
+(probing found no decodable non-canonical spelling: the real decoders refuse explicit `null`,
+unknown and positional members, so every decodable AST re-encodes to its input). `seal` keeps
+its normalising canonical round trip and reports decode failures as `CanonicalError::Serialize`;
+a hand-built typed AST that breaks an invariant of its type fails in its own serializer, so it
+cannot be sealed, hashed or exported. `to_canonical_json`, `compute_hash` and `verify_hash` are
+unchanged; the unit fixture `sealed()` still hashes to
+`ce23dc12dae8b49033785a3832ebece12870f940ce895ab3d01f370b8feee216` (pinned in
+`req_nfr_006_typed_positions_keep_the_fixture_hash`). fineprint-core builds and reads the typed
+values directly: `literal(n)`/`literal_of` are `ValueExpressionAST::Literal`, characteristic-
+defining placeholders in tests are `{"MEMORY": "test.*"}`, empty text is
+`TextTokenStream::default()`. Engine-built keyword abilities use keyword names of the form
+`[A-Z][A-Z0-9_]*` through the new `layers::keyword_id` (ASCII letters upper-cased, digits kept,
+every other character `_`): keyword counters give `counter:<kind>` / `keyword_id(kind)`
+(`FLYING`, `FIRST_STRIKE`, `HEXPROOF_FROM_RED`), the face-down ward ability is keyword `WARD`
+with the keyword parameter `cost` `{2}`, `RemoveKeyword(k)` removes the keyword named
+`keyword_id(k)` (so `"flying"` and `"FLYING"` both work) and, for hexproof, every
+`HEXPROOF_<rest>` variant whose rest is non-empty and does not start with `_` (CR 702.11e). The
+SBA indestructible check reads the vocabulary id `INDESTRUCTIBLE` (this supersedes the lowercase
+keyword of "#41 FP-040 — Indestructible and regeneration"; as "#43 FP-042 — Start your engines! keyword literal and the speed designation" does for `START_YOUR_ENGINES`).
+A split card's combined rules text (CR 709.4c) is the left half's tokens then the right half's;
+a right-half token whose id is already used gets `'` appended until unique, so the combined
+stream stays valid. The state-hash leaf layout is unchanged: `put_json` now carries a
+`serde_json::Value`, typed values go through `put_typed` (canonical JSON, else the structural
+encoding of their JSON tree, else tag 2), and `serde_json` moves to core's `[dependencies]`.
+`CopyException`, `LayerModification` and `CopyExceptionWire` keep `AbilityAST` unboxed with
+`#[allow(clippy::large_enum_variant)]`. This supersedes the open "Follow-up" of "#159 FP-140 —
+Card wrappers validated against the real AST types".
+**Rationale.** REQ-DSL-003, REQ-DSL-010 and REQ-DSL-012 ask for the real typed ASTs; typing the
+fields makes invalid content unrepresentable, so the separate validation pass and its views are
+redundant, while the lossless check still guarantees one spelling per definition
+(REQ-NFR-006). A `KEYWORD` ability must have an upper-case keyword name, so the nearest valid
+form of the engine's lower-case keyword strings is their vocabulary-id spelling (which equals the
+vocabulary id for every base keyword counter and for indestructible); keeping `RemoveKeyword`'s
+argument normalised keeps existing callers working. Re-numbering colliding split token ids is the
+only way to keep both halves' text in one valid stream. Boxing the ability payload would change
+public variants the spec tests build.
+**Alternatives.** Keeping the wrappers alongside the real types (rejected: the issue asks for
+the swap); parameterised keyword counters (`HEXPROOF` with a `from` parameter; rejected: the
+counter kind is free text and the variant check would need a second representation); dropping
+the right half's colliding tokens (rejected: loses text, CR 709.4c); `Box<AbilityAST>` variants
+(rejected: public API churn for a lint).
+
+## #232 FP-164 — PartnerAbilityDSL newtype
+
+**Decision.** `PartnerAbilityDSL` is `pub struct PartnerAbilityDSL(ability::AbilityAST)` with a
+private field, deriving `Clone, Debug, PartialEq, Eq` and `#[serde(transparent)]` `Serialize`;
+its `Deserialize` decodes an `ability::AbilityAST` with the strict decoder and requires
+`kind() == "KEYWORD"`. `PartnerAbilityDSL::new(ability) -> Result<PartnerAbilityDSL, String>`
+fails with exactly `a partner ability must be a KEYWORD ability, found kind <kind>`;
+`as_ability(&self) -> &AbilityAST` and `into_ability(self) -> AbilityAST` give the ability back.
+The JSON form is the ability's own, so canonical JSON and hashes are unchanged.
+**Rationale.** "#159 FP-140 — PartnerAbilityDSL is a KEYWORD ability" made the KEYWORD rule part
+of the card contract; a private field makes it an invariant of the type rather than a check.
+**Alternatives.** A plain re-export of `AbilityAST` (rejected: loses the KEYWORD rule); a public
+field (rejected: would allow a non-KEYWORD partner).
+
+## #232 FP-164 — Text placeholder bridge removed
+
+**Decision.** The MessagePack bridge of "#37 FP-036 — Placeholder bridge" is removed: the public
+items `layers::decode_rules_text`, `layers::encode_rules_text` and the variant
+`TextWordError::InvalidRulesText` no longer exist (re-exports in `layers/mod.rs` and doc links in
+`registry.rs` updated). `replace_in_rules_text(&TextTokenStream, category, from, to) ->
+Option<TextTokenStream>` and `replace_targets(&TextTokenStream, ...)` work on the typed stream:
+`None` when nothing changed, `None` for an invalid replacement, `CARD_NAME` gives `None` or the
+empty set. Behaviour on valid streams is unchanged.
+**Rationale.** `Characteristics.rules_text` is the typed stream now, so there is nothing to
+decode; undecodable text can no longer exist.
+**Alternatives.** Keeping the two functions as identity shims (rejected: dead public API).
+
+## #232 FP-164 — Lint schema check after typed storage
+
+**Decision.** The lints read typed definitions. `walk::RawJson` encodes every face and partner
+ability once with the depth-checked serializer (`canonical::to_checked_value`); the JSON-reading
+checks (`FPL-LOOK-BACK`, `FPL-MAX-ITER`, `FPL-LAYER-KIND`, `FPL-LINK-ID`, `FPL-TOKEN-REF`, the
+`FPL-TEXT-COVERAGE` spans, the color-identity mana strings) walk that JSON form, and
+`FPL-MANA-ABILITY`, `FPL-TIER-HINT` and the characteristics checks read the typed abilities,
+always (no "only where `to_real` succeeds"). `FPL-SCHEMA` stays registered with its location
+rules; since a decoded definition is valid by construction, it now reports every position
+(`power`, `toughness`, `text`, each ability, each partner) whose typed value does not encode, that
+is a hand-built value breaking an invariant of its type (for example a lower-case keyword name or
+a literal beyond the safe integer range), with the encoder's clipped message; an ability that
+does not encode has `null` as its JSON form and is not walked. `lint_definition` is split into
+the encoding step and a private `lint_facts`, so unit tests can run the JSON-reading checks on
+JSON the typed positions cannot hold. The compile-driven edits in `lint/text.rs`
+(`face.text.len()`) and `lint/characteristics.rs` (filter on `to_real` removed) are part of this.
+**Rationale.** D4 of the brief: invalid AST content is refused at load, so the lint can neither
+see it nor report it; keeping `FPL-SCHEMA` meaningful for hand-built values keeps the lint total
+over everything a `CardDefinitionDSL` can hold (R12).
+**Alternatives.** Retiring `FPL-SCHEMA` (rejected: the brief keeps the id registered); linting
+raw JSON documents instead of definitions (rejected: changes the public lint API).
+
+## #232 FP-164 — Golden hashes and replaced tests
+
+**Decision.** Recorded golden changes, each caused by content that was an invalid placeholder
+(old → new):
+- `layers::tests::GOLDEN_PERF` (`perf_fingerprint`, seeds 0-7): the engine wrote layer-7 values
+  as bare JSON integers and the fixtures used lower-case keywords and a string CDA; now
+  `{"LITERAL": n}`, `[A-Z][A-Z0-9_]*` keywords, `{"MEMORY": "test.count"}` and typed `Debug`.
+  Seed 0 `41f86003…:b29c3012…` → `12f52353…:9835970f…`; 1 `e6e71a13…:7b85b746…` →
+  `ab473815…:c5b47676…`; 2 `5b380d28…:1e3660df…` → `4eba4050…:11d867cc…`; 3
+  `81f88866…:736022f9…` → `74952e1c…:a8c5d1cd…`; 4 `ffd92d03…:838844fd…` →
+  `8caef82a…:e1199597…`; 5 `de67961e…:48698025…` → `8ccc4049…:d37455d2…`; 6
+  `be956504…:9ad70a5f…` → `6d1266c9…:cc6991cc…`; 7 `65fcd234…:c0c6e52d…` →
+  `a484ff7e…:98e80ea7…` (full values in the test). Evidence that no result changed: the new
+  test `req_layer_005_results_equal_pre_migration_semantics` pins a representation-independent
+  fingerprint of the same boards (literal P/T as numbers, abilities by id and keyword name,
+  order records) computed on the base tree 242545c, and it passes.
+- `state::effects_tests::GOLDEN_LAYERS`: `49b4707ebee9e40df30c49d6ca4fe2289e328f66814ef2b84833e58400ce7cc1`
+  → `e4d5ee18abcb3d3e96fbcfd9e7eea993b2d62d639a89028fe5945cf2b09f947f`, because the fixture
+  STATIC ability lacked `effects`; the base tree gives the new value for the same valid content.
+- The face-down ward {2} profile (`layouts::FaceDownProfile::with_ward_2`) now encodes as
+  `{"abilityId":"facedown:ward","keyword":"WARD","kind":"KEYWORD","params":{"cost":"{2}"}}` with
+  power and toughness `{"LITERAL":2}` (was `"keyword":"ward","cost":"{2}"` and bare `2`), so
+  every state or digest holding it changes; its bytes equal those the base tree gives for the
+  same valid content (`GOLDEN_FACE_DOWN` in `layers/encode_tests.rs`). Keyword-counter abilities
+  change likewise (`"keyword":"flying"` → `"FLYING"`).
+- New pinned bytes, unchanged from the base tree: `layers/encode_tests.rs`
+  `typed_dsl_values_keep_their_golden_bytes` (a LITERAL and a MATH expression, an empty and a
+  four-kind token stream, KEYWORD with and without parameters, STATIC, TRIGGERED with
+  `POPULATE`, a copy and a face-down characteristics snapshot), hex captured on 242545c.
+- Unchanged: the dsl fixture `sealed()` (`ce23dc12…ee216`) and every other dsl and core golden.
+- The differential outputs (`target/differential`) are compared after the Independent Tester's
+  migration (the baseline outputs of 242545c are kept outside the repository).
+
+Replaced tests (R10 exception D8 of the brief: their subject was content that can no longer be
+constructed; each replacement asserts the same content is refused at the typed decode, or
+exercises the same check on the content's JSON form):
+- dsl `card/tests.rs`: `req_dsl_010_typed_views` → `req_dsl_010_typed_positions_decode_strictly`
+  and `req_dsl_010_partner_ability_new_as_into`; `req_nfr_006_single_spelling_check` →
+  `req_nfr_006_non_canonical_ast_spelling_rejected`; `req_nfr_006_wrappers_stay_permissive` →
+  `req_nfr_006_typed_positions_refuse_placeholders`; in
+  `req_dsl_003_invalid_asts_rejected_on_load_and_seal`, `..._null_power_and_later_faces_rejected`,
+  `..._ast_check_precedes_hash_check` and `req_obj_001_optional_members_reject_null` the seal
+  path of invalid content and the location in messages became plain-serde rejection and
+  `Schema`; `req_dsl_001_seal_normalises_numbers` normalises on load and refuses a hand-built
+  fraction; `req_nfr_006_definition_noncharacter` asserts a typed token cannot hold a
+  noncharacter; `req_nfr_006_compute_hash_deep_value_is_an_error` uses a deep typed expression
+  and a deep keyword parameter; `req_dsl_003_typed_views_never_panic` fuzzes plain serde and
+  `from_json`.
+- dsl `lint/tests.rs`: `req_ing_009_schema_reports_every_position` and
+  `..._schema_passes_and_clips` use hand-built unencodable values, plus the new
+  `req_ing_009_schema_invalid_json_rejected_at_load`; `..._layer_kind_fails`,
+  `..._text_coverage_bad_spans`, `..._look_back`, `..._max_iter`, `..._link_id_fails` and
+  `..._mana_ability_other_kinds` assert the invalid JSON is refused at load and run the same
+  check on the JSON form (`run_raw`); look-back keys in typed definitions live in opaque keyword
+  parameters (`..._look_back`, `..._look_back_deep_path_is_bounded`, `..._report_is_sorted...`,
+  `..._determinism_and_reordering`); `..._robust_on_hostile_values` and
+  `..._random_values_never_panic` use hand-built typed values, the walker on deep JSON and
+  decode-or-skip.
+- core: `layers/text_tests.rs` `encode_decode_round_trip` → `typed_rules_text_round_trip`,
+  `decode_rejects_placeholder_garbage` → `typed_decode_rejects_placeholder_garbage`,
+  `layer3_undecodable_or_empty_text_is_noop` (undecodable text → word-free text),
+  `property_random_placeholders_never_panic` and `property_random_bytes_never_panic` decode
+  through the typed stream, `errors_display` without `InvalidRulesText`, the garbage case of the
+  `replace_targets` test removed; `state/effects_tests.rs` `wire_keeps_json_null_power_distinct`
+  → `wire_keeps_some_power_distinct`; `layers/cache_tests.rs`
+  `digest_encodes_values_outside_canonical_json` and `memory/tests.rs`
+  `lki_encoding_is_deterministic_and_sensitive` reach the MessagePack fallback through a value
+  expression deeper than the JSON depth budget instead of an unsafe integer in an ability;
+  `layers/copy_tests.rs` "modification that is not an object" → refused by the decoder;
+  `layers/tests.rs` `literal_forms` (bare-integer form gone).
+**Rationale.** REQ-NFR-006: only content that changed from invalid placeholder to valid AST may
+change a golden, and every change is shown to be representational.
+**Alternatives.** Keeping the old values with a compatibility encoding of literals and keyword
+names (rejected: they are not valid ASTs).
+
+## #232 FP-164 — Spec-test migration
+
+**Decision.** The Independent Tester migrated the spec tests of fineprint-dsl and fineprint-core
+to the typed card AST positions. Shared helpers build typed values from valid wire JSON through
+plain serde (`tests/typed_ast_support/mod.rs` in both crates: `vx`, `ability_of`, `tx`, `pa`,
+`synthetic_ability`). Readings, each the option nearest to the brief:
+- Placeholders were replaced by the nearest valid synthetic content with the same identity:
+  a literal is `{"LITERAL": n}` (the bare-integer form is gone, and tests that compared "both
+  literal forms" now assert that the bare form is refused as a typed value expression); a
+  free-form ability `{"synthetic": name}` or `{key: n}` is the KEYWORD ability with `abilityId`
+  `name`/`key`, keyword `TEST_SYNTHETIC` and, for `{key: n}`, the opaque parameter `n`; a
+  CDA-like placeholder (`{COUNT_KEY: 0}`, `{"CDA": key}`) is `{"MEMORY": key}`, recognised by
+  the test environments; rules text of bare strings is one LITERAL token per word (ids `w<i>`,
+  or `w:<word>` in the layouts helpers so that two halves concatenate to a valid stream); test
+  keyword strings are stored as DSL keyword names (`flying` → `FLYING`, `first strike` →
+  `FIRST_STRIKE`, `test.marker` → `TEST_MARKER`) and the helpers that read keywords back compare
+  through the same mapping, so the assertions keep their rules-text spelling.
+- `from_json` error messages are no longer required to name the position (`faces[i].power`,
+  `abilities[j]`, ...): contract C4 lists only the error kind (`Schema`), so
+  `spec_dsl_card_ast.rs` asserts `Schema` (plus refusal by plain serde) instead of the markers.
+- Where a test fed invalid content to `seal`, it now checks that the typed value of the position
+  cannot be decoded (plain serde) and that `from_json` refuses the same JSON with `Schema`.
+  Values that are only expressible by hand (an unsafe `Literal`, a 200-level MATH chain) are
+  built directly as typed values and still refused by `seal`.
+- A float in a hand-built KEYWORD `params` is refused by `seal` (the real ability type re-checks
+  its parameters on write); the `-0.0`/`1.0` normalisation of decision "#159 FP-140" is asserted
+  on the loader path (in `power` and in KEYWORD `params`), where it still applies.
+- Lint tests that built invalid ASTs inside a `CardDefinitionDSL` assert instead, per C5, that
+  the same JSON is rejected by `from_json` with `Schema` (`def_abilities_or_schema`,
+  `assert_document_schema_rejected` in `spec_dsl_lint_common`); a document-level failure
+  (noncharacter, unsafe number) is accepted as `Canonical`, because document checks run first
+  (C4). The lint ids whose only failing fixture is not a valid typed AST (`FPL-SCHEMA`,
+  `FPL-LAYER-KIND`, `FPL-MAX-ITER`) keep their pass case and lose the lint-level fail case; every
+  other lint keeps both. Valid fixtures with findings replace the undecodable ones in the
+  ordering, reordering and message tests (a look-back key in NATIVE_EFFECT params, an unpaired
+  link reference). The random-definition generator falls back to the valid base fixture when a
+  mutation does not decode and gained two valid finding-producing bases (look-back key in params,
+  mismatched tier hint) so that it still reaches eight lint ids.
+- T3(g): the real AST types document a single JSON spelling (`expr`, `ability`, `text` module
+  docs) and no decodable second spelling of an AST was found, so
+  `req_nfr_006_non_canonical_spellings_are_refused` asserts the lossless property on the
+  documented candidates (explicit `INSTANT` timing, empty or `false` optionals, present `null`,
+  wrapped values: each is refused with `Schema` or reproduced byte for byte) and uses a
+  positional array spelling of `commanderEligibility` (the object holding the partner ASTs) as
+  the case a derived decoder may accept but does not reproduce.
+- T4(b): for two overlapping text effects the new core test asserts the outcomes the existing
+  layer-3 suite already establishes for the same pairs (dependency chain ends as Forest in both
+  orders; dependency loop ends with the earlier timestamp's `to`), in both timestamp and both
+  registration orders. T4(c): the cached and full-recompute modes are compiled separately, so
+  the state hash of the typed state is pinned (`GOLDEN_TYPED_STATE`) and the same pin passes
+  under both builds.
+**Rationale.** R10 and the brief's T1/T2: keep each test's intent with valid, neutral,
+synthetic content; C4/C5 define what replaces the removed invalid-content paths.
+**Alternatives.** Building positions from the new engine helper `layers::keyword_id` (rejected:
+black-box tests use their own mapping); dropping the lint fail cases outright (rejected: C5 asks
+for the `Schema` assertion); pinning error-message locations (rejected: not in the contract).
+
+## #232 FP-164 — Golden changes and replaced tests
+
+**Decision.** Golden changes in the spec tests, each caused by fixture or engine content that was
+an invalid placeholder and is now a valid typed AST (old → new). Values were produced by each
+test's own computation path; the reasons are traced per fixture below.
+- `spec_layers_perf_equiv.rs` `GOLDEN_DIGEST_*` (`evaluated_digest(evaluate_all)`): the boards
+  had literal P/T as engine-written bare JSON integers, lower-case keyword abilities and the
+  CDA placeholder `{COUNT_KEY: 0}`; now `{"LITERAL": n}`, `[A-Z][A-Z0-9_]*` keywords and
+  `{"MEMORY": COUNT_KEY}`.
+  A `c038ff1139778fbd2c2a9c7cfcaf840a6cbdb53b5842f3506fd7d8ed81feb831` →
+  `a4d874274de7e5f515d13433bb364ea4ebeba558f511bc2f054fde5deffd7687`;
+  B1 `32671421b1a093f82a294a418fc3da2ec1b73882fdb4cd65c34eae98abd438bc` →
+  `6f351ff80d9fc0880e18cc0fb3a100adecd8bc7c7d45244ff11bf097140711d3`;
+  B2 `56c0ba78c66eb37dad2f3c7ff6672645c1d11d51e8ad18c51810fdbf7d6d3eca` →
+  `c52b0fcf6fe49236ac0d9ae397fbb7d7249d6de0732b756a045c50fc8102e5ab`;
+  C1 `9b2b2c6b0ea2fc1f6265aa8afdc5ec7ac84e6cafd84a8e14d3fa4479b2e92489` →
+  `42b5e16f9cca6ee0c296bacab878e83ee6b220b9c95c67d5f13deaf67724e6aa`;
+  C2 `2c8ecb76ef5f280ed76f8a08f40b18e15185236d79fdb0680cce0eaaaeec3204` →
+  `9c3ba17860422d9cb892bb758938b2fc491edcaf2c5b3770c2e93279f2261287`. The
+  `GOLDEN_ORDER_*` pins (application order) are unchanged and still pass, so only the encoded
+  content moved, not the layer results.
+- `spec_layers_state_hash.rs` `GOLDEN_SMALL_STATE`:
+  `13e35cf7e24c0de507022934867a4fc1e2c8731c449a1ddd2147de6305bc3381` →
+  `a478cd161601de9f51b8a80c682b37d04788a09467f8c06f7c6196ea2afb9818`, because the state's
+  granted, own and ETB-link abilities were `{"synthetic": name}` placeholders.
+- `spec_layers_facedown_support.rs` `expected_ward_fields`: the pinned face-down ward {2}
+  ability fields `kind KEYWORD, abilityId facedown:ward, keyword ward, cost {2}` →
+  `kind KEYWORD, abilityId facedown:ward, keyword WARD, params.cost {2}` (the brief's typed form
+  `{"abilityId":"facedown:ward","kind":"KEYWORD","keyword":"WARD","params":{"cost":"{2}"}}`).
+- Unchanged, as required (C7): `spec_dsl_card.rs` `PINNED_HASH`/`PINNED_SEALED`
+  (`e930e89d0aec056f27c5a0bac081553c5435af9dbebf4b13f42d65b294d2b770`, also re-checked in
+  `spec_dsl_card_typed.rs` by SHA-256 of the pinned canonical text) and every other dsl and core
+  golden of the spec suites.
+- New pin: `spec_typed_ast_core.rs` `GOLDEN_TYPED_STATE`
+  `9879316ad2f5773b38edc06eca295cfd4f8e7c5413a30f7fac6bee6bdee9f179`, identical in the cached
+  and the full-recompute builds.
+- Differential outputs (`target/differential`, cached = full, byte-identical) against the
+  242545c baseline: `empty_board.digest` is unchanged (no content); the 21 others change, every
+  one through placeholder content: the ten `.digest` scenarios evaluate creatures whose layer-7
+  P/T the engine wrote as bare integers (and, where present, lower-case keyword grants and
+  keyword-counter abilities), and the eleven `.statehash` scenarios all start from
+  `Rig::standard`, which registers a lower-case `haste` grant and links the
+  `{"synthetic": "test.o7_static"}` ability. First 16 hex digits, old → new:
+  after_declared_changes c9e09614ca839cf5 → 6bf06be01e46d7b9; after_effect_removed
+  b310bccb14f84b22 → 2286abdbe60a8d04; board_200_permanents_4_players a93906ce85d69647 →
+  ea4e8dc5fe43a71e; cda_reads_player_values 4474209b23d8abf1 → 1cad15a591131eb4;
+  dependency_dependent_earlier and dependency_remover_earlier (equal before and after)
+  6119268ac2601a67 → 4d3b7dd7eaffba08; layer7_chain_with_counters df386ded1effc7fe →
+  028cf677497546f6; multi_layer_lockin_group b99d8712307b42cd → 8250074b24a85d65;
+  type_change_and_keyword_grants 6eaf044a80e9f78a → 9778ce7c6db21be9; vanilla_board
+  aefa8e0ed3ca4131 → 02419381fc47890b; attachment_status_designation 0658f59f3c934e98 →
+  d108639a697d418d; control_change 0ae4433aa7fa1b91 → 0ae530a568dc1c81; counter_change
+  0686d14f44593c50 → e84bf918d0bdcee0; effect_expiry 21418428850babb5 → 9f1cc48df602dad4;
+  effect_group_and_restamp ada15e64063d3e7b → 0c226bb20522be55; effect_removal
+  0f3c5ce210456b25 → 7cf3488f7d66b148; player_value_change 1ca1c8aa15dcf474 →
+  6411147a7912d5da; random_walk_seed_1 0b0ae131d96b232c → f3536c1664c1557f;
+  timestamp_order_grant_first b926b30b2152cd5e → 74f9ad6a6971b587;
+  timestamp_order_removal_first 90fa234add7fca04 → a0263e39002b4544; zone_change
+  cf5ad186374dab64 → c89e07be6c0f80ce.
+
+Replaced tests (T2; their only subject was content that can no longer be constructed):
+- `spec_dsl_card_ast.rs` `req_nfr_006_wrappers_keep_plain_serde` →
+  `req_nfr_006_typed_positions_refuse_placeholder_content_in_plain_serde`; the seal side of
+  `assert_rejected` (used by the invalid power/toughness, text, ability and partner tests) and of
+  the random-position agreement property became "the typed position does not decode".
+- `spec_dsl_review1.rs`: the noncharacter-in-token `seal` case → `TextTokenStream::new` refuses
+  it with `TextError::Noncharacter`; the deep free-form placeholder of the depth tests moved from
+  `power` into opaque KEYWORD `params`; the float `LITERAL` seal normalisation → loader
+  normalisation plus refusal of the hand-built float in `params`.
+- `spec_dsl_lint.rs` `req_ing_009_schema_every_position` (every undecodable position reported by
+  FPL-SCHEMA) → each of the seven positions, alone and together, refused by `from_json`, and no
+  FPL-SCHEMA finding on the valid definition; undecodable cases of the MANA-ABILITY, LAYER-KIND,
+  LOOK-BACK and MAX-ITER tests and of the acceptance table → `from_json` `Schema`.
+- `spec_dsl_lint_characteristics.rs` (undecodable PAY_MANA ability) and
+  `spec_dsl_lint_robust.rs` (random values per position, deep nesting: over-deep documents
+  refused by `from_json`, the lint walks the deepest typed content that still decodes).
+- `spec_layers_text.rs` `no_op_rules` and `no_op_on_undecodable_text_with_effect`: the garbage
+  placeholder text → valid literal/name-reference text with the same values, and the garbage JSON
+  is refused as a typed stream.
+- `spec_layers_text_helpers.rs` `encode_decode_round_trip`, `decode_reads_the_wire_form`,
+  `decode_invalid_placeholders` (InvalidRulesText) → the typed stream's serde round trip, wire
+  form and refusal of the same placeholders; `error_display_non_empty` without
+  `InvalidRulesText`.
+- `spec_layers_text_property.rs` decode/encode properties → the typed stream's JSON and
+  MessagePack round trips; random placeholders and bytes are decoded as the typed stream; the
+  evaluate-never-panics property runs on what decodes and checks the helper's result.
+- `spec_layers_copy_cda_parts.rs`: malformed `defines` and odd ability shapes run only when the
+  typed ability holds them; in `req_obj_002_non_cdas_are_never_dropped` the TRIGGERED ability
+  with CHAR effects, the STATIC ability without effects and the lower-case keyword (all refused,
+  asserted) → valid TRIGGERED, RULE-only STATIC and `TEST_KW` keyword abilities.
+- `spec_layers_counters.rs` `evaluated_pt_uses_the_logged_literal_form` and
+  `spec_layers_cross_object_order.rs` `json_lit`: the bare-integer literal form is asserted to
+  be refused; both forms are now `Literal(n)`.
+**Rationale.** T6 and R10: a golden may change only where its fixture moved from an invalid
+placeholder to a valid AST; each change above is traced to such content, and goldens of valid
+content are unchanged.
+**Alternatives.** Keeping placeholders through a compatibility encoding (rejected: they are not
+valid ASTs and the brief forbids them).
+
 ## #48 FP-046 — Starting player draw
 
 **Decision.** With no `StartOptions::starting_player` the starting player is

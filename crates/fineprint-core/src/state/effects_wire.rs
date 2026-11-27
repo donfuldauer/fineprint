@@ -232,6 +232,9 @@ pub(super) enum ValueSourceWire {
 }
 
 /// A [`CopyException`].
+// The typed `AbilityAST` payload is large; it stays unboxed so the public variants keep the
+// shape callers build (docs/DECISIONS.md "#232 FP-164 — Typed card AST positions").
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum CopyExceptionWire {
     GainAbility(AbilityAST),
@@ -799,7 +802,7 @@ fn stand_in_modification(layer: Layer) -> LayerModification {
             supertypes: BTreeSet::new(),
             card_types: BTreeSet::new(),
             subtypes: BTreeSet::new(),
-            rules_text: TextTokenStream(Vec::new()),
+            rules_text: TextTokenStream::default(),
             abilities: Vec::new(),
             power: None,
             toughness: None,
@@ -809,7 +812,7 @@ fn stand_in_modification(layer: Layer) -> LayerModification {
             life_modifier: None,
         })),
         Layer::L2 => LayerModification::SetController(PlayerId::new(0)),
-        Layer::L3 => LayerModification::SetText(TextTokenStream(Vec::new())),
+        Layer::L3 => LayerModification::SetText(TextTokenStream::default()),
         Layer::L4 => LayerModification::RemoveSubtypes(BTreeSet::new()),
         Layer::L5 => LayerModification::AddColors(ColorBitmask::NONE),
         Layer::L6 => LayerModification::RemoveAllAbilities,

@@ -12,8 +12,7 @@ mod report;
 mod spec_dsl_lint_common;
 
 use fineprint_dsl::card::{
-    AbilityAST, CardDefinitionDSL, CardFaceDSL, ColorBitmask, FaceKind, LayoutBehavior,
-    SupportStatus, TextTokenStream,
+    CardDefinitionDSL, CardFaceDSL, ColorBitmask, FaceKind, LayoutBehavior, SupportStatus,
 };
 use fineprint_dsl::lint::{
     LintContext, LintId, Severity, SourceCharacteristics, SourceFaceCharacteristics,
@@ -447,13 +446,14 @@ fn req_obj_001_color_identity_activated_pay_mana() {
         let a = activated("a", cost, json!([native()]));
         assert_decodes(&a);
         let mut d = costed(c(vec![Generic(2)]), ColorBitmask::NONE);
-        d.faces[0].abilities = vec![AbilityAST(a)];
+        d.faces[0].abilities = vec![ability_of(a)];
         let r = run0(&d);
         assert_exactly(&r, LintId::COLOR_IDENTITY, &[(E, "$".to_string())]);
         d.color_identity = ColorBitmask::RED;
         assert_none(&run0(&d), LintId::COLOR_IDENTITY);
     }
-    // an undecodable activated ability does not contribute
+    // an undecodable activated ability does not contribute. #232 FP-164 (C5): it can no longer
+    // be held by a `CardDefinitionDSL`; the same JSON is refused by `from_json` with `Schema`.
     let bad = with(
         &activated(
             "a",
@@ -464,10 +464,13 @@ fn req_obj_001_color_identity_activated_pay_mana() {
         json!(1),
     );
     assert_undecodable(&bad);
-    let mut d = costed(None, ColorBitmask::NONE);
-    d.faces[0].abilities = vec![AbilityAST(bad)];
+    let d = costed(None, ColorBitmask::NONE);
+    assert_document_schema_rejected(
+        &patched_document(&d, &[("/faces/0/abilities/0", bad)]),
+        "undecodable PAY_MANA ability",
+    );
     let r = run0(&d);
-    assert_at(&r, LintId::SCHEMA, E, "faces[0].abilities[0]");
+    assert_none(&r, LintId::SCHEMA);
     assert_none(&r, LintId::COLOR_IDENTITY);
 }
 
@@ -476,8 +479,8 @@ fn req_obj_001_color_identity_activated_pay_mana() {
 fn req_ing_009_color_identity_ignores_literal_text() {
     // CR 903.4 (rules-text symbols are not modelled at this baseline; see the brief's limits)
     let mut d = costed(None, ColorBitmask::NONE);
-    d.faces[0].text = TextTokenStream(vec![lit("t0", "{R}"), lit("t1", "{G/U}")]);
-    d.faces[0].abilities = vec![AbilityAST(spanned(&keyword("k"), 0, 1))];
+    d.faces[0].text = tx(vec![lit("t0", "{R}"), lit("t1", "{G/U}")]);
+    d.faces[0].abilities = vec![ability_of(spanned(&keyword("k"), 0, 1))];
     assert!(undecodable_positions(&d).is_empty());
     let r = run0(&d);
     assert!(r.is_empty(), "unexpected findings:\n{}", dump(&r));

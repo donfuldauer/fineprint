@@ -68,8 +68,9 @@ pub fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// A literal printed value `Literal(n)` (#232 FP-164: formerly the bare JSON integer placeholder).
 fn printed(n: i64) -> ValueExpressionAST {
-    ValueExpressionAST(serde_json::json!(n))
+    ValueExpressionAST::Literal(n)
 }
 
 /// A synthetic creature with no abilities.
@@ -82,7 +83,7 @@ pub fn creature(name: &str, power: i64, toughness: i64) -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(&["Creature"]),
         subtypes: BTreeSet::new(),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: Vec::new(),
         power: Some(printed(power)),
         toughness: Some(printed(toughness)),

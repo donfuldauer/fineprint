@@ -92,8 +92,9 @@ impl ObjectWorld for Ext {
 fn pt_ext() -> Ext {
     let mut world = world();
     for b in world.bases.values_mut() {
-        b.characteristics.power = Some(ValueExpressionAST(serde_json::json!(2)));
-        b.characteristics.toughness = Some(ValueExpressionAST(serde_json::json!(2)));
+        // #232 FP-164: the typed literal `{"LITERAL":2}` (formerly the bare placeholder `2`).
+        b.characteristics.power = Some(ValueExpressionAST::Literal(2));
+        b.characteristics.toughness = Some(ValueExpressionAST::Literal(2));
     }
     Ext {
         world,

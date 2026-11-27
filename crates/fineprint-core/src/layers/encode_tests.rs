@@ -30,7 +30,13 @@ fn set<const N: usize>(items: [&str; N]) -> BTreeSet<String> {
 }
 
 fn ability(tag: &str) -> AbilityAST {
-    AbilityAST(format!("test.ability.{tag}").into())
+    test_ability(&format!("test.ability.{tag}"))
+}
+
+/// A one-token synthetic rules text whose literal is `text`.
+fn word_text(text: &str) -> TextTokenStream {
+    serde_json::from_value(serde_json::json!([{"id": "t1", "kind": "LITERAL", "text": text}]))
+        .unwrap()
 }
 
 fn chars() -> Characteristics {
@@ -42,7 +48,7 @@ fn chars() -> Characteristics {
         supertypes: BTreeSet::new(),
         card_types: set(["Creature"]),
         subtypes: set(["Testkin"]),
-        rules_text: TextTokenStream(Vec::new()),
+        rules_text: TextTokenStream::default(),
         abilities: vec![ability("a")],
         power: Some(literal(2)),
         toughness: Some(literal(2)),
@@ -89,7 +95,7 @@ fn characteristics_variants() -> Vec<Characteristics> {
         one(&|c| c.supertypes = set(["Legendary"])),
         one(&|c| c.card_types = set(["Artifact"])),
         one(&|c| c.subtypes = set(["Otherkin"])),
-        one(&|c| c.rules_text = TextTokenStream(vec!["w".into()])),
+        one(&|c| c.rules_text = word_text("w")),
         one(&|c| c.abilities.push(ability("b"))),
         one(&|c| c.abilities.clear()),
         one(&|c| c.power = Some(literal(3))),
@@ -140,10 +146,8 @@ fn modifications() -> Vec<LayerModification> {
     ]));
     out.push(LayerModification::SetController(PlayerId::new(1)));
     out.push(LayerModification::SetController(PlayerId::new(2)));
-    out.push(LayerModification::SetText(TextTokenStream(Vec::new())));
-    out.push(LayerModification::SetText(TextTokenStream(vec![
-        "w".into(),
-    ])));
+    out.push(LayerModification::SetText(TextTokenStream::default()));
+    out.push(LayerModification::SetText(word_text("w")));
     for (category, from, to) in [
         (RewritableCategory::ColorWord, "a", "b"),
         (RewritableCategory::BasicLandType, "a", "b"),
@@ -360,8 +364,14 @@ fn documented_tags() {
     assert_eq!(encode_to_vec(&modification), [6, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
     // A DSL value: tag 0 then its RFC 8785 bytes.
     let mut want = vec![12, 0];
-    put_bytes(&mut want, br#"{"a":1,"b":[true,null]}"#);
-    let value = AbilityAST(serde_json::json!({"b": [true, null], "a": 1}));
+    put_bytes(
+        &mut want,
+        br#"{"abilityId":"a","keyword":"K","kind":"KEYWORD","params":{"a":1,"b":[true]}}"#,
+    );
+    let value: AbilityAST = serde_json::from_value(serde_json::json!({
+        "params": {"b": [true], "a": 1}, "kind": "KEYWORD", "keyword": "K", "abilityId": "a"
+    }))
+    .unwrap();
     assert_eq!(encode_to_vec(&LayerModification::AddAbility(value)), want);
 }
 
@@ -472,7 +482,7 @@ impl Serialize for Refuses {
 fn dsl_value_fallback() {
     let enc = |v: serde_json::Value| {
         let mut out = Vec::new();
-        put_json(&mut out, &AbilityAST(v));
+        put_json(&mut out, &v);
         out
     };
     let big = enc(serde_json::json!({"z": u64::MAX, "a": [1, "s", null, false, {"k": 1.5}]}));
@@ -504,3 +514,265 @@ fn dsl_value_fallback() {
     put_typed(&mut out, &Refuses);
     assert_eq!(out, [2]);
 }
+
+/// A synthetic neutral ability (a STATIC ability with one RULE `SKIP` effect) with ability id
+/// `id` (R5; #232: replaces the former string placeholder abilities).
+fn test_ability(id: &str) -> AbilityAST {
+    serde_json::from_value(serde_json::json!({
+        "abilityId": id,
+        "kind": "STATIC",
+        "effects": [{"type": "RULE", "kind": "SKIP"}],
+    }))
+    .expect("valid synthetic ability")
+}
+
+// ---------------------------------------------------------------------------------------------
+// #232 golden bytes: typed DSL values encode exactly as the JSON wrappers did
+// ---------------------------------------------------------------------------------------------
+
+/// `v` decoded as `T` (valid synthetic content).
+fn typed<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+    serde_json::from_value(v).unwrap()
+}
+
+/// Lower-case hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The golden abilities (synthetic, R5): a KEYWORD (with and without parameters), a STATIC and a
+/// TRIGGERED ability with a `POPULATE` effect.
+fn golden_abilities() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "keyword",
+            serde_json::json!({"abilityId": "a1", "kind": "KEYWORD", "keyword": "TEST_KEYWORD"}),
+        ),
+        (
+            "keyword_params",
+            serde_json::json!({"abilityId": "a2", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+                "params": {"cost": "{2}"}}),
+        ),
+        (
+            "static",
+            serde_json::json!({"abilityId": "a3", "kind": "STATIC",
+                "effects": [{"type": "RULE", "kind": "SKIP"}]}),
+        ),
+        (
+            "triggered",
+            serde_json::json!({"abilityId": "a4", "kind": "TRIGGERED",
+                "trigger": {"mode": "STATE", "state": {"pred": "IS_CREATURE"}},
+                "effect": [{"op": "POPULATE"}]}),
+        ),
+    ]
+}
+
+/// The golden token streams: empty, and one token of each kind (synthetic, R5).
+fn golden_texts() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("text_empty", serde_json::json!([])),
+        (
+            "text_tokens",
+            serde_json::json!([
+                {"id": "t1", "kind": "NAME_REF", "ref": "SELF"},
+                {"id": "t2", "kind": "LITERAL", "text": " gets +1/+1 for each "},
+                {"id": "t3", "kind": "WORD", "category": "CREATURE_TYPE", "value": "TestType"},
+                {"id": "t4", "kind": "WORD", "category": "NUMBER", "value": "2"},
+                {"id": "t5", "kind": "NAME_REF", "ref": "OTHER", "name": "test.other"}
+            ]),
+        ),
+    ]
+}
+
+/// The golden copy characteristics: every DSL position holds a valid typed value.
+fn golden_copy_characteristics() -> Characteristics {
+    Characteristics {
+        names: set(["test.golden_creature"]),
+        mana_cost: Some("{1}{G}".parse().unwrap()),
+        color_indicator: None,
+        colors: ColorBitmask::GREEN,
+        supertypes: BTreeSet::new(),
+        card_types: set(["Creature"]),
+        subtypes: set(["Testkin"]),
+        rules_text: word_text("abc"),
+        abilities: golden_abilities()
+            .into_iter()
+            .map(|(_, v)| typed(v))
+            .collect(),
+        power: Some(typed(serde_json::json!({"LITERAL": 2}))),
+        toughness: Some(typed(
+            serde_json::json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1}, "rhs": "X"}}),
+        )),
+        loyalty: None,
+        defense: Some(4),
+        hand_modifier: None,
+        life_modifier: Some(-1),
+    }
+}
+
+/// The golden face-down characteristics: the 2/2 ward {2} profile with typed values.
+fn golden_face_down_characteristics() -> Characteristics {
+    Characteristics {
+        names: BTreeSet::new(),
+        mana_cost: None,
+        color_indicator: None,
+        colors: ColorBitmask::NONE,
+        supertypes: BTreeSet::new(),
+        card_types: set(["Creature"]),
+        subtypes: BTreeSet::new(),
+        rules_text: TextTokenStream::default(),
+        abilities: vec![typed(serde_json::json!({"abilityId": "facedown:ward",
+            "kind": "KEYWORD", "keyword": "WARD", "params": {"cost": "{2}"}}))],
+        power: Some(literal(2)),
+        toughness: Some(literal(2)),
+        loyalty: None,
+        defense: None,
+        hand_modifier: None,
+        life_modifier: None,
+    }
+}
+
+// REQ-NFR-006, REQ-DSL-003, REQ-DSL-010, REQ-DSL-012 (#232): the state-hash leaf bytes of valid
+// typed DSL values are exactly those the JSON wrappers produced before the migration (pinned
+// from the base tree 242545c): value expressions, token streams, abilities of three kinds, and
+// characteristics inside a copy and a face-down modification.
+#[test]
+fn typed_dsl_values_keep_their_golden_bytes() {
+    let enc = |m: &dyn fineprint_base::encode::CanonicalEncode| {
+        let mut out = Vec::new();
+        m.encode_canonical(&mut out);
+        hex(&out)
+    };
+    let literal_3 = CopyException::SetPower(typed(serde_json::json!({"LITERAL": 3})));
+    assert_eq!(enc(&literal_3), GOLDEN_LITERAL);
+    let math = CopyException::SetPower(typed(
+        serde_json::json!({"MATH": {"op": "ADD", "lhs": {"LITERAL": 1}, "rhs": "X"}}),
+    ));
+    assert_eq!(enc(&math), GOLDEN_MATH);
+    let texts: Vec<String> = golden_texts()
+        .into_iter()
+        .map(|(_, v)| enc(&LayerModification::SetText(typed(v))))
+        .collect();
+    assert_eq!(texts, [GOLDEN_TEXT_EMPTY, GOLDEN_TEXT_TOKENS]);
+    let abilities: Vec<String> = golden_abilities()
+        .into_iter()
+        .map(|(_, v)| enc(&LayerModification::AddAbility(typed(v))))
+        .collect();
+    assert_eq!(
+        abilities,
+        [
+            GOLDEN_KEYWORD,
+            GOLDEN_KEYWORD_PARAMS,
+            GOLDEN_STATIC,
+            GOLDEN_TRIGGERED
+        ]
+    );
+    let copy = LayerModification::CopyValues(Box::new(golden_copy_characteristics()));
+    assert_eq!(enc(&copy), GOLDEN_COPY);
+    let face_down = LayerModification::FaceDown(Box::new(golden_face_down_characteristics()));
+    assert_eq!(enc(&face_down), GOLDEN_FACE_DOWN);
+    // The face-down ward {2} profile encodes as the golden face-down characteristics.
+    let profile = crate::layouts::FaceDownProfile::with_ward_2();
+    assert_eq!(
+        enc(&LayerModification::FaceDown(Box::new(
+            profile.characteristics().clone()
+        ))),
+        GOLDEN_FACE_DOWN
+    );
+}
+
+// REQ-NFR-006 (#232): a typed value encodes exactly as `put_json` of its JSON tree, on the
+// canonical path and on the structural fallback; a value with no JSON tree is tag 2.
+#[test]
+fn put_typed_matches_put_json_of_the_tree() {
+    for (_, v) in golden_abilities().into_iter().chain(golden_texts()) {
+        let mut tree = Vec::new();
+        put_json(&mut tree, &v);
+        let mut typed_bytes = Vec::new();
+        put_typed(&mut typed_bytes, &v);
+        assert_eq!(typed_bytes, tree);
+    }
+    let unsafe_number = serde_json::json!({"n": u64::MAX});
+    let mut tree = Vec::new();
+    put_json(&mut tree, &unsafe_number);
+    let mut typed_bytes = Vec::new();
+    put_typed(&mut typed_bytes, &unsafe_number);
+    assert_eq!(tree[0], 1);
+    assert_eq!(typed_bytes, tree);
+}
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_LITERAL: &str = "0a000d0000007b224c49544552414c223a337d";
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_MATH: &str = concat!(
+    "0a00330000007b224d415448223a7b226c6873223a7b224c49544552414c223a317d2c226f70223a22414444",
+    "222c22726873223a2258227d7d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_TEXT_EMPTY: &str = "0500020000005b5d";
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_TEXT_TOKENS: &str = concat!(
+    "05002a0100005b7b226964223a227431222c226b696e64223a224e414d455f524546222c22726566223a2253",
+    "454c46227d2c7b226964223a227432222c226b696e64223a224c49544552414c222c2274657874223a222067",
+    "657473202b312f2b3120666f72206561636820227d2c7b2263617465676f7279223a2243524541545552455f",
+    "54595045222c226964223a227433222c226b696e64223a22574f5244222c2276616c7565223a225465737454",
+    "797065227d2c7b2263617465676f7279223a224e554d424552222c226964223a227434222c226b696e64223a",
+    "22574f5244222c2276616c7565223a2232227d2c7b226964223a227435222c226b696e64223a224e414d455f",
+    "524546222c226e616d65223a22746573742e6f74686572222c22726566223a224f54484552227d5d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_KEYWORD: &str = concat!(
+    "0c003c0000007b226162696c6974794964223a226131222c226b6579776f7264223a22544553545f4b455957",
+    "4f5244222c226b696e64223a224b4559574f5244227d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_KEYWORD_PARAMS: &str = concat!(
+    "0c00540000007b226162696c6974794964223a226132222c226b6579776f7264223a22544553545f4b455957",
+    "4f5244222c226b696e64223a224b4559574f5244222c22706172616d73223a7b22636f7374223a227b327d22",
+    "7d7d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_STATIC: &str = concat!(
+    "0c004c0000007b226162696c6974794964223a226133222c2265666665637473223a5b7b226b696e64223a22",
+    "534b4950222c2274797065223a2252554c45227d5d2c226b696e64223a22535441544943227d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_TRIGGERED: &str = concat!(
+    "0c007c0000007b226162696c6974794964223a226134222c22656666656374223a5b7b226f70223a22504f50",
+    "554c415445227d5d2c226b696e64223a22545249474745524544222c2274726967676572223a7b226d6f6465",
+    "223a225354415445222c227374617465223a7b2270726564223a2249535f4352454154555245227d7d7d"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_COPY: &str = concat!(
+    "000100000014000000746573742e676f6c64656e5f637265617475726501060000007b317d7b477d00100000",
+    "0000010000000800000043726561747572650100000007000000546573746b696e002b0000005b7b22696422",
+    "3a227431222c226b696e64223a224c49544552414c222c2274657874223a22616263227d5d04000000003c00",
+    "00007b226162696c6974794964223a226131222c226b6579776f7264223a22544553545f4b4559574f524422",
+    "2c226b696e64223a224b4559574f5244227d00540000007b226162696c6974794964223a226132222c226b65",
+    "79776f7264223a22544553545f4b4559574f5244222c226b696e64223a224b4559574f5244222c2270617261",
+    "6d73223a7b22636f7374223a227b327d227d7d004c0000007b226162696c6974794964223a226133222c2265",
+    "666665637473223a5b7b226b696e64223a22534b4950222c2274797065223a2252554c45227d5d2c226b696e",
+    "64223a22535441544943227d007c0000007b226162696c6974794964223a226134222c22656666656374223a",
+    "5b7b226f70223a22504f50554c415445227d5d2c226b696e64223a22545249474745524544222c2274726967",
+    "676572223a7b226d6f6465223a225354415445222c227374617465223a7b2270726564223a2249535f435245",
+    "4154555245227d7d7d01000d0000007b224c49544552414c223a327d0100330000007b224d415448223a7b22",
+    "6c6873223a7b224c49544552414c223a317d2c226f70223a22414444222c22726873223a2258227d7d000104",
+    "000000000000000001ffffffffffffffff"
+);
+
+/// Golden bytes (hex) pinned from the base tree 242545c (#232).
+const GOLDEN_FACE_DOWN: &str = concat!(
+    "030000000000000000000000010000000800000043726561747572650000000000020000005b5d0100000000",
+    "570000007b226162696c6974794964223a2266616365646f776e3a77617264222c226b6579776f7264223a22",
+    "57415244222c226b696e64223a224b4559574f5244222c22706172616d73223a7b22636f7374223a227b327d",
+    "227d7d01000d0000007b224c49544552414c223a327d01000d0000007b224c49544552414c223a327d000000",
+    "00"
+);

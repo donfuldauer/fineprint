@@ -123,14 +123,13 @@ fn letters(bits: u8) -> String {
 
 /// The computed color identity (CR 903.4): over every face (CR 903.4d), the colors of its mana
 /// cost and color indicator, plus the symbol colors of every `PAY_MANA` and `WATERBEND` cost
-/// node of every decodable ability. Literal text is not scanned (CR 903.4c reminder text cannot
+/// node of every ability. Literal text is not scanned (CR 903.4c reminder text cannot
 /// be told apart reliably).
 fn identity(def: &CardDefinitionDSL, facts: &CardFacts<'_>) -> u8 {
     let faces = def.faces.iter().fold(0, |acc, f| acc | face_colors(f));
     facts
         .abilities
         .iter()
-        .filter(|a| a.typed.is_ok())
         .flat_map(|a| a.scan.mana_strings.iter())
         .filter_map(|m| ManaCostDSL::parse(m).ok())
         .fold(faces, |acc, c| acc | cost_colors(Some(&c)))
