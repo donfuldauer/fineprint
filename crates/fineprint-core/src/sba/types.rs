@@ -666,7 +666,7 @@ pub struct SbaOutcome {
     pub ceased: Vec<ObjectId>,
     /// The permanents that became unattached and remain on the battlefield (CR 704.5n,
     /// CR 704.5p, CR 701.3d), ascending, without duplicates: the attachment of every
-    /// `GameEvent::Unattach` event of the batch that occurred (it is in
+    /// `GameEvent::Unattach` or `GameEvent::UnattachFrom` event of the batch that occurred (it is in
     /// [`SbaOutcome::executed`]; an unattach that found nothing attached is no event), planned
     /// by the pass or produced by a replacement effect (for example an `Instead` of another
     /// event of the batch), that is still on the battlefield as the same object at the END of

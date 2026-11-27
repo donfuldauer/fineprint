@@ -488,6 +488,11 @@ pub struct TurnState {
     heartbeat: HeartbeatState,
     /// The previous turn's active player.
     previous_active: Option<PlayerId>,
+    /// Whether the current turn's first-turn draw-step skip (CR 103.8a) has been applied: only
+    /// the first draw step run in that turn is skipped; a later (added) draw step of the same
+    /// turn runs (Gate 06-turn R9). Reset when a turn starts ([`run_turn`]) and when one ends
+    /// ([`TurnState::record_turn_taken`]).
+    first_turn_draw_skip_used: bool,
 }
 
 impl TurnState {
@@ -513,6 +518,8 @@ impl TurnState {
     /// check reads it (REQ-TURN-002, REQ-TURN-003).
     pub(crate) fn record_turn_taken(&mut self, active: PlayerId) {
         self.previous_active = Some(active);
+        // Gate 06-turn R9: the next turn starts with its CR 103.8a skip unconsumed.
+        self.first_turn_draw_skip_used = false;
     }
 }
 
@@ -556,11 +563,12 @@ fn active_player<H: TurnHost + ?Sized>(host: &H, what: &str) -> Result<PlayerId,
         .ok_or_else(|| procedure_error(format!("turn sequencer: {what} without an active player")))
 }
 
-/// CR 103.8: whether `active`'s draw step is skipped. True only on the first turn (turn number
+/// CR 103.8: whether `active`'s normal draw step of the current turn is skipped. True only on the first turn (turn number
 /// 1), when `active` is [`TurnHost::starting_player`] and the rule says skip: `AlwaysSkip`
 /// skips; `NeverSkip` does not; `CrDefault` skips only in a two-player game (CR 103.8a; the
 /// Two-Headed Giant rule CR 103.8b is out of scope; CR 103.8c: other multiplayer games never
-/// skip).
+/// skip). This is a pure query: [`run_segment`] applies the skip to the first draw step run in
+/// the turn only, so a draw step added to that turn by an effect still draws (Gate 06-turn R9).
 #[must_use]
 pub fn first_turn_draw_skipped<H: TurnHost + ?Sized>(host: &H, active: PlayerId) -> bool {
     if host.game().turn().turn_number() != 1 || host.starting_player() != Some(active) {
@@ -590,6 +598,8 @@ pub fn run_turn<H: TurnHost + ?Sized>(
     active: PlayerId,
     choices: &mut ChoiceContext<'_>,
 ) -> Result<TurnReport, Interrupt> {
+    // Gate 06-turn R9: a new turn starts with its CR 103.8a skip unconsumed.
+    state.first_turn_draw_skip_used = false;
     host.begin_turn(active)?;
     let mut segments = Vec::new();
     // CR 500.1: "A turn consists of five phases, in this order ... Each of these phases takes
@@ -727,8 +737,14 @@ pub fn run_segment<H: TurnHost + ?Sized>(
     // CR 103.8a: "the player who plays first skips the draw step ... of their first turn";
     // CR 500.11: "To skip a step ... is to proceed past it as though it didn't exist", so the
     // step never begins: no begin-step event or expiry, no draw, no registry entry, no
-    // priority, no end-step expiry or mana emptying (CR 614.10a).
-    if step == Step::Draw && first_turn_draw_skipped(host, active) {
+    // priority, no end-step expiry or mana emptying (CR 614.10a). The rule names "the draw
+    // step" of that turn, so only the first draw step run in the turn is skipped; a draw step
+    // an effect adds to it (CR 500.9, CR 500.10) still runs (Gate 06-turn R9).
+    if step == Step::Draw
+        && !state.first_turn_draw_skip_used
+        && first_turn_draw_skipped(host, active)
+    {
+        state.first_turn_draw_skip_used = true;
         return Ok(SegmentReport {
             segment,
             heartbeat_ran: false,

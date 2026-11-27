@@ -582,8 +582,19 @@ fn req_net_003_r12_take_mulligan_is_rejected_on_the_last_mulligan() {
         };
         if req.chooser == a && *to_bottom == 2 {
             assert_eq!(*mulligans_taken, 2);
+            // R8 (gate 06-turn round 2, REQ-NET-003): the payload validator itself rejects
+            // TAKE_MULLIGAN here, so `submit` refuses it and the request stays pending
+            // unchanged; ordinary requests (the loop's earlier answers) accepted it.
             let result = session.submit(req.request_id, ChoiceResponse::TakeMulligan);
             assert!(result.is_err());
+            assert_eq!(session.pending().unwrap(), &req);
+            let ChoicePayload::MulliganDecision { hand, .. } = &req.payload else {
+                unreachable!()
+            };
+            let whole = ChoiceResponse::KeepHand {
+                bottom: hand.iter().rev().copied().collect(),
+            };
+            session.submit(req.request_id, whole).unwrap();
             return;
         }
         let answer = if req.chooser == a {
@@ -670,13 +681,16 @@ fn req_net_003_defaults_validate_and_bad_answers_are_rejected() {
         session.submit_default(req.request_id).unwrap();
     }
     let (req, hand) = second.expect("a is asked again");
+    // R7 (gate 06-turn round 2, REQ-NET-003): the pair has the right count (2), so the foreign
+    // id is the only reason for the rejection (the validator checks the count first).
+    assert_eq!((req.min, req.max), (2, 2));
+    assert!(!hand.contains(&o(9999)));
     let outside = ChoiceResponse::KeepHand {
-        bottom: vec![o(9999)],
+        bottom: vec![hand[0], o(9999)],
     };
     assert!(session.submit(req.request_id, outside).is_err());
-    // The request needs two cards: the duplicate pair has the right count, so the duplicate is
-    // the only reason for the rejection.
-    assert_eq!((req.min, req.max), (2, 2));
+    // The duplicate pair has the right count, so the duplicate is the only reason for the
+    // rejection.
     let dup = ChoiceResponse::KeepHand {
         bottom: vec![hand[0], hand[0]],
     };

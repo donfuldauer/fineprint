@@ -1580,6 +1580,37 @@ fn req_net_003_validate_other_types() {
             bottom: vec![o(7), o(6)],
         },
     );
+    // R8 (gate 06-turn, REQ-NET-003, CR 103.5): the final request (whole hand to the bottom)
+    // rejects TAKE_MULLIGAN; ordinary requests keep accepting it.
+    let mut last = req(ChoiceType::MulliganDecision);
+    last.payload = ChoicePayload::MulliganDecision {
+        hand: objs(1..3),
+        mulligans_taken: 2,
+        to_bottom: 2,
+    };
+    let msg = reject(&last, &ChoiceResponse::TakeMulligan);
+    assert!(msg.contains("no further mulligan"), "{msg}");
+    assert_eq!(
+        last.validate(&ChoiceResponse::KeepHand {
+            bottom: vec![o(2), o(1)]
+        }),
+        Ok(())
+    );
+    let mut ordinary = last.clone();
+    ordinary.payload = ChoicePayload::MulliganDecision {
+        hand: objs(1..3),
+        mulligans_taken: 1,
+        to_bottom: 1,
+    };
+    assert_eq!(ordinary.validate(&ChoiceResponse::TakeMulligan), Ok(()));
+    // An empty hand is not special-cased (it is never asked).
+    let mut empty = last.clone();
+    empty.payload = ChoicePayload::MulliganDecision {
+        hand: vec![],
+        mulligans_taken: 0,
+        to_bottom: 0,
+    };
+    assert_eq!(empty.validate(&ChoiceResponse::TakeMulligan), Ok(()));
     // PREGAME_ACTION
     let r = req(ChoiceType::PregameAction);
     assert_eq!(

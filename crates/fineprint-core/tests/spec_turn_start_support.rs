@@ -450,7 +450,9 @@ pub fn model(m: &Mock, seed: u64, opts: &StartOptions, policy: &Policy) -> Model
                 m.format.mulligan.free_first_mulligan_multiplayer,
             );
             // CR 103.5: at the last mulligan the player orders the whole hand onto the bottom.
-            let forced = c as usize >= size(p);
+            // R12 (gate 06-turn round 2): the production loop also forces it when the bottom
+            // count reaches the actual hand length (a library shorter than the hand size).
+            let forced = c as usize >= size(p) || c as usize >= hands[p].len();
             if forced && hands[p].is_empty() {
                 continue;
             }

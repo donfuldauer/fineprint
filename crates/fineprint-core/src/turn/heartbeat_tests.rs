@@ -1270,7 +1270,8 @@ fn req_turn_001_rolled_back_action_keeps_priority() {
 #[test]
 fn req_turn_001_default_try_take_action_takes_the_action() {
     // REQ-TURN-001, CR 117.3c: the default `try_take_action` takes the action through
-    // `take_action` and reports it taken.
+    // `take_action` and reports it taken. Gate 06-turn R19: the call itself is asserted, not
+    // only the outcome.
     let base = Bare::new(GameState::new(3, 2, 20).unwrap());
     let a = base.game.turn_order()[0];
     let session = ChoiceSession::start(base, move |b: &mut Bare, c: &mut ChoiceContext<'_>| {
@@ -1278,7 +1279,10 @@ fn req_turn_001_default_try_take_action_takes_the_action() {
     })
     .unwrap();
     match session.status() {
-        Status::Done { output, .. } => assert_eq!(*output, ActionOutcome::Taken),
+        Status::Done { state, output } => {
+            assert_eq!(*output, ActionOutcome::Taken);
+            assert_eq!(state.taken, vec![(a, cast(1))]);
+        }
         Status::Pending(r) => panic!("unexpected request {r:?}"),
     }
 }
@@ -1349,6 +1353,8 @@ fn req_turn_001_state_new_is_empty() {
 struct Bare {
     game: GameState,
     hb: HeartbeatState,
+    /// Every `take_action` call, in order (R19: the default `try_take_action` must make it).
+    taken: Vec<(PlayerId, ChoiceResponse)>,
 }
 
 impl Bare {
@@ -1356,6 +1362,7 @@ impl Bare {
         Bare {
             game,
             hb: HeartbeatState::new(),
+            taken: Vec::new(),
         }
     }
 }
@@ -1400,10 +1407,11 @@ impl HeartbeatHost for Bare {
     }
     fn take_action(
         &mut self,
-        _: PlayerId,
-        _: &ChoiceResponse,
+        player: PlayerId,
+        action: &ChoiceResponse,
         _: &mut ChoiceContext<'_>,
     ) -> Result<(), Interrupt> {
+        self.taken.push((player, action.clone()));
         Ok(())
     }
 }

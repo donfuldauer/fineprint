@@ -1326,6 +1326,90 @@ fn req_turn_002_first_draw_step_skip_only_where_cr_103_8_says() {
     }
 }
 
+/// Runs `Step::Draw` through [`run_segment`] twice in the current turn.
+fn two_draw_segments() -> Proc<(SegmentReport, SegmentReport)> {
+    Box::new(|w, c| {
+        let r = TurnBasedRegistry::new();
+        let first = run_segment(&mut w.host, &mut w.ts, &r, Segment::Step(Step::Draw), c)?;
+        let second = run_segment(&mut w.host, &mut w.ts, &r, Segment::Step(Step::Draw), c)?;
+        Ok((first, second))
+    })
+}
+
+#[test]
+fn req_turn_002_req_turn_003_first_turn_skip_covers_the_first_draw_step_only() {
+    // REQ-TURN-002, REQ-TURN-003; Gate 06-turn R9. CR 103.8a: "the player who plays first
+    // skips the draw step ... of their first turn": the first draw step run in that turn is
+    // skipped with no host call (CR 500.11, F48); a second (added) draw step of the same turn
+    // runs normally: begin-step event and expiry, the draw (CR 504.1), priority (CR 504.2),
+    // end-step expiry and mana emptying.
+    let mut h = Fake::new(2).at_turn(1, 0);
+    let a = h.p(0);
+    h.starting = Some(a);
+    assert!(first_turn_draw_skipped(&h, a));
+    let d = drive(world(h), &[], two_draw_segments());
+    let (w, (first, second)) = d.done.unwrap();
+    let draw = Segment::Step(Step::Draw);
+    assert_eq!(
+        first,
+        SegmentReport {
+            segment: draw,
+            heartbeat_ran: false,
+            cleanup_steps: 0
+        }
+    );
+    assert_eq!(
+        second,
+        SegmentReport {
+            segment: draw,
+            heartbeat_ran: true,
+            cleanup_steps: 0
+        }
+    );
+    // Only the second segment left calls: exactly one draw step's worth.
+    assert_eq!(w.host.log, plain_step(Step::Draw, &[Ev::Draw(a)]));
+    assert_eq!(d.asked.len(), 2);
+    assert_eq!(d.asked[0].chooser, a);
+    // The query is pure: it still says the turn's normal draw step is skipped.
+    assert!(first_turn_draw_skipped(&w.host, a));
+}
+
+#[test]
+fn req_turn_002_first_turn_skip_is_reset_for_a_new_turn() {
+    // REQ-TURN-002, REQ-CORE-001; Gate 06-turn R9, CR 103.8a: the consumed skip belongs to
+    // one turn. A state reused for a new turn 1 (record_turn_taken, or the start of run_turn)
+    // skips that turn's first draw step again.
+    let draw = Segment::Step(Step::Draw);
+    let mut h = Fake::new(2).at_turn(1, 0);
+    let a = h.p(0);
+    h.starting = Some(a);
+    let after_record: Proc<(SegmentReport, SegmentReport)> = Box::new(move |w, c| {
+        let r = TurnBasedRegistry::new();
+        let first = run_segment(&mut w.host, &mut w.ts, &r, draw, c)?;
+        w.ts.record_turn_taken(a);
+        let again = run_segment(&mut w.host, &mut w.ts, &r, draw, c)?;
+        Ok((first, again))
+    });
+    let d = drive(world(h.clone()), &[], after_record);
+    let (w, (first, again)) = d.done.unwrap();
+    assert!(!first.heartbeat_ran);
+    assert!(!again.heartbeat_ran);
+    assert!(w.host.log.is_empty());
+    assert!(d.asked.is_empty());
+
+    let new_turn: Proc<TurnReport> = Box::new(move |w, c| {
+        run_segment(&mut w.host, &mut w.ts, &TurnBasedRegistry::new(), draw, c)?;
+        // The same state, a new game: run_turn makes this turn 1 again.
+        w.host.game.set_turn_number(0);
+        run_turn(&mut w.host, &mut w.ts, &TurnBasedRegistry::standard(), a, c)
+    });
+    let d = drive(world(h), &[], new_turn);
+    let (w, report) = d.done.unwrap();
+    assert_eq!(w.host.log, expected_turn(a, None, &[], false, false));
+    assert_eq!(report.segments[2].segment, draw);
+    assert!(!report.segments[2].heartbeat_ran);
+}
+
 #[test]
 fn req_turn_002_draw_step_draws_then_heartbeat() {
     // REQ-TURN-002, CR 504.1, CR 504.2: the draw, then priority to the active player.

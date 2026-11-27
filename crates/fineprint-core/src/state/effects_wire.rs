@@ -754,7 +754,8 @@ fn modification_from_wire(m: ModificationWire) -> Result<LayerModification, Stat
 /// The checks of one effect's own fields that decoding and [`GameState::serialize`] share:
 /// its timestamp and the timestamp of its granting effect (`granted_at`) were issued by the
 /// state's generator (REQ-CORE-002), and a layer-7a effect is from a characteristic-defining
-/// ability (SRS 6.2 item 1, CR 613.4a: as [`GameState::register_effect`]).
+/// ability (SRS 6.2 item 1, CR 613.4a: as [`GameState::register_effect`]), and a resolved effect
+/// does not carry an unlocked selector (CR 611.2c).
 ///
 /// [`GameState::serialize`]: super::GameState::serialize
 /// [`GameState::register_effect`]: super::GameState::register_effect
@@ -769,6 +770,12 @@ fn check_effect_fields(effect: &ContinuousEffect, issued: Issued) -> Result<(), 
     // SRS 6.2 item 1, CR 613.4a: as `GameState::register_effect`.
     if effect.layer == Layer::L7a && !effect.is_cda {
         return Err(bad("non-CDA effect in layer 7a"));
+    }
+    // CR 611.2c: a resolved effect affects the objects determined when it begins, so its
+    // selector is locked (`register_effect_group`) before it is stored; an unlocked one would
+    // reach objects that start matching after a restore (as `GameState::register_effect`).
+    if effect.origin == EffectOrigin::Resolved && matches!(effect.affected, Affected::Selector(_)) {
+        return Err(bad("unlocked resolved selector"));
     }
     Ok(())
 }
@@ -905,11 +912,6 @@ pub(super) fn effects_from_wire(
         let mut group = Vec::with_capacity(parts.len() + 1);
         for id in std::iter::once(anchor).chain(parts) {
             let effect = described[id].clone();
-            if effect.origin == EffectOrigin::Resolved
-                && matches!(effect.affected, Affected::Selector(_))
-            {
-                return Err(bad("unlocked resolved selector inside an effect group"));
-            }
             group.push((*id, effect));
         }
         registry

@@ -2503,3 +2503,89 @@ fn ledger_restore_of_many_object_stamps() {
     assert_eq!(back.timestamps().object_timestamp(o(1)), Some(t(2_000)));
     check_round_trip(&s);
 }
+
+// REQ-CORE-002, REQ-LAYER-001, REQ-NFR-006 (gate 06-turn R3): CR 611.2c: a resolved effect with
+// an unlocked selector is neither serialized nor restored (a creature that starts matching after
+// a restore could gain the ability); locked resolved sets, resolved linked groups and static
+// selector effects round-trip unchanged.
+#[test]
+fn wire_refuses_unlocked_resolved_selector() {
+    use super::effects_wire::AffectedWire;
+    let creatures = || Affected::Selector(selector(PredicateAST::IsCreature));
+    // (a) Built through the raw registry API, with an issued id and timestamp: not serialized.
+    let mut raw = GameState::new(11, 2, 20).unwrap();
+    let ts = raw.stamp_resolved_effect().unwrap();
+    let id = raw.issue_effect_id().unwrap();
+    raw.effects_mut()
+        .register(
+            id,
+            resolved_effect(ts, Layer::L6, creatures(), grant_marker()),
+        )
+        .unwrap();
+    assert_eq!(
+        raw.serialize(),
+        Err(StateError::Encode("unlocked resolved selector".to_owned()))
+    );
+    // (b) A hand-built wire carrying it: refused on restore.
+    let mut s = GameState::new(11, 2, 20).unwrap();
+    let ts = s.stamp_resolved_effect().unwrap();
+    s.register_effect(
+        resolved_effect(ts, Layer::L6, only(&[1]), grant_marker()),
+        None,
+    )
+    .unwrap();
+    let mut w = wire_of(&s);
+    assert_eq!(w.effects.effects.len(), 1);
+    assert_eq!(decode_wire(&w).unwrap(), s);
+    w.effects.effects[0].effect.affected =
+        AffectedWire::Selector(selector(PredicateAST::IsCreature));
+    assert_eq!(
+        decode_wire(&w),
+        Err(StateError::Decode("unlocked resolved selector".to_owned()))
+    );
+    // (c) Valid shapes round-trip, hash-stable.
+    let mut ok = GameState::new(12, 2, 20).unwrap();
+    let t1 = ok.stamp_object(o(1), StampReason::EntersZone).unwrap();
+    let t2 = ok.stamp_resolved_effect().unwrap();
+    // A locked resolved set.
+    ok.register_effect(
+        resolved_effect(t2, Layer::L6, only(&[1]), grant_marker()),
+        None,
+    )
+    .unwrap();
+    // A static selector effect.
+    ok.register_effect(
+        static_effect(o(1), t1, Layer::L6, creatures(), grant_marker()),
+        Some(GeneratingAbility::new(o(1), ability("granter"))),
+    )
+    .unwrap();
+    // A resolved linked group: a selector locked at registration plus a SameAsLayer part.
+    let t3 = ok.stamp_resolved_effect().unwrap();
+    let anchor = resolved_effect(
+        t3,
+        Layer::L4,
+        creatures(),
+        LayerModification::AddTypes {
+            supertypes: BTreeSet::new(),
+            card_types: set(["Artifact"]),
+            subtypes: BTreeSet::new(),
+        },
+    );
+    let part = resolved_effect(
+        t3,
+        Layer::L6,
+        Affected::SameAsLayer(Layer::L4),
+        grant_marker(),
+    );
+    ok.register_effect_group(&Board::new(&[1], &[]), vec![(anchor, None), (part, None)])
+        .unwrap();
+    assert_eq!(ok.effects().len(), 4);
+    let hash = ok.state_hash();
+    check_round_trip(&ok);
+    assert_eq!(
+        GameState::deserialize(&ok.serialize().unwrap())
+            .unwrap()
+            .state_hash(),
+        hash
+    );
+}

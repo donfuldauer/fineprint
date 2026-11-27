@@ -91,7 +91,9 @@ fn any_cost(costs: &[CostAST], pred: impl Fn(&CostAST) -> bool) -> bool {
 /// Inline branches (`IF`/`ELSE` bodies, modes, `FOR_EACH` bodies and every other nested
 /// instruction list) are followed. The body of a `CREATE_DELAYED_TRIGGER` is not: the delayed
 /// trigger is a separate ability that resolves later (CR 603.7), so its `trigger` and `effect`
-/// are not part of this ability's effect.
+/// are not part of this ability's effect. Nor is the `params` member of a `NATIVE_EFFECT`:
+/// it is opaque data handed to the registered native effect (REQ-DSL-015, SRS §14.8), not an
+/// instruction list.
 fn moves_library_card(roots: &[Option<&Value>]) -> bool {
     let mut stack: Vec<&Value> = roots.iter().flatten().copied().collect();
     while let Some(v) = stack.pop() {
@@ -112,6 +114,16 @@ fn moves_library_card(roots: &[Option<&Value>]) -> bool {
                     }
                     // CR 603.7: a delayed trigger is a separate ability; its body is not walked.
                     Some("CREATE_DELAYED_TRIGGER") => continue,
+                    // REQ-DSL-015 (SRS §14.8): a native effect's `params` are opaque data, not
+                    // instructions, so only its other members are walked (gate 06-turn R16).
+                    Some("NATIVE_EFFECT") => {
+                        stack.extend(
+                            map.iter()
+                                .filter(|(key, _)| key.as_str() != "params")
+                                .map(|(_, v)| v),
+                        );
+                        continue;
+                    }
                     _ => {}
                 }
                 stack.extend(map.values());

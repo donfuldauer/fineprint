@@ -108,17 +108,23 @@ struct World {
     chars: BTreeMap<CardId, Characteristics>,
     env: StoredSbaEnvironment,
     next_card: u64,
+    /// Objects the snapshot lists in `objects()` while `base()` is `None` (gate 06-turn R2).
+    unlisted_base: BTreeSet<ObjectId>,
 }
 
 /// The layer environment and LKI provider over one snapshot of a world.
 struct Snapshot {
     bases: BTreeMap<ObjectId, ObjectBase>,
     counters: BTreeMap<ObjectId, BTreeMap<String, i64>>,
+    /// Listed by `objects()` but with no base (an object of unknown base).
+    unlisted_base: BTreeSet<ObjectId>,
 }
 
 impl LayerEnvironment for Snapshot {
     fn objects(&self) -> Vec<ObjectId> {
-        self.bases.keys().copied().collect()
+        let mut ids: Vec<ObjectId> = self.bases.keys().copied().collect();
+        ids.extend(self.unlisted_base.iter().copied());
+        ids
     }
 
     fn base(&self, id: ObjectId) -> Option<ObjectBase> {
@@ -164,7 +170,11 @@ fn snapshot_of(
         );
         counters.insert(id, events.markers().counters(id));
     }
-    Snapshot { bases, counters }
+    Snapshot {
+        bases,
+        counters,
+        unlisted_base: BTreeSet::new(),
+    }
 }
 
 impl World {
@@ -186,6 +196,7 @@ impl World {
             chars: BTreeMap::new(),
             env: StoredSbaEnvironment::default(),
             next_card: 100,
+            unlisted_base: BTreeSet::new(),
         }
     }
 
@@ -234,7 +245,13 @@ impl World {
     }
 
     fn snapshot(&self) -> Snapshot {
-        snapshot_of(&self.zones, &self.events, &self.chars)
+        let mut snap = snapshot_of(&self.zones, &self.events, &self.chars);
+        // Gate 06-turn R2: listed, but its base is unavailable.
+        for &id in &self.unlisted_base {
+            snap.bases.remove(&id);
+        }
+        snap.unlisted_base = self.unlisted_base.clone();
+        snap
     }
 
     /// Executes `event` directly (no bus), for setup.
@@ -937,8 +954,15 @@ fn unknown_layer_object_skipped_others_evaluated() {
     let ghost = w.creature(1, 0);
     let dead = w.creature(1, 0);
     let fine = w.creature(1, 2);
-    let card = w.card_of(ghost);
-    w.chars.remove(&card);
+    // Gate 06-turn R2: the environment lists all three objects but has no base for `ghost`
+    // (removing the card from `chars` would drop it from `objects()` and never fail).
+    w.unlisted_base.insert(ghost);
+    let snap = w.snapshot();
+    assert!(snap.objects().contains(&ghost) && snap.base(ghost).is_none());
+    assert!(
+        crate::layers::evaluate_all(&w.effects, &snap).is_err(),
+        "the premise: the whole-board evaluation fails"
+    );
     assert_eq!(w.found(obj(dead)), ["704.5f"]);
     assert!(w.found(obj(ghost)).is_empty());
     assert!(w.found(obj(fine)).is_empty());
@@ -4394,6 +4418,73 @@ fn unattached_omits_a_replacement_unattach_whose_attachment_left() {
     let out = pass(&mut w);
     assert!(out.performed);
     assert_eq!(unattach_events(&out), [eq]);
+    assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
+    assert!(out.unattached.is_empty());
+}
+
+/// Gate 06-turn R18: Equipment `eq` attached to a legal host `b`, optionally `other_host`
+/// (`c`) instead, and a creature D (toughness 0) whose SBA move a replacement turns into
+/// `Instead([ZoneChange D, UnattachFrom eq from b])`, plus `ZoneChange eq` to exile with
+/// `eq_leaves`. Returns (world, eq).
+fn replacement_unattach_from_world(wrong_host: bool, eq_leaves: bool) -> (World, ObjectId) {
+    let mut w = World::new();
+    let b = w.creature(1, 3);
+    let c = w.creature(1, 3);
+    let eq = w.create(1, ZoneKind::Battlefield, equipment());
+    w.attach(eq, AttachTarget::Permanent(if wrong_host { c } else { b }));
+    let d = w.creature(1, 0);
+    let mut instead = vec![
+        zone_change(d, ZoneKind::Graveyard, ZoneChangeCause::StateBasedAction),
+        GameEvent::UnattachFrom {
+            attachment: eq,
+            host: AttachTarget::Permanent(b),
+        },
+    ];
+    if eq_leaves {
+        instead.push(zone_change(eq, ZoneKind::Exile, ZoneChangeCause::Other));
+    }
+    w.registry
+        .add(ReplacementEffect::new(
+            e(1),
+            sba_move_of(d),
+            Action::Instead(instead),
+        ))
+        .unwrap();
+    (w, eq)
+}
+
+// REQ-SBA-001, CR 704.5n, CR 704.5p, CR 701.3d (gate 06-turn R18): a replacement turns the SBA
+// move of D into `UnattachFrom(eq, B)` with eq attached to B: eq is unattached, remains on the
+// battlefield and is listed in `unattached`.
+#[test]
+fn unattached_lists_an_unattach_from_produced_by_a_replacement() {
+    let (mut w, eq) = replacement_unattach_from_world(false, false);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert_eq!(w.permanents.attached_to(eq), None);
+    assert_eq!(w.zones.object(eq).unwrap().zone, ZoneId::Battlefield);
+    assert_eq!(out.unattached, [eq]);
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d (gate 06-turn R18 control): eq is attached to another host
+// than the `UnattachFrom` names: nothing is unattached and eq is not listed.
+#[test]
+fn unattached_omits_an_unattach_from_of_the_wrong_host() {
+    let (mut w, eq) = replacement_unattach_from_world(true, false);
+    let out = pass(&mut w);
+    assert!(out.performed);
+    assert!(w.permanents.attached_to(eq).is_some());
+    assert!(out.unattached.is_empty());
+}
+
+// REQ-SBA-001, CR 704.5n, CR 701.3d (gate 06-turn R18 control): the attachment is unattached
+// and then leaves the battlefield in the same pass: not listed.
+#[test]
+fn unattached_omits_an_unattach_from_whose_attachment_left() {
+    let (mut w, eq) = replacement_unattach_from_world(false, true);
+    let card = w.card_of(eq);
+    let out = pass(&mut w);
+    assert!(out.performed);
     assert_eq!(w.zone_of_card(card), Some(ZoneId::Exile));
     assert!(out.unattached.is_empty());
 }

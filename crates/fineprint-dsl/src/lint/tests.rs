@@ -1865,6 +1865,72 @@ fn req_ing_009_mana_ability_skips_delayed_trigger_body() {
     );
 }
 
+/// REQ-ING-009, REQ-DSL-015 (CR 605.1a, SRS §14.8, gate 06-turn R16): the `params` of a
+/// NATIVE_EFFECT are opaque data, so a DRAW-shaped or MOVE-to-LIBRARY-shaped object inside them
+/// is not counted as moving a card to or from a library; a real DRAW or MOVE to LIBRARY next to
+/// the native effect in the same effect list still is.
+#[test]
+fn req_ing_009_mana_ability_skips_native_effect_params() {
+    let native = |params: Value| json!({"op": "NATIVE_EFFECT", "id": "test.native", "version": 1, "params": params});
+    let move_to_library = json!({"op": "MOVE", "objects": {"ref": "SELF"}, "toZone": "LIBRARY"});
+    for params in [
+        json!({"op": "DRAW"}),
+        json!({"op": "MOVE", "toZone": "LIBRARY"}),
+    ] {
+        mana_findings(
+            &activated(json!({"effect": [{"op": "POPULATE"}, native(params.clone())]})),
+            0,
+        );
+        mana_findings(
+            &activated(json!({"effect": [native(params.clone()), draw_one()]})),
+            1,
+        );
+        mana_findings(
+            &activated(json!({"effect": [native(params), move_to_library.clone()]})),
+            1,
+        );
+    }
+}
+
+/// REQ-ING-009, REQ-DSL-005, REQ-DSL-015 (CR 603.10, gate 06-turn R17): keyword `params` are
+/// keyword data, so an object there whose `op` is NATIVE_EFFECT is not a native instruction and
+/// a look-back key inside its `params` is reported at its path under the keyword's `params`.
+#[test]
+fn req_ing_009_look_back_in_keyword_native_shaped_param() {
+    let kw = json!({"abilityId": "k", "kind": "KEYWORD", "keyword": "TEST_KEYWORD",
+        "textSpan": [0, 0],
+        "params": {"k": {"op": "NATIVE_EFFECT", "params": {"lookBack": true}}}});
+    decodes(&kw);
+    for report in [run(&one_face(vec![kw.clone()])), run_raw(&[kw])] {
+        let messages: Vec<&str> = report
+            .with_id(LintId::LOOK_BACK)
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("$.params.k.params.lookBack"),
+            "{}",
+            messages[0]
+        );
+    }
+}
+
+/// REQ-ING-009, REQ-DSL-015 (CR 603.10, SRS §14.8, gate 06-turn R17): a NATIVE_EFFECT
+/// instruction nested in an IF body of a SPELL effect is still an instruction, so its `params`
+/// stay opaque and a look-back key inside them is not reported.
+#[test]
+fn req_ing_009_look_back_skips_nested_native_effect_params() {
+    let spell = json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0], "effect": [
+        {"op": "IF", "cond": {"pred": "IS_CREATURE"}, "then": [
+            {"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+                "params": {"lookBack": true}}
+        ]}
+    ]});
+    decodes(&spell);
+    none_of(&run(&one_face(vec![spell.clone()])), LintId::LOOK_BACK);
+    none_of(&run_raw(&[spell]), LintId::LOOK_BACK);
+}
+
 /// REQ-ING-009, REQ-DSL-015 (CR 603.10, SRS §14.8, gate 06-turn F53): a look-back-like key in
 /// the opaque `params` of a NATIVE_EFFECT is not reported; one nested in a trigger matcher's
 /// filters still is, and so is one in keyword `params` (`req_ing_009_look_back`).

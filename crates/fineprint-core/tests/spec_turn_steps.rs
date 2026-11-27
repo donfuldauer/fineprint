@@ -1198,7 +1198,8 @@ fn cleanup_live_endless_cycle_begins_one_step_per_pass_cycle() {
             cycle + 1,
             "cleanup steps begun before cycle {cycle}"
         );
-        for _ in 0..2 {
+        for pass in 0..2usize {
+            let before = begun.get();
             let req = session
                 .pending()
                 .cloned()
@@ -1207,6 +1208,13 @@ fn cleanup_live_endless_cycle_begins_one_step_per_pass_cycle() {
             session
                 .submit(req.request_id, ChoiceResponse::PassPriority)
                 .expect("a pass is accepted");
+            // Gate 06-turn R15: the first pass of the pair starts no cleanup step; the second
+            // (all players passed, CR 514.3a) starts exactly one.
+            assert_eq!(
+                begun.get(),
+                before + pass,
+                "cleanup steps begun after pass {pass} of cycle {cycle}"
+            );
         }
     }
     assert_eq!(begun.get(), 26);

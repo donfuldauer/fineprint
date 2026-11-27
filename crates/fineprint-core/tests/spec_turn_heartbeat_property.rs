@@ -262,6 +262,8 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
         let mut reset_pending = true;
         let mut rec_index = 0usize;
         let mut pending_moved: Option<PlayerId> = None;
+        // R11 (CR 117.4): set by a TopResolved pass, cleared at the resolution.
+        let mut resolution_pending = false;
         for ev in trace(&run) {
             match ev {
                 Ev::Act(..) => {
@@ -285,6 +287,7 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                     }
                     passed.clear();
                     reset_pending = true;
+                    resolution_pending = false;
                 }
                 Ev::HostAsk(chooser) => {
                     // F21: a generated host request names a player still in the game.
@@ -299,6 +302,10 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                     let at = &run.at_ask[ask_index];
                     let answer = &run.answers[ask_index];
                     ask_index += 1;
+                    assert!(
+                        !resolution_pending,
+                        "{ctx}: priority asked before the top object resolved"
+                    );
                     let live = live_of(at);
                     // (b), (c)
                     assert!(!at.host.has_left_game(chooser), "{ctx}");
@@ -329,7 +336,12 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                     }
                     // (f)
                     if matches!(answer, ChoiceResponse::PassPriority) {
-                        passed.insert(chooser);
+                        // R10 (CR 117.4): one pass per player per pass cycle; an action or a
+                        // resolution clears the set.
+                        assert!(
+                            passed.insert(chooser),
+                            "{ctx}: {chooser:?} passed twice in one pass cycle"
+                        );
                         passed.retain(|p| live.contains(p));
                         let count = passed.len();
                         let rec = &records[rec_index];
@@ -349,7 +361,8 @@ fn req_turn_001_property_heartbeat_terminates_or_asks() {
                         };
                         match (&rec.result, expected_kind) {
                             (PassResult::PriorityMoved { to }, 0) => pending_moved = Some(*to),
-                            (PassResult::TopResolved, 1) | (PassResult::StepEnds, 2) => {}
+                            (PassResult::TopResolved, 1) => resolution_pending = true,
+                            (PassResult::StepEnds, 2) => {}
                             (r, k) => panic!("{ctx}: record {rec_index} result {r:?}, kind {k}"),
                         }
                         rec_index += 1;

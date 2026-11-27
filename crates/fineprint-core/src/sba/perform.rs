@@ -317,7 +317,7 @@ impl Plan {
 ///   host's zone change then has nothing to unattach), and the look-back of "becomes
 ///   unattached" triggers (CR 603.10c) sees it. Counters left on an object that moves get no
 ///   removal event (CR 122.2). [`SbaOutcome::unattached`] lists the attachment of every
-///   `Unattach` event of the batch that occurred, planned or produced by a replacement effect
+///   `Unattach` or `UnattachFrom` event of the batch that occurred, planned or produced by a replacement effect
 ///   (for example an `Instead` of another event of the batch), if it is still on the
 ///   battlefield as the same object at the end of the pass.
 /// - **Battle protectors** (CR 704.5x, CR 704.5y, CR 310.11, CR 310.9a, CR 310.12a): before
@@ -952,20 +952,23 @@ fn perform_findings(
     removed_from_game.sort_unstable();
 
     // CR 704.5n, CR 704.5p, CR 701.3d: "It remains on the battlefield": the permanents that
-    // every Unattach event of the batch, planned or produced by a replacement, unattached and
-    // that are still on the battlefield as the same object at the end of the pass (decision
-    // #42 FP-041, D2). An unattach that found nothing attached is no event (the bus records
-    // only events that occurred), and an executed one reports `Outcome::Applied`. The event
-    // itself stays in `executed` either way.
+    // every Unattach or UnattachFrom event of the batch, planned or produced by a replacement,
+    // unattached and that are still on the battlefield as the same object at the end of the pass (decision
+    // #42 FP-041, D2). An unattach that found nothing attached (an `UnattachFrom` of another
+    // host included) is no event (the bus records only events that occurred), and an executed
+    // one reports `Outcome::Applied`. The event itself stays in `executed` either way (gate
+    // 06-turn R18).
     let unattached: Vec<ObjectId> = executed
         .iter()
         .flat_map(|b| &b.events)
         .filter_map(|ev| match (ev.instance.event(), ev.outcome) {
-            (GameEvent::Unattach { attachment }, Outcome::Applied)
-                if ctx
-                    .zones
-                    .object(*attachment)
-                    .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
+            (
+                GameEvent::Unattach { attachment } | GameEvent::UnattachFrom { attachment, .. },
+                Outcome::Applied,
+            ) if ctx
+                .zones
+                .object(*attachment)
+                .is_some_and(|r| r.zone == ZoneId::Battlefield) =>
             {
                 Some(*attachment)
             }

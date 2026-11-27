@@ -155,21 +155,31 @@ fn str_member<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<
 /// a look-back flag and is not recorded (docs/DECISIONS.md, "Gate 06-turn F53 — Look-back scan
 /// skips native-effect params"). Every other fact is still recorded there, and look-back keys
 /// everywhere else (trigger matchers, filters, bindings, keyword `params`) are recorded.
+///
+/// The exemption applies to native-effect *instructions* only (docs/DECISIONS.md, "Gate
+/// 06-turn R17 — Native-effect exemption applies to instructions only"): everything under the
+/// `params` member of a keyword instance (an object whose `kind` is `KEYWORD`) is opaque
+/// keyword data (REQ-DSL-005), so an object there whose `op` is `NATIVE_EFFECT` is data, not
+/// an instruction, and look-back-like keys inside it are recorded (CR 603.10).
 pub(super) fn scan(root: &Value) -> Scan<'_> {
     let mut out = Scan::default();
     let mut arena = vec![Node {
         parent: None,
         seg: Seg::Root,
     }];
-    // (value, arena node, inside native-effect params)
-    let mut stack: Vec<(&Value, usize, bool)> = vec![(root, 0, false)];
-    while let Some((value, node, opaque)) = stack.pop() {
+    // (value, arena node, inside native-effect params, inside keyword params)
+    let mut stack: Vec<(&Value, usize, bool, bool)> = vec![(root, 0, false, false)];
+    while let Some((value, node, opaque, data)) = stack.pop() {
         match value {
             Value::Object(map) => {
                 visit_object(map, node, &arena, &mut out);
-                let native = str_member(map, "op") == Some("NATIVE_EFFECT");
+                // Below keyword `params` everything is keyword data (REQ-DSL-005), so an object
+                // there is never a native instruction, whatever its `op` (gate 06-turn R17).
+                let native = !data && str_member(map, "op") == Some("NATIVE_EFFECT");
+                let keyword = !data && str_member(map, "kind") == Some("KEYWORD");
                 for (key, child) in map {
                     let child_opaque = opaque || (native && key == "params");
+                    let child_data = data || (keyword && key == "params");
                     let lookback = !child_opaque && is_lookback_key(key);
                     let container = child.is_object() || child.is_array();
                     if !lookback && !container {
@@ -184,7 +194,7 @@ pub(super) fn scan(root: &Value) -> Scan<'_> {
                         out.lookback.push((clip(key, CLIP), render(&arena, idx)));
                     }
                     if container {
-                        stack.push((child, idx, child_opaque));
+                        stack.push((child, idx, child_opaque, child_data));
                     }
                 }
             }
@@ -195,7 +205,7 @@ pub(super) fn scan(root: &Value) -> Scan<'_> {
                             parent: Some(node),
                             seg: Seg::Index(i),
                         });
-                        stack.push((child, arena.len() - 1, opaque));
+                        stack.push((child, arena.len() - 1, opaque, data));
                     }
                 }
             }

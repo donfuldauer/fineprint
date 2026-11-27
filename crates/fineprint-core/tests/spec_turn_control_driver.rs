@@ -479,3 +479,64 @@ fn first_strike_decided_at_the_damage_boundary_through_run_planned_turn() {
         assert_eq!(combat, steps::combat_steps(expected), "{label}");
     }
 }
+
+/// REQ-TURN-002, REQ-TURN-003; CR 510.4, CR 614.10 (gate round 2, R5): through
+/// `run_planned_turn`, the first-strike decision is made as the first combat damage step is
+/// about to begin even when declare blockers is skipped: a provisional plan without the step
+/// gains it when an attacker has first strike (the host is asked once, after declare
+/// attackers), and a provisional step is dropped when first strike is gone.
+#[test]
+fn first_strike_decided_when_declare_blockers_is_skipped() {
+    for (start, provisional, expected) in [(true, false, true), (false, true, false)] {
+        let (w, _) = run_cw(base(start), move |w, c| {
+            let t = w
+                .sched
+                .next_turn(&S2, &everyone, provisional)
+                .expect("turn");
+            w.sched.add_step_skip(P1, Step::DeclareBlockers);
+            planned(w, &t, c)
+        })
+        .expect("run");
+        let label = format!("start {start}, provisional {provisional}");
+        let mut want = vec![Step::BeginningOfCombat, Step::DeclareAttackers];
+        if expected {
+            want.push(Step::FirstStrikeDamage);
+        }
+        want.extend([Step::CombatDamage, Step::EndOfCombat]);
+        assert_eq!(combat_begun(&w.host.base_calls()), want, "{label}");
+        assert_eq!(
+            *w.host.t.first_strike_reads.borrow(),
+            vec![Some(Step::DeclareAttackers)],
+            "{label}"
+        );
+    }
+}
+
+/// REQ-TURN-002, REQ-TURN-003; CR 506.1, CR 510.4, CR 500.9 (gate round 2, R6): an extra
+/// declare blockers step added before the combat damage step runs after the first-strike
+/// step; with first strike still reported, the combat phase has exactly one first-strike step
+/// and one combat damage step.
+#[test]
+fn extra_declare_blockers_after_first_strike_adds_no_second_first_strike_step() {
+    let (w, _) = run_cw(base(true), |w, c| {
+        let t = w.sched.next_turn(&S2, &everyone, true).expect("turn");
+        assert!(
+            w.sched
+                .add_extra_step_before(Step::CombatDamage, Step::DeclareBlockers, None)
+        );
+        planned(w, &t, c)
+    })
+    .expect("run");
+    assert_eq!(
+        combat_begun(&w.host.base_calls()),
+        vec![
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::DeclareBlockers,
+            Step::FirstStrikeDamage,
+            Step::DeclareBlockers,
+            Step::CombatDamage,
+            Step::EndOfCombat,
+        ]
+    );
+}

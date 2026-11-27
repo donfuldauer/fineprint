@@ -66,7 +66,7 @@ fn same(a: &Mock, b: &Mock) -> bool {
         && a.starting == b.starting
 }
 
-/// R3 (F92): `same` compares the game state too, so a difference in only the life total is seen.
+/// REQ-CORE-001, REQ-CORE-006, REQ-NET-003, R3 (F92, R13): `same` compares the game state too, so a difference in only the life total is seen.
 #[test]
 fn same_detects_a_game_state_only_difference() {
     let a = run_keep(base(5, 2)).host;
@@ -422,6 +422,38 @@ fn mulligan_to_bottom_table() {
     assert_eq!(mulligan_to_bottom(3, 3, false), 3);
 }
 
+/// REQ-FMT-001, REQ-NET-003, CR 103.5 (R12, gate 06-turn round 2): a library shorter than the
+/// starting hand size gives a short hand; the last mulligan is forced when the bottom count
+/// reaches the actual hand length, and the session's requests and totals equal the model's.
+#[test]
+fn short_library_forces_the_last_mulligan_at_the_hand_length() {
+    // 3 cards in the library, starting hand size 7: the hand is 3 cards.
+    let policy = Policy::script(&[(1, 0, true), (1, 1, true), (1, 2, true), (1, 3, true)]);
+    let mock = Mock::new(21, 2, 3, 20, 7, false);
+    let want = model(&mock, 21, &opt(1), &policy);
+    let run = drive(mock, opt(1), &policy);
+    let p1: Vec<_> = mulligan_asks(&run)
+        .into_iter()
+        .filter(|a| a.0 == pid(1))
+        .collect();
+    // taken 3: counted 3 >= hand length 3, forced although 3 < 7; the policy's wish is moot.
+    assert_eq!(
+        p1,
+        vec![
+            (pid(1), 0, 0),
+            (pid(1), 1, 1),
+            (pid(1), 2, 2),
+            (pid(1), 3, 3)
+        ]
+    );
+    assert_eq!(run.report.mulligans[0], (pid(1), 3));
+    assert_eq!(mulligan_asks(&run), want.asks);
+    assert_eq!(run.host.libs, want.libs);
+    assert_eq!(run.host.hands, want.hands);
+    assert!(run.host.hand_of(1).is_empty());
+    assert_eq!(want.mulls[&pid(1)], 3);
+}
+
 /// REQ-FMT-001, REQ-NET-003, CR 103.5: when the count to bottom reaches the hand size no
 /// further mulligan is offered; the player orders the whole hand onto the bottom (one request
 /// with `to_bottom` = hand size), the opening hand is empty and the run completes.
@@ -454,6 +486,46 @@ fn zero_hand_limit_stops_asking_and_empties_hand() {
     desc.reverse();
     assert_eq!(tail, desc, "whole hand bottomed in the answered order");
     assert_eq!(run.host.hand_of(2).len(), 3);
+
+    // R14 (gate 06-turn round 2, REQ-NET-003, R8): the final request itself disallows
+    // TAKE_MULLIGAN: the session rejects it, the request stays pending, and the whole-hand
+    // KEEP_HAND is then accepted.
+    let mut s = start_session(Mock::new(11, 2, LIB, 20, 3, false), opt(1)).expect("start");
+    loop {
+        let req = s.pending().cloned().expect("final request is issued");
+        let ChoicePayload::MulliganDecision {
+            hand, to_bottom, ..
+        } = &req.payload
+        else {
+            panic!("payload")
+        };
+        if req.chooser == pid(1) && *to_bottom as usize == hand.len() {
+            assert_eq!((req.min, req.max), (3, 3));
+            assert!(
+                s.submit(req.request_id, ChoiceResponse::TakeMulligan)
+                    .is_err()
+            );
+            assert_eq!(s.pending(), Some(&req));
+            let whole = ChoiceResponse::KeepHand {
+                bottom: hand.iter().rev().copied().collect(),
+            };
+            s.submit(req.request_id, whole).expect("whole-hand keep");
+            break;
+        }
+        s.submit(req.request_id, policy.answer(&req))
+            .expect("answer");
+    }
+    while let Some(req) = s.pending().cloned() {
+        s.submit(req.request_id, policy.answer(&req))
+            .expect("answer");
+    }
+    match s.status() {
+        Status::Done { state, output } => {
+            assert!(state.hand_of(1).is_empty());
+            assert_eq!(output.mulligans[0], (pid(1), 3));
+        }
+        Status::Pending(_) => unreachable!(),
+    }
 
     // Per-player override with the free first mulligan: counted reaches 3 at 4 taken.
     let mut m = Mock::new(11, 3, LIB, 20, 7, true);
@@ -717,7 +789,7 @@ fn pregame_order_after_all_mulligans_and_performed_in_given_order() {
 // Replay and properties.
 // ---------------------------------------------------------------------------------------------
 
-/// REQ-NET-003, R3: replaying the recorded answers gives identical hosts and report.
+/// REQ-NET-003, REQ-CORE-001, REQ-CORE-006, R3: replaying the recorded answers gives identical hosts and report.
 #[test]
 fn replay_gives_identical_result() {
     let mut m = Mock::new(31, 3, LIB, 40, 7, true);

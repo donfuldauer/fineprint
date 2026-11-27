@@ -937,6 +937,8 @@ struct Fake {
     resolve_adds_attacker: bool,
     /// Resolving during declare blockers flips `first_strike`.
     resolve_flips_first_strike: bool,
+    /// The current step at each `first_strike_damage_step` query, in order (R5).
+    first_strike_reads: std::cell::RefCell<Vec<Option<Step>>>,
 }
 
 impl Fake {
@@ -954,6 +956,7 @@ impl Fake {
             stack_in: Vec::new(),
             resolve_adds_attacker: false,
             resolve_flips_first_strike: false,
+            first_strike_reads: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -1153,6 +1156,7 @@ impl TurnHost for Fake {
         Ok(())
     }
     fn first_strike_damage_step(&self) -> bool {
+        self.first_strike_reads.borrow_mut().push(self.step);
         self.first_strike
     }
     fn attackers_declared(&self) -> bool {
@@ -2276,4 +2280,266 @@ fn req_turn_003_scheduler_combat_adjustments_only_in_combat() {
         drain(&mut s)[..2],
         [seg(Step::EndOfCombat), PlanItem::EndPhase(Phase::Combat)]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn round 2: follow-ups of the installed plan (R4) and the first-strike decision at
+// the first damage step (R5, R6)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn req_turn_003_cr_614_10b_driver_runs_only_its_own_schedulers_follow_ups() {
+    // REQ-TURN-003, CR 614.10b (R4): two schedulers both skip P1's turn with different
+    // follow-ups and both install plan 1 for P2. Scheduler B run with scheduler A's handle
+    // passes the serial and player checks, and performs B's follow-up (the one installed with
+    // B's plan), never A's.
+    let order = seats(2);
+    let mut a = TurnScheduler::new(order[0]);
+    a.add_turn_skip(order[0], Some(FollowUpId(1)));
+    let ta = take(&mut a, &order);
+    let mut b = TurnScheduler::new(order[0]);
+    b.add_turn_skip(order[0], Some(FollowUpId(2)));
+    let tb = take(&mut b, &order);
+    assert_eq!((ta.player, ta.plan_serial), (tb.player, tb.plan_serial));
+    assert_eq!(ta.follow_ups, vec![FollowUpId(1)]);
+    assert_eq!(tb.follow_ups, vec![FollowUpId(2)]);
+    let mut w = world(2);
+    w.sched = b;
+    let (w, report, _) = run(w, move |w, c| planned(w, &ta, c));
+    assert_eq!(report.active_player, order[1]);
+    assert_eq!(
+        w.host.log[..3],
+        [
+            Ev::Turn(order[1]),
+            Ev::FollowUp(FollowUpId(2)),
+            Ev::Phase(Phase::Beginning)
+        ]
+    );
+    assert!(!w.host.log.contains(&Ev::FollowUp(FollowUpId(1))));
+}
+
+#[test]
+fn req_turn_003_cr_614_10b_follow_ups_run_once_and_stale_handles_stay_rejected() {
+    // REQ-TURN-003, CR 614.10b (R4): a follow-up runs once per plan. Re-running the finished
+    // turn's handle is rejected before any host call and performs no follow-up; on the next
+    // turn of the same scheduler the saved earlier handle (which still lists the follow-up)
+    // is rejected with an empty host call log, and the next turn performs no follow-up.
+    let order = seats(2);
+    let (_, (first, again, stale, next_log), _) = run(world(2), move |w, c| {
+        w.sched.add_turn_skip(order[0], Some(FollowUpId(4)));
+        let t1 = w.sched.next_turn(&order, &all_in, false).unwrap();
+        assert_eq!(t1.follow_ups, vec![FollowUpId(4)]);
+        planned(w, &t1, c)?;
+        let first = std::mem::take(&mut w.host.log);
+        let again = planned(w, &t1, c).err();
+        let again_log = std::mem::take(&mut w.host.log);
+        let t2 = w.sched.next_turn(&order, &all_in, false).unwrap();
+        let stale = planned(w, &t1, c).err();
+        let stale_log = std::mem::take(&mut w.host.log);
+        planned(w, &t2, c)?;
+        Ok((
+            first,
+            (again, again_log),
+            (stale, stale_log),
+            w.host.log.clone(),
+        ))
+    });
+    let follow_ups = |log: &[Ev]| -> Vec<Ev> {
+        log.iter()
+            .filter(|e| matches!(e, Ev::FollowUp(_)))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(follow_ups(&first), vec![Ev::FollowUp(FollowUpId(4))]);
+    for (err, log) in [again, stale] {
+        assert!(
+            matches!(err, Some(Interrupt::Error(ChoiceError::Procedure(_)))),
+            "{err:?}"
+        );
+        assert!(log.is_empty(), "no host method is called: {log:?}");
+    }
+    assert!(follow_ups(&next_log).is_empty(), "{next_log:?}");
+}
+
+/// Runs one planned turn of a fresh two-player world set up by `setup`; returns the combat
+/// steps begun and the steps current at each first-strike query.
+fn combat_run(
+    provisional: bool,
+    setup: impl Fn(&mut World) + 'static,
+) -> (Vec<Step>, Vec<Option<Step>>) {
+    let (w, report, _) = run(world(2), move |w, c| {
+        let order = w.host.game().turn_order().to_vec();
+        let t = w.sched.next_turn(&order, &all_in, provisional).unwrap();
+        setup(w);
+        planned(w, &t, c)
+    });
+    let steps = combat_steps(&w.host.log);
+    let reported: Vec<Step> = report
+        .segments
+        .iter()
+        .filter_map(|r| match r.segment {
+            Segment::Step(s) if s.phase() == Phase::Combat => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, steps);
+    let reads = w.host.first_strike_reads.borrow().clone();
+    (steps, reads)
+}
+
+#[test]
+fn req_turn_002_cr_510_4_first_strike_decided_when_declare_blockers_is_skipped() {
+    // REQ-TURN-002, REQ-TURN-003, CR 510.4, CR 614.10 (R5): the decision is made as the first
+    // combat damage step is about to begin, whatever step precedes it. With declare blockers
+    // skipped, a provisional plan without the first-strike step still gets one when an
+    // attacker has first strike; the host is asked once, after declare attackers.
+    let (steps, reads) = combat_run(false, |w| {
+        let active = w.sched.active_player().unwrap();
+        w.host.first_strike = true;
+        w.sched.add_step_skip(active, Step::DeclareBlockers);
+    });
+    assert_eq!(
+        steps,
+        [
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::FirstStrikeDamage,
+            Step::CombatDamage,
+            Step::EndOfCombat
+        ]
+    );
+    assert_eq!(reads, [Some(Step::DeclareAttackers)]);
+    // R5 (b): a provisional first-strike step whose creature lost first strike before damage
+    // is removed, declare blockers skipped.
+    let (steps, reads) = combat_run(true, |w| {
+        let active = w.sched.active_player().unwrap();
+        w.host.first_strike = false;
+        w.sched.add_step_skip(active, Step::DeclareBlockers);
+    });
+    assert_eq!(
+        steps,
+        [
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::CombatDamage,
+            Step::EndOfCombat
+        ]
+    );
+    assert_eq!(reads, [Some(Step::DeclareAttackers)]);
+}
+
+#[test]
+fn req_turn_002_cr_508_8_no_attackers_never_asks_for_first_strike() {
+    // REQ-TURN-002, CR 508.8, CR 510.4 (R5 (d)): no attackers skips declare blockers and both
+    // combat damage steps; no combat damage step begins, so the first-strike question is never
+    // asked.
+    let (steps, reads) = combat_run(true, |w| {
+        w.host.attackers = false;
+        w.host.first_strike = true;
+    });
+    assert_eq!(
+        steps,
+        [
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::EndOfCombat
+        ]
+    );
+    assert!(reads.is_empty(), "{reads:?}");
+}
+
+#[test]
+fn req_turn_002_cr_506_1_extra_declare_blockers_adds_no_second_first_strike_step() {
+    // REQ-TURN-002, REQ-TURN-003, CR 506.1, CR 510.4, CR 500.9 (R6): an extra declare blockers
+    // step added before the combat damage step runs after the first-strike step; the host
+    // still reports first strike, yet the combat phase has exactly one first-strike step and
+    // one combat damage step (the decision made as the first damage step began is retained).
+    let (steps, reads) = combat_run(true, |w| {
+        w.host.first_strike = true;
+        assert!(
+            w.sched
+                .add_extra_step_before(Step::CombatDamage, Step::DeclareBlockers, None)
+        );
+    });
+    assert_eq!(
+        steps,
+        [
+            Step::BeginningOfCombat,
+            Step::DeclareAttackers,
+            Step::DeclareBlockers,
+            Step::FirstStrikeDamage,
+            Step::DeclareBlockers,
+            Step::CombatDamage,
+            Step::EndOfCombat
+        ]
+    );
+    assert_eq!(reads, [Some(Step::DeclareBlockers)]);
+}
+
+#[test]
+fn req_turn_002_cr_510_4_set_first_strike_is_retained_once_damage_began() {
+    // REQ-TURN-002, CR 510.4, CR 506.1 (R6): once a combat damage step has begun in the
+    // combat phase, `set_first_strike_damage_step` changes nothing for either argument; a new
+    // combat phase decides afresh. Pending provisional steps keep their behaviour (`true`
+    // does not duplicate, `false` removes; see
+    // `req_turn_003_scheduler_combat_adjustments_only_in_combat`).
+    let order = seats(2);
+    let mut s = TurnScheduler::new(order[0]);
+    s.next_turn(&order, &all_in, true).unwrap();
+    assert!(
+        s.add_extra_phase(Phase::Combat, Phase::Combat, None),
+        "a second combat phase"
+    );
+    advance_to(&mut s, seg(Step::DeclareBlockers));
+    assert!(s.first_damage_step_is_next());
+    assert!(
+        !s.set_first_strike_damage_step(true),
+        "pending: not doubled"
+    );
+    advance_to(&mut s, seg(Step::FirstStrikeDamage));
+    assert!(!s.first_damage_step_is_next());
+    assert!(s.add_extra_step_before(Step::CombatDamage, Step::DeclareBlockers, None));
+    assert_eq!(s.next_item(), Some(seg(Step::DeclareBlockers)));
+    assert!(
+        !s.set_first_strike_damage_step(true),
+        "no second first-strike step"
+    );
+    assert!(
+        !s.set_first_strike_damage_step(false),
+        "the decision is retained"
+    );
+    assert!(!s.first_damage_step_is_next());
+    assert_eq!(
+        s.next_item(),
+        Some(seg(Step::CombatDamage)),
+        "the second damage step follows"
+    );
+    // The extra combat phase decides at its own first damage step.
+    advance_to(&mut s, seg(Step::DeclareBlockers));
+    assert!(s.first_damage_step_is_next());
+    assert!(s.set_first_strike_damage_step(false));
+    assert_eq!(
+        drain(&mut s)[..2],
+        [seg(Step::CombatDamage), seg(Step::EndOfCombat)]
+    );
+}
+
+#[test]
+fn req_turn_002_cr_614_10_first_damage_step_query_honours_pending_step_skips() {
+    // REQ-TURN-002, CR 614.10, CR 510.4 (R5): the "first damage step is next" query looks past
+    // steps a pending skip will remove, and is false outside combat and before the first item.
+    let order = seats(2);
+    let mut s = TurnScheduler::new(order[0]);
+    assert!(!s.first_damage_step_is_next());
+    let t = take(&mut s, &order);
+    assert!(!s.first_damage_step_is_next());
+    s.add_step_skip(t.player, Step::DeclareBlockers);
+    advance_to(&mut s, seg(Step::BeginningOfCombat));
+    assert!(!s.first_damage_step_is_next());
+    advance_to(&mut s, seg(Step::DeclareAttackers));
+    assert!(s.first_damage_step_is_next());
+    // A skip of the combat damage step too: nothing damage-like is next.
+    s.add_step_skip(t.player, Step::CombatDamage);
+    assert!(!s.first_damage_step_is_next());
+    assert_eq!(s.next_item(), Some(seg(Step::EndOfCombat)));
 }

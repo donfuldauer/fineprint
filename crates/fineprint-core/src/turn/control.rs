@@ -85,7 +85,10 @@ pub struct PlannedTurn {
     pub skipped: Vec<SkippedTurn>,
     /// The follow-up actions of the skip effects consumed on the way, in the order those skip
     /// effects were created (CR 614.10b: they are the first thing that happens in this turn).
-    /// [`run_planned_turn`] performs them through [`TurnHost::perform_follow_up`].
+    /// Informational only: the scheduler keeps its own copy with the installed plan, and
+    /// [`run_planned_turn`] performs that copy, never this field, so a handle of another
+    /// scheduler cannot run its follow-ups here (docs/DECISIONS.md "Gate 06-turn R4 —
+    /// Follow-ups belong to the scheduler").
     pub follow_ups: Vec<FollowUpId>,
     /// The serial number of the plan [`TurnScheduler::next_turn`] installed for this turn
     /// (1 for the first turn, then counting up). [`run_planned_turn`] rejects a turn whose
@@ -192,6 +195,14 @@ pub struct TurnScheduler {
     active: Option<PlayerId>,
     /// Whether the combat phases of the current turn have a first-strike damage step.
     first_strike: bool,
+    /// Whether a combat damage step (first-strike or regular) has begun in the current combat
+    /// phase: set when [`TurnScheduler::next_item`] yields one, reset when a combat phase
+    /// begins and when a plan is installed (CR 510.4: the first-strike decision is made as the
+    /// first combat damage step begins and is then retained).
+    damage_begun: bool,
+    /// The follow-up actions (CR 614.10b) of the installed plan, in creation order, until
+    /// [`run_planned_turn`] takes them (R4).
+    follow_ups: Vec<FollowUpId>,
     /// The current turn's phases not yet ended; the first one may be in progress.
     plan: Vec<PlanPhase>,
     /// The item last yielded by [`TurnScheduler::next_item`] in the current turn.
@@ -210,6 +221,14 @@ fn is_main(phase: Phase) -> bool {
     matches!(phase, Phase::PrecombatMain | Phase::PostcombatMain)
 }
 
+/// Whether `segment` is a combat damage step, first-strike or regular (CR 510.4).
+fn is_damage_step(segment: Segment) -> bool {
+    matches!(
+        segment,
+        Segment::Step(Step::FirstStrikeDamage | Step::CombatDamage)
+    )
+}
+
 impl TurnScheduler {
     /// A scheduler whose first normal turn is `starting_player`'s; no turn is in progress.
     #[must_use]
@@ -224,6 +243,8 @@ impl TurnScheduler {
             step_skips: Vec::new(),
             active: None,
             first_strike: false,
+            damage_begun: false,
+            follow_ups: Vec::new(),
             plan: Vec::new(),
             last_item: None,
             turn_over: false,
@@ -344,7 +365,11 @@ impl TurnScheduler {
     /// (what [`TurnScheduler::next_item`] yields if nobody corrects it); it is no longer
     /// decisive: [`run_planned_turn`] decides at each combat phase's damage boundary through
     /// [`TurnScheduler::set_first_strike_damage_step`] (CR 510.4; docs/DECISIONS.md "Gate
-    /// 06-turn F49 — First-strike decision at the damage boundary").
+    /// 06-turn F49 — First-strike decision at the damage boundary", refined by "Gate 06-turn
+    /// R5 — First-strike decision at the first damage step").
+    ///
+    /// The follow-ups consumed on the way are recorded with the installed plan (replacing those
+    /// of the previous plan) and performed by [`run_planned_turn`] (R4).
     pub fn next_turn(
         &mut self,
         seat_order: &[PlayerId],
@@ -382,13 +407,15 @@ impl TurnScheduler {
                 continue;
             }
             self.install_plan(player, first_strike_damage_step);
-            // The follow-ups in the order their skip effects were created.
+            // The follow-ups in the order their skip effects were created; the scheduler keeps
+            // them with the installed plan for its driver run (R4).
             follow_ups.sort_by_key(|&(created, _)| created);
+            self.follow_ups = follow_ups.into_iter().map(|(_, f)| f).collect();
             return Some(PlannedTurn {
                 player,
                 extra,
                 skipped,
-                follow_ups: follow_ups.into_iter().map(|(_, f)| f).collect(),
+                follow_ups: self.follow_ups.clone(),
                 plan_serial: self.plan_serial,
             });
         }
@@ -405,6 +432,7 @@ impl TurnScheduler {
         self.last_item = None;
         self.turn_over = false;
         self.main_seen = false;
+        self.damage_begun = false;
         self.plan_serial = self.plan_serial.wrapping_add(1);
     }
 
@@ -524,10 +552,48 @@ impl TurnScheduler {
         }
     }
 
-    /// Records `item` as the last item yielded and returns it.
+    /// Records `item` as the last item yielded and returns it. CR 510.4: a combat phase that
+    /// begins has no combat damage step begun yet; a yielded combat damage step has begun.
     fn yielded(&mut self, item: PlanItem) -> PlanItem {
+        match item {
+            PlanItem::BeginPhase(Phase::Combat) => self.damage_begun = false,
+            PlanItem::Segment(s) if is_damage_step(s) => self.damage_begun = true,
+            _ => {}
+        }
         self.last_item = Some(item);
         item
+    }
+
+    /// Whether the next item [`TurnScheduler::next_item`] would yield is the FIRST combat
+    /// damage step (first-strike or regular) of the in-progress combat phase, pending step
+    /// skips taken into account (CR 614.10: a skipped step yields nothing). This is the moment
+    /// the first-strike decision is made (CR 510.4: "as the combat damage step begins"),
+    /// whatever plan segment preceded it (R5). False once a combat damage step of this combat
+    /// phase has begun (the decision is then retained), outside a combat phase, and when the
+    /// next item is not a combat damage step.
+    #[must_use]
+    pub fn first_damage_step_is_next(&self) -> bool {
+        if self.turn_over || self.damage_begun || self.phase_in_progress() != Some(Phase::Combat) {
+            return false;
+        }
+        let Some(active) = self.active else {
+            return false;
+        };
+        // The skips `next_item` would consume on the way, oldest first.
+        let mut consumed: Vec<Step> = Vec::new();
+        for seg in &self.plan[0].segments {
+            if let Segment::Step(step) = seg.segment
+                && seg.skippable
+            {
+                let used = consumed.iter().filter(|&&s| s == step).count();
+                if self.pending_step_skips(active, step) > used {
+                    consumed.push(step);
+                    continue;
+                }
+            }
+            return is_damage_step(seg.segment);
+        }
+        false
     }
 
     /// The phase of the last item yielded; `None` before the first item or after the turn is
@@ -792,8 +858,17 @@ impl TurnScheduler {
     /// `true` inserts a first-strike step directly before the first not-yet-started combat
     /// damage step if none is planned before it; `false` removes the not-yet-started
     /// first-strike steps. Returns whether the plan changed. Outside a combat phase, or with no
-    /// combat damage step left, nothing changes.
+    /// combat damage step left, nothing changes. Once a combat damage step (first-strike or
+    /// regular) has begun in the current combat phase nothing changes either: CR 510.4 decides
+    /// "as the combat damage step begins" and the second step then follows unconditionally, so
+    /// a later call (after an extra declare blockers step, say) never adds a second
+    /// first-strike step nor removes the decided one (R6; CR 506.1 allows two combat damage
+    /// steps).
     pub fn set_first_strike_damage_step(&mut self, first_strike: bool) -> bool {
+        // CR 510.4, CR 506.1 (R6): the decision is retained once a damage step has begun.
+        if self.damage_begun {
+            return false;
+        }
         let Some(segments) = self.combat_segments_mut() else {
             return false;
         };
@@ -1262,9 +1337,10 @@ pub fn restart_game<H: RestartHost + ?Sized>(
 // ---------------------------------------------------------------------------------------------
 
 /// Runs `turn`, planned by [`TurnScheduler::next_turn`], through the sequencer (REQ-TURN-003):
-/// [`TurnHost::begin_turn`], then [`TurnHost::perform_follow_up`] for each of
-/// [`PlannedTurn::follow_ups`] in order (CR 614.10b), then one [`TurnScheduler::next_item`] at a
-/// time until the turn is over. `BeginPhase(p)`: [`TurnHost::begin_phase`] and the [`ExpiryPoint::BeginPhase`] expiry;
+/// [`TurnHost::begin_turn`], then [`TurnHost::perform_follow_up`] for each follow-up the
+/// scheduler recorded with its installed plan, in creation order (CR 614.10b; the scheduler's
+/// own copy, never `turn`'s [`PlannedTurn::follow_ups`], and only once per plan), then one
+/// [`TurnScheduler::next_item`] at a time until the turn is over. `BeginPhase(p)`: [`TurnHost::begin_phase`] and the [`ExpiryPoint::BeginPhase`] expiry;
 /// `Segment(s)`: [`run_segment`]; `EndPhase(p)`: the [`ExpiryPoint::EndPhase`] expiry and
 /// [`TurnHost::empty_mana_pools`] (as `run_phase`). Skips are applied as each phase or step
 /// would begin (CR 614.10), and changes made to `scheduler` between items take effect at the
@@ -1273,8 +1349,12 @@ pub fn restart_game<H: RestartHost + ?Sized>(
 ///
 /// In a combat phase, as `run_phase` does: once a declare attackers step has ended,
 /// [`TurnHost::attackers_declared`] `false` calls [`TurnScheduler::skip_blockers_and_damage`]
-/// (CR 508.8); once a declare blockers step has ended, [`TurnHost::first_strike_damage_step`]
-/// is passed to [`TurnScheduler::set_first_strike_damage_step`] (CR 510.4).
+/// (CR 508.8). CR 510.4: when the next item is the first combat damage step of the combat
+/// phase ([`TurnScheduler::first_damage_step_is_next`]), whatever step preceded it (declare
+/// blockers, or declare attackers when declare blockers is skipped),
+/// [`TurnHost::first_strike_damage_step`] is asked once and passed to
+/// [`TurnScheduler::set_first_strike_damage_step`]; the decision is then retained for the rest
+/// of the combat phase.
 ///
 /// # Errors
 /// As `run_turn`; [`ChoiceError::Procedure`] before any host call if `turn` is not the turn of
@@ -1300,12 +1380,20 @@ pub fn run_planned_turn<H: TurnHost + ?Sized>(
     }
     host.begin_turn(turn.player)?;
     // CR 614.10b: "That action is considered to be the first thing that happens during the
-    // next step, phase, or turn to actually occur."
-    for &follow_up in &turn.follow_ups {
+    // next step, phase, or turn to actually occur." The scheduler's own follow-ups of its
+    // installed plan, taken so they run once per plan (R4).
+    for follow_up in std::mem::take(&mut scheduler.follow_ups) {
         host.perform_follow_up(follow_up, choices)?;
     }
     let mut segments = Vec::new();
-    while let Some(item) = scheduler.next_item() {
+    loop {
+        // CR 510.4: "as the combat damage step begins" (R5: whatever step preceded it).
+        if scheduler.first_damage_step_is_next() {
+            scheduler.set_first_strike_damage_step(host.first_strike_damage_step());
+        }
+        let Some(item) = scheduler.next_item() else {
+            break;
+        };
         match item {
             PlanItem::BeginPhase(p) => {
                 host.begin_phase(p)?;
@@ -1313,16 +1401,9 @@ pub fn run_planned_turn<H: TurnHost + ?Sized>(
             }
             PlanItem::Segment(s) => {
                 segments.push(run_segment(host, state, registry, s, choices)?);
-                match s {
-                    // CR 508.8.
-                    Segment::Step(Step::DeclareAttackers) if !host.attackers_declared() => {
-                        scheduler.skip_blockers_and_damage();
-                    }
-                    // CR 510.4: "as the combat damage step begins".
-                    Segment::Step(Step::DeclareBlockers) => {
-                        scheduler.set_first_strike_damage_step(host.first_strike_damage_step());
-                    }
-                    _ => {}
+                // CR 508.8.
+                if s == Segment::Step(Step::DeclareAttackers) && !host.attackers_declared() {
+                    scheduler.skip_blockers_and_damage();
                 }
             }
             PlanItem::EndPhase(p) => {

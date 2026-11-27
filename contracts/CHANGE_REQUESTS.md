@@ -188,3 +188,15 @@ providers `LkiProvider` in `events/exec.rs` and `CeasingLki` in `sba/perform.rs`
 `controller` yet, so the event-driven (`EventContext::execute`) and SBA perform paths fall back to
 the stored controller until they forward it; that is a follow-up (those files belong to another
 unit, #209).
+
+## CR-009 — SBA perform (REQ-SBA-001, REQ-REPL-*): `post_batch` is also called before each Prevent follow-up batch
+Requested by: #50 gate 06-turn (round 2, R1; change made by round 1, F6/F13)   Kind: behavioural (call timing and frequency; recorded retroactively by the phase 06 gate review)   Status: open
+Change: `sba::perform_all_relayered` and `sba::perform_all_post_batch` now call their `post_batch` provider, besides the single call after the batch for retained zero-defense battles, once before each `Prevent` follow-up batch of the pass's batch (through `replacement::process_batch_refreshing`), so the follow-up batch is resolved and executed with characteristics evaluated from the inputs it supplies. A pass with a prevention follow-up and no retained battle therefore calls it, where it was called at most once and only for a retained battle before. `sba::perform_all` is unchanged (follow-ups use the pre-pass provider). No signature or type changes.
+Why: REQ-LAYER-001 (CR 613.1b), REQ-REPL-* (CR 616.1), REQ-CORE-003 (CR 603.10a): follow-up batches must see the state the previous batch left. Gate 06-turn F6/F13.
+Consumers affected: every caller of the two entry points whose `post_batch` is not a pure function of its context or counts its calls (it must remain pure, R3); none in-tree besides tests.
+
+## CR-010 — MulliganDecision payload validator (REQ-NET-003): TAKE_MULLIGAN rejected on the final request
+Requested by: #50 gate 06-turn (round 2, R8)   Kind: behavioural (validation only)   Status: open
+Change: `PendingChoiceRequest::validate_response` (choice/request.rs) now rejects `TAKE_MULLIGAN` for a `MULLIGAN_DECISION` payload whose `to_bottom` is at least the hand size (the last mulligan: the whole hand goes on the bottom, CR 103.5). Before, every non-KEEP_HAND answer passed the payload check and the game-start procedure rejected TAKE_MULLIGAN afterwards. The payload fields, canonical encoding, wire names and `ValidatorRule` are unchanged.
+Why: REQ-NET-003 (the request describes the legal answers); gate 06-turn F86/R8.
+Consumers affected: any client or host that submitted TAKE_MULLIGAN on the final request (it was a procedure error at the next replay; it is now a submit-time rejection). No signature changes.
