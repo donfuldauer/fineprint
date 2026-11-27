@@ -14,14 +14,23 @@
 //! back otherwise (`announce` commits its own checkpoint on success, so the whole-cast
 //! checkpoint has to come from the caller; see `docs/DECISIONS.md`, "#54 FP-052").
 //!
-//! 1. **Step 7, mana-ability window** (CR 601.2g, 605.3a, 117.1d): if the locked mana part is
-//!    payable and not `{0}`, the player is asked `PAY_MANA_AND_COSTS` (one ask, before anything
-//!    changes): the mana abilities that can be activated now, the payment-method offers and
-//!    whether an auto-pay plan exists. `CANCEL_AND_ROLLBACK` reverses the cast (CR 734.1). An
-//!    unpayable mana part (CR 118.6) makes the attempt illegal without an ask. Each listed mana
-//!    ability is activated in the listed order, without the stack (CR 605.3b, 605.4a, 405.6c).
-//!    Activating mana abilities is optional (CR 118.3c): an activation that is not available
-//!    now, or that the host refuses, is simply not activated.
+//! 1. **Step 7, mana-ability window** (CR 601.2g, 605.3a, 117.1d; contract CR-015): if the
+//!    locked mana part is payable and not `{0}`, the player is asked `PAY_MANA_AND_COSTS` one or
+//!    more times: each request lists the mana abilities that can be activated now, the
+//!    payment-method offers and whether an auto-pay plan exists, all computed on a state in which
+//!    the activations of the earlier answers of this window have been applied. An answer in which
+//!    at least one listed ability is actually activated (available at that moment, not already
+//!    in progress, accepted by the host; tried in the listed order, CR 605.3c) is followed by a
+//!    new request; its payment methods and its auto-pay flag are discarded. The window ends with
+//!    the first answer that is auto-pay, lists no ability, or lists abilities none of which was
+//!    activated; that answer's payment methods are used. At most 256 requests are asked: the
+//!    256th lists no ability, so it ends the window. `CANCEL_AND_ROLLBACK` reverses the cast (CR 734.1). An unpayable mana part
+//!    (CR 118.6) makes the attempt illegal without an ask. Nothing in the real state changes
+//!    while the window is open: the rounds are simulated on a scratch copy of the state, and
+//!    when the window has ended the concatenation of every listed ability is activated for real,
+//!    in order, without the stack (CR 605.3b, 605.4a, 405.6c), exactly as if one answer had
+//!    listed them all. Activating mana abilities is optional (CR 118.3c): an activation that is
+//!    not available at its turn, or that the host refuses, is simply not activated.
 //! 2. **Step 8, payment** (CR 601.2h): the chosen payment methods are applied to the mana still
 //!    to pay (they never change the locked cost, CR 702.51b, 702.126b). Then the first pass pays
 //!    every cost that is not late ([`PayState::cost_is_late`] false): the mana from the pool
@@ -50,14 +59,22 @@
 //! reversed. Before the real activations, the procedure runs them once on a scratch copy of the
 //! state and follows each unit of the paying player's pool: when a durable activation consumed a
 //! unit produced by an earlier activation, the earlier activation is committed durably too
-//! (transitively). Units equal in every field are interchangeable, and a removed unit is matched
-//! to the earliest equal unit.
+//! (transitively). The probe covers the whole concatenated list of the window, so a dependency
+//! across two answers of the window is followed too. Which pool units an activation removed comes
+//! from the host ([`PayState::last_activation_removed`], contract CR-016); a host that does not
+//! report it (or reports an invalid list) gets the documented inference fallback: the removed
+//! units are the multiset difference of the pool before and after, each credited to the earliest
+//! equal unit (the lowest-index tie-break of [`plan_payment`]). Units equal in every field cannot
+//! be told apart otherwise, so the fallback is sound only for the hosts described on
+//! [`PayState::activate_mana_ability`].
 //!
-//! **No re-activation before resolution** (CR 605.3c). A mana ability is offered and accepted
-//! only if it is in [`PayState::available_mana_abilities`] at the moment of its activation, and
-//! the procedure keeps the set of activations it has begun and not yet finished: beginning one
-//! that is already in progress is refused with [`PayError::Illegal`]. Activations resolve
-//! immediately (CR 605.3b), so the set holds at most one activation at a time.
+//! **No re-activation before resolution** (CR 605.3c). A mana ability is offered in a request
+//! only if it is in [`PayState::available_mana_abilities`] on the window's state at that request,
+//! and it is activated only if it is available at the moment of its activation (in the
+//! simulation and again on the real state). The procedure keeps the set of activations it has
+//! begun and not yet finished: beginning one that is already in progress is refused with
+//! [`PayError::Illegal`]. Activations resolve immediately (CR 605.3b), so the set holds at most
+//! one activation at a time.
 //!
 //! # Spell-history conventions
 //!
@@ -71,10 +88,11 @@
 //!
 //! # Determinism and replay
 //!
-//! Only `Vec`, `BTreeMap` and `BTreeSet`; the single request id comes from
-//! [`ChoiceContext::next_request_id`]; nothing changes before the ask, so a suspended run leaves
-//! the transaction stack and the state untouched and a [`ChoiceSession`](crate::choice::ChoiceSession)
-//! replay reaches the same final state (R3).
+//! Only `Vec`, `BTreeMap` and `BTreeSet`; each request id comes from
+//! [`ChoiceContext::next_request_id`]; nothing in the real state changes before the window has
+//! ended (its rounds run on a scratch copy), so a suspended run leaves the transaction stack and
+//! the state untouched and a [`ChoiceSession`](crate::choice::ChoiceSession) replay of the same
+//! answers reaches the same final state (R3).
 
 use std::collections::BTreeSet;
 
@@ -130,6 +148,17 @@ pub trait PayState: crate::txn::Transactional {
     /// Activates a mana ability (CR 605.3): pays its cost, adds its mana to the pool and
     /// immediately resolves every triggered mana ability it caused (CR 605.3b, 605.4a, 405.6c).
     ///
+    /// **Host requirement (CR 734.1, contract CR-016).** The procedure must know which pool
+    /// units an activation removed, to keep an activation whose mana a durable activation spent.
+    /// Without [`PayState::last_activation_removed`] it infers the removal from the pool before
+    /// and after the call: the removed units are the multiset difference, each credited to the
+    /// earliest equal unit, the survivors keep their order and the added units come after them.
+    /// That inference is sound exactly when (1) the host removes, among equal units, the
+    /// lowest-index one (the tie-break of [`plan_payment`]) and (2) the activation does not both
+    /// remove a unit and add an equal one. A host that removes, among equal units, other than the
+    /// lowest-index one, or whose activation both removes a unit and adds an equal one, MUST
+    /// override [`PayState::last_activation_removed`].
+    ///
     /// # Errors
     /// [`PayError`] if it cannot be activated; the state must then be unchanged (the procedure
     /// rolls its nested checkpoint back anyway).
@@ -139,6 +168,27 @@ pub trait PayState: crate::txn::Transactional {
         source: ObjectId,
         ability_id: &str,
     ) -> Result<ManaActivation, PayError>;
+
+    /// Which units of `player`'s mana pool the last successful
+    /// [`activate_mana_ability`](PayState::activate_mana_ability) call removed (CR 734.1,
+    /// REQ-CORE-005, contract CR-016): its cost payment and the triggered mana abilities it
+    /// caused, together, as indices into the pool as it was immediately BEFORE the call, strictly
+    /// ascending, without duplicates. The units that were not removed keep their relative order
+    /// and the units the call added come after them, in the order added. A unit the call removed
+    /// and an equal unit the call added are reported as removed and added respectively (the pool
+    /// may be identical before and after).
+    ///
+    /// The value is transient bookkeeping of the last call: it must not enter the state hash or
+    /// any canonical encoding, it must survive `Clone`, and the procedure reads it only directly
+    /// after a successful call on the same value (the scratch copy of the dependent-activation
+    /// probe). `None` (the default) means the host does not report; the procedure then infers the
+    /// removal as described on [`activate_mana_ability`](PayState::activate_mana_ability). A
+    /// report is used only when it is valid (every index below the pool length before the call,
+    /// strictly ascending, and no more units surviving than the pool holds after the call);
+    /// otherwise the inference is used.
+    fn last_activation_removed(&self, _player: PlayerId) -> Option<Vec<usize>> {
+        None
+    }
 
     /// Whether `item` involves random elements or moves objects from the library to a public
     /// zone, so it is paid in the second pass of CR 601.2h.
@@ -265,12 +315,15 @@ impl ActivationGuard {
     }
 }
 
-/// What the player answered at step 7.
-#[derive(Default)]
+/// What the answer that ended the step-7 window chose: the payment methods, as
+/// `(offer index, objects)`.
 struct Answer {
     methods: Vec<(u32, Vec<ObjectId>)>,
-    mana_abilities: Vec<(ObjectId, String)>,
 }
+
+/// The most `PAY_MANA_AND_COSTS` requests of one step-7 window (contract CR-015): the last one
+/// lists no mana ability, so it ends the window.
+const MAX_WINDOW_REQUESTS: usize = 256;
 
 /// Runs steps 7-9 of casting a spell (REQ-CAST-001, REQ-CORE-005; CR 601.2g-601.2i, 605, 734):
 /// the mana-ability window, the payment of `locked` and the commit, as described on the module.
@@ -319,54 +372,74 @@ pub fn pay_total_cost<S: PayState>(
         ManaPart::Payable(m) => *m,
     };
 
-    // CR 601.2g: step 7, the chance to activate mana abilities, asked before anything changes.
+    // CR 601.2g, 605.3a: step 7, the window in which the player may activate mana abilities
+    // (contract CR-015). Its rounds run on a scratch copy: nothing in the real state changes
+    // before the window has ended.
     let mut offers = Vec::new();
-    let mut answer = Answer::default();
+    let mut methods = Vec::new();
     if !mana.is_zero() {
-        let state = txn.state();
-        offers = state.payment_methods(player, stack_object, locked);
-        let mut abilities = state.available_mana_abilities(player);
-        abilities.sort();
-        abilities.dedup();
-        let purpose = state.purpose(player, stack_object);
-        let auto_pay = plan_payment(state.mana_pool(player), &mana, &purpose).is_some();
-        let request = pay_request(
-            ctx,
-            player,
-            stack_object,
-            locked_total(locked),
-            &offers,
-            abilities,
-            auto_pay,
-        );
-        match ask_checked(ctx, request)? {
-            ChoiceResponse::PayCosts { auto_pay: true, .. } => {}
-            ChoiceResponse::PayCosts {
-                methods,
-                mana_abilities,
-                ..
-            } => {
-                answer = Answer {
-                    methods,
+        let mut scratch = txn.state().clone();
+        let mut listed: Vec<(ObjectId, String)> = Vec::new();
+        for round in 1..=MAX_WINDOW_REQUESTS {
+            offers = scratch.payment_methods(player, stack_object, locked);
+            // The last request lists no ability, so it ends the window.
+            let abilities = if round < MAX_WINDOW_REQUESTS {
+                let mut a = scratch.available_mana_abilities(player);
+                a.sort();
+                a.dedup();
+                a
+            } else {
+                Vec::new()
+            };
+            let purpose = scratch.purpose(player, stack_object);
+            let auto_pay = plan_payment(scratch.mana_pool(player), &mana, &purpose).is_some();
+            let request = pay_request(
+                ctx,
+                player,
+                stack_object,
+                locked_total(locked),
+                &offers,
+                abilities,
+                auto_pay,
+            );
+            match ask_checked(ctx, request)? {
+                ChoiceResponse::PayCosts { auto_pay: true, .. } => break,
+                ChoiceResponse::PayCosts {
+                    methods: chosen,
                     mana_abilities,
-                };
-            }
-            // CR 734.1: the player cancels the cast.
-            ChoiceResponse::CancelAndRollback => {
-                return rolled_back(txn, cast_checkpoint, PayStopReason::Cancelled)
-                    .map(PayOutcome::Cancelled);
-            }
-            other => {
-                return Err(procedure_error(format!(
-                    "{} does not answer this PAY_MANA_AND_COSTS request",
-                    other.wire_name()
-                )));
+                    ..
+                } => {
+                    let ran = simulate_round(&mut scratch, player, &mana_abilities);
+                    listed.extend(mana_abilities);
+                    if !ran {
+                        // The window ends with this answer's payment methods.
+                        methods = chosen;
+                        break;
+                    }
+                    // CR 605.3a: something was activated, so the player may activate more; this
+                    // answer's methods are discarded.
+                }
+                // CR 734.1: the player cancels the cast; nothing has changed yet.
+                ChoiceResponse::CancelAndRollback => {
+                    return rolled_back(txn, cast_checkpoint, PayStopReason::Cancelled)
+                        .map(PayOutcome::Cancelled);
+                }
+                other => {
+                    return Err(procedure_error(format!(
+                        "{} does not answer this PAY_MANA_AND_COSTS request",
+                        other.wire_name()
+                    )));
+                }
             }
         }
+        // CR 605.3b, 605.4a, 734.1: every listed ability, in order, each in its own nested
+        // checkpoint, as if one answer had listed them all.
+        activate_all(txn, player, &listed)?;
+        // The real state now equals the scratch copy's final state (R3), so the offers match the
+        // request that ended the window.
+        offers = txn.state().payment_methods(player, stack_object, locked);
     }
-
-    // CR 605.3b, 605.4a, 734.1: the mana abilities, each in its own nested checkpoint.
-    activate_all(txn, player, &answer.mana_abilities)?;
+    let answer = Answer { methods };
 
     // CR 601.2h, SRS 7.1 step 8: payment methods apply to the mana still to pay.
     let mut costs_paid: Vec<String> = Vec::new();
@@ -530,9 +603,47 @@ struct Probe {
     durable: bool,
 }
 
+/// Whether `(source, ability)` is in `player`'s available mana abilities of `state` now
+/// (CR 605.3a).
+fn is_available<S: PayState>(state: &S, player: PlayerId, source: ObjectId, ability: &str) -> bool {
+    state
+        .available_mana_abilities(player)
+        .iter()
+        .any(|(s, a)| *s == source && a == ability)
+}
+
+/// CR 601.2g, 605.3a-c: one round of the step-7 window on the scratch copy `scratch`, with the
+/// rules [`activate_all`] applies on the real state: each listed ability, in order, is activated
+/// only if it is available at that moment, not already in progress (CR 605.3c) and accepted by the
+/// host; a refused activation leaves `scratch` as it was. Returns whether at least one ran.
+fn simulate_round<S: PayState>(
+    scratch: &mut S,
+    player: PlayerId,
+    list: &[(ObjectId, String)],
+) -> bool {
+    let mut guard = ActivationGuard::default();
+    let mut ran = false;
+    for (source, ability) in list {
+        if !is_available(scratch, player, *source, ability) {
+            continue;
+        }
+        if guard.begin(*source, ability).is_err() {
+            continue;
+        }
+        let before = scratch.clone();
+        match scratch.activate_mana_ability(player, *source, ability) {
+            Ok(_) => ran = true,
+            Err(_) => *scratch = before,
+        }
+        guard.finish(*source, ability);
+    }
+    ran
+}
+
 /// CR 734.1: runs the listed activations on a scratch copy of the state and decides which must
 /// be durable: the library-touching ones and, transitively, every earlier activation whose mana
-/// a durable activation consumed.
+/// a durable activation consumed. The removed units come from
+/// [`PayState::last_activation_removed`] when the host reports them (contract CR-016).
 fn probe_activations<S: PayState>(
     state: &S,
     player: PlayerId,
@@ -545,20 +656,18 @@ fn probe_activations<S: PayState>(
     // For each activation, the producers of the units it consumed.
     let mut consumed: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); list.len()];
     for (k, (source, ability)) in list.iter().enumerate() {
-        if !scratch
-            .available_mana_abilities(player)
-            .iter()
-            .any(|(s, a)| s == source && a == ability)
-        {
+        if !is_available(&scratch, player, *source, ability) {
             continue;
         }
         let before = scratch.clone();
         match scratch.activate_mana_ability(player, *source, ability) {
             Ok(done) => {
+                let removed = scratch.last_activation_removed(player);
                 let (gone, next) = follow_units(
                     before.mana_pool(player).units(),
                     scratch.mana_pool(player).units(),
                     &origin,
+                    removed.as_deref(),
                     k,
                 );
                 if let (Some(c), Some(p)) = (consumed.get_mut(k), probes.get_mut(k)) {
@@ -588,29 +697,83 @@ fn probe_activations<S: PayState>(
     probes
 }
 
-/// Aligns the pool `before` an activation with the pool `after` it: the survivors keep their
-/// order (the earliest equal unit is matched first) and the units at the end that match nothing
-/// are new. Returns the producers of the removed units and the producer list of `after`, the new
-/// units credited to activation `k`.
+/// Whether `removed` is a usable report of the units an activation removed from a pool of
+/// `before` units that holds `after` units afterwards (contract CR-016): strictly ascending,
+/// every index below `before`, and no more survivors than `after`.
+fn valid_removal(removed: &[usize], before: usize, after: usize) -> bool {
+    removed.windows(2).all(|w| matches!(w, [a, b] if a < b))
+        && removed.iter().all(|&i| i < before)
+        && before.saturating_sub(removed.len()) <= after
+}
+
+/// The inference fallback of contract CR-016: for each distinct unit value, the
+/// `count_before - count_after` (when positive) earliest equal units of `before` are removed
+/// (the lowest-index tie-break of [`plan_payment`]). Returns one flag per `before` unit.
+fn infer_removal(before: &[ManaUnit], after: &[ManaUnit]) -> Vec<bool> {
+    let mut removed = vec![false; before.len()];
+    let mut decided = vec![false; before.len()];
+    for (i, unit) in before.iter().enumerate() {
+        if decided.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        let equal: Vec<usize> = (i..before.len())
+            .filter(|&j| before.get(j) == Some(unit))
+            .collect();
+        let remaining = after.iter().filter(|u| *u == unit).count();
+        let gone = equal.len().saturating_sub(remaining);
+        for (n, &j) in equal.iter().enumerate() {
+            if let Some(d) = decided.get_mut(j) {
+                *d = true;
+            }
+            if n < gone
+                && let Some(r) = removed.get_mut(j)
+            {
+                *r = true;
+            }
+        }
+    }
+    removed
+}
+
+/// CR 734.1: aligns the pool `before` an activation with the pool `after` it (contract CR-016).
+/// The removed units are the host's report `removed` when it is valid, otherwise the inference
+/// of [`infer_removal`]. The units not removed keep their order and pair one-to-one with the
+/// first units of `after`; the rest of `after` is new and credited to activation `k`. Returns the
+/// producers of the removed units and the producer list of `after`. Never panics.
 fn follow_units(
     before: &[ManaUnit],
     after: &[ManaUnit],
     origin: &[Option<usize>],
+    removed: Option<&[usize]>,
     k: usize,
 ) -> (Vec<usize>, Vec<Option<usize>>) {
+    let taken = match removed.filter(|v| valid_removal(v, before.len(), after.len())) {
+        Some(v) => {
+            let mut flags = vec![false; before.len()];
+            for &i in v {
+                if let Some(f) = flags.get_mut(i) {
+                    *f = true;
+                }
+            }
+            flags
+        }
+        None => infer_removal(before, after),
+    };
     let mut gone = Vec::new();
     let mut next = Vec::with_capacity(after.len());
-    let mut j = 0;
-    for (i, unit) in before.iter().enumerate() {
+    for (i, gone_now) in taken.iter().enumerate() {
         let from = origin.get(i).copied().flatten();
-        if after.get(j) == Some(unit) {
+        if *gone_now {
+            if let Some(p) = from {
+                gone.push(p);
+            }
+        } else {
             next.push(from);
-            j += 1;
-        } else if let Some(p) = from {
-            gone.push(p);
         }
     }
-    next.extend(after.iter().skip(j).map(|_| Some(k)));
+    // The survivors are the first units of `after`; the rest is new.
+    next.truncate(after.len());
+    next.resize(after.len(), Some(k));
     (gone, next)
 }
 
@@ -629,12 +792,7 @@ fn activate_all<S: PayState>(
     let mut guard = ActivationGuard::default();
     for ((source, ability), probe) in list.iter().zip(probes) {
         // CR 605.3a: only an ability that can be activated now.
-        if !txn
-            .state()
-            .available_mana_abilities(player)
-            .iter()
-            .any(|(s, a)| s == source && a == ability)
-        {
+        if !is_available(txn.state(), player, *source, ability) {
             continue;
         }
         // CR 605.3c: not again before it has resolved.
