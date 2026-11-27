@@ -3801,7 +3801,7 @@
         "crates/fineprint-core/src/events/types.rs:674",
         "crates/fineprint-core/src/events/types.rs:740",
         "crates/fineprint-core/src/knowledge/mod.rs:11",
-        "crates/fineprint-core/src/lib.rs:41",
+        "crates/fineprint-core/src/lib.rs:43",
         "crates/fineprint-core/src/memory/error.rs:19",
         "crates/fineprint-core/src/memory/linked.rs:17",
         "crates/fineprint-core/src/memory/linked.rs:19",

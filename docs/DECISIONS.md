@@ -11039,3 +11039,12 @@ player the winner), none left is `DRAWN`; otherwise `IN_PROGRESS`.
 question for the rules-researcher (which CR rules end the game and when it is a draw) and will be
 replaced by the game-result unit.
 **Alternatives.** Always `IN_PROGRESS` (makes the `result` assertion useless today).
+**Rules-researcher ruling (CR-2026-11-06).** Consistent for two-player and free-for-all games:
+a player still in the game wins once all opponents have left (CR 104.2a), a loser leaves the game
+(CR 104.5), and the game is a draw when all remaining players lose simultaneously (CR 104.4a);
+state-based actions are one simultaneous event (CR 704.3), so `DRAWN` is reached only when the
+last players lose in the same event, and the host must evaluate the result after the whole event.
+Not covered by the provisional host (reported as `IN_PROGRESS`): draws by a mandatory loop
+(CR 104.4b) or by an effect (CR 104.4c), and a win by an effect (CR 104.2b). Not valid for team
+games (CR 104.2c), Emperor (CR 104.2d) or limited range of influence (CR 104.3h); the reference
+host is two-player / free-for-all only, and the game-result unit replaces this reading.
