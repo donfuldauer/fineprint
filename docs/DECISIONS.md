@@ -12243,6 +12243,7 @@ it changes the choice protocol contract); always asking two requests (changes th
 spell with symbols for no reason); clamping X values (lossy, rejected by the finding).
 
 ## #54 FP-052 tester - dependent mana ability and late-item order
+**Superseded in part (gate 06-turn round 7).** The first sentence of the Rationale below ("The pinned procedure commits each non-library activation with `commit`, so X is reversed with the action, while CR 734.1 lets a player keep X when its mana was spent on a mana ability that is not reversed") is superseded by "#54 FP-052 — SRS 2.5 category (b) vs CR 605.1a and 734.1" and by SRS 2.5(a). Retaining X is not an option the engine may decline: by default legal mana abilities are reversed with the action, EXCEPT that a producer whose mana was spent on a mana ability that is not reversed is retained (mandatory, SRS 2.5(a)). The Decision of this entry is a limit of what the test checks (Y survives, the pool equals the pre-cast pool, X is neither asserted kept nor reversed), not a statement of the required engine behaviour; the required behaviour is asserted by `req_core_005_dependent_activation_kept` (unit tests, crates/fineprint-core/src/mana/pay_unit_tests.rs).
 
 **Decision.** For ability X (not library-touching) whose mana pays the cost of library-touching
 ability Y, the spec test asserts only that Y's effect survives the rollback and that the pool
