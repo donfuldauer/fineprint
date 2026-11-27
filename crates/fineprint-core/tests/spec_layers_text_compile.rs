@@ -332,7 +332,7 @@ fn req_dsl_012_compile_rejects_card_name() {
     for (from, to) in [
         ("test.name_a", "test.name_b"),
         ("test.name_a", "test.name_a"),
-        ("Swamp", "Island"),
+        ("test.name_one", "test.name_two"),
     ] {
         let m = Modification::replace_text_word(CardName, from, to);
         for r in [

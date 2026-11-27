@@ -1061,15 +1061,27 @@ fn malformed_defines_counts_as_all_parts() {
         }
     }
     // A modification that is not an object cannot be held by a typed ability any more (#232):
-    // the decoder refuses it.
-    assert!(
-        serde_json::from_value::<AbilityAST>(serde_json::json!({
+    // the decoder refuses it. The fixture carries every other required member (`affected`), so
+    // the refusal is the numeric modification's; the same fixture with an object modification
+    // decodes (control).
+    let fixture = |modification: serde_json::Value| {
+        serde_json::json!({
             "abilityId": "test.odd",
             "kind": "STATIC",
-            "effects": [{"type": "CHAR", "layer": "4", "modification": 3, "isCDA": true}],
-        }))
-        .is_err()
+            "effects": [{
+                "type": "CHAR",
+                "layer": "4",
+                "affected": {"ref": "SELF"},
+                "modification": modification,
+                "isCDA": true,
+            }],
+        })
+    };
+    assert!(
+        serde_json::from_value::<AbilityAST>(fixture(serde_json::json!({"op": "TEST_OP"}))).is_ok(),
+        "control: the same fixture with an object modification decodes"
     );
+    assert!(serde_json::from_value::<AbilityAST>(fixture(serde_json::json!(3))).is_err());
 }
 
 // REQ-OBJ-002; CR 707.9d last sentence: "in addition to its other types" exceptions (and

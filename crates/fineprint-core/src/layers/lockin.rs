@@ -21,19 +21,25 @@ use fineprint_dsl::ability::Layer;
 use fineprint_dsl::expr::ObjectSelectorAST;
 
 use super::error::LayerError;
-use super::pipeline::{LayerEnvironment, MatchContext, evaluate};
+#[cfg(doc)]
+use super::pipeline::evaluate;
+use super::pipeline::{LayerEnvironment, MatchContext, evaluate_all};
 use super::registry::{Affected, ContinuousEffect, ContinuousEffects, EffectOrigin};
 use super::text::validate_modification;
 
 /// The set of objects a selector picks now, for an effect of `source` controlled by
 /// `controller` (CR 611.2c: the set is determined when the effect begins).
 ///
-/// For each object of `env.objects()` in ascending [`ObjectId`] order, the object is evaluated
-/// fully with `effects` ([`evaluate`]) and included iff `env.matches(selector, ..)` holds for
-/// that evaluated view. Deterministic: the result is a [`BTreeSet`] (REQ-CORE-001).
+/// The board is evaluated once with `effects` ([`evaluate_all`], one layer-major pass,
+/// REQ-LAYER-001); then, for each object of `env.objects()` in ascending [`ObjectId`] order
+/// (duplicates ignored), the object is included iff `env.matches(selector, ..)` holds for its
+/// evaluated view. Each view equals [`evaluate`] of that object, so the result is the set a
+/// per-object evaluation would give. Deterministic: the result is a [`BTreeSet`]
+/// (REQ-CORE-001).
 ///
 /// # Errors
-/// The first [`LayerError`] of [`evaluate`] (for example [`LayerError::UnknownObject`]).
+/// The first [`LayerError`] of [`evaluate_all`]: [`LayerError::UnknownObject`] of the smallest
+/// id of `env.objects()` that has no base.
 pub fn resolve_affected_set(
     effects: &ContinuousEffects,
     env: &dyn LayerEnvironment,
@@ -41,18 +47,16 @@ pub fn resolve_affected_set(
     controller: PlayerId,
     selector: &ObjectSelectorAST,
 ) -> Result<BTreeSet<ObjectId>, LayerError> {
-    let mut ids = env.objects();
-    ids.sort_unstable();
-    ids.dedup();
+    // REQ-LAYER-001: one board pass for every candidate, ascending and de-duplicated.
+    let board = evaluate_all(effects, env)?;
     let mut out = BTreeSet::new();
-    for id in ids {
+    for (&id, evaluated) in &board {
         // CR 611.2c: matched against the object's current characteristics.
-        let evaluated = evaluate(effects, env, id)?;
         let ctx = MatchContext {
             source,
             effect_controller: controller,
             candidate: id,
-            candidate_view: &evaluated,
+            candidate_view: evaluated,
         };
         if env.matches(selector, &ctx) {
             out.insert(id);

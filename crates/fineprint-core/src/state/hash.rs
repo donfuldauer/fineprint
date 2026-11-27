@@ -42,7 +42,9 @@ impl GameState {
     ///   sticker entries, each tagged, in ascending key order; CR 613.7);
     /// - `/effect_generators`: the generating-ability links,
     ///   `BTreeMap<EffectId, GeneratingAbility>` (each value the source `ObjectId` and the
-    ///   ability as RFC 8785 canonical JSON, CR 613.8a);
+    ///   ability as a DSL value in the `crate::layers` encoding documentation: tag `0` and
+    ///   [`put_bytes`](fineprint_base::encode::put_bytes) of its RFC 8785 canonical JSON; else
+    ///   tag `1` and the structural encoding of its JSON tree; else tag `2` alone; CR 613.8a);
     /// - `/history`: the `HistoryLedger`.
     ///
     /// Each empty collection (`/effects`, `/timestamps`, `/effect_generators`, `/history`) is

@@ -71,7 +71,7 @@ Consumers affected: events executor (`events/exec.rs`), trigger normalizer (`tri
 replacement bus kind mapping (`replacement/types.rs`), replay and state-hash goldens.
 
 ## CR-005 — State model and canonical state hash: layers in GameState
-Requested by: #183 FP-144   Kind: breaking   Status: open
+Requested by: #183 FP-144   Kind: breaking   Status: merged (#243)
 Change: the placeholder type `state::EffectRegistry` (and its `is_empty`) is removed, with no
 compatibility alias. `GameState` stores the real `layers::ContinuousEffects`, the
 `layers::TimestampLedger` and the links `BTreeMap<EffectId, state::GeneratingAbility>` (new type
@@ -105,6 +105,10 @@ state, hashed and replayed); REQ-LAYER-002 existence (CR 613.8a): each static (a
 linked to the ability on its source that generates it.
 Consumers affected: fineprint-core state and txn; golden state hashes; bindings and replay format
 (not yet implemented); #184, #186, #193.
+Process note: the contract change and its implementation merged together in #243 (phase 04)
+without a separate contract-only PR, and #243 is not a phase boundary. It is recorded as merged and
+ratified by the phase 06 gate review (a phase boundary, docs/DECISIONS.md "Gate 06-turn F30 — CR-005
+recorded as merged"), as the phase 02 gate did for CR-002 and CR-003.
 
 ## CR-006 — Card DSL (SRS 14.4.3): optional "defines" on layer-4 CHAR modifications
 Requested by: #198 FP-151   Kind: additive   Status: open

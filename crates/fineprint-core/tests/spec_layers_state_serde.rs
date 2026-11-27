@@ -176,7 +176,7 @@ fn bit_flips_over_every_byte_never_panic() {
     assert!(errs > 0);
 }
 
-// R12 (T2): bounded random byte buffers (fixed-seed local generator) never panic, raw and
+// R12, REQ-CORE-001 (T2): bounded random byte buffers (fixed-seed local generator) never panic, raw and
 // spliced after a valid prefix.
 #[test]
 fn random_buffers_never_panic() {
@@ -198,27 +198,6 @@ fn random_buffers_never_panic() {
                 assert_eq!(t2, t);
             }
         }
-    }
-}
-
-/// Every array inside `v`, depth first, as a mutable reference path is awkward in serde_json;
-/// this collects the JSON pointers of arrays of exactly `len` elements.
-fn arrays_of_len(v: &serde_json::Value, len: usize, at: String, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::Array(items) => {
-            if items.len() == len {
-                out.push(at.clone());
-            }
-            for (i, x) in items.iter().enumerate() {
-                arrays_of_len(x, len, format!("{at}/{i}"), out);
-            }
-        }
-        serde_json::Value::Object(m) => {
-            for (k, x) in m {
-                arrays_of_len(x, len, format!("{at}/{k}"), out);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -383,8 +362,8 @@ fn inconsistent_states_are_rejected() {
         );
     }
 
-    // Duplicated effect id: two effects with distinct ids; the entry list's second element
-    // replaced by a copy of the first.
+    // Duplicated effect id: two effects with distinct ids; the second entry's `id` replaced by
+    // a copy of the first's, both effect bodies left intact (named schema `effects.effects`).
     let mut s = base();
     for colors in [ColorBitmask::RED, ColorBitmask::BLUE] {
         s.register_effect(
@@ -394,38 +373,24 @@ fn inconsistent_states_are_rejected() {
         .unwrap();
     }
     let v = wire(&s.serialize().unwrap());
-    let mut pointers = Vec::new();
-    arrays_of_len(&v["effects"], 2, String::new(), &mut pointers);
+    // Control: the unmodified fixture decodes.
     assert!(
-        !pointers.is_empty(),
-        "the effects member holds a list of two entries"
+        GameState::deserialize(&unwire(&v)).is_ok(),
+        "the unmodified two-effect fixture decodes"
     );
-    let mut rejected = 0;
-    for p in &pointers {
-        let mut w = v.clone();
-        let arr = w["effects"].pointer_mut(p).unwrap().as_array_mut().unwrap();
-        let first = arr[0].clone();
-        if arr[1] == first {
-            continue;
-        }
-        arr[1] = first;
-        let r = GameState::deserialize(&unwire(&w));
-        if is_decode_err(&r) {
-            rejected += 1;
-        }
-    }
-    // The outermost two-element list is the entry list.
+    let entries = v["effects"]["effects"].as_array().expect("entry list");
+    assert_eq!(entries.len(), 2, "two effect entries");
+    assert_ne!(entries[0]["id"], entries[1]["id"], "distinct ids to start");
+    assert_ne!(
+        entries[0]["effect"], entries[1]["effect"],
+        "distinct bodies"
+    );
     let mut w = v.clone();
-    let arr = w["effects"]
-        .pointer_mut(&pointers[0])
-        .unwrap()
-        .as_array_mut()
-        .unwrap();
-    arr[1] = arr[0].clone();
+    w["effects"]["effects"][1]["id"] = v["effects"]["effects"][0]["id"].clone();
+    assert_ne!(w, v);
     assert!(
         is_decode_err(&GameState::deserialize(&unwire(&w))),
-        "duplicated effect id ({} candidate lists, {rejected} rejected)",
-        pointers.len()
+        "duplicated effect id"
     );
 }
 

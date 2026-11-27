@@ -38,7 +38,7 @@
 use std::collections::BTreeSet;
 
 use fineprint_base::ids::{ObjectId, PlayerId, Timestamp};
-use fineprint_dsl::ability::{CharacteristicEffect, Layer, StaticEffect, TypePart};
+use fineprint_dsl::ability::{Layer, StaticEffect, TypePart};
 use fineprint_dsl::card::{AbilityAST, ColorBitmask, LayoutBehavior, ValueExpressionAST};
 use fineprint_dsl::mana::ManaCostDSL;
 use fineprint_dsl::vocab::RulesVocabulary;
@@ -181,13 +181,6 @@ enum CdaTarget {
     PowerToughness,
 }
 
-/// Every type-line target: what a layer-4 CDA without a valid `defines` defines.
-const ALL_TYPE_TARGETS: [CdaTarget; 3] = [
-    CdaTarget::Supertypes,
-    CdaTarget::CardTypes,
-    CdaTarget::Subtypes,
-];
-
 impl CopyException {
     /// The characteristic whose copied CDA this exception stops from being copied (CR 707.9d):
     /// a set value or a value not copied, one type-line part at a time (CR 109.3, 205.1b).
@@ -217,29 +210,22 @@ impl CopyException {
     }
 }
 
-/// The type-line parts a layer-4 CDA effect defines (CR 707.9d), from its modification's
-/// `defines` value as parsed by [`TypePart::parse_defines`] (SRS §14.4.3); `parsed` is `None`
-/// when `defines` is absent. Absent or malformed (not an array, empty, unknown or wrongly-cased
-/// name, non-string, duplicate: decoding would have refused it) gives all three parts. Never
-/// panics (R12).
-fn layer4_targets(parsed: Option<Result<BTreeSet<TypePart>, String>>) -> BTreeSet<CdaTarget> {
-    match parsed {
-        Some(Ok(parts)) => parts
-            .into_iter()
-            .map(|p| match p {
-                TypePart::Supertypes => CdaTarget::Supertypes,
-                TypePart::CardTypes => CdaTarget::CardTypes,
-                TypePart::Subtypes => CdaTarget::Subtypes,
-            })
-            .collect(),
-        _ => ALL_TYPE_TARGETS.into_iter().collect(),
+/// The CDA target of a type-line part (CR 707.9d; CR 109.3, 205.1b: each part is a
+/// characteristic of its own).
+fn type_part_target(part: TypePart) -> CdaTarget {
+    match part {
+        TypePart::Supertypes => CdaTarget::Supertypes,
+        TypePart::CardTypes => CdaTarget::CardTypes,
+        TypePart::Subtypes => CdaTarget::Subtypes,
     }
 }
 
 /// The characteristics a characteristic-defining ability defines: a `STATIC` ability with a
 /// `CHAR` effect marked `isCDA: true` defines the characteristic of its layer (4: the
-/// type-line parts of [`layer4_targets`], 5: colors, 7a: power and toughness). Reads ability
-/// data only, never card identity (R4).
+/// type-line parts of
+/// [`fineprint_dsl::ability::CharacteristicEffect::defined_type_parts`], all three for an
+/// absent or malformed `defines`; 5: colors, 7a: power and toughness). Reads ability data only,
+/// never card identity (R4).
 fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
     let mut out = BTreeSet::new();
     let AbilityAST::Static(ability) = ability else {
@@ -255,12 +241,9 @@ fn cda_targets(ability: &AbilityAST) -> BTreeSet<CdaTarget> {
         match effect.layer {
             // CR 707.9d: per type-line part (CR 109.3, 205.1b).
             Layer::L4 => {
-                let parsed = effect
-                    .modification
-                    .params
-                    .get(CharacteristicEffect::DEFINES)
-                    .map(TypePart::parse_defines);
-                out.extend(layer4_targets(parsed));
+                if let Some(parts) = effect.defined_type_parts() {
+                    out.extend(parts.into_iter().map(type_part_target));
+                }
             }
             Layer::L5 => {
                 out.insert(CdaTarget::Colors);

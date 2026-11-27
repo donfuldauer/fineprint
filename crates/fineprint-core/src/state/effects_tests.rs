@@ -364,7 +364,14 @@ pub(super) fn populate_layers(rng: &mut SplitMix64, s: &mut GameState, steps: u6
                 if below(rng, 2) == 0 {
                     effect.source = Some(any_object(rng));
                 }
-                s.register_effect(effect, None).unwrap();
+                // CR 611.2c: a resolved selector is locked when the effect begins, by the group
+                // path (against this world without objects: the empty set).
+                if matches!(effect.affected, Affected::Selector(_)) {
+                    s.register_effect_group(&NoWorld, vec![(effect, None)])
+                        .unwrap();
+                } else {
+                    s.register_effect(effect, None).unwrap();
+                }
             }
             7 => {
                 let id = s.issue_effect_id().unwrap();
@@ -743,8 +750,8 @@ fn register_effect_validates_links() {
         Err(StateError::Layer(LayerError::DuplicateEffect(e(4))))
     );
     assert_eq!(taken, before);
-    // Effect-id exhaustion.
-    let mut full = state_at(0, u64::MAX);
+    // Effect-id exhaustion (the effect's timestamp is issued: TimestampNotIssued comes first).
+    let mut full = state_at(ts.get(), u64::MAX);
     let before = full.clone();
     assert_eq!(
         full.register_effect(remove_all(), None),
@@ -829,7 +836,9 @@ fn link_effect_generator_and_remove() {
 // REQ-DSL-004, REQ-LAYER-002 (S3): SRS 6.2 item 1, CR 613.4a: layer 7a consists only of
 // characteristic-defining abilities. register_effect refuses a non-CDA 7a effect, leaving state,
 // hash and generators unchanged, and accepts a CDA one; ContinuousEffects::register itself still
-// accepts a non-CDA 7a effect.
+// accepts a non-CDA 7a effect. REQ-LAYER-001, REQ-CORE-001: the wire decoder refuses a valid,
+// linked 7a CDA whose `is_cda` alone is flipped (F62), and serialize refuses a state the raw
+// registry made inconsistent (F31).
 #[test]
 fn s3_layer_7a_boundary() {
     let mut s = GameState::new(8, 2, 20).unwrap();
@@ -870,10 +879,32 @@ fn s3_layer_7a_boundary() {
             .is_ok()
     );
     check_round_trip(&s);
+    // F62: the valid, linked layer-7a CDA state with only `is_cda` flipped on the wire is
+    // refused for exactly that reason; the unmodified bytes decode (control).
+    let good = wire_of(&s);
+    assert_eq!(decode_wire(&good).as_ref(), Ok(&s));
+    let mut flipped = good.clone();
+    let seven_a: Vec<usize> = flipped
+        .effects
+        .effects
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.effect.layer == Layer::L7a)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(seven_a.len(), 1);
+    assert!(flipped.effects.effects[seven_a[0]].effect.is_cda);
+    flipped.effects.effects[seven_a[0]].effect.is_cda = false;
+    assert_eq!(flipped.effect_generators, good.effect_generators);
+    assert_eq!(
+        decode_wire(&flipped),
+        Err(StateError::Decode("non-CDA effect in layer 7a".to_owned()))
+    );
     // The registry itself accepts a non-CDA 7a effect (existing behaviour).
     let mut r = ContinuousEffects::new();
     assert_eq!(r.register(e(1), non_cda.clone()), Ok(()));
-    // Written directly into a state, it does not deserialize.
+    // Written directly into a state, it is not serialized (F31: serialize refuses what
+    // deserialize refuses), and the state hash is still computable.
     let mut direct = GameState::new(8, 2, 20).unwrap();
     direct.stamp_object(o(1), StampReason::EntersZone).unwrap();
     let id = direct.issue_effect_id().unwrap();
@@ -881,7 +912,11 @@ fn s3_layer_7a_boundary() {
     direct
         .link_effect_generator(EffectId::new(1), GeneratingAbility::new(o(1), ability("x")))
         .unwrap_err();
-    assert_decode_err(GameState::deserialize(&direct.serialize().unwrap()));
+    assert_eq!(
+        direct.serialize(),
+        Err(StateError::Encode("non-CDA effect in layer 7a".to_owned()))
+    );
+    let _ = direct.state_hash();
     // Group parts are checked too.
     let mut grouped = GameState::new(8, 2, 20).unwrap();
     let ts = grouped.stamp_resolved_effect().unwrap();
@@ -1511,10 +1546,18 @@ fn run_streams(
     let mut pending: Vec<(EffectId, GeneratingAbility)> = Vec::new();
     while li < ledger.len() || ei < effects.len() || !pending.is_empty() {
         let choice = rng.as_deref_mut().map_or(0, |r| below(r, 3));
+        // REQ-CORE-002: an effect is registered only once its timestamp has been issued (the
+        // ledger stream issues every timestamp an effect names).
+        let ready = effects.get(ei).is_some_and(|op| match op {
+            EffectOp::Static(_, ts, ..) | EffectOp::Resolved(ts, ..) => {
+                *ts <= s.ids().timestamp.last_issued()
+            }
+            EffectOp::Etb(_) => true,
+        });
         if (choice == 2 || (li >= ledger.len() && ei >= effects.len())) && !pending.is_empty() {
             let (id, g) = pending.remove(0);
             s.link_effect_generator(id, g).unwrap();
-        } else if li < ledger.len() && (choice == 0 || ei >= effects.len()) {
+        } else if li < ledger.len() && (choice == 0 || ei >= effects.len() || !ready) {
             match &ledger[li] {
                 LedgerOp::Object(n) => {
                     s.stamp_object(o(*n), StampReason::EntersZone).unwrap();
@@ -2171,4 +2214,292 @@ fn typed_dsl_values_round_trip_through_the_wire() {
     check_round_trip(&s);
     let back = GameState::deserialize(&s.serialize().unwrap()).unwrap();
     assert_eq!(back.effects(), s.effects());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn: issued timestamps, locked resolved selectors, linear ledger restore
+// ---------------------------------------------------------------------------------------------
+
+/// Synthetic objects on the battlefield controlled by player 1; a filter selector with the
+/// `IsCreature` predicate matches a view with the card type `Creature`.
+struct Board(BTreeMap<ObjectId, Characteristics>);
+
+impl Board {
+    /// Objects `creatures` are 2/2 creatures, `others` noncreature artifacts.
+    fn new(creatures: &[u64], others: &[u64]) -> Board {
+        let mut objects = BTreeMap::new();
+        for &n in creatures {
+            objects.insert(o(n), creature(vec![]));
+        }
+        for &n in others {
+            let mut c = creature(vec![]);
+            c.card_types = set(["Artifact"]);
+            c.subtypes = BTreeSet::new();
+            c.power = None;
+            c.toughness = None;
+            objects.insert(o(n), c);
+        }
+        Board(objects)
+    }
+}
+
+impl LayerEnvironment for Board {
+    fn objects(&self) -> Vec<ObjectId> {
+        self.0.keys().copied().collect()
+    }
+
+    fn base(&self, id: ObjectId) -> Option<ObjectBase> {
+        self.0.get(&id).map(|c| ObjectBase {
+            characteristics: c.clone(),
+            controller: Some(p(1)),
+            on_battlefield: true,
+        })
+    }
+
+    fn matches(&self, s: &ObjectSelectorAST, ctx: &MatchContext<'_>) -> bool {
+        let is_creature_filter = matches!(
+            s,
+            ObjectSelectorAST::Filter(SelectorFilter { predicate: Some(p), .. })
+                if **p == PredicateAST::IsCreature
+        );
+        is_creature_filter
+            && ctx
+                .candidate_view
+                .characteristics
+                .card_types
+                .contains("Creature")
+    }
+}
+
+/// A layer-6 effect granting the `marker` ability.
+fn grant_marker() -> LayerModification {
+    LayerModification::AddAbility(ability("marker"))
+}
+
+/// Whether `id` has the `marker` ability after the layers.
+fn has_marker(s: &GameState, env: &dyn LayerEnvironment, id: u64) -> bool {
+    crate::layers::evaluate(s.effects(), env, o(id))
+        .unwrap()
+        .characteristics
+        .abilities
+        .contains(&ability("marker"))
+}
+
+/// Asserts `register_effect_group(env, parts)` fails with `want` and changes nothing.
+fn refuse_group(
+    s: &mut GameState,
+    env: &dyn LayerEnvironment,
+    parts: Vec<(ContinuousEffect, Option<GeneratingAbility>)>,
+    want: &StateError,
+) {
+    let before = s.clone();
+    let h = s.state_hash();
+    assert_eq!(s.register_effect_group(env, parts).as_ref(), Err(want));
+    assert_eq!(*s, before);
+    assert_eq!(s.state_hash(), h);
+}
+
+// REQ-CORE-002, REQ-LAYER-001 (gate 06-turn F25): register_effect and register_effect_group
+// refuse an effect stamped 0 or above the state's last issued timestamp, and a static effect
+// whose `granted_at` is, with the state, its hash and its generators unchanged; issued
+// timestamps, shared by parts of one effect, are accepted and the state round-trips.
+#[test]
+fn unissued_effect_timestamps_are_refused() {
+    let mut s = GameState::new(6, 2, 20).unwrap();
+    let t1 = s.stamp_object(o(1), StampReason::EntersZone).unwrap();
+    assert_eq!(s.ids().timestamp.last_issued(), 1);
+    let g = || Some(GeneratingAbility::new(o(1), ability("granter")));
+    let printed = |ts: Timestamp| static_effect(o(1), ts, Layer::L6, only(&[1]), grant_marker());
+    let granted = |ts: Timestamp, at: Timestamp| ContinuousEffect {
+        origin: EffectOrigin::Static {
+            granted_at: Some(at),
+        },
+        ..printed(ts)
+    };
+    let resolved = |ts: Timestamp| resolved_effect(ts, Layer::L6, only(&[1]), grant_marker());
+    for ts in [t(0), t(2), t(u64::MAX)] {
+        refuse(
+            &mut s,
+            printed(ts),
+            g(),
+            &StateError::TimestampNotIssued(ts),
+        );
+        refuse(
+            &mut s,
+            resolved(ts),
+            None,
+            &StateError::TimestampNotIssued(ts),
+        );
+        refuse_group(
+            &mut s,
+            &NoWorld,
+            vec![(resolved(ts), None)],
+            &StateError::TimestampNotIssued(ts),
+        );
+        // A later part with an unissued timestamp: nothing of the earlier part commits.
+        refuse_group(
+            &mut s,
+            &NoWorld,
+            vec![(printed(t1), g()), (resolved(ts), None)],
+            &StateError::TimestampNotIssued(ts),
+        );
+        // An issued effect timestamp with an unissued granting timestamp.
+        refuse(
+            &mut s,
+            granted(t1, ts),
+            g(),
+            &StateError::TimestampNotIssued(ts),
+        );
+        refuse_group(
+            &mut s,
+            &NoWorld,
+            vec![(granted(t1, ts), g())],
+            &StateError::TimestampNotIssued(ts),
+        );
+    }
+    assert_eq!(s.ids().effect.last_issued(), 0);
+    assert!(s.effect_generators().is_empty());
+    // Issued timestamps are accepted, including one shared by every part of a group.
+    assert_eq!(s.register_effect(granted(t1, t1), g()), Ok(e(1)));
+    let t2 = s.stamp_resolved_effect().unwrap();
+    assert_eq!(
+        s.register_effect_group(
+            &NoWorld,
+            vec![
+                (resolved(t2), None),
+                (printed(t2), g()),
+                (granted(t2, t1), g())
+            ]
+        ),
+        Ok(vec![e(2), e(3), e(4)])
+    );
+    assert_eq!(s.register_effect(resolved(t1), None), Ok(e(5)));
+    check_round_trip(&s);
+}
+
+// REQ-LAYER-001, REQ-CORE-002 (gate 06-turn F26): CR 611.2c: register_effect refuses a resolved
+// effect whose affected set is a selector (it would match objects that start matching later),
+// leaving the state, its hash and the effect generator unchanged; it accepts a resolved effect
+// with a locked set and, CR 611.3a, a static effect with a selector.
+#[test]
+fn register_effect_refuses_unlocked_resolved_selector() {
+    let mut s = GameState::new(7, 2, 20).unwrap();
+    let t1 = s.stamp_object(o(1), StampReason::EntersZone).unwrap();
+    let creatures = || Affected::Selector(selector(PredicateAST::IsCreature));
+    refuse(
+        &mut s,
+        resolved_effect(t1, Layer::L6, creatures(), grant_marker()),
+        None,
+        &StateError::UnlockedResolvedSelector,
+    );
+    assert_eq!(s.ids().effect.last_issued(), 0);
+    assert!(s.effects().is_empty());
+    assert!(s.effect_generators().is_empty());
+    // A resolved effect with its locked set.
+    assert_eq!(
+        s.register_effect(
+            resolved_effect(t1, Layer::L6, only(&[1]), grant_marker()),
+            None
+        ),
+        Ok(e(1))
+    );
+    // CR 611.3a: a static effect keeps its selector.
+    assert_eq!(
+        s.register_effect(
+            static_effect(o(1), t1, Layer::L6, creatures(), grant_marker()),
+            Some(GeneratingAbility::new(o(1), ability("granter")))
+        ),
+        Ok(e(2))
+    );
+    assert_eq!(s.effects().get(e(2)).unwrap().affected, creatures());
+    check_round_trip(&s);
+    let display = StateError::UnlockedResolvedSelector.to_string();
+    assert!(display.contains("register_effect_group"), "{display}");
+    assert!(display.contains("Affected::Objects"), "{display}");
+}
+
+// REQ-LAYER-001 (gate 06-turn F26): CR 611.2c: register_effect_group locks a resolved
+// selector to the objects matching it when the effect begins: with only A a creature, the
+// effect reaches A; once B becomes a creature, the effect still does not reach B.
+#[test]
+fn register_effect_group_locks_resolved_selector() {
+    let mut s = GameState::new(9, 2, 20).unwrap();
+    let ts = s.stamp_resolved_effect().unwrap();
+    let only_a = Board::new(&[1], &[2]);
+    let ids = s
+        .register_effect_group(
+            &only_a,
+            vec![(
+                resolved_effect(
+                    ts,
+                    Layer::L6,
+                    Affected::Selector(selector(PredicateAST::IsCreature)),
+                    grant_marker(),
+                ),
+                None,
+            )],
+        )
+        .unwrap();
+    assert_eq!(s.effects().get(ids[0]).unwrap().affected, only(&[1]));
+    assert!(has_marker(&s, &only_a, 1));
+    assert!(!has_marker(&s, &only_a, 2));
+    // B becomes a creature later.
+    let both = Board::new(&[1, 2], &[]);
+    assert!(has_marker(&s, &both, 1));
+    assert!(!has_marker(&s, &both, 2));
+    check_round_trip(&s);
+}
+
+// REQ-CORE-002 (gate 06-turn F27): CR 613.7a: restamp_static_effects refuses a new object
+// timestamp that is 0 or above the last issued one, changing nothing (state, generators,
+// hash); a valid restamp from 1 to 2 at watermark 2 updates the printed effect and the state
+// round-trips.
+#[test]
+fn restamp_static_effects_refuses_unissued_timestamp() {
+    let mut s = GameState::new(10, 2, 20).unwrap();
+    let t1 = s.stamp_object(o(1), StampReason::EntersZone).unwrap();
+    let id = s
+        .register_effect(
+            static_effect(o(1), t1, Layer::L6, only(&[1]), grant_marker()),
+            Some(GeneratingAbility::new(o(1), ability("granter"))),
+        )
+        .unwrap();
+    let t2 = s.stamp_object(o(1), StampReason::EntersZone).unwrap();
+    assert_eq!(t2, t(2));
+    for bad in [t(3), t(0), t(u64::MAX)] {
+        let before = s.clone();
+        let h = s.state_hash();
+        assert_eq!(
+            s.restamp_static_effects(o(1), t1, bad),
+            Err(StateError::TimestampNotIssued(bad))
+        );
+        assert_eq!(s, before);
+        assert_eq!(s.state_hash(), h);
+        assert_eq!(s.effects().get(id).unwrap().timestamp, t1);
+    }
+    assert_eq!(s.restamp_static_effects(o(1), t1, t2), Ok(()));
+    assert_eq!(s.effects().get(id).unwrap().timestamp, t2);
+    assert_eq!(s.ids().timestamp.last_issued(), 2);
+    check_round_trip(&s);
+}
+
+// REQ-CORE-001, REQ-NFR-006 (gate 06-turn F65): CR 613.7d: a state with 2,000 object
+// timestamps (and counters and stickers) decodes to an equal ledger built once from the
+// validated entries, with the same hash.
+#[test]
+fn ledger_restore_of_many_object_stamps() {
+    let mut s = GameState::new(11, 2, 20).unwrap();
+    for n in (1..=2_000).rev() {
+        s.stamp_object(o(n), StampReason::EntersZone).unwrap();
+    }
+    s.stamp_counters(CounterHolder::Object(o(7)), "test.counter_a")
+        .unwrap();
+    s.stamp_counters(CounterHolder::Player(p(2)), "test.counter_p")
+        .unwrap();
+    s.stamp_sticker(o(7), 3).unwrap();
+    assert_eq!(s.timestamps().object_timestamp(o(2_000)), Some(t(1)));
+    let back = GameState::deserialize(&s.serialize().unwrap()).unwrap();
+    assert_eq!(back.timestamps(), s.timestamps());
+    assert_eq!(back.timestamps().object_timestamp(o(1)), Some(t(2_000)));
+    check_round_trip(&s);
 }

@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use fineprint_base::ids::{EffectId, PlayerId};
+use fineprint_base::ids::{EffectId, PlayerId, Timestamp};
 
 use super::MAX_PLAYERS;
 use crate::layers::LayerError;
@@ -53,6 +53,15 @@ pub enum StateError {
     AlreadyLinked(EffectId),
     /// The effect id is a registered continuous effect (its link is made when it is registered).
     EffectRegistered(EffectId),
+    /// The timestamp was not issued by this state's timestamp generator: it is 0 or above the
+    /// last issued timestamp (REQ-CORE-002).
+    TimestampNotIssued(Timestamp),
+    /// A resolved effect with a selector as its affected set was given to
+    /// `GameState::register_effect`, which does not lock selectors (CR 611.2c: the affected
+    /// set of a resolved effect is fixed when it begins). Register it through
+    /// `GameState::register_effect_group`, which locks it, or pass the locked set as
+    /// `Affected::Objects`.
+    UnlockedResolvedSelector,
 }
 
 impl fmt::Display for StateError {
@@ -91,6 +100,13 @@ impl fmt::Display for StateError {
             StateError::EffectRegistered(id) => {
                 write!(f, "effect {} is a registered continuous effect", id.get())
             }
+            StateError::TimestampNotIssued(t) => {
+                write!(f, "timestamp {} was not issued by this state", t.get())
+            }
+            StateError::UnlockedResolvedSelector => f.write_str(
+                "a resolved effect's selector must be locked (CR 611.2c): register it with \
+                 register_effect_group or pass the locked set as Affected::Objects",
+            ),
         }
     }
 }
