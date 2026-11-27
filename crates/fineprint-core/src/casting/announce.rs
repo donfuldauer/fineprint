@@ -162,8 +162,10 @@ pub trait CastState: Transactional {
     /// Besides the call with the player's real choices, the procedure probes this method before
     /// the costs are chosen, with a one-mode list and a probe [`CostChoice`] (an alternative cost,
     /// an ascending additional-cost subset, X at the low end of its range, no symbol options, no
-    /// harmonize creature), to decide which modes can be chosen (CR 700.2a, 601.2c; CR-012). It
-    /// must stay pure (R3).
+    /// harmonize creature), to decide which modes can be chosen (CR 700.2a, 601.2c; CR-013): every
+    /// alternative-cost choice times every additional-cost subset, at most 4096 calls per mode,
+    /// and no probe call at all for a mode whose product exceeds that budget. It must stay pure
+    /// (R3).
     fn target_slots(
         &self,
         req: &CastRequest,
@@ -385,8 +387,11 @@ type Stop = (CastStep, StopReason);
 /// Steps 1-5 on the live state of `txn`: the stack object and proposal, or the failed step.
 ///
 /// Step 2 asks `CHOOSE_MODES` (modal only), then `CHOOSE_COSTS_AND_X`; when the cost spec
-/// lists an alternative or additional cost, a second `CHOOSE_COSTS_AND_X` asks the symbols of
-/// the costs chosen in the first (CR 601.2b, 118.9; CR-011, see [`choose_costs`]).
+/// lists an alternative or additional cost, a second `CHOOSE_COSTS_AND_X` follows only when
+/// [`CastState::symbol_slots`] returns slots for the costs chosen in the first, and asks those
+/// symbols (CR 601.2b, 118.9; CR-011, see [`choose_costs`]). A choice whose costs carry no such
+/// symbol (for example a symbol-free alternative cost) gets one request, so callers must not
+/// expect a fixed two-request sequence.
 fn run<S: CastState>(
     txn: &mut Transactions<S>,
     ctx: &mut ChoiceContext<'_>,
@@ -724,44 +729,51 @@ fn request(
     }
 }
 
-/// The most additional costs for which every subset is probed (CR-012).
-const PROBE_ALL_SUBSETS_UP_TO: usize = 6;
-/// The most additional-cost subsets probed per alternative-cost choice (CR-012): `2^6`.
-const PROBE_SUBSETS_MAX: usize = 64;
+/// The most [`CastState::target_slots`] calls the legality check of one mode may make before the
+/// costs are chosen (CR-013, R12: untrusted card data cannot force more).
+const PROBE_BUDGET: usize = 4096;
 
-/// The additional-cost subsets [`mode_legal`] probes, in probe order (CR-012): with at most
-/// [`PROBE_ALL_SUBSETS_UP_TO`] additional costs, every subset in ascending bit-mask order;
-/// otherwise none, each one alone (ascending) and all, keeping at most [`PROBE_SUBSETS_MAX`]
-/// subsets (the singles are cut so that "all" is still probed). Each subset is ascending.
-fn probe_subsets(n: usize) -> Vec<Vec<u32>> {
-    let indices: Vec<u32> = (0..n).filter_map(|i| u32::try_from(i).ok()).collect();
-    if n <= PROBE_ALL_SUBSETS_UP_TO {
-        return (0..1usize << n)
-            .map(|mask| {
-                indices
-                    .iter()
-                    .copied()
-                    .filter(|&i| mask & (1usize << i) != 0)
-                    .collect()
-            })
-            .collect();
+/// The number of probes of the exhaustive product for `alternatives` alternative costs and
+/// `additional` additional costs, `(alternatives + 1) * 2^additional`, when it fits the
+/// [`PROBE_BUDGET`] (CR-013); `None` when it exceeds it. Computed without overflow: a shift by
+/// `usize::BITS - 1` or more, or an overflowing product, is over budget.
+fn probe_count(alternatives: usize, additional: usize) -> Option<usize> {
+    let bits = usize::try_from(usize::BITS).unwrap_or(usize::MAX);
+    if additional >= bits.saturating_sub(1) {
+        return None;
     }
-    let mut out: Vec<Vec<u32>> = vec![Vec::new()];
-    out.extend(indices.iter().take(PROBE_SUBSETS_MAX - 2).map(|&i| vec![i]));
-    out.push(indices);
-    out
+    alternatives
+        .checked_add(1)
+        .and_then(|a| a.checked_mul(1usize << additional))
+        .filter(|&p| p <= PROBE_BUDGET)
 }
 
-/// Whether mode `mode` (original index) can be chosen (CR 700.2a): some cost configuration
-/// gives every target slot of the mode alone at least its minimum of legal candidates (CR 601.2c:
-/// a spell may require targets, or alternative targets, only when an alternative or additional
-/// cost was chosen; CR-012).
+/// The additional-cost subset of bit mask `mask` over `n` additional costs: the indices `i < n`
+/// whose bit is set, ascending (CR-013).
+fn subset_from_mask(n: usize, mask: usize) -> Vec<u32> {
+    (0..n)
+        .filter(|&i| mask & (1usize << i) != 0)
+        .filter_map(|i| u32::try_from(i).ok())
+        .collect()
+}
+
+/// Whether mode `mode` (original index) can be chosen (CR 700.2a: a mode that would be illegal
+/// can't be chosen): some cost configuration gives every target slot of the mode alone at least
+/// its minimum of legal candidates (CR 601.2c: a spell may require targets, or alternative
+/// targets, only when an alternative or additional cost was chosen; CR-013, amending CR-012).
 ///
-/// Probes, in order and stopping at the first success: the normal cost then each alternative
-/// cost of `cost_spec(req, &[mode])`, each combined with the subsets of [`probe_subsets`], X at
-/// the low end of its range, no symbol options and no harmonize creature. At most
-/// `(alternatives + 1) * 64` calls of [`CastState::target_slots`]; a spell with no alternative
-/// or additional cost makes exactly one. The real choices are checked again at step 3.
+/// When the exhaustive product fits the [`PROBE_BUDGET`] ([`probe_count`]), it probes, in order
+/// and stopping at the first success: the normal cost then each alternative cost of
+/// `cost_spec(req, &[mode])` (outer), each combined with EVERY additional-cost subset in
+/// ascending bit-mask order (inner, the empty subset first, [`subset_from_mask`]), X at the low
+/// end of its range, no symbol options and no harmonize creature. That is at most
+/// [`PROBE_BUDGET`] calls of [`CastState::target_slots`]; a spell with no alternative or
+/// additional cost makes exactly one.
+///
+/// Over the budget no legality claim can be proved either way within it, so the mode is offered
+/// without any call: the CR 601.2c check of step 3 with the costs the player actually chose
+/// rolls the cast back (CR 601.2, 734.1) with [`StopReason::MissingTarget`] if that choice leaves
+/// a slot without enough legal candidates. No legal mode is ever omitted.
 fn mode_legal<S: CastState>(
     state: &S,
     req: &CastRequest,
@@ -769,15 +781,20 @@ fn mode_legal<S: CastState>(
     mode: u32,
 ) -> bool {
     let spec = state.cost_spec(req, &[mode]);
+    let n = spec.additional_costs.len();
+    if probe_count(spec.alternative_costs.len(), n).is_none() {
+        // CR-013: over the budget, offered; step 3 decides (CR 601.2c, 734.1).
+        return true;
+    }
     let alternatives = core::iter::once(None)
         .chain((0..spec.alternative_costs.len()).filter_map(|i| u32::try_from(i).ok().map(Some)));
-    let subsets = probe_subsets(spec.additional_costs.len());
     let x = spec.x_range.map(|(lo, _)| lo);
     for alternative in alternatives {
-        for additional in &subsets {
+        // `n < usize::BITS - 1` was checked by `probe_count`.
+        for mask in 0..1usize << n {
             let probe = CostChoice {
                 alternative,
-                additional: additional.clone(),
+                additional: subset_from_mask(n, mask),
                 x,
                 symbol_options: Vec::new(),
                 harmonize: None,
@@ -794,8 +811,9 @@ fn mode_legal<S: CastState>(
 }
 
 /// CR 601.2b, 700.2a, 700.2d: asks the modes among the legal ones ([`mode_legal`]: legal under
-/// at least one probed cost configuration) and returns the chosen ORIGINAL indices, ascending;
-/// `None` when too few modes can be chosen.
+/// at least one cost configuration of the exhaustive probe, or offered because the probe would
+/// exceed the [`PROBE_BUDGET`]; CR-013) and returns the chosen ORIGINAL indices, ascending; `None`
+/// when too few modes can be chosen.
 fn ask_modes<S: CastState>(
     state: &S,
     ctx: &mut ChoiceContext<'_>,
@@ -884,8 +902,10 @@ fn ask_modes<S: CastState>(
 /// When `spec` lists neither an alternative nor an additional cost, one `CHOOSE_COSTS_AND_X`
 /// (if it offers anything) carries everything, including the normal cost's symbol slots.
 /// Otherwise the first `CHOOSE_COSTS_AND_X` carries no symbol slot; [`CastState::symbol_slots`]
-/// then gives the slots of the costs that will be paid and, when there are any, a second
+/// then gives the slots of the costs that will be paid and, only when it returns any, a second
 /// `CHOOSE_COSTS_AND_X` asks only them; its options replace the first answer's (empty) ones.
+/// When it returns none (for example a symbol-free alternative cost), the first request is the
+/// only one.
 fn choose_costs<S: CastState>(
     state: &S,
     ctx: &mut ChoiceContext<'_>,
@@ -1287,8 +1307,16 @@ pub(super) mod tests_support {
         super::mode_answers_capped(k, min, max, repeats)
     }
 
-    /// The additional-cost subsets the mode-legality probes use (CR-012).
-    pub(crate) fn probe_subsets(n: usize) -> Vec<Vec<u32>> {
-        super::probe_subsets(n)
+    /// The per-mode probe budget (CR-013).
+    pub(crate) const PROBE_BUDGET: usize = super::PROBE_BUDGET;
+
+    /// The exhaustive probe count when within the budget, else `None` (CR-013).
+    pub(crate) fn probe_count(alternatives: usize, additional: usize) -> Option<usize> {
+        super::probe_count(alternatives, additional)
+    }
+
+    /// The additional-cost subset of a bit mask, ascending (CR-013).
+    pub(crate) fn subset_from_mask(n: usize, mask: usize) -> Vec<u32> {
+        super::subset_from_mask(n, mask)
     }
 }

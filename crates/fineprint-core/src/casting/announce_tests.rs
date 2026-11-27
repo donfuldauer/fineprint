@@ -1776,7 +1776,7 @@ fn req_net_003_answer_counters() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Gate 06-turn round 5 (REQ-CAST-001; CR 700.2a, 601.2b, 601.2c, 601.2d, 118.9; CR-011, CR-012)
+// Gate 06-turn rounds 5-6 (REQ-CAST-001; CR 700.2a, 601.2b-601.2d, 118.9; CR-011 to CR-013)
 // ---------------------------------------------------------------------------------------------
 
 /// The answers of `pending` that end the session, and every request asked on the way.
@@ -1865,8 +1865,8 @@ fn req_cast_001_mode_legal_through_alternative_cost() {
     );
 }
 
-/// REQ-CAST-001, CR 700.2a, 734.1 (CR-012): when no probed cost configuration gives the only
-/// mode its target, the cast rolls back with `NoLegalMode` and the identical hash.
+/// REQ-CAST-001, CR 700.2a, 734.1 (CR-012, CR-013): when no probed cost configuration gives the
+/// only mode its target, the cast rolls back with `NoLegalMode` and the identical hash.
 #[test]
 fn req_cast_001_mode_with_no_legal_probe_rolls_back() {
     let mut toy = modes_toy(1).with_rules(&[targeting(1, 1, "SHROUD", to(20))]);
@@ -1926,15 +1926,67 @@ fn req_cast_001_mode_legal_through_additional_subset() {
     }
 }
 
-/// REQ-CAST-001, CR 700.2a (CR-012): with 7 additional costs the probes are none, each alone and
-/// all; a mode legal only through a pair is not offered, one legal through all of them is.
-#[test]
-fn req_cast_001_mode_probes_with_seven_additional_costs() {
+/// The additional-cost subset of `mask` over `n` costs, ascending (written out independently of
+/// the procedure's helper).
+fn mask_subset(n: u32, mask: u32) -> Vec<u32> {
+    (0..n).filter(|i| mask >> i & 1 == 1).collect()
+}
+
+/// The (alternative, additional) part of every recorded `target_slots` call, asserting each one
+/// probes mode 0 alone with the CR-012 probe fields.
+fn probe_list(toy: &Toy) -> Vec<(Option<u32>, Vec<u32>)> {
+    toy.calls
+        .take()
+        .into_iter()
+        .map(|(m, c)| {
+            assert_eq!(m, vec![0]);
+            assert!(c.symbol_options.is_empty() && c.harmonize.is_none());
+            (c.alternative, c.additional)
+        })
+        .collect()
+}
+
+/// A one-mode toy with `alternatives` alternative and `additional` additional costs whose mode 0
+/// has one slot without a candidate unless a `cost_mode_slots` entry gives it one.
+fn budget_toy(alternatives: usize, additional: usize) -> Toy {
     let mut toy = modes_toy(1);
-    toy.costs.additional_costs = (0..7).map(|i| format!("add{i}")).collect();
+    toy.costs.alternative_costs = (0..alternatives).map(|i| format!("alt{i}")).collect();
+    toy.costs.additional_costs = (0..additional).map(|i| format!("add{i}")).collect();
     toy.mode_slots.insert(0, vec![spec(1, 1, vec![])]);
+    toy
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): with 7 additional costs a mode legal only through
+/// the pair [2, 5] is offered; the probes before the success are exactly the ascending-mask
+/// subsets up to {2, 5} (mask 36), with the normal cost.
+#[test]
+fn req_cast_001_mode_legal_through_intermediate_pair_of_seven() {
+    let mut toy = budget_toy(0, 7);
     toy.cost_mode_slots
-        .insert((None, vec![0, 1], 0), vec![spec(1, 1, vec![to(21)])]);
+        .insert((None, vec![2, 5], 0), vec![spec(1, 1, vec![to(21)])]);
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(r.choice_type, ChoiceType::ChooseModes);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let expected: Vec<(Option<u32>, Vec<u32>)> =
+        (0..=36).map(|mask| (None, mask_subset(7, mask))).collect();
+    assert_eq!(expected.last(), Some(&(None, vec![2, 5])));
+    assert_eq!(probe_list(&toy), expected);
+    // Chosen with that pair it is announced with the target.
+    let answers = [
+        ChoiceResponse::SelectModes { modes: vec![0] },
+        costs(None, vec![2, 5], None),
+        select_targets(vec![vec![to(21)]]),
+    ];
+    let proposal = announced(done(&toy, &spell(), &answers).1);
+    assert_eq!(proposal.targets, vec![vec![to(21)]]);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2, 734.1 (CR-013): 1 alternative and 7 additional costs with no
+/// legal probe: exactly 2 * 128 = 256 calls, alternative-major and mask-minor, then `NoLegalMode`
+/// at step Choices with the identical hash and priority player.
+#[test]
+fn req_cast_001_mode_no_legal_probe_of_seven_rolls_back() {
+    let toy = budget_toy(1, 7);
     let (after, out) = done(&toy, &spell(), &[]);
     assert_rolled_back(
         &toy,
@@ -1943,40 +1995,135 @@ fn req_cast_001_mode_probes_with_seven_additional_costs() {
         CastStep::Choices,
         StopReason::NoLegalMode,
     );
-    let subsets: Vec<Vec<u32>> = toy
-        .calls
-        .take()
-        .into_iter()
-        .map(|(_, c)| c.additional)
-        .collect();
-    let mut expected: Vec<Vec<u32>> = vec![vec![]];
-    expected.extend((0..7).map(|i| vec![i]));
-    expected.push((0..7).collect());
-    assert_eq!(subsets, expected);
-    // Legal through all seven: offered.
+    let mut expected: Vec<(Option<u32>, Vec<u32>)> = Vec::new();
+    for alternative in [None, Some(0)] {
+        expected.extend((0..128).map(|mask| (alternative, mask_subset(7, mask))));
+    }
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 256);
+    assert_eq!(probes, expected);
+}
+
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): the budget boundary. 12 additional costs and no
+/// alternative (4096 probes) are exhaustive: a mode legal only through the full set (mask 4095)
+/// is offered after exactly 4096 calls. 3 alternatives and 10 additional costs (4 * 1024 = 4096)
+/// are exhaustive too.
+#[test]
+fn req_cast_001_mode_probe_budget_exhaustive_at_4096() {
+    let mut toy = budget_toy(0, 12);
     toy.cost_mode_slots
-        .insert((None, (0..7).collect(), 0), vec![spec(1, 1, vec![to(21)])]);
+        .insert((None, (0..12).collect(), 0), vec![spec(1, 1, vec![to(21)])]);
     let r = pending(&toy, &spell(), &[]);
     assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[0], (None, vec![]));
+    assert_eq!(probes[4095], (None, (0..12).collect::<Vec<u32>>()));
+
+    let mut toy = budget_toy(3, 10);
+    toy.cost_mode_slots.insert(
+        (Some(2), (0..10).collect(), 0),
+        vec![spec(1, 1, vec![to(21)])],
+    );
+    let r = pending(&toy, &spell(), &[]);
+    assert_eq!(mode_labels(&r), strs(&["m0"]));
+    let probes = probe_list(&toy);
+    assert_eq!(probes.len(), 4096);
+    assert_eq!(probes[1024], (Some(0), vec![]));
+    assert_eq!(probes[4095], (Some(2), (0..10).collect::<Vec<u32>>()));
+    // Without any legal probe the same shape is rejected after exactly 4096 calls.
+    let toy = budget_toy(3, 10);
+    let (after, out) = done(&toy, &spell(), &[]);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Choices,
+        StopReason::NoLegalMode,
+    );
+    assert_eq!(probe_list(&toy).len(), 4096);
 }
 
-/// REQ-CAST-001 (CR-012): the probe subsets stay within 64 per alternative choice; with at most
-/// six additional costs every subset is probed in ascending bit-mask order.
+/// REQ-CAST-001, CR 700.2a, 601.2c (CR-013): over the budget (13 additional costs: 8192;
+/// 1 alternative and 12: 8192; 3 alternatives and 11: 8192; 70 additional costs: shift beyond
+/// the word size) the mode is offered with zero `target_slots` calls from the mode check, and
+/// nothing panics.
 #[test]
-fn req_cast_001_probe_subset_bound() {
-    use super::announce::tests_support as ts;
-    assert_eq!(ts::probe_subsets(0), vec![Vec::<u32>::new()]);
-    assert_eq!(ts::probe_subsets(6).len(), 64);
-    assert_eq!(ts::probe_subsets(6)[5], vec![0, 2]);
-    assert_eq!(ts::probe_subsets(7).len(), 9);
-    let big = ts::probe_subsets(100);
-    assert_eq!(big.len(), 64);
-    assert_eq!(big[0], Vec::<u32>::new());
-    assert_eq!(big[62], vec![61]);
-    assert_eq!(big[63], (0..100).collect::<Vec<u32>>());
+fn req_cast_001_mode_probe_over_budget_offered_without_calls() {
+    for (alternatives, additional) in [(0, 13), (1, 12), (3, 11), (0, 70), (0, 200)] {
+        let toy = budget_toy(alternatives, additional);
+        let r = pending(&toy, &spell(), &[]);
+        assert_eq!(
+            r.choice_type,
+            ChoiceType::ChooseModes,
+            "{alternatives} + {additional}"
+        );
+        assert_eq!(mode_labels(&r), strs(&["m0"]));
+        assert!(
+            toy.calls.take().is_empty(),
+            "{alternatives} alternatives, {additional} additional: no probe call"
+        );
+    }
 }
 
-/// REQ-CAST-001, CR 700.2a (CR-012): a spell without alternative or additional costs makes
+/// REQ-CAST-001, CR 601.2c, 601.2, 734.1 (CR-013): a mode offered over the budget whose real
+/// cost choice leaves no legal target goes past the mode request and rolls back at step Targets
+/// with `MissingTarget`, the identical hash and priority player; the only `target_slots` call is
+/// the step-3 one with the real choice.
+#[test]
+fn req_cast_001_mode_over_budget_rolls_back_at_targets() {
+    let toy = budget_toy(0, 13);
+    let answers = [
+        ChoiceResponse::SelectModes { modes: vec![0] },
+        costs(None, vec![3], None),
+    ];
+    let asked = requests_until_done(&toy, &spell(), &answers);
+    assert_eq!(asked[0].choice_type, ChoiceType::ChooseModes);
+    assert_eq!(asked[1].choice_type, ChoiceType::ChooseCostsAndX);
+    toy.calls.take();
+    let (after, out) = done(&toy, &spell(), &answers);
+    assert_rolled_back(
+        &toy,
+        &after,
+        &out,
+        CastStep::Targets,
+        StopReason::MissingTarget { slot: 0 },
+    );
+    assert_eq!(probe_list(&toy), vec![(None, vec![3])]);
+}
+
+/// REQ-CAST-001, REQ-CORE-001 (CR-013): the budget arithmetic is exact at the boundary and never
+/// overflows; subsets come out ascending in bit order.
+#[test]
+fn req_cast_001_probe_budget_arithmetic() {
+    use super::announce::tests_support as ts;
+    assert_eq!(ts::PROBE_BUDGET, 4096);
+    assert_eq!(ts::probe_count(0, 0), Some(1));
+    assert_eq!(ts::probe_count(0, 12), Some(4096));
+    assert_eq!(ts::probe_count(0, 13), None);
+    assert_eq!(ts::probe_count(1, 11), Some(4096));
+    assert_eq!(ts::probe_count(1, 12), None);
+    assert_eq!(ts::probe_count(3, 10), Some(4096));
+    assert_eq!(ts::probe_count(3, 11), None);
+    assert_eq!(ts::probe_count(4095, 0), Some(4096));
+    assert_eq!(ts::probe_count(4096, 0), None);
+    assert_eq!(ts::probe_count(usize::MAX, 0), None);
+    assert_eq!(ts::probe_count(usize::MAX, 1), None);
+    assert_eq!(ts::probe_count(0, 62), None);
+    assert_eq!(ts::probe_count(0, 63), None);
+    assert_eq!(ts::probe_count(0, 64), None);
+    assert_eq!(ts::probe_count(0, usize::MAX), None);
+    assert_eq!(ts::subset_from_mask(0, 0), Vec::<u32>::new());
+    assert_eq!(ts::subset_from_mask(7, 36), vec![2, 5]);
+    assert_eq!(ts::subset_from_mask(6, 5), vec![0, 2]);
+    assert_eq!(ts::subset_from_mask(3, 0b1111), vec![0, 1, 2]);
+    assert_eq!(
+        ts::subset_from_mask(12, 4095),
+        (0..12).collect::<Vec<u32>>()
+    );
+}
+
+/// REQ-CAST-001, CR 700.2a (CR-012, CR-013): a spell without alternative or additional costs makes
 /// exactly one `target_slots` call per mode, with the default cost choice.
 #[test]
 fn req_cast_001_mode_probe_single_call_without_costs() {

@@ -39,9 +39,13 @@
 //!    half, face, cast mode) are already in [`CastKind`] (CR 709.3, 712.8b, 716.3a, 719.3a,
 //!    721.3a, 708.4).
 //! 4. **Choices** (CR 601.2b, 700.2a, 700.2d): `CHOOSE_MODES` (a mode is offered when some
-//!    cost configuration gives it its targets, CR-012), then `CHOOSE_COSTS_AND_X`; when the spell
-//!    has an alternative or additional cost, a second `CHOOSE_COSTS_AND_X` asks the hybrid and
-//!    Phyrexian symbols of the costs chosen ([`CastState::symbol_slots`], CR 118.9; CR-011).
+//!    cost configuration gives it its targets, or when probing every configuration would exceed
+//!    the per-mode budget, CR-012, CR-013), then `CHOOSE_COSTS_AND_X`; when the spell has an
+//!    alternative or additional cost, a second `CHOOSE_COSTS_AND_X` is sent only when
+//!    [`CastState::symbol_slots`] returns slots for the costs selected in the first, and asks
+//!    those hybrid and Phyrexian symbols (CR 118.9; CR-011). A selection whose costs have no such
+//!    symbol (for example a symbol-free alternative cost) gets one request only, so replay and UI
+//!    callers must not expect a fixed two-request sequence.
 //! 5. **Targets** (CR 601.2c, 115.2-115.6): `CHOOSE_TARGETS`.
 //! 6. **Division** (CR 601.2d): `DIVIDE_VALUE`.
 //! 7. **Legality** (CR 601.2e): every applicable prohibition is checked against the fully
