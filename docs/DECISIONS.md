@@ -10830,3 +10830,81 @@ placeholder to a valid AST; each change above is traced to such content, and gol
 content are unchanged.
 **Alternatives.** Keeping placeholders through a compatibility encoding (rejected: they are not
 valid ASTs and the brief forbids them).
+
+## #48 FP-046 — Starting player draw
+
+**Decision.** With no `StartOptions::starting_player` the starting player is
+`turn_order[next_bounded(n)]` from the state's PRNG (exactly one call; none when the option is
+set). The chooser of later games of a match, Archenemy (CR 103.1b), Power Play (CR 103.1c),
+shared team turns (CR 103.1a), commander, companion and sticker steps (CR 103.2) are out of scope;
+`StartOptions::starting_player` is the hook for them.
+**Rationale.** CR 103.1 allows any mutually agreeable method in game 1, so a seeded draw is
+deterministic (R3) and replayable.
+**Alternatives.** A choice request to a player (rejected: CR 103.1 gives game 1 no chooser).
+
+## #48 FP-046 — GameStartHost seam
+
+**Decision.** `turn::start::run_game_start` is written against a `GameStartHost` trait (library
+order, hand, draw, return-to-library, put-on-bottom, set starting player, set life, pregame
+eligibility and actions); the procedure holds no state beyond its locals and never mutates
+`GameState` except through the PRNG.
+**Rationale.** Mirrors "#46 FP-045 — TurnHost seam": zones and the game object arrive in later
+units; `set_starting_player` is what `TurnHost::starting_player()` reports.
+**Alternatives.** Mutating `GameState` directly (rejected: it has no zones or libraries yet).
+
+## #48 FP-046 — Zero-hand mulligan limit
+
+**Decision.** When the counted mulligans (`mulligan_to_bottom`) reach the player's starting hand
+size (CR 103.5, last sentence), or exceed the cards actually in hand, no `MULLIGAN_DECISION` is
+asked: the player keeps and the whole hand is put on the library bottom in ascending id order,
+so the opening hand is empty. The mulligan request's mulligan decision uses the `Payload`
+validator rule with min = max = the bottom count.
+**Rationale.** The order of a forced bottom has no player choice; ascending ids is deterministic.
+The extra "exceeds the hand" guard keeps a short library from producing an invalid default.
+**Alternatives.** Asking with a one-answer request (rejected: no decision exists).
+
+## #48 FP-046 — Free first mulligan condition
+
+**Decision.** The free first mulligan applies iff the format flag
+`free_first_mulligan_multiplayer` is set and `player_count > 2`; two-player Brawl and Two-Headed
+Giant specifics are not modelled.
+**Rationale.** CR 103.5c names "a multiplayer game and any Brawl game"; core has no Brawl
+variant flag in the brief's inputs and the flag exists for the format to opt in.
+**Alternatives.** Applying it to any format with the flag set (rejected: two-player games are
+not multiplayer).
+
+## #48 FP-046 — Pregame action as one subset ask
+
+**Decision.** Each player with eligible cards gets exactly one `PREGAME_ACTION` request (min 0,
+max = number of eligible cards) answered with a subset in the order to take the actions; an empty
+answer performs nothing, and a player without eligible cards is not asked.
+**Rationale.** CR 103.6 lets the player take "any such actions in any order"; one ask keeps the
+protocol small and the SRS 15.3 row is `SUBMIT_PREGAME` with eligible cards.
+**Alternatives.** One ask per card or per action (rejected: more round trips, no extra
+information).
+
+## #48 FP-046 — Order of PRNG calls in the game start
+
+**Decision.** One `next_bounded(n)` (unless the starting player is given), one shuffle per player
+in stored turn order, then per mulligan round the shuffles of the players who took a mulligan in
+declaration order (starting player first, then turn order). Opening draws, declarations and
+bottoming use no randomness.
+**Rationale.** A fixed seed must give fixed hands and library order; independent tests compute
+golden values from this order.
+**Alternatives.** Shuffling in declaration order at the start (rejected: the stored order is
+independent of who starts).
+
+## #48 FP-046 — Spec-test judgement calls (Independent Tester)
+
+**Decision.** The black-box spec tests (`tests/spec_turn_start*.rs`) assert an invalid starting
+player as any `ChoiceSession::start` error (the brief said a `Procedure`-style error), and do not
+test a zero-player host (`GameState::new(0)` is rejected, so no such host can be built) or a
+wrong answer variant reaching the procedure (`ChoiceSession::submit` validates the response type
+first; rejection is tested through `validate` and `submit`). The CR 103.5c "first mulligan shows
+`to_bottom == 0`" check covers both the first ask (0 taken) and the ask after the first mulligan
+(1 taken); the ask after the second shows 1.
+**Rationale.** These follow the binding "specified behaviour" of the brief and the existing
+`GameState` and choice-session contracts; the unreachable branches remain defensive code.
+**Alternatives.** Exposing `ChoiceContext::new` to reach the defensive branches (rejected:
+`src/choice` is outside #48's owned paths and the branches are unreachable through the public
+protocol).
