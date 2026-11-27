@@ -247,3 +247,36 @@ chosen for it" and "a spell may require alternative targets only if an alternati
 cost was chosen for it." A mode whose only legal targets come through an alternative cost was
 removed (and the cast rolled back with `NoLegalMode` when it was the only mode). Gate 06-turn round 5.
 Consumers affected: `casting::announce`; `CastState::target_slots` implementors (extra calls only).
+
+## CR-013 — CastState (REQ-CAST-001): mode legality probes every additional-cost subset within a budget (amends CR-012)
+Requested by: #50 gate 06-turn (round 6, CodeRabbit thread 4718412705 re-opened)   Kind: additive   Status: open
+Change: no signature or type changes. Amends the probe set of CR-012. `casting::announce` probes the host
+for a mode (original index `m`) over the Cartesian product of {the normal cost, each alternative cost
+`i` of `cost_spec(req, &[m])`} and EVERY subset of the additional costs of that spec (ascending
+bit-mask order, so the empty subset is first, each subset ascending), calling
+`target_slots(req, &[m], &probe)` with the probe fields of CR-012 (`x` = low end of the X range,
+empty `symbol_options`, `harmonize: None`), and stops at the first probe that gives every target slot at
+least `min` legal candidates (mode offered). The exhaustive product is used only when
+`(alternatives + 1) * 2^additional <= 4096` (`alternatives` = the number of alternative costs,
+`additional` = the number of additional costs, both from the host's spec; computed without overflow,
+and for `additional >= 64` the bound is exceeded). That is at most 4096 calls of `target_slots` per
+mode, so untrusted card data cannot force more (R12). When the product exceeds the budget no legality
+claim can be proved either way, so the mode is OFFERED without calling `target_slots` at all: the CR
+601.2c check of step 3 with the costs the player actually chose is unchanged and rolls the cast back
+(CR 734.1) with `MissingTarget` if that choice leaves a slot without enough legal candidates, so no
+legal mode is ever omitted and no illegal proposal completes. The CR-012 rules "at most 6 additional
+costs" and "none, each one alone, and all" are withdrawn. A spell with no alternative and no additional
+cost still makes exactly one call per mode. `CastState::target_slots` must stay pure (R3).
+Why: REQ-CAST-001; CR 700.2a: "If one of the modes would be illegal (due to an inability to choose
+legal targets, for example), that mode can’t be chosen."; CR 601.2c: "A spell may require some targets
+only if an alternative or additional cost (such as a kicker cost) or a particular mode was chosen for
+it" and "a spell may require alternative targets only if an alternative or additional cost was chosen
+for it."; CR 601.2: "If a player is unable to comply with the requirements of a step listed below
+while performing that step, the casting of the spell is illegal; the game returns to the moment before
+the casting of that spell was proposed". With CR-012 a mode legal only through a subset that was
+not probed (for example the pair [2, 5] of seven additional costs) was omitted. A host-supplied legality
+hook was rejected: it would add a required or defaulted host method for a check the existing
+`target_slots` already answers. Gate 06-turn round 6.
+Consumers affected: `casting::announce`; `CastState::target_slots` implementors (up to 4096 calls per
+mode before the costs are chosen, instead of at most 64 per alternative); the spec tests that asserted
+the omission.
