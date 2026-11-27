@@ -9,8 +9,17 @@
 //!
 //! [`announce`] runs the steps as one deterministic, suspendable procedure (a
 //! [`ChoiceSession`](crate::choice::ChoiceSession) procedure) written against the narrow,
-//! card-agnostic host seam [`CastState`]. Steps 6-9 (cost lock, mana window, payment, commit)
-//! and the ward and becomes-target triggers are not part of this module.
+//! card-agnostic host seam [`CastState`]. Steps 7-9 (mana window, payment, commit) and the ward
+//! and becomes-target triggers are not part of this module.
+//!
+//! Step 6, determining and locking in the total cost (CR 601.2f), is the pure calculator
+//! [`determine_total_cost`]: from a [`CostBasis`] (the mana cost or the chosen alternative cost),
+//! it adds the additional costs and the `COST_INCREASE` entries, applies the `COST_REDUCTION`
+//! entries in the player's order ([`ReductionStep`]) component by component (CR 118.7a-g) with
+//! the mana component floored at `{0}`, then the `COST_MINIMUM` and `COST_SET` entries in
+//! [`CostStages::total_effects`](crate::layers::CostStages::total_effects) order, and returns an
+//! immutable [`LockedCost`]. An unpayable cost stays unpayable (CR 118.6a). Its parameter
+//! conventions are documented on the `cost` module and in `docs/DECISIONS.md` ("#53 FP-051").
 //!
 //! # Steps
 //!
@@ -78,6 +87,7 @@
 #![deny(missing_docs)]
 
 mod announce;
+mod cost;
 
 #[cfg(test)]
 mod announce_tests;
@@ -85,4 +95,8 @@ mod announce_tests;
 pub use announce::{
     AnnounceOutcome, CastKind, CastRequest, CastState, CastStep, CostChoice, CostSpec, ModeSpec,
     Proposal, RolledBack, StopReason, TargetSlotSpec, announce,
+};
+pub use cost::{
+    CostBasis, CostError, LockedCost, ManaComponent, ManaPart, ReductionStep, SymbolChoice,
+    determine_total_cost,
 };
