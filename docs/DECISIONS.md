@@ -11177,3 +11177,193 @@ Not covered by the provisional host (reported as `IN_PROGRESS`): draws by a mand
 (CR 104.4b) or by an effect (CR 104.4c), and a win by an effect (CR 104.2b). Not valid for team
 games (CR 104.2c), Emperor (CR 104.2d) or limited range of influence (CR 104.3h); the reference
 host is two-player / free-for-all only, and the game-result unit replaces this reading.
+
+## #52 FP-050 tester — No `.pzl` scenarios; session-driven direct harness
+
+**Decision.** The casting announce spec tests are Rust black-box and property tests only
+(`crates/fineprint-core/tests/spec_casting_announce*.rs`); no `.pzl` scenario is written. The
+"direct" harness is a `ChoiceSession` procedure that calls `casting::announce` on the run's state
+with the run's `ChoiceContext` and records the state hash and priority right before and after the
+call; every test also drives the same procedure answer by answer (`submit`) and through `replay`.
+**Rationale.** No scenario host reaches the casting module yet (brief). `ChoiceContext` has no
+public constructor, so a session is the only way to obtain one; recording the state inside the run
+observes the state `announce` leaves behind on the same `&mut S`.
+**Alternatives.** A `.pzl` scenario (no host); a test-only `ChoiceContext` constructor (outside
+owned paths, a contract change).
+
+## #52 FP-050 tester — Begin-check `"zone"` filter tested only with malformed values
+
+**Decision.** The begin-check tests assert that a `PROHIBITION` with a malformed `"zone"` (a
+non-string, or an unknown zone name) matches nothing; they do not test a well-formed zone name.
+**Rationale.** `CastState` has no method that reports the zone of `request.object`, so the expected
+result of a well-formed `"zone"` is not determined by the brief; a malformed value matches nothing
+under the existing convention (`actions` module docs, R12) whatever the zone.
+**Alternatives.** Assume the object is in a particular zone (not derivable from the API).
+
+## #52 FP-050 tester — Two alternative costs in one answer
+
+**Decision.** "Two alternative costs rejected" (CR 601.2b) is tested as: `ConfigureCosts.alternative`
+outside the offered list is rejected, every single alternative (and none) is accepted, and the
+same additional cost twice is rejected.
+**Rationale.** `ConfigureCosts.alternative` is an `Option<u32>`, so a response that names two
+alternative costs cannot be built; the type enforces "at most one".
+**Alternatives.** None that compile against the pinned response type.
+
+## #52 FP-050 tester — TargetSlot max
+
+**Decision.** The `CHOOSE_TARGETS` shape test requires `min`, `legal` (ascending, without the
+stack object and prohibited candidates), `current: []` and `may_keep_illegal: false` exactly, and
+accepts `max` equal to the slot spec's `max` or to that value clamped to the number of legal
+candidates.
+**Rationale.** The brief writes the slot as `TargetSlot{min,max,legal,current:[]}` without saying
+whether `max` is clamped; the choice module clamps `max` to the candidate count for its other
+selection kinds, and both forms accept exactly the same answers.
+**Alternatives.** Require the unclamped spec `max` (rejects an equivalent, consistent request).
+
+## #52 FP-050 tester — Ambiguous orders accepted both ways
+
+**Decision.** Where the brief does not fix an order, the tests accept both readings: the order of
+`Proposal.modes` for a multi-mode answer (answer order or ascending), the recipient order within one
+target slot of a `DIVIDE_VALUE` request (answer order or ascending), and whether a cast with only
+optional slots whose candidates are all illegal still asks `CHOOSE_TARGETS` (either way it must be
+announced, never rolled back).
+**Rationale.** R8: the brief fixes slot order and ascending candidate/mode lists, not these.
+**Alternatives.** Pin one order (would test an unstated choice).
+
+## #52 FP-050 tester — Division recipients chosen in two slots
+
+**Decision.** The property test requires that the `DIVIDE_VALUE` recipients are the chosen targets
+with each target once (a target chosen in two slots is one recipient) and that the shares sum to the
+total, each at least 1.
+**Rationale.** The `SUBMIT_DIVISION` validation requires distinct recipients, so a target named in
+two slots cannot appear twice; whether such a target counts once or twice for CR 601.2d ("each of
+these targets must receive at least one") is reported as a rules question.
+**Alternatives.** Require one recipient per chosen slot entry (not representable in the protocol).
+
+## #52 FP-050 tester — Candidate insertion order
+
+**Decision.** `determinism_candidate_order` feeds the same candidates to the fake in non-ascending
+orders and requires an identical, ascending `legal` list (players before objects).
+**Rationale.** Brief test 8: "permuting the fake's entry or candidate insertion order does not change
+the output (candidates ascending)". It is a separate test so that, if the host contract
+("ascending") is meant to make sorting the host's job, the disagreement is isolated.
+**Alternatives.** Only ascending candidate lists (would not test test 8 as written).
+
+## #52 FP-050 — Module wiring and the CastState seam
+
+**Decision.** The procedure lives in `crates/fineprint-core/src/casting/` (`mod.rs` with the
+module docs and conventions, `announce.rs`, unit tests in `announce_tests.rs`), exported as
+`fineprint_core::casting`. It is written against the narrow, card-agnostic host trait
+`CastState: Transactional` (rule set, opponents, target controller, mode / cost / target-slot /
+division specs, `put_on_stack`, source qualities, prohibition application and 601.3a lapse, and
+a defaulted cross-slot `proposal_combination_legal`). `announce` clones `*state` into a
+`Transactions`, takes the checkpoint (CR 734), works on `state_mut()`, and on an illegal step
+rolls back and copies the restored state back (`RolledBack` carries the post-rollback hash and
+priority player, CR 734.1, 734.2); on success it commits and copies the state back; on
+`Err(Interrupt)` `*state` is left untouched. Every answer is validated again against its request
+before use (R12). Library moves, shuffles and reveals are documented as not reversible (CR 734.1)
+and the host's concern.
+**Rationale.** The real `GameState` has no stack or object host yet (same pattern as
+`ActionHost` #49, `PlacementEnv` #31, `TurnHost` #46); a later integration unit implements
+`CastState`.
+**Alternatives.** Editing `GameState` (outside the owned paths); `Transactions` held by the
+caller (the pinned signature takes `&mut S`).
+
+## #52 FP-050 — TARGETING_RULE parameter convention
+
+**Decision.** As documented in `casting/mod.rs`: `"keyword"` (required: `HEXPROOF`, `SHROUD`,
+`PROTECTION`, `OTHER`), `"effect"` (`PROHIBIT` default, or `IGNORE_HEXPROOF`), exactly one of
+`"target_object"` / `"target_player"` (unsigned integer), `"sources"` (`ANY` default, or
+`OPPONENTS`: caster is an opponent of `target_controller(target)`), `"quality"` (string,
+`source_has_quality`), `"source_player"` (unsigned integer, must equal the caster). Any wrong
+type or unknown value makes the entry match nothing (R12). The `players` set is ignored except
+that an `IGNORE_HEXPROOF` entry must `applies_to(caster)`. An `IGNORE_HEXPROOF` entry is accepted
+with any valid keyword (it is the effect that matters) and uses the same full filter
+(target, sources, quality, source player) as a prohibition. It suppresses only `PROHIBIT` entries
+whose keyword is `HEXPROOF` (CR 702.11e); every other applicable `PROHIBIT` entry makes the
+candidate illegal (CR 101.2). The verdict is a pure function of the set of applicable entries, so
+it does not depend on timestamps or iteration order. Candidates are deduplicated and ascending
+(`BTreeSet`), and the stack object itself is removed first (CR 115.5). Ward is not checked.
+**Rationale.** SRS §14.6/§14.7 route targeting through `TARGETING_RULE` with an opponent scope
+(hexproof) or a universal scope (shroud, protection); the brief pins the parameter names.
+**Alternatives.** Requiring `"keyword": "HEXPROOF"` on `IGNORE_HEXPROOF` entries (stricter, no
+gain); using the entry's `players` set for the hexproof scope (it names whose rules change, not
+whose spells are affected).
+
+## #52 FP-050 — Begin check scope (CR 601.3, 601.3a) and the zone filter
+
+**Decision.** The begin check reads `rule_set().applying(PROHIBITION, caster)` entries whose
+`"action"` is `"CAST"` (spell) or `"ACTIVATE"` (ability) and whose `"object"` filter (#49
+convention) admits `request.object`. `CastState` reports no zone, so an entry carrying a `"zone"`
+parameter matches nothing here (the #49 generator already applied zone-filtered prohibitions
+when it offered the action). Each matching entry refuses with `NotStarted{Prohibited}` unless
+`prohibition_could_lapse(entry, request)` (CR 601.3a). Step 5 re-reads the same entries from the
+live (post-announce) state and refuses on any `prohibition_applies` with no leniency (CR 601.2e).
+Permissions (timing, zone of origin, activation limits) are not re-checked: #49 offered the
+action. This supersedes "#49 FP-047 — CR 601.3a not implemented here" for the casting procedure
+only; the legal-action generator is unchanged.
+**Rationale.** The brief's step 1 and step 5 definitions; the seam has no zone accessor.
+**Alternatives.** A zone accessor on `CastState` (not in the pinned API); re-checking timing
+here (duplicates #49).
+
+## #52 FP-050 — Mode legality and index translation (CR 700.2a, 700.2d)
+
+**Decision.** A mode is legal when every slot of `target_slots(req, &[mode], &CostChoice::default())`
+has at least `min` legal candidates after the targeting rules. `CHOOSE_MODES` lists only the
+legal modes (labels and `mode_costs` filtered in step), presented indices `0..k`; the answer is
+translated back to ORIGINAL indices and sorted ascending (a repeated mode appears once per
+choice, CR 700.2d). `NoLegalMode` rolls back when no mode is legal, when repeats are not allowed
+and fewer than `min` are legal, or when the (clamped) max is below min. With repeats the max is
+the spec's max and the default repeats the legal modes cyclically; without repeats max is
+clamped to the number of legal modes. Options are enumerated `Mode(i)` below
+`ENUMERATION_LIMIT` answers (sets, or multisets with repeats), otherwise a `Modes` validator.
+**Rationale.** Same shape as the trigger placement (#31); costs are chosen after modes, so mode
+legality cannot depend on them.
+**Alternatives.** Offering every mode and rolling back after an illegal pick (contradicts
+CR 700.2a "can't be chosen").
+
+## #52 FP-050 — Choice request shapes
+
+**Decision.** All requests: chooser = caster, `reason.source` = the stack object, `hidden:
+false`, `reveal_to: []`, ids from `next_request_id()` in ask order (modes, costs, targets,
+division; a step with nothing to ask is skipped). `reason.cr`: `CHOOSE_MODES` and
+`CHOOSE_COSTS_AND_X` "CR 601.2b", `CHOOSE_TARGETS` "CR 601.2c", `DIVIDE_VALUE` "CR 601.2d".
+`CHOOSE_COSTS_AND_X` is asked when the cost spec offers anything (an alternative or additional
+cost, an X range, a symbol slot or a harmonize candidate); `min = max = 1` (one configuration);
+enumerated options are its building blocks (cost labels as `Text`, X values as `Number`,
+harmonize candidates as `Object`) below `ENUMERATION_LIMIT` answers, otherwise a `Payload`
+validator; default = normal cost, no additional cost, X = low end, option 0 per symbol slot, no
+harmonize. An empty X range or an empty symbol slot is a host error (`ChoiceError::Procedure`),
+as is a target slot with max below min. `CHOOSE_TARGETS` is asked whenever there is at least one
+slot; each slot's max is clamped to its legal count; request min/max are the sums;
+`may_keep_illegal: false`; default = the first `min` legal candidates per slot; chosen lists are
+returned ascending. `DIVIDE_VALUE` recipients are the DISTINCT chosen targets in slot order
+(first occurrence), each with minimum 1; `min = max =` recipient count; `DivisionImpossible`
+compares the total with the distinct count; the default puts the remainder on the first
+recipient; the result is in recipient order. Nothing is divided when no target was chosen.
+**Rationale.** The `DIVIDE_VALUE` validator keys recipients by target, so a target chosen in two
+slots can only be one recipient; CR 601.2d speaks of "each of these targets".
+**Alternatives.** One recipient per slot entry (the validator rejects the duplicate).
+
+## #52 FP-050 — Count announcement and deferrals
+
+**Decision.** The announce-count-first rule of CR 601.2c is met by `SelectTargets`: each slot's
+list length is the announced count (no separate ask). Deferred: splice (CR 601.2b, 702.47);
+"must be chosen as a target" maximisation (CR 601.2c); CR 601.4 look-ahead (a mode or cost
+available only through a later choice); re-checking permissions (timing, zone); the "owns but not
+controlled by another player" clause of protection from a player (CR 702.16k: only "controls",
+i.e. the caster, is matched); and mode legality that depends on costs (costs are not chosen yet).
+Ward and becomes-target triggers belong to #57.
+**Rationale.** Not cheap without host data the seam does not carry; the brief allows deferral.
+**Alternatives.** Extra seam methods for each (outside the pinned API).
+
+## #52 FP-050 — SRS §7.1 discrepancies (CR 2026-11-06 wins)
+
+**Decision.** `docs/SRS.md` is not edited; the code follows the CR. Step 1 cites 601.2a for the
+layout choice and the permission / prohibition check, but those are CR 601.3 (601.3a, 601.3e)
+and CR 709.3, 712.8b-c, 716.3a, 719.3a, 721.3a, 708.4. Step 3 omits CR 115.2, 115.5, the 601.2c
+"must be chosen as a target" rule and announce-count-first. Step 2 omits splice (CR 601.2b,
+702.47). Step 0 should note CR 734.1's non-reversible library actions. A P8 SRS-edit line is in
+`docs/HUMAN_QUEUE.md`.
+**Rationale.** CR wins over the SRS (PROCESS.md).
+**Alternatives.** Editing the SRS here (a P8 item for a person).
