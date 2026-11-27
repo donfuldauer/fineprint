@@ -10831,6 +10831,135 @@ content are unchanged.
 **Alternatives.** Keeping placeholders through a compatibility encoding (rejected: they are not
 valid ASTs and the brief forbids them).
 
+## #49 FP-047 tester — Permission for ACTIVATE and SPECIAL_ACTION in the matrix
+
+**Decision.** The T1 permission/prohibition matrix uses, as the "permission" of ACTIVATE and
+SPECIAL_ACTION, a `TIMING_PERMISSION` entry naming that action. The tests assert only what the
+brief specifies: with that entry alone the action is offered (it needs no effect, CR 117.1b,
+117.1c), and with an applicable prohibition in either timestamp order it is not offered and
+`explain` names the prohibition (CR 101.2). They do not assert that the entry appears in the basis.
+For PLAY_LAND and CAST the permission is `PLAY_PERMISSION` / `CAST_PERMISSION` for a graveyard
+candidate, whose basis must name it.
+**Rationale.** The brief defines no permission kind for activating abilities or taking special
+actions, but T1 asks for the full matrix for all four classes. An entry that is harmless if
+ignored keeps the both-orders prohibition check meaningful without inventing behaviour.
+**Alternatives.** Skipping (a) and (c) for ACTIVATE/SPECIAL_ACTION (leaves T1 incomplete);
+asserting the entry in the basis (not specified).
+
+## #49 FP-047 tester — Unspecified filter combinations and malformed values
+
+**Decision.** The tests leave out filters the brief does not define: `"zone"` on SPECIAL_ACTION
+prohibitions and `"kind"` on prohibitions of other actions (plus filtered PLAY_LAND prohibitions,
+as the brief says). A `"zone"` string that is not a Zone wire name (`"test.no_such_zone"`), an
+`"object"` that is not an unsigned JSON integer (`"x"`, `-1`, `10.5`, `null`), a non-string
+`"kind"` (`[]`, `3`) and a missing or non-string `"action"` count as malformed. An entry with a
+malformed filter never applies: a prohibition does not forbid and a permission does not grant.
+The property test's independent re-derivation of "prohibited" (T9 (v)) uses the same reading.
+**Rationale.** T10: malformed params "never make an entry apply". A filter that cannot match any
+candidate is the safe reading of untrusted input (R12).
+**Alternatives.** Treating a malformed filter as absent, so the entry applies to everything. That
+would let bad input widen a prohibition, which T10 rules out.
+
+## #49 FP-047 tester — Reading of the reason lists
+
+**Decision.** (1) "not own turn -> Timing(OwnTurn) only" for PLAY_LAND means Timing(OwnTurn) is
+the only *timing* reason (no Timing(SorceryTiming) as well). Other failing checks are still
+listed, so on the opponent's turn with nothing else wrong the list is exactly
+`[Timing(OwnTurn)]`. (2) When several TURN_FACE_UP denials apply, the tests check the reasons as
+a set (every expected denial present, nothing else). The order among `FaceUp(..)` entries, and
+whether `InstantOrSorcery` appears once or twice when both the merged flag and the
+manifest/cloak flag hold, are not specified. (3) Every other multi-reason case is asserted as an
+exact list in Reason declaration order, Prohibited first, as the brief states.
+**Rationale.** These assert everything the brief fixes and nothing more.
+**Alternatives.** Asserting an exact order for FaceUp denials (overspecified).
+
+## #49 FP-047 tester — The fake host offers the same candidates to every player
+
+**Decision.** `FakeHost` (spec_actions_support.rs) returns the same candidate vectors whoever
+asks. Only the TimingContext (`player`) and the lands-played counter depend on the player.
+**Rationale.** The generator's per-player behaviour comes from the TimingContext, the RuleSet
+(`applying(kind, player)`) and the counter. Sharing the candidates lets one host exercise both
+players in every property seed.
+**Alternatives.** Per-player candidate vectors (more fixture code, no extra coverage of the API).
+
+## #49 FP-047 — Rule-entry param conventions of the legal-action generator
+
+**Decision.** The generator (`fineprint_core::actions`) reads these opaque `RuleModification`
+params: `"action"` (string, one of `PLAY_LAND`, `CAST`, `ACTIVATE`, `SPECIAL_ACTION`; an entry
+without a string action applies to nothing); `"zone"` (optional zone wire name; absent = any
+zone); `"object"` (optional unsigned JSON integer, the raw object id; for `ACTIVATE` the ability's
+source); `"kind"` (optional, `SPECIAL_ACTION` prohibitions only, the special-action kind id). A
+present filter of the wrong type or an unknown zone name matches nothing (R12). Only entries that
+modify the rules for the asked player count (`RuleSet::applying`); "earliest" is application
+order. `"zone"` is not read for special actions (their candidates carry no zone). Exception:
+`PLAY_LAND` prohibitions and the land count come unfiltered from `RuleSet::query` and
+`RuleSet::land_plays_allowed`; the filters are honoured on `PLAY_PERMISSION` entries only.
+**Rationale.** The brief's conventions; one source of truth for the land count (layers/post is
+not changed by this unit); malformed untrusted params must never widen what an entry forbids or
+permits.
+**Alternatives.** Ignoring a malformed filter (rejected: a malformed zone-limited permission
+would then permit every zone); filtering `PLAY_LAND` prohibitions here (rejected: the land count
+would disagree with `land_plays_allowed`).
+
+## #49 FP-047 — Host-side versus generator-side checks
+
+**Decision.** The host decides the facts that need the game state or card characteristics:
+which objects are candidates, faces and alternative cast modes (one candidate per object, face,
+cast mode), "instant or flash" (`instant_timing`, including CR 601.3d conditional flash), is a
+land, summoning sickness including haste, mana ability, "activate only if" condition, own
+permissions of the card (`own_permission` labels), face-down facts and special-action base
+availability (`available`, `could_begin_to_cast`). The generator decides everything the rules
+and rule effects decide: zone permissions, prohibitions, timing permissions, land counts,
+activation timing and limits, registry timing and the turn-face-up denial table. No permission
+kind is consulted for `ACTIVATE` or `SPECIAL_ACTION` (only prohibitions), and `CAST_PERMISSION` /
+`TIMING_PERMISSION` are consulted only when needed (a non-hand zone; not instant and not sorcery
+timing).
+**Rationale.** SRS 14.6: the generator consults only permissions, prohibitions, additional land
+plays, activation timing/limits and the special-action registry; R4 keeps card facts out of it.
+**Alternatives.** Evaluating characteristics in the generator (rejected: needs the layer view
+and would invite card-specific logic).
+
+## #49 FP-047 — Basis of an offered action
+
+**Decision.** Land: `Rule "CR 305.1"` for the hand, otherwise the earliest matching
+`PLAY_PERMISSION` effect or the own permission; when at least one land was already played, every
+applicable `ADDITIONAL_LAND_PLAY` effect is appended. Cast: for a non-hand zone the earliest
+matching `CAST_PERMISSION` effect or the own permission, then the timing allowance: `Rule
+"CR 117.1a"` when the spell has instant timing or sorcery timing holds, else the earliest
+matching `TIMING_PERMISSION` effect. Activate: `Rule "CR 117.1b"` (mana abilities
+`"CR 605.3a"`). Special action: `Rule` with the registry kind's rule (`"CR 116.2b"` for
+TURN_FACE_UP). The basis is never empty for an offered action.
+**Rationale.** Each entry names what made that part of the action legal; a permission effect is
+listed only when it was needed.
+**Alternatives.** Listing every applicable permission even when not needed (rejected: the basis
+would no longer say which rule or effect allowed the action).
+
+## #49 FP-047 — Duplicate responses and explain
+
+**Decision.** Candidates of each class are sorted into a total order (all fields) before they
+are checked. When several candidates yield the same response, the first legal one wins, else the
+first one; `explain` returns exactly that result, so `explain(a)` is Legal exactly when `a` is in
+`legal_actions` and nothing depends on the host's order. A `SpecialCandidate` of kind
+`TURN_FACE_UP` is ignored: that kind comes only from `turn_face_up_candidates`. Reasons are
+sorted by the declaration order of `Reason` (Prohibited is the first reason that can co-occur;
+face-up denials in the declaration order of `FaceUpDenial`) and repeats are removed. For a land
+play off-turn only `Timing(OwnTurn)` is reported, not `Timing(SorceryTiming)`.
+**Rationale.** The brief's "first in the output order" is ambiguous when equal responses come
+from different candidates; preferring the legal one keeps the explain/legal_actions invariant
+the brief requires (REQ-DSL-013) and R3.
+**Alternatives.** Using the first candidate in host order (rejected: host-order dependent);
+reporting the union of all candidates' reasons (rejected: could call an offered action illegal).
+
+## #49 FP-047 — CR 601.3a not implemented here
+
+**Decision.** The generator does not apply CR 601.3a ("may consider choices that could change
+the prohibited quality") or the choice-dependent parts of CR 601.3b/601.3e: a matching `CAST`
+prohibition always forbids the candidate. Faces and cast modes the host lists are separate
+candidates, so a prohibition limited by object or zone is checked per candidate.
+**Rationale.** There is no casting procedure yet to enumerate proposal choices; a later unit
+that adds one can supply the qualities per candidate.
+**Alternatives.** Ignoring prohibitions with quality filters (rejected: would offer prohibited
+actions).
 ## #48 FP-046 — Starting player draw
 
 **Decision.** With no `StartOptions::starting_player` the starting player is
