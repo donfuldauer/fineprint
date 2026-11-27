@@ -11632,3 +11632,126 @@ equivalent for a correct host and never adds mana).
 **Rationale.** The earlier brief (clause D11) read 605.3c as a per-window cap. The rules-researcher answer shows a mana ability resolves immediately (605.3b), so only starting it again before it has resolved is barred.
 
 **Alternatives.** Keep the stricter test: rejected, it asserts something the CR does not say. This is an R10 correction toward the brief and the CR, with brief clause D11 as the evidence of the correction.
+
+## #55 FP-053 — auto-tap solver input: a host-supplied mana-source description
+
+**Decision.** `preview_auto_tap` takes the activatable mana abilities as a slice of `ManaSource`
+values supplied by the host: object, ability id, snow-ness, whether `{T}` is in the cost, and the
+alternative `ManaOutput`s (types, restrictions, riders applied to every unit, CR 106.6a).
+**Rationale.** The DSL baseline has no add-mana instruction the engine could inspect, and
+`PayState` exposes a mana ability only as `(source, ability_id)`; the host is the only party that
+knows what an ability produces.
+**Alternatives.** Deriving outputs from card ASTs (no instruction to read); extending `PayState`
+(a contract change, R2, not needed for this unit).
+
+## #55 FP-053 — auto-tap scope
+
+**Decision.** Each entry is activated at most once, producing exactly one of its outputs.
+Abilities whose cost is anything other than an optional `{T}`, and abilities that consume mana,
+are out of scope; the host lists only abilities it can activate now (CR 605.3a). A repeated
+listing of the same `(source, ability_id)` is a separate entry and a legal separate activation
+(CR 605.3b, 605.3c; see "#54 FP-052 — Correction of test D11"); two used `{T}` entries sharing an
+object conflict (CR 118.3). Activating mana abilities is optional (CR 118.3c), so pool-only
+payment is a solution.
+**Rationale.** Matches the brief and the `PAY_MANA_AND_COSTS` answer, which lists
+`(source, ability_id)` pairs activated once each in order.
+**Alternatives.** Modelling arbitrary activation costs or mana-consuming filters (needs a cost
+model the payment seam does not expose).
+
+## #55 FP-053 — auto-tap rank key
+
+**Decision.** Ascending by K1 activations, K2 produced-but-unspent units, K3 the sum over used
+entries of the distinct mana types across all their outputs, K4 the `(index, output)` sequence.
+Validity requires `plan_payment` to pay from the pool with the produced units appended and every
+activation to have a spent unit; `plan` is exactly that `plan_payment` result.
+**Rationale.** The issue asks for "fewest sources, keep colors flexible" with a stable order;
+K2 avoids floating mana that would empty at the end of the step (CR 500.5); K3 keeps
+multi-color sources for later; K4 is total and input-ordered (R3). Requiring the exact
+`plan_payment` result guarantees acceptance by `casting::pay_total_cost`.
+**Alternatives.** Ranking by remaining color coverage (non-local, costlier); allowing wasted
+activations (the player would tap a source for nothing).
+
+## #55 FP-053 — auto-tap limits and budget
+
+**Decision.** `MAX_SOURCES = 64` entries considered, `MAX_SOLUTIONS = 32` results, and
+`SEARCH_BUDGET = 200_000` `plan_payment` evaluations of candidates per call. Iterative deepening on
+K1 with result-preserving pruning: outputs with no unit that is allowed for the purpose and can
+pay a symbol of the cost are dropped; levels deeper than the cost's total symbol count, or whose
+best-case spendable-unit count is below it, are skipped; a DFS node is entered only if enough
+non-conflicting entries remain. A superset check (`plan_payment` on the pool with every usable
+output added, not counted against the budget) returns empty at once for unpayable costs, so a
+`u64::MAX` amount never allocates in proportion to the amount. When the budget runs out, the valid
+candidates found so far are returned ranked by the same key; the result is exact whenever the
+search ends within the budget (always for at most 10 entries with at most 2 outputs each).
+**Rationale.** Bounded work on untrusted input (R12) with a deterministic cut-off (R3).
+**Alternatives.** A wall-clock limit (forbidden, R3/R7); unbounded search (can hang).
+
+## #55 FP-053 — wiring edit of mana/mod.rs
+
+**Decision.** `mana/mod.rs` gains `mod autotap;`, the `pub use autotap::{...}` re-export of the
+pinned items and the module-doc section "The auto-tap solver"; nothing else in it changes. The
+unit tests live inline in `autotap.rs` (the only new owned file).
+**Rationale.** The crate denies `missing_docs` in `mana` and the pinned API is re-exported from
+`fineprint_core::mana`; the brief allows exactly these additions.
+**Alternatives.** A separate test file (outside the owned paths).
+
+## #55 FP-053 — previewAutoTap facade
+
+**Decision.** This unit delivers the engine-level `fineprint_core::mana::preview_auto_tap`. The
+SRS 13.2 `IRulesEngine.previewAutoTap(sessionId, playerId, cost)` method needs the `api/` facade,
+which does not exist yet; that later unit maps the session's pool and the player's activatable
+mana abilities onto this function. The SRS `ManaCostExpression` is the locked `ManaComponent`
+here (the cost after CR 601.2f is locked).
+**Rationale.** Keeps the solver pure and testable now; the facade is a thin adapter.
+**Alternatives.** Building a partial facade in this unit (outside the owned paths).
+
+## #55 FP-053 tester — Rank order is strict, solutions are distinct
+
+**Decision.** The spec tests assert that consecutive solutions have strictly ascending rank keys
+(K1, K2, K3, K4), so a result never lists the same candidate twice.
+**Rationale.** K4 is the `(index, output)` sequence, which identifies a candidate uniquely; a
+sorted list with a repeated key could only come from a duplicate candidate, which the brief's
+candidate rules (each entry at most once, one output per entry) never produce.
+**Alternatives.** Asserting non-strict order (`<=`), which would let duplicates through.
+
+## #55 FP-053 tester — Fake host for the acceptance property
+
+**Decision.** The `pay_total_cost` fake host in `spec_mana_autotap_property.rs` scripts, per
+`(source, ability_id)`, a queue of activations taken from the solution in order (the units of
+the chosen output, and whether the entry uses `{T}`). A `{T}` activation taps the source, and a
+second `{T}` activation of that source is refused (CR 118.3). The host lists only abilities
+that still have a scripted activation.
+**Rationale.** A repeated listing of one ability may pick different outputs, so a single
+script per key cannot describe it. Tapping per source matches the pinned `uses_tap` rule
+("two entries with uses_tap that share `source`").
+**Alternatives.** One script per key, as `spec_casting_pay.rs` does, which cannot express
+repeated listings with different outputs.
+
+## #55 FP-053 tester — Budget-limited inputs assert validity only
+
+**Decision.** For 200 identical entries with a large cost, the tests assert only that every
+returned solution is valid and ranked, that the result is deterministic, and that unreachable
+costs give an empty result. They do not assert that the result is non-empty or optimal.
+**Rationale.** The brief says a call that reaches `SEARCH_BUDGET` "still returns only valid
+solutions". It guarantees exactness only up to 10 entries with 2 outputs each.
+**Alternatives.** Asserting the lexicographically first 32 subsets, which the pinned contract
+does not guarantee past the exact range.
+
+## #55 FP-053 tester — Reading of requirement 11's empty-result clause
+
+**Decision.** The part of brief requirement 11 about an empty result is read as its final
+sentence: on small cases, an empty result means the reference finds no valid candidate. The
+exactness property test checks this. Nothing is submitted for empty results.
+**Rationale.** The clause is garbled, but its last sentence states the requirement plainly.
+An empty result has no activations to submit.
+**Alternatives.** Submitting `auto_pay: true` with every ability activated, which the clause
+explicitly says is not required.
+
+## #55 FP-053 tester — A short prefix is complete
+
+**Decision.** The prefix property test also asserts that when `preview_auto_tap(.., n)` returns
+fewer than `n` solutions, every larger limit returns the same number. The test uses random
+inputs inside the exact range only.
+**Rationale.** Inside the exact range, the result is the reference list truncated to
+`min(n, 32)` (requirement 10), so a short list must already be complete.
+**Alternatives.** Asserting the prefix relation alone.

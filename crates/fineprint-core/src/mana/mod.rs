@@ -56,6 +56,24 @@
 //! [`spend`] removes exactly the planned units (CR 118.3a); the rest stays in the pool as
 //! unspent mana (CR 106.4, 106.4a).
 //!
+//! # The auto-tap solver
+//!
+//! [`preview_auto_tap`] (REQ-API-002 `previewAutoTap`) lists the best ways to pay a locked
+//! [`ManaComponent`] for a purpose from a pool plus the mana abilities the player could activate
+//! now (CR 605.3a, 601.2g). The host describes each activatable ability as a [`ManaSource`]: its
+//! object, its ability id, whether it is a snow source (CR 107.4h), whether `{T}` is in its cost
+//! (one `{T}` activation per object, CR 118.3) and its alternative [`ManaOutput`]s, each a list
+//! of mana types with the restrictions and riders every produced unit carries (CR 106.6a). Each
+//! entry is activated at most once; a repeated listing is a separate entry (CR 605.3b, 605.3c).
+//! A solution is valid only when [`plan_payment`] pays the cost from the pool with the produced
+//! units appended (CR 601.2h) and every activation contributes a spent unit, so answering its
+//! activations, in order, to `PAY_MANA_AND_COSTS` is accepted. Solutions are ranked by fewest
+//! activations, then fewest produced-but-unspent units, then the fewest distinct types the used
+//! entries could make (multi-color sources are kept for later), then the `(index, output)`
+//! sequence. Only the first [`MAX_SOURCES`] entries are considered, at most [`MAX_SOLUTIONS`]
+//! solutions are returned, and at most [`SEARCH_BUDGET`] candidates are evaluated: the result is
+//! exact whenever the search ends within the budget and always sound.
+//!
 //! # Lifecycle
 //!
 //! [`ManaPool::empty`] empties a pool as a step or phase ends (CR 500.5, 703.4q). The turn
@@ -68,6 +86,7 @@
 
 #![deny(missing_docs)]
 
+mod autotap;
 mod plan;
 mod pool;
 
@@ -81,6 +100,10 @@ use fineprint_base::ids::ObjectId;
 use fineprint_dsl::mana::Color;
 
 pub use crate::casting::ManaComponent;
+pub use autotap::{
+    AutoTapActivation, AutoTapSolution, MAX_SOLUTIONS, MAX_SOURCES, ManaOutput, ManaSource,
+    SEARCH_BUDGET, preview_auto_tap,
+};
 pub use plan::{PaymentPlan, plan_payment, spend};
 pub use pool::ManaPool;
 
