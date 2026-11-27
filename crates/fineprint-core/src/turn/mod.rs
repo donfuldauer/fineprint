@@ -15,6 +15,11 @@
 //! main-phase registry actions, cleanup) and the CR 500.4 / CR 500.5 boundary work, and runs the
 //! heartbeat in every step that gives priority. It is written against the [`TurnHost`] seam, a
 //! supertrait of [`HeartbeatHost`].
+//!
+//! [`start`] is the game start (REQ-FMT-001, REQ-NET-003): the starting player (CR 103.1), the
+//! shuffles (CR 103.3), starting life (CR 103.4), opening hands and the London mulligan
+//! (CR 103.5) and the pregame actions (CR 103.6). It is written against the [`GameStartHost`]
+//! seam and records the starting player that `TurnHost::starting_player` reports.
 
 #![deny(missing_docs)]
 
@@ -39,3 +44,10 @@ pub use steps::{
     TurnBasedRegistry, TurnHost, TurnReport, TurnState, UntapOptions, first_turn_draw_skipped,
     run_phase, run_segment, run_turn, segments_of,
 };
+
+pub mod start;
+
+#[cfg(test)]
+mod start_tests;
+
+pub use start::{GameStartHost, StartOptions, StartReport, mulligan_to_bottom, run_game_start};
