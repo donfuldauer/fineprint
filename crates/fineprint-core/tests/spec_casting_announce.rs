@@ -17,12 +17,14 @@ mod support;
 
 use fineprint_core::casting::*;
 use fineprint_core::choice::{
-    ChoiceError, ChoicePayload, ChoiceResponse, ChoiceTarget, ChoiceType, PendingChoiceRequest,
-    RequestId, Status,
+    ChoiceError, ChoiceOption, ChoiceOptions, ChoicePayload, ChoiceResponse, ChoiceTarget,
+    ChoiceType, ENUMERATION_LIMIT, PendingChoiceRequest, RequestId, Status, ValidatorContract,
+    ValidatorRule,
 };
 use fineprint_core::txn::Transactional;
 use fineprint_dsl::ability::RuleKind;
 use serde_json::json;
+use std::collections::BTreeMap;
 use support::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -1031,86 +1033,124 @@ fn rich_costs() -> CostSpec {
     }
 }
 
-/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b: the cost ask carries the CostSpec;
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b, 118.9: the cost ask carries the CostSpec;
 /// invalid configurations (an alternative cost outside the list, the same additional cost
 /// twice, X out of range or missing, a wrong number of symbol options) are rejected; a valid
-/// one ends up in `Proposal.costs`.
+/// one ends up in `Proposal.costs`. With alternative and additional costs listed, the symbol
+/// slots come in a second, symbols-only request (CR-011, brief clause B2); the host here keeps
+/// the slots whatever alternative is chosen (`SymbolHost::Always`).
 #[test]
 fn costs_validation_and_result() {
     for (label, req) in both_kinds(P1) {
+        let spec = rich_costs();
         let f = Fake {
             cost_spec: rich_costs(),
+            symbols: SymbolHost::Always(spec.symbol_slots.clone()),
             ..Fake::new()
         };
         let p = pending_of(&f, &req, &[]);
         assert_eq!(p.choice_type, ChoiceType::ChooseCostsAndX);
-        let spec = rich_costs();
+        // B2: the first request has no symbol slots.
         assert_eq!(
             p.payload,
             ChoicePayload::ChooseCostsAndX {
                 alternative_costs: spec.alternative_costs.clone(),
                 additional_costs: spec.additional_costs.clone(),
                 x_range: spec.x_range,
-                symbol_slots: spec.symbol_slots.clone(),
+                symbol_slots: Vec::new(),
                 harmonize_candidates: spec.harmonize_candidates.clone(),
             },
             "{label}"
         );
-        let valid = CostChoice {
+        let first = CostChoice {
             alternative: Some(1),
             additional: vec![0, 1],
             x: Some(3),
-            symbol_options: vec![1, 0],
+            symbol_options: Vec::new(),
             harmonize: Some(oid(31)),
         };
-        let bad = [
+        let bad_first = [
             CostChoice {
                 alternative: Some(2),
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
                 additional: vec![0, 0],
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
                 additional: vec![2],
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
                 x: Some(5),
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
                 x: Some(0),
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
                 x: None,
-                ..valid.clone()
+                ..first.clone()
             },
             CostChoice {
-                symbol_options: vec![1],
-                ..valid.clone()
+                harmonize: Some(oid(32)),
+                ..first.clone()
             },
+            // No symbol slots in the first request: any symbol option is one too many.
             CostChoice {
-                symbol_options: vec![1, 0, 0],
-                ..valid.clone()
-            },
-            CostChoice {
-                symbol_options: vec![2, 0],
-                ..valid.clone()
+                symbol_options: vec![1, 0],
+                ..first.clone()
             },
         ];
-        for b in &bad {
+        for b in &bad_first {
             assert!(
                 p.validate(&configure(b)).is_err(),
-                "{label}: accepted {b:?}"
+                "{label}: first request accepted {b:?}"
             );
         }
-        assert!(p.validate(&configure(&valid)).is_ok(), "{label}");
-        let run = drive(&f, &req, &[configure(&valid)]);
+        assert!(p.validate(&configure(&first)).is_ok(), "{label}");
+
+        // B2: the second request carries only the slots.
+        let second = pending_of(&f, &req, &[configure(&first)]);
+        assert_eq!(second.choice_type, ChoiceType::ChooseCostsAndX, "{label}");
+        assert_eq!(second.request_id, RequestId::new(p.request_id.get() + 1));
+        assert_eq!(
+            second.payload,
+            ChoicePayload::ChooseCostsAndX {
+                alternative_costs: Vec::new(),
+                additional_costs: Vec::new(),
+                x_range: None,
+                symbol_slots: spec.symbol_slots.clone(),
+                harmonize_candidates: Vec::new(),
+            },
+            "{label}"
+        );
+        for b in [
+            symbols_only(&[1]),
+            symbols_only(&[1, 0, 0]),
+            symbols_only(&[2, 0]),
+            symbols_only(&[]),
+            configure(&first),
+        ] {
+            assert!(
+                second.validate(&b).is_err(),
+                "{label}: second request accepted {b:?}"
+            );
+        }
+        assert!(second.validate(&symbols_only(&[1, 0])).is_ok(), "{label}");
+
+        let run = drive(&f, &req, &[configure(&first), symbols_only(&[1, 0])]);
         let (_, prop) = announced(&run, &f);
-        assert_eq!(prop.costs, valid, "{label}");
+        assert_eq!(
+            prop.costs,
+            CostChoice {
+                symbol_options: vec![1, 0],
+                ..first.clone()
+            },
+            "{label}"
+        );
         assert_eq!(prop.modes, Vec::<u32>::new());
         assert!(prop.targets.iter().all(Vec::is_empty));
         assert_eq!(prop.division, None);
@@ -1592,12 +1632,9 @@ fn determinism_modes_ascending() {
             &[select_modes(&[2, 0]), select_targets(&[&[to(11)]])],
         );
         let (_, prop) = announced(&run, &f);
-        // Original indices of offered 2 and 0 (answer order or ascending order).
-        assert!(
-            prop.modes == vec![3, 0] || prop.modes == vec![0, 3],
-            "{:?}",
-            prop.modes
-        );
+        // offered indices 2 and 0 map to original 3 and 0; the proposal lists original indices
+        // ascending
+        assert_eq!(prop.modes, vec![0, 3]);
     }
 }
 
@@ -1617,4 +1654,772 @@ fn outcome_types_are_comparable() {
     assert_traits::<StopReason>();
     assert_traits::<RolledBack>();
     assert_traits::<AnnounceOutcome>();
+}
+
+// ---------------------------------------------------------------------------------------------
+// 9. Mode legality through costs (CR-012), symbol announcement after the costs (CR-011),
+//    large X ranges and large divisions
+// ---------------------------------------------------------------------------------------------
+
+/// `n` additional cost labels.
+fn additional(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("test.add_{i}")).collect()
+}
+
+/// Two modes. Mode 0's normal slot needs object 10, which has shroud, so it is illegal with the
+/// normal cost; with exactly the costs `(alternative, additional)` its slot is replaced by one
+/// with the legal object 11 (CR 601.2c, alternative targets). Mode 1 is legal (object 12).
+fn cost_gated_fake(costs: CostSpec, alternative: Option<u32>, additional: &[u32]) -> Fake {
+    let mut gated = BTreeMap::new();
+    gated.insert(
+        (0, alternative, additional.to_vec()),
+        vec![slot(1, 1, &[to(11)])],
+    );
+    Fake {
+        mode_spec: Some(modes_spec(2, 1, 1, false)),
+        mode_slots: vec![vec![slot(1, 1, &[to(10)])], vec![slot(1, 1, &[to(12)])]],
+        mode_cost_slots: gated,
+        cost_spec: costs,
+        ..Fake::new()
+    }
+    .with_rules(&[tr(1, shroud_obj(10), 1)])
+}
+
+fn alt_costs() -> CostSpec {
+    CostSpec {
+        alternative_costs: strs(&["test.alt_a"]),
+        ..no_costs()
+    }
+}
+
+fn add_costs(n: usize) -> CostSpec {
+    CostSpec {
+        additional_costs: additional(n),
+        ..no_costs()
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 700.2a, 601.2c (CR-012, B1): a mode whose targets are
+/// legal only with an alternative cost is offered (the alternative cost is probed); choosing it
+/// with that alternative cost announces it. Without the alternative cost in the spec the same
+/// mode is not offered.
+#[test]
+fn modes_legal_only_through_alternative_cost() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let f = Fake {
+                priority: Some(caster),
+                ..cost_gated_fake(alt_costs(), Some(0), &[])
+            };
+            let p = pending_of(&f, &req, &[]);
+            assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}");
+            let chosen = CostChoice {
+                alternative: Some(0),
+                ..no_choice()
+            };
+            let run = drive(
+                &f,
+                &req,
+                &[
+                    select_modes(&[0]),
+                    configure(&chosen),
+                    select_targets(&[&[to(11)]]),
+                ],
+            );
+            let (_, prop) = announced(&run, &f);
+            assert_eq!(prop.modes, vec![0], "{label}");
+            assert_eq!(prop.costs, chosen, "{label}");
+            assert_eq!(prop.targets, vec![vec![to(11)]], "{label}");
+
+            // Control: no alternative cost listed, so no probe reaches the gated slots.
+            let control = Fake {
+                cost_spec: no_costs(),
+                ..f.clone()
+            };
+            let p = pending_of(&control, &req, &[]);
+            assert_eq!(
+                modes_payload(&p).0,
+                vec![mode_labels(2)[1].clone()],
+                "{label}: control"
+            );
+        }
+    }
+}
+
+/// REQ-CAST-001 (step 2); CR 700.2a, 601.2c (CR-012, B1): with at most 6 additional costs
+/// every subset is probed, so a mode legal only with the subset {0, 2} of three additional costs
+/// is offered and announced with that subset.
+#[test]
+fn modes_legal_only_through_additional_subset() {
+    for (label, req) in both_kinds(P1) {
+        let f = cost_gated_fake(add_costs(3), None, &[0, 2]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}");
+        let chosen = CostChoice {
+            additional: vec![0, 2],
+            ..no_choice()
+        };
+        let run = drive(
+            &f,
+            &req,
+            &[
+                select_modes(&[0]),
+                configure(&chosen),
+                select_targets(&[&[to(11)]]),
+            ],
+        );
+        let (_, prop) = announced(&run, &f);
+        assert_eq!(prop.modes, vec![0], "{label}");
+        assert_eq!(prop.costs, chosen, "{label}");
+        assert_eq!(prop.targets, vec![vec![to(11)]], "{label}");
+        // Six additional costs, a pair: still every subset.
+        let f = cost_gated_fake(add_costs(6), None, &[1, 4]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: six costs");
+    }
+}
+
+/// REQ-CAST-001 (step 2); CR 700.2a (CR-012, B1): with more than 6 additional costs only "none",
+/// each one alone and all of them are probed: a mode legal only with a pair of 7 is not offered,
+/// one legal with a single one or with all 7 is.
+#[test]
+fn modes_seven_additional_costs_probe_none_each_all() {
+    for (label, req) in both_kinds(P1) {
+        let f = cost_gated_fake(add_costs(7), None, &[2, 5]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(
+            modes_payload(&p).0,
+            vec![mode_labels(2)[1].clone()],
+            "{label}: pair of 7"
+        );
+        let f = cost_gated_fake(add_costs(7), None, &[3]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: one of 7");
+        let f = cost_gated_fake(add_costs(7), None, &[0, 1, 2, 3, 4, 5, 6]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: all 7");
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-CORE-005; CR 700.2a, 601.2, 734.1 (CR-012, B1): the only mode is
+/// legal under no probe (its gated slots need a cost combination that is never probed) -> no
+/// request, rolled back at Choices with NoLegalMode to the identical hash and priority.
+#[test]
+fn modes_no_probe_legal_rolls_back() {
+    for (label, req) in both_kinds(P1) {
+        let mut costs = add_costs(7);
+        costs.alternative_costs = strs(&["test.alt_a"]);
+        costs.x_range = Some((1, 3));
+        let f = Fake {
+            mode_spec: Some(modes_spec(1, 1, 1, false)),
+            ..cost_gated_fake(costs, Some(0), &[2, 5])
+        };
+        let run = drive(&f, &req, &[]);
+        assert!(run.requests.is_empty(), "{label}");
+        assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+    }
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005; CR 601.2c, 601.2, 734.1 (CR-012, B1): a mode offered
+/// only through an alternative cost but then cast with the normal cost has no legal target in
+/// the final check: rolled back at Targets with MissingTarget{slot: 0} and the original hash.
+#[test]
+fn modes_offered_through_alternative_but_not_chosen_rolls_back() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let f = Fake {
+                priority: Some(caster),
+                ..cost_gated_fake(alt_costs(), Some(0), &[])
+            };
+            let run = drive(&f, &req, &[select_modes(&[0]), configure(&no_choice())]);
+            assert_eq!(run.requests.len(), 2, "{label}");
+            assert_rolled_back(
+                &run,
+                &f,
+                CastStep::Targets,
+                StopReason::MissingTarget { slot: 0 },
+            );
+        }
+    }
+}
+
+/// The CHOOSE_COSTS_AND_X payload parts.
+fn cost_payload(p: &PendingChoiceRequest) -> ChoicePayload {
+    assert_eq!(p.choice_type, ChoiceType::ChooseCostsAndX);
+    p.payload.clone()
+}
+
+fn symbols_payload(slots: Vec<Vec<String>>) -> ChoicePayload {
+    ChoicePayload::ChooseCostsAndX {
+        alternative_costs: Vec::new(),
+        additional_costs: Vec::new(),
+        x_range: None,
+        symbol_slots: slots,
+        harmonize_candidates: Vec::new(),
+    }
+}
+
+/// A hybrid-style normal cost (one slot of two options) and a symbol-free alternative cost.
+fn hybrid_alt_spec() -> CostSpec {
+    CostSpec {
+        alternative_costs: strs(&["test.alt_a"]),
+        symbol_slots: vec![strs(&["test.sym_a", "test.sym_b"])],
+        ..no_costs()
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b, 118.9 (CR-011, B2): a hybrid-style normal
+/// cost and a symbol-free alternative. The first request has no symbol slots. Normal cost: a
+/// second request (next id, same chooser, reason CR 601.2b) carries only the slots and its
+/// answer becomes `symbol_options`. Alternative cost: no second request, `symbol_options` empty.
+#[test]
+fn symbols_follow_the_chosen_cost_default_host() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let f = Fake {
+                priority: Some(caster),
+                cost_spec: hybrid_alt_spec(),
+                ..Fake::new()
+            };
+            // Normal path.
+            let run = drive(&f, &req, &[configure(&no_choice()), symbols_only(&[1])]);
+            assert_eq!(run.requests.len(), 2, "{label}");
+            assert_eq!(
+                cost_payload(&run.requests[0]),
+                ChoicePayload::ChooseCostsAndX {
+                    alternative_costs: strs(&["test.alt_a"]),
+                    additional_costs: Vec::new(),
+                    x_range: None,
+                    symbol_slots: Vec::new(),
+                    harmonize_candidates: Vec::new(),
+                },
+                "{label}"
+            );
+            assert_eq!(
+                cost_payload(&run.requests[1]),
+                symbols_payload(vec![strs(&["test.sym_a", "test.sym_b"])]),
+                "{label}"
+            );
+            for (i, p) in run.requests.iter().enumerate() {
+                assert_eq!(p.request_id, RequestId::new(i as u64), "{label}");
+                assert_eq!(p.chooser, caster, "{label}");
+                assert_eq!(p.reason.cr, "CR 601.2b", "{label}");
+                assert!(p.validate(&p.default_on_timeout).is_ok(), "{label}");
+            }
+            let second = &run.requests[1];
+            assert!(second.validate(&symbols_only(&[0])).is_ok(), "{label}");
+            assert!(second.validate(&symbols_only(&[])).is_err(), "{label}");
+            assert!(second.validate(&symbols_only(&[0, 1])).is_err(), "{label}");
+            assert!(second.validate(&symbols_only(&[2])).is_err(), "{label}");
+            let alt_in_second = CostChoice {
+                alternative: Some(0),
+                symbol_options: vec![0],
+                ..no_choice()
+            };
+            assert!(
+                second.validate(&configure(&alt_in_second)).is_err(),
+                "{label}"
+            );
+            let (_, prop) = announced(&run, &f);
+            assert_eq!(
+                prop.costs,
+                CostChoice {
+                    symbol_options: vec![1],
+                    ..no_choice()
+                },
+                "{label}"
+            );
+            // Alternative path: no symbol request.
+            let alt = CostChoice {
+                alternative: Some(0),
+                ..no_choice()
+            };
+            let run = drive(&f, &req, &[configure(&alt)]);
+            assert_eq!(run.requests.len(), 1, "{label}");
+            let (_, prop) = announced(&run, &f);
+            assert_eq!(prop.costs, alt, "{label}");
+            assert!(prop.costs.symbol_options.is_empty(), "{label}");
+        }
+    }
+}
+
+/// REQ-CAST-001 (step 2); CR 601.2b, 118.9 (CR-011, B2): the provided `CastState::symbol_slots`
+/// returns nothing when an alternative cost is chosen and the spec's slots otherwise.
+#[test]
+fn symbols_provided_default() {
+    for (label, req) in both_kinds(P1) {
+        let host = DefaultSymbols(Fake {
+            cost_spec: CostSpec {
+                additional_costs: additional(1),
+                ..hybrid_alt_spec()
+            },
+            ..Fake::new()
+        });
+        let normal = CostChoice {
+            additional: vec![0],
+            ..no_choice()
+        };
+        assert_eq!(
+            host.symbol_slots(&req, &[], &normal),
+            vec![strs(&["test.sym_a", "test.sym_b"])],
+            "{label}"
+        );
+        assert_eq!(
+            host.symbol_slots(&req, &[], &no_choice()),
+            vec![strs(&["test.sym_a", "test.sym_b"])],
+            "{label}"
+        );
+        let alt = CostChoice {
+            alternative: Some(0),
+            additional: vec![0],
+            ..no_choice()
+        };
+        assert!(host.symbol_slots(&req, &[], &alt).is_empty(), "{label}");
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b, 118.9d (CR-011, B2): a host whose alternative
+/// cost has symbols of its own (it overrides `symbol_slots`) gets them asked; the host is asked
+/// with the first answer's costs; X, additional costs and harmonize come from the first answer,
+/// `symbol_options` from the second.
+#[test]
+fn symbols_of_the_alternative_cost_host_override() {
+    for (label, req) in both_kinds(P1) {
+        let mut per = BTreeMap::new();
+        per.insert((None, vec![]), vec![strs(&["test.sym_a", "test.sym_b"])]);
+        per.insert(
+            (Some(0), vec![0]),
+            vec![
+                strs(&["test.sym_c", "test.sym_d", "test.sym_e"]),
+                strs(&["test.sym_f", "test.sym_g"]),
+            ],
+        );
+        let f = Fake {
+            cost_spec: CostSpec {
+                additional_costs: additional(1),
+                x_range: Some((0, 2)),
+                harmonize_candidates: vec![oid(30), oid(31)],
+                ..hybrid_alt_spec()
+            },
+            symbols: SymbolHost::PerCosts(per),
+            ..Fake::new()
+        };
+        let first = CostChoice {
+            alternative: Some(0),
+            additional: vec![0],
+            x: Some(2),
+            symbol_options: Vec::new(),
+            harmonize: Some(oid(30)),
+        };
+        let run = drive(&f, &req, &[configure(&first), symbols_only(&[2, 1])]);
+        assert_eq!(run.requests.len(), 2, "{label}");
+        assert_eq!(
+            cost_payload(&run.requests[1]),
+            symbols_payload(vec![
+                strs(&["test.sym_c", "test.sym_d", "test.sym_e"]),
+                strs(&["test.sym_f", "test.sym_g"]),
+            ]),
+            "{label}"
+        );
+        let (_, prop) = announced(&run, &f);
+        assert_eq!(
+            prop.costs,
+            CostChoice {
+                symbol_options: vec![2, 1],
+                ..first.clone()
+            },
+            "{label}"
+        );
+        // Additional cost 0 without the alternative: the host returns no slots -> one request.
+        let only_add = CostChoice {
+            additional: vec![0],
+            x: Some(1),
+            ..no_choice()
+        };
+        let run = drive(&f, &req, &[configure(&only_add)]);
+        assert_eq!(run.requests.len(), 1, "{label}");
+        assert_eq!(announced(&run, &f).1.costs, only_add, "{label}");
+        // Normal cost: the normal slot.
+        let run = drive(
+            &f,
+            &req,
+            &[
+                configure(&CostChoice {
+                    x: Some(0),
+                    ..no_choice()
+                }),
+                symbols_only(&[0]),
+            ],
+        );
+        assert_eq!(
+            cost_payload(&run.requests[1]),
+            symbols_payload(vec![strs(&["test.sym_a", "test.sym_b"])]),
+            "{label}"
+        );
+    }
+}
+
+/// REQ-NET-003, R12; CR 601.2b (CR-011, B2): a symbol slot with no options from the host is a
+/// protocol error (`Interrupt::Error`): the session reports an error for the first answer, which
+/// is itself valid, and stays unchanged.
+#[test]
+fn symbols_empty_slot_is_an_error() {
+    for (label, req) in both_kinds(P1) {
+        let f = Fake {
+            cost_spec: hybrid_alt_spec(),
+            symbols: SymbolHost::Always(vec![strs(&["test.sym_a"]), Vec::new()]),
+            ..Fake::new()
+        };
+        let mut s = start(&f, &req);
+        let p = s.pending().cloned().expect("first cost request");
+        assert!(p.validate(&configure(&no_choice())).is_ok(), "{label}");
+        let err = s
+            .submit(p.request_id, configure(&no_choice()))
+            .expect_err("an empty symbol slot must fail");
+        assert!(
+            !matches!(
+                err,
+                ChoiceError::Invalid { .. } | ChoiceError::StaleRequest { .. }
+            ),
+            "{label}: {err:?}"
+        );
+        assert!(s.answers().is_empty(), "{label}");
+        assert_eq!(s.pending(), Some(&p), "{label}");
+        assert!(
+            replay(&f, &req, &[configure(&no_choice())]).is_err(),
+            "{label}"
+        );
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b (CR-011, B2): with neither an alternative nor
+/// an additional cost there is one request carrying the spec's symbol slots (unchanged), even
+/// if the host would answer `symbol_slots` differently.
+#[test]
+fn symbols_single_request_without_alternative_or_additional() {
+    for (label, req) in both_kinds(P1) {
+        let spec = CostSpec {
+            x_range: Some((0, 2)),
+            symbol_slots: vec![strs(&["test.sym_a", "test.sym_b"])],
+            harmonize_candidates: vec![oid(30)],
+            ..no_costs()
+        };
+        for symbols in [
+            SymbolHost::Default,
+            SymbolHost::Always(vec![strs(&["test.sym_z"])]),
+        ] {
+            let f = Fake {
+                cost_spec: spec.clone(),
+                symbols,
+                ..Fake::new()
+            };
+            let chosen = CostChoice {
+                x: Some(2),
+                symbol_options: vec![1],
+                harmonize: Some(oid(30)),
+                ..no_choice()
+            };
+            let run = drive(&f, &req, &[configure(&chosen)]);
+            assert_eq!(run.requests.len(), 1, "{label}");
+            assert_eq!(
+                cost_payload(&run.requests[0]),
+                ChoicePayload::ChooseCostsAndX {
+                    alternative_costs: Vec::new(),
+                    additional_costs: Vec::new(),
+                    x_range: Some((0, 2)),
+                    symbol_slots: spec.symbol_slots.clone(),
+                    harmonize_candidates: vec![oid(30)],
+                },
+                "{label}"
+            );
+            assert!(
+                run.requests[0]
+                    .validate(&configure(&CostChoice {
+                        symbol_options: Vec::new(),
+                        ..chosen.clone()
+                    }))
+                    .is_err(),
+                "{label}: missing symbol option"
+            );
+            assert_eq!(announced(&run, &f).1.costs, chosen, "{label}");
+        }
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b (CR-011, B2): the ids stay dense across the
+/// two cost requests and the following asks (modes 0, costs 1, symbols 2, targets 3).
+#[test]
+fn symbols_request_ids_dense_with_other_asks() {
+    for (label, req) in both_kinds(P1) {
+        let f = Fake {
+            cost_spec: CostSpec {
+                additional_costs: additional(1),
+                symbol_slots: vec![strs(&["test.sym_a", "test.sym_b"])],
+                ..no_costs()
+            },
+            ..four_ask_fake()
+        };
+        let run = drive(
+            &f,
+            &req,
+            &[
+                select_modes(&[1]),
+                configure(&CostChoice {
+                    additional: vec![0],
+                    ..no_choice()
+                }),
+                symbols_only(&[0]),
+                select_targets(&[&[to(12)]]),
+                submit_division(&[(to(12), 3)]),
+            ],
+        );
+        let kinds: Vec<(u64, ChoiceType)> = run
+            .requests
+            .iter()
+            .map(|p| (p.request_id.get(), p.choice_type))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (0, ChoiceType::ChooseModes),
+                (1, ChoiceType::ChooseCostsAndX),
+                (2, ChoiceType::ChooseCostsAndX),
+                (3, ChoiceType::ChooseTargets),
+                (4, ChoiceType::DivideValue),
+            ],
+            "{label}"
+        );
+        let (_, prop) = announced(&run, &f);
+        assert_eq!(
+            prop.costs,
+            CostChoice {
+                additional: vec![0],
+                symbol_options: vec![0],
+                ..no_choice()
+            },
+            "{label}"
+        );
+        // Replay in one call gives the same result.
+        let s = replay(&f, &req, &run.answers).expect("replay");
+        assert_eq!(s.state_hash(), run.final_hash, "{label}");
+    }
+}
+
+/// Checks that no `Number` option of an enumerated cost request is lossy: each stands for an X
+/// in the payload's range and the default answer with that X validates (B3).
+fn assert_numbers_lossless(p: &PendingChoiceRequest) {
+    let ChoicePayload::ChooseCostsAndX { x_range, .. } = &p.payload else {
+        panic!("not a cost request: {:?}", p.payload);
+    };
+    let ChoiceOptions::Enumerated(items) = &p.options else {
+        return;
+    };
+    for item in items {
+        if let ChoiceOption::Number(n) = item {
+            let (lo, hi) = x_range.expect("a Number option without an X range");
+            let v = u64::try_from(*n).expect("a negative Number option");
+            assert!(lo <= v && v <= hi, "Number({n}) outside {lo}..={hi}");
+            let ChoiceResponse::ConfigureCosts {
+                alternative,
+                additional,
+                symbol_options,
+                harmonize,
+                ..
+            } = p.default_on_timeout.clone()
+            else {
+                panic!("default is not ConfigureCosts");
+            };
+            let a = ChoiceResponse::ConfigureCosts {
+                alternative,
+                additional,
+                x: Some(v),
+                symbol_options,
+                harmonize,
+            };
+            assert!(p.validate(&a).is_ok(), "X {v} of Number({n}) rejected");
+        }
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b (B3): an X range above i64::MAX is announced
+/// with a Payload validator (min = max = 1) and the exact u64 range; both ends are accepted and
+/// the values just outside are not; the chosen X reaches the proposal unchanged.
+#[test]
+fn x_range_above_i64_uses_a_validator() {
+    let lo = i64::MAX as u64 + 1;
+    let hi = i64::MAX as u64 + 2;
+    for (label, req) in both_kinds(P1) {
+        for (a, b) in [(lo, hi), (0, lo), (lo, u64::MAX), (0, u64::MAX)] {
+            let f = Fake {
+                cost_spec: x_costs(a, b),
+                ..Fake::new()
+            };
+            let p = pending_of(&f, &req, &[]);
+            assert_eq!(
+                p.options,
+                ChoiceOptions::Validator(ValidatorContract {
+                    min: 1,
+                    max: 1,
+                    rule: ValidatorRule::Payload,
+                }),
+                "{label}: {a}..={b}"
+            );
+            assert_eq!((p.min, p.max), (1, 1), "{label}");
+            let ChoicePayload::ChooseCostsAndX { x_range, .. } = &p.payload else {
+                panic!("{label}: {:?}", p.payload);
+            };
+            assert_eq!(*x_range, Some((a, b)), "{label}");
+            assert!(p.validate(&with_x(a)).is_ok(), "{label}: {a}");
+            assert!(p.validate(&with_x(b)).is_ok(), "{label}: {b}");
+            if a > 0 {
+                assert!(p.validate(&with_x(a - 1)).is_err(), "{label}: below");
+            }
+            if b < u64::MAX {
+                assert!(p.validate(&with_x(b + 1)).is_err(), "{label}: above");
+            }
+            assert!(p.validate(&p.default_on_timeout).is_ok(), "{label}");
+        }
+        let f = Fake {
+            cost_spec: x_costs(lo, hi),
+            ..Fake::new()
+        };
+        let run = drive(&f, &req, &[with_x(hi)]);
+        assert_eq!(announced(&run, &f).1.costs.x, Some(hi), "{label}");
+        let run = drive(&f, &req, &[with_x(lo)]);
+        assert_eq!(announced(&run, &f).1.costs.x, Some(lo), "{label}");
+    }
+}
+
+/// REQ-CAST-001 (step 2), REQ-NET-003; CR 601.2b (B3): a small range is enumerated with Number
+/// options, none of them lossy (also near i64::MAX).
+#[test]
+fn x_range_small_is_enumerated_with_exact_numbers() {
+    for (label, req) in both_kinds(P1) {
+        let f = Fake {
+            cost_spec: x_costs(0, 3),
+            ..Fake::new()
+        };
+        let p = pending_of(&f, &req, &[]);
+        let ChoiceOptions::Enumerated(items) = &p.options else {
+            panic!("{label}: 0..=3 not enumerated: {:?}", p.options);
+        };
+        let numbers: Vec<i64> = items
+            .iter()
+            .filter_map(|o| match o {
+                ChoiceOption::Number(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(numbers, vec![0, 1, 2, 3], "{label}");
+        assert_numbers_lossless(&p);
+        let top = i64::MAX as u64;
+        for (a, b) in [(top - 2, top), (top, top), (7, 9)] {
+            let f = Fake {
+                cost_spec: x_costs(a, b),
+                ..Fake::new()
+            };
+            assert_numbers_lossless(&pending_of(&f, &req, &[]));
+        }
+    }
+}
+
+/// The DIVIDE_VALUE request for targets 10 and 11 and `total`.
+fn divide_two(total: u64, req: &CastRequest) -> (Fake, ChoiceResponse, PendingChoiceRequest) {
+    let f = div_fake(total);
+    let t = select_targets(&[&[to(10), to(11)]]);
+    let p = pending_of(&f, req, std::slice::from_ref(&t));
+    assert_eq!(p.choice_type, ChoiceType::DivideValue);
+    (f, t, p)
+}
+
+/// REQ-CAST-001 (step 4), REQ-NET-003; CR 601.2d (B4): two recipients have T-1 valid divisions:
+/// T = 3 and T = 10_000 (9_999 answers) are enumerated with the recipients, T = 10_001 (10_000
+/// answers, the ENUMERATION_LIMIT) carries a Division validator with each minimum 1.
+#[test]
+fn division_enumeration_limit() {
+    assert_eq!(ENUMERATION_LIMIT, 10_000);
+    for (label, req) in both_kinds(P1) {
+        for total in [3, ENUMERATION_LIMIT] {
+            let (_, _, p) = divide_two(total, &req);
+            assert_eq!(
+                p.options,
+                ChoiceOptions::Enumerated(vec![
+                    ChoiceOption::Object(oid(10)),
+                    ChoiceOption::Object(oid(11))
+                ]),
+                "{label}: T={total}"
+            );
+            assert_eq!((p.min, p.max), (2, 2), "{label}");
+        }
+        let total = ENUMERATION_LIMIT + 1;
+        let (f, t, p) = divide_two(total, &req);
+        assert_eq!(
+            p.options,
+            ChoiceOptions::Validator(ValidatorContract {
+                min: 2,
+                max: 2,
+                rule: ValidatorRule::Division {
+                    total,
+                    recipients: vec![(to(10), 1), (to(11), 1)],
+                },
+            }),
+            "{label}"
+        );
+        assert_eq!((p.min, p.max), (2, 2), "{label}");
+        assert_eq!(
+            p.payload,
+            ChoicePayload::DivideValue {
+                total,
+                recipients: vec![(to(10), 1), (to(11), 1)],
+            },
+            "{label}"
+        );
+        // Any division still validates; bad ones are still rejected.
+        for (a, b) in [(1, total - 1), (total - 1, 1), (5_000, 5_001)] {
+            assert!(
+                p.validate(&submit_division(&[(to(10), a), (to(11), b)]))
+                    .is_ok(),
+                "{label}: {a}/{b}"
+            );
+        }
+        for (a, b) in [(0, total), (total, 0), (5_000, 5_000), (5_001, 5_001)] {
+            assert!(
+                p.validate(&submit_division(&[(to(10), a), (to(11), b)]))
+                    .is_err(),
+                "{label}: accepted {a}/{b}"
+            );
+        }
+        assert!(p.validate(&p.default_on_timeout).is_ok(), "{label}");
+        let d = [(to(10), 5_000), (to(11), 5_001)];
+        let run = drive(&f, &req, &[t, submit_division(&d)]);
+        assert_eq!(announced(&run, &f).1.division, Some(d.to_vec()), "{label}");
+    }
+}
+
+/// REQ-CAST-001 (step 4), REQ-NET-003; CR 601.2d (B4): one recipient has exactly one valid
+/// division, so the request is enumerated for any total.
+#[test]
+fn division_single_recipient_always_enumerated() {
+    for (label, req) in both_kinds(P1) {
+        for total in [1, ENUMERATION_LIMIT, ENUMERATION_LIMIT + 1, u64::MAX] {
+            let f = div_fake(total);
+            let t = select_targets(&[&[to(11)]]);
+            let p = pending_of(&f, &req, std::slice::from_ref(&t));
+            assert_eq!(
+                p.options,
+                ChoiceOptions::Enumerated(vec![ChoiceOption::Object(oid(11))]),
+                "{label}: T={total}"
+            );
+            assert!(
+                p.validate(&submit_division(&[(to(11), total)])).is_ok(),
+                "{label}"
+            );
+            let run = drive(&f, &req, &[t, submit_division(&[(to(11), total)])]);
+            assert_eq!(
+                announced(&run, &f).1.division,
+                Some(vec![(to(11), total)]),
+                "{label}"
+            );
+        }
+    }
 }

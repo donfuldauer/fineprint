@@ -322,6 +322,25 @@ pub fn mode_labels(n: usize) -> Vec<String> {
 // the fake host
 // ---------------------------------------------------------------------------------------------
 
+/// The symbol slots of one symbol announcement: one option list per symbol.
+pub type Slots = Vec<Vec<String>>;
+
+/// Symbol slots keyed by `(alternative, additional)` of the first cost answer.
+pub type SlotsByCosts = BTreeMap<(Option<u32>, Vec<u32>), Slots>;
+
+/// How the fake answers `CastState::symbol_slots` (CR-011; CR 601.2b, 118.9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SymbolHost {
+    /// The contract's default: no slots when an alternative cost is chosen (it is paid rather
+    /// than the mana cost, CR 118.9), otherwise `CostSpec::symbol_slots`. The provided method
+    /// itself is checked against this on [`DefaultSymbols`].
+    Default,
+    /// These slots whatever costs were chosen.
+    Always(Vec<Vec<String>>),
+    /// Per `(alternative, additional)` of the first cost answer; any other key gives no slots.
+    PerCosts(SlotsByCosts),
+}
+
 /// A toy game state implementing [`Transactional`] and [`CastState`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fake {
@@ -346,6 +365,12 @@ pub struct Fake {
     pub mode_slots: Vec<Vec<TargetSlotSpec>>,
     /// Target slots added last when additional cost 0 is chosen (CR 601.2c, first example).
     pub additional_slots: Vec<TargetSlotSpec>,
+    /// Per `(original mode, alternative, additional ascending)`: the slots that REPLACE
+    /// `mode_slots[mode]` when exactly those costs are announced (CR 601.2c: "a spell may
+    /// require alternative targets only if an alternative or additional cost was chosen").
+    pub mode_cost_slots: BTreeMap<(u32, Option<u32>, Vec<u32>), Vec<TargetSlotSpec>>,
+    /// `symbol_slots` (CR-011).
+    pub symbols: SymbolHost,
     /// `division_total`.
     pub division: Option<u64>,
     /// The qualities `source_has_quality` reports for any object on this fake's stack.
@@ -376,6 +401,8 @@ impl Fake {
             base_slots: Vec::new(),
             mode_slots: Vec::new(),
             additional_slots: Vec::new(),
+            mode_cost_slots: BTreeMap::new(),
+            symbols: SymbolHost::Default,
             division: None,
             qualities: BTreeSet::new(),
             combination_legal: true,
@@ -457,8 +484,15 @@ impl CastState for Fake {
         costs: &CostChoice,
     ) -> Vec<TargetSlotSpec> {
         let mut out = self.base_slots.clone();
+        let mut additional = costs.additional.clone();
+        additional.sort_unstable();
         for &m in modes {
-            if let Some(extra) = self.mode_slots.get(m as usize) {
+            if let Some(replaced) =
+                self.mode_cost_slots
+                    .get(&(m, costs.alternative, additional.clone()))
+            {
+                out.extend(replaced.iter().cloned());
+            } else if let Some(extra) = self.mode_slots.get(m as usize) {
                 out.extend(extra.iter().cloned());
             }
         }
@@ -466,6 +500,28 @@ impl CastState for Fake {
             out.extend(self.additional_slots.iter().cloned());
         }
         out
+    }
+
+    fn symbol_slots(
+        &self,
+        req: &CastRequest,
+        modes: &[u32],
+        costs: &CostChoice,
+    ) -> Vec<Vec<String>> {
+        match &self.symbols {
+            SymbolHost::Default => {
+                if costs.alternative.is_some() {
+                    Vec::new()
+                } else {
+                    self.cost_spec(req, modes).symbol_slots
+                }
+            }
+            SymbolHost::Always(slots) => slots.clone(),
+            SymbolHost::PerCosts(map) => map
+                .get(&(costs.alternative, costs.additional.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
 
     fn division_total(&self, _req: &CastRequest, _proposal: &Proposal) -> Option<u64> {
@@ -528,6 +584,93 @@ impl CastState for Fake {
         _proposal: &Proposal,
     ) -> bool {
         self.combination_legal
+    }
+}
+
+/// A host that delegates every required `CastState` method to a [`Fake`] and keeps the PROVIDED
+/// `symbol_slots` (so tests can call the contract's default directly, CR-011).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultSymbols(pub Fake);
+
+impl Transactional for DefaultSymbols {
+    fn state_hash(&self) -> Digest {
+        self.0.state_hash()
+    }
+
+    fn priority_player(&self) -> Option<PlayerId> {
+        self.0.priority_player()
+    }
+
+    fn carry_durable(restored: Self, _before: &Self, _after: &Self) -> Self {
+        restored
+    }
+}
+
+impl CastState for DefaultSymbols {
+    fn rule_set(&self) -> &RuleSet {
+        self.0.rule_set()
+    }
+
+    fn are_opponents(&self, a: PlayerId, b: PlayerId) -> bool {
+        self.0.are_opponents(a, b)
+    }
+
+    fn target_controller(&self, t: ChoiceTarget) -> PlayerId {
+        self.0.target_controller(t)
+    }
+
+    fn mode_spec(&self, req: &CastRequest) -> Option<ModeSpec> {
+        self.0.mode_spec(req)
+    }
+
+    fn cost_spec(&self, req: &CastRequest, modes: &[u32]) -> CostSpec {
+        self.0.cost_spec(req, modes)
+    }
+
+    fn target_slots(
+        &self,
+        req: &CastRequest,
+        modes: &[u32],
+        costs: &CostChoice,
+    ) -> Vec<TargetSlotSpec> {
+        self.0.target_slots(req, modes, costs)
+    }
+
+    fn division_total(&self, req: &CastRequest, proposal: &Proposal) -> Option<u64> {
+        self.0.division_total(req, proposal)
+    }
+
+    fn put_on_stack(&mut self, req: &CastRequest) -> ObjectId {
+        self.0.put_on_stack(req)
+    }
+
+    fn source_has_quality(&self, req: &CastRequest, stack_object: ObjectId, quality: &str) -> bool {
+        self.0.source_has_quality(req, stack_object, quality)
+    }
+
+    fn prohibition_applies(
+        &self,
+        entry: &RuleEntry,
+        req: &CastRequest,
+        stack_object: ObjectId,
+        proposal: &Proposal,
+    ) -> bool {
+        self.0
+            .prohibition_applies(entry, req, stack_object, proposal)
+    }
+
+    fn prohibition_could_lapse(&self, entry: &RuleEntry, req: &CastRequest) -> bool {
+        self.0.prohibition_could_lapse(entry, req)
+    }
+
+    fn proposal_combination_legal(
+        &self,
+        req: &CastRequest,
+        stack_object: ObjectId,
+        proposal: &Proposal,
+    ) -> bool {
+        self.0
+            .proposal_combination_legal(req, stack_object, proposal)
     }
 }
 
@@ -713,6 +856,19 @@ pub fn configure(c: &CostChoice) -> ChoiceResponse {
         symbol_options: c.symbol_options.clone(),
         harmonize: c.harmonize,
     }
+}
+
+/// The `ConfigureCosts` answer to a symbols-only (second) CHOOSE_COSTS_AND_X request (CR-011).
+pub fn symbols_only(options: &[u32]) -> ChoiceResponse {
+    configure(&CostChoice {
+        symbol_options: options.to_vec(),
+        ..no_choice()
+    })
+}
+
+/// Owned strings.
+pub fn strs(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| (*s).to_owned()).collect()
 }
 
 /// `ConfigureCosts` with only X.
