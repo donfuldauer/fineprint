@@ -955,7 +955,10 @@ fn req_ing_009_look_back() {
         .with_id(LintId::LOOK_BACK)
         .map(|l| l.message.as_str())
         .collect();
-    assert_eq!(messages.len(), 4, "{messages:#?}");
+    // Brief Gate 06-turn F53: a look-back-like key under the `params` of a NATIVE_EFFECT is
+    // opaque native-effect data (REQ-DSL-015, SRS §14.8) and is not reported, so the three
+    // other keys are (this assertion counted four before F53).
+    assert_eq!(messages.len(), 3, "{messages:#?}");
     assert!(
         messages
             .iter()
@@ -968,7 +971,7 @@ fn req_ing_009_look_back() {
     );
     assert!(messages.iter().any(|m| m.contains("\"Look-Back-Mode\"")));
     assert!(
-        messages
+        !messages
             .iter()
             .any(|m| m.contains("$.effect[0].params.x[0].LOOKBACK"))
     );
@@ -1799,4 +1802,380 @@ fn req_ing_009_random_values_never_panic() {
 fn req_ing_009_clip_on_char_boundary() {
     assert_eq!(clip("abc", 5), "abc");
     assert_eq!(clip("ééé", 2), "éé...");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 06-turn review fixes
+
+/// A DRAW of one card by the controller.
+fn draw_one() -> Value {
+    json!({"op": "DRAW", "player": {"ref": "CONTROLLER"}, "count": {"LITERAL": 1}})
+}
+
+/// Asserts the one-face definition with `a` as its only ability gives `n` FPL-MANA-ABILITY
+/// findings.
+fn mana_findings(a: &Value, n: usize) {
+    decodes(a);
+    let report = run(&one_face(vec![a.clone()]));
+    assert_eq!(
+        of(&report, LintId::MANA_ABILITY).len(),
+        n,
+        "{a}: {report:#?}"
+    );
+}
+
+/// REQ-ING-009 (CR 605.1a, gate 06-turn F50): an `EXILE_UNTIL` whose `objects` selector takes
+/// cards from a library moves a card from a library, so a targetless TAP_SOURCE ability
+/// declared a mana ability is an Error; the same instruction on the battlefield is not.
+#[test]
+fn req_ing_009_mana_ability_exile_until_from_library() {
+    let exile = |zone: &str| {
+        activated(json!({"effect": [{"op": "EXILE_UNTIL",
+            "objects": {"zones": [zone], "pred": "IS_LAND"},
+            "duration": {"kind": "UNTIL_END_OF_TURN"}}]}))
+    };
+    let library = exile("LIBRARY");
+    mana_findings(&library, 1);
+    let report = run(&one_face(vec![library]));
+    let lint = report.with_id(LintId::MANA_ABILITY).next().expect("one");
+    assert!(lint.message.contains("library"), "{}", lint.message);
+    mana_findings(&exile("BATTLEFIELD"), 0);
+}
+
+/// REQ-ING-009 (CR 605.1a, CR 603.7, gate 06-turn F51): the body of a delayed trigger the
+/// ability creates is a separate ability, so its DRAW is not counted; the same DRAW in the
+/// ability itself, or in an inline IF branch, is.
+#[test]
+fn req_ing_009_mana_ability_skips_delayed_trigger_body() {
+    let delayed = json!({"op": "CREATE_DELAYED_TRIGGER",
+        "trigger": {"mode": "EVENT", "event": {"kind": "DIES"}},
+        "effect": [draw_one()], "oneShot": true});
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"}, delayed]})),
+        0,
+    );
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"}, draw_one()]})),
+        1,
+    );
+    mana_findings(
+        &activated(json!({"effect": [{"op": "POPULATE"},
+            {"op": "IF", "cond": {"pred": "IS_CREATURE"}, "then": [draw_one()]}]})),
+        1,
+    );
+}
+
+/// REQ-ING-009, REQ-DSL-015 (CR 603.10, SRS §14.8, gate 06-turn F53): a look-back-like key in
+/// the opaque `params` of a NATIVE_EFFECT is not reported; one nested in a trigger matcher's
+/// filters still is, and so is one in keyword `params` (`req_ing_009_look_back`).
+#[test]
+fn req_ing_009_look_back_skips_native_effect_params() {
+    let spell = json!({"abilityId": "s", "kind": "SPELL", "textSpan": [0, 0], "effect": [
+        {"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+            "params": {"lookBack": true}}
+    ]});
+    decodes(&spell);
+    let typed = run(&one_face(vec![spell.clone()]));
+    none_of(&typed, LintId::LOOK_BACK);
+    none_of(&run_raw(&[spell]), LintId::LOOK_BACK);
+    // Nested in a matcher filter (refused at load, so checked on its JSON form).
+    let t = json!({"abilityId": "t", "kind": "TRIGGERED", "textSpan": [0, 0],
+        "trigger": {"mode": "EVENT", "event": {"kind": "DIES", "subject": {"ref": "SELF"},
+            "filters": {"inner": {"lookBack": true}}}},
+        "effect": [{"op": "NATIVE_EFFECT", "id": "test.native", "version": 1,
+            "params": {"lookBack": true}}]});
+    let report = run_raw(&[t]);
+    let messages: Vec<&str> = report
+        .with_id(LintId::LOOK_BACK)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert!(
+        messages[0].contains("$.trigger.event.filters.inner.lookBack"),
+        "{}",
+        messages[0]
+    );
+    // A member named `params` outside a NATIVE_EFFECT is not opaque.
+    let other = json!({"abilityId": "o", "kind": "SPELL", "textSpan": [0, 0],
+        "effect": [{"op": "POPULATE", "params": {"lookBack": true}}]});
+    assert_eq!(run_raw(&[other]).with_id(LintId::LOOK_BACK).count(), 1);
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 202.3d, CR 709.4b, CR 709.5, gate 06-turn F98): each half of
+/// a Room has the combined mana value of both halves (unequal halves {1}{U} and {3}{R}: 6).
+#[test]
+fn req_ing_009_mana_value_room_combined() {
+    let mut room = def_of(
+        vec![
+            face_of(FaceKind::LeftHalf, Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::RightHalf, Some("{3}{R}"), 0, vec![]),
+        ],
+        mask(10),
+    );
+    room.layout = LayoutBehavior::Room;
+    let mv = |faces: Vec<Option<u32>>| {
+        let ctx = source(faces.into_iter().map(|m| (m, None)).collect(), None);
+        of(&lint_definition(&room, &ctx), LintId::MANA_VALUE)
+    };
+    assert!(mv(vec![Some(6), Some(6)]).is_empty());
+    assert_eq!(
+        mv(vec![Some(2), Some(4)]),
+        vec![
+            (Severity::Error, "faces[0]".to_owned(), Some(0), None),
+            (Severity::Error, "faces[1]".to_owned(), Some(1), None),
+        ]
+    );
+    assert_eq!(mv(vec![Some(6), Some(4)]).len(), 1);
+}
+
+/// REQ-ING-009, REQ-ING-002 (CR 710.1c, gate 06-turn F99): the Flipped face of a flip card
+/// has the Main face's mana value and colors; a modal double-faced card's back face keeps its
+/// own (absent) cost.
+#[test]
+fn req_ing_009_flip_uses_main_cost_and_colors() {
+    let mut flip = def_of(
+        vec![
+            face(Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::Flipped, None, 0, vec![]),
+        ],
+        ColorBitmask::BLUE,
+    );
+    flip.layout = LayoutBehavior::Flip;
+    let blue = Some(ColorBitmask::BLUE);
+    let report = lint_definition(&flip, &source(vec![(Some(2), blue), (Some(2), blue)], None));
+    none_of(&report, LintId::MANA_VALUE);
+    none_of(&report, LintId::COLORS);
+    let report = lint_definition(
+        &flip,
+        &source(
+            vec![(Some(2), blue), (Some(0), Some(ColorBitmask::NONE))],
+            None,
+        ),
+    );
+    assert_eq!(
+        of(&report, LintId::MANA_VALUE),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    assert_eq!(
+        of(&report, LintId::COLORS),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    // A modal DFC computes per face: its back face without a cost has value 0 and no colors.
+    let mut mdfc = def_of(
+        vec![
+            face(Some("{1}{U}"), 0, vec![]),
+            face_of(FaceKind::Back, None, 0, vec![]),
+        ],
+        ColorBitmask::BLUE,
+    );
+    mdfc.layout = LayoutBehavior::DfcModal;
+    let none = Some(ColorBitmask::NONE);
+    let report = lint_definition(&mdfc, &source(vec![(Some(2), blue), (Some(0), none)], None));
+    none_of(&report, LintId::MANA_VALUE);
+    none_of(&report, LintId::COLORS);
+    let report = lint_definition(&mdfc, &source(vec![(Some(2), blue), (Some(2), blue)], None));
+    assert_eq!(
+        of(&report, LintId::MANA_VALUE),
+        vec![(Severity::Error, "faces[1]".to_owned(), Some(1), None)]
+    );
+    assert_eq!(
+        of(&report, LintId::COLORS),
+        vec![(Severity::Warning, "faces[1]".to_owned(), Some(1), None)]
+    );
+}
+
+/// A finding reduced to (severity, path, face, span).
+type Spanned = (Severity, String, Option<usize>, Option<(u32, u32)>);
+
+/// A finding reduced to (id, severity, path, face, span).
+type Ordered<'a> = (
+    &'a str,
+    Severity,
+    &'a str,
+    Option<usize>,
+    Option<(u32, u32)>,
+);
+
+/// REQ-ING-009, REQ-NFR-006 (SRS §14.3 `textSpan`, gate 06-turn F100): many faces with one
+/// covering ability each, one face with no ability and one face with an uncovered token give
+/// exactly the expected coverage findings.
+#[test]
+fn req_ing_009_text_coverage_many_faces() {
+    const FACES: usize = 2_000;
+    let mut faces: Vec<CardFaceDSL> = (0..FACES)
+        .map(|_| face(None, 1, vec![keyword("k", 0, 0)]))
+        .collect();
+    // Face 1000: two tokens and no ability; face FACES: three tokens, only token 0 covered.
+    faces[1_000] = face(None, 2, vec![]);
+    faces.push(face(None, 3, vec![keyword("k", 0, 0)]));
+    let def = def_of(faces, ColorBitmask::NONE);
+    let report = run(&def);
+    let found: Vec<Spanned> = report
+        .with_id(LintId::TEXT_COVERAGE)
+        .map(|l| {
+            (
+                l.severity,
+                l.location.path.clone(),
+                l.location.face_index,
+                l.location.text_span,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            (
+                Severity::Error,
+                "faces[1000].text".to_owned(),
+                Some(1_000),
+                Some((0, 1))
+            ),
+            (
+                Severity::Error,
+                "faces[2000].text".to_owned(),
+                Some(2_000),
+                Some((1, 2))
+            ),
+        ]
+    );
+}
+
+/// REQ-ING-009 (CR 607.1, gate 06-turn F101): two link ids that differ only after the clip
+/// give two distinct findings; the same id twice gives one.
+#[test]
+fn req_ing_009_link_id_clipped_ids_stay_distinct() {
+    let long_a = format!("{}a", "x".repeat(64));
+    let long_b = format!("{}b", "x".repeat(64));
+    let spell = |ids: [&str; 2]| {
+        json!({"abilityId": "r", "kind": "SPELL", "effect": [
+            {"op": "DESTROY", "objects": {"ref": "LINKED", "linkId": ids[0]}},
+            {"op": "DESTROY", "objects": {"ref": "LINKED", "linkId": ids[1]}},
+        ]})
+    };
+    let count = |a: Value| {
+        let mut def = one_face(vec![a]);
+        def.faces[0].text = tokens(0);
+        let report = run(&def);
+        assert!(
+            report
+                .with_id(LintId::LINK_ID)
+                .all(|l| l.severity == Severity::Error),
+            "{report:#?}"
+        );
+        report.with_id(LintId::LINK_ID).count()
+    };
+    assert_eq!(count(spell([&long_a, &long_b])), 2);
+    assert_eq!(count(spell([&long_a, &long_a])), 1);
+    // Unclipped ids keep their plain quoted form.
+    let mut def = one_face(vec![spell(["ghost", "ghost"])]);
+    def.faces[0].text = tokens(0);
+    let report = run(&def);
+    let msg = &report.with_id(LintId::LINK_ID).next().expect("one").message;
+    assert!(msg.contains("\"ghost\" that"), "{msg}");
+}
+
+/// REQ-ING-009 (referenced token definitions exist, gate 06-turn F101): two unknown token ids
+/// that differ only after the clip give two distinct findings; the same id twice gives one.
+#[test]
+fn req_ing_009_token_ref_clipped_ids_stay_distinct() {
+    let long_a = format!("test.{}a", "x".repeat(64));
+    let long_b = format!("test.{}b", "x".repeat(64));
+    let spell = |ids: [&str; 2]| {
+        json!({"abilityId": "s", "kind": "SPELL", "effect": [
+            {"op": "CREATE_TOKEN", "tokenDef": ids[0], "count": {"LITERAL": 1}},
+            {"op": "CREATE_TOKEN", "tokenDef": ids[1], "count": {"LITERAL": 1}},
+        ]})
+    };
+    let ctx = LintContext {
+        source: None,
+        known_token_ids: Some(BTreeSet::new()),
+    };
+    let count = |a: Value| {
+        let mut def = one_face(vec![a]);
+        def.faces[0].text = tokens(0);
+        lint_definition(&def, &ctx)
+            .with_id(LintId::TOKEN_REF)
+            .count()
+    };
+    assert_eq!(count(spell([&long_a, &long_b])), 2);
+    assert_eq!(count(spell([&long_a, &long_a])), 1);
+    // relatedTokens entries are told apart too, each at its own path.
+    let mut def = clean();
+    def.related_tokens = Some(vec![long_a.clone(), long_b.clone()]);
+    let report = lint_definition(&def, &ctx);
+    let messages: BTreeSet<&str> = report
+        .with_id(LintId::TOKEN_REF)
+        .map(|l| l.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 2, "{report:#?}");
+}
+
+/// REQ-ING-009 (location contract `LintLocation::ability`, gate 06-turn F104): an ability
+/// that does not encode keeps its typed, ordered `text_span` in the finding's location; an
+/// unordered typed span gives no span.
+#[test]
+fn req_ing_009_schema_keeps_typed_span() {
+    let with_span = |span: (u32, u32)| {
+        let mut base = AbilityBase::new("b");
+        base.text_span = Some(span);
+        let mut def = one_face(vec![]);
+        def.faces[0]
+            .abilities
+            .push(AbilityAST::Keyword(KeywordInstanceAST::new(
+                base,
+                "not upper",
+            )));
+        run(&def)
+    };
+    let report = with_span((0, 0));
+    let schema: Vec<&Lint> = report.with_id(LintId::SCHEMA).collect();
+    assert_eq!(schema.len(), 1, "{report:#?}");
+    assert_eq!(schema[0].location.path, "faces[0].abilities[0]");
+    assert_eq!(schema[0].location.text_span, Some((0, 0)));
+    // The span covers the one token, so there is no coverage gap.
+    none_of(&report, LintId::TEXT_COVERAGE);
+    let report = with_span((3, 1));
+    let schema: Vec<&Lint> = report.with_id(LintId::SCHEMA).collect();
+    assert_eq!(schema.len(), 1, "{report:#?}");
+    assert_eq!(schema[0].location.text_span, None);
+}
+
+/// REQ-ING-009 (deterministic and ordered output, gate 06-turn F24): the report order written
+/// out literally for two findings whose face order and lint-id order disagree: the face-0
+/// FPL-TEXT-COVERAGE gap comes before the face-1 FPL-MANA-VALUE mismatch although
+/// "FPL-MANA-VALUE" < "FPL-TEXT-COVERAGE" (key: face, ability, id, severity, span, path,
+/// message).
+#[test]
+fn req_ing_009_report_order_literal() {
+    let def = def_of(
+        vec![face(Some("{W}"), 1, vec![]), face(Some("{W}"), 0, vec![])],
+        ColorBitmask::WHITE,
+    );
+    let report = lint_definition(&def, &source(vec![(Some(1), None), (Some(5), None)], None));
+    let order: Vec<Ordered<'_>> = report
+        .lints
+        .iter()
+        .map(|l| {
+            (
+                l.id.as_str(),
+                l.severity,
+                l.location.path.as_str(),
+                l.location.face_index,
+                l.location.text_span,
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (
+                "FPL-TEXT-COVERAGE",
+                Severity::Error,
+                "faces[0].text",
+                Some(0),
+                Some((0, 0))
+            ),
+            ("FPL-MANA-VALUE", Severity::Error, "faces[1]", Some(1), None),
+        ]
+    );
 }

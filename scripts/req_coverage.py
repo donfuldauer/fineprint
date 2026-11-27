@@ -27,9 +27,15 @@ What `--tests` counts (only test code, never production source):
      inside a comment or string is not an attribute;
   c2. a file declared by a brace-less `#[cfg(test)] mod name;` (other attributes such as
      `#[path = "x.rs"]` and a `pub` visibility may accompany it) counts in full. It is resolved
-     as rustc does: `#[path = "rel"]` gives `<dir of declaring file>/rel`; otherwise a module
-     root (mod.rs, lib.rs, main.rs) gives `<dir>/name.rs` or `<dir>/name/mod.rs`, and any other
-     `foo.rs` gives `<dir>/foo/name.rs` or `<dir>/foo/name/mod.rs`. A file that does not exist is
+     as rustc does, through the declaration's enclosing inline modules (`mod a { mod b { ... } }`
+     in the same file, tracked by brace depth on the comment- and string-blanked text): the
+     module directory is `<dir>/a/b` in a module root (mod.rs, lib.rs, main.rs) and
+     `<dir>/foo/a/b` in any other `foo.rs` (just `<dir>` and `<dir>/foo` at the top level of the
+     file). `#[path = "rel"]` gives `<dir of declaring file>/rel` at the top level of the file
+     and `<module directory>/rel` inside an inline module; otherwise the candidates are
+     `<module directory>/name.rs` and `<module directory>/name/mod.rs`. So in `src/lib.rs`,
+     `mod outer { #[cfg(test)] mod checks; }` names `src/outer/checks.rs`, not `src/checks.rs`.
+     (A `#[path]` on the inline module itself is not modelled.) A file that does not exist is
      ignored. Plain `mod child;` declarations inside such a file count in full too (transitively,
      cycles terminate), even when the child lies outside the `--tests` roots;
   d. any other file does not count.
@@ -220,6 +226,7 @@ def ids_in_test_code(p: pathlib.Path) -> set:
 
 
 MOD_DECL = re.compile(r"(?<![\w])(?:pub\s*(?:\([^()]*\)\s*)?)?mod\s+([A-Za-z_]\w*)\s*;")
+INLINE_MOD = re.compile(r"(?<![\w])(?:pub\s*(?:\([^()]*\)\s*)?)?mod\s+([A-Za-z_]\w*)\s*\{")
 ATTR_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 ATTR_PATH = re.compile(r"#\[\s*path\s*=\s*\]")
 STRING_LIT = re.compile(r'"((?:\\.|[^"\\])*)"', re.S)
@@ -234,17 +241,44 @@ def _read(p: pathlib.Path) -> str:
         return ""
 
 
-def mod_decls(text: str) -> list:
-    """Brace-less `mod name;` declarations as (name, is_cfg_test, path_attr_or_None) in source order.
+def _inline_paths(blank: str, positions) -> list:
+    """Enclosing inline-module path (tuple of names, outermost first) at each of `positions`.
 
-    Lexically aware (see `code_mask`): declarations and attributes inside comments or strings are
-    ignored. Attributes are collected backwards from the `mod`, so a `#[cfg(test)]` and a
-    `#[path = "..."]` may come in either order, with other attributes between them.
+    `blank` is comment- and string-blanked source; `positions` must be ascending. Every `{`
+    opens a scope, named when it is the body of `mod name {`, and every `}` closes the innermost
+    one (an unbalanced `}` is ignored), so the path lists the named scopes open at a position.
+    """
+    named = {m.end() - 1: m.group(1) for m in INLINE_MOD.finditer(blank)}
+    stack, out, i = [], [], 0
+    for pos in positions:
+        while i < pos:
+            c = blank[i]
+            if c == "{":
+                stack.append(named.get(i))
+            elif c == "}" and stack:
+                stack.pop()
+            i += 1
+        out.append(tuple(n for n in stack if n is not None))
+    return out
+
+
+def mod_decls(text: str) -> list:
+    """Brace-less `mod name;` declarations in source order, each as
+    (name, is_cfg_test, path_attr_or_None, inline_path).
+
+    `inline_path` is the tuple of the enclosing inline module names (outermost first; empty at
+    the top level of the file), computed by brace depth on the blanked text (see
+    `_inline_paths`). Lexically aware (see `code_mask`): declarations, attributes and braces
+    inside comments or strings are ignored. Attributes are collected backwards from the `mod`, so
+    a `#[cfg(test)]` and a `#[path = "..."]` may come in either order, with other attributes
+    between them.
     """
     mask = code_mask(text)
     blank = "".join(c if m else " " for c, m in zip(text, mask))
     out = []
-    for m in MOD_DECL.finditer(blank):
+    matches = list(MOD_DECL.finditer(blank))
+    inline = _inline_paths(blank, [m.start() for m in matches])
+    for m, inline_path in zip(matches, inline):
         k, is_test, path = m.start(), False, None
         while True:
             while k > 0 and blank[k - 1].isspace():
@@ -269,17 +303,22 @@ def mod_decls(text: str) -> list:
                 lit = STRING_LIT.search(attr_text)
                 path = lit.group(1) if lit else None
             k = j - 1
-        out.append((m.group(1), is_test, path))
+        out.append((m.group(1), is_test, path, inline_path))
     return out
 
 
-def resolve_mod(declaring: pathlib.Path, name: str, path_attr) -> list:
-    """Candidate files for `mod name;` declared in `declaring`, in rustc's lookup order."""
+def resolve_mod(declaring: pathlib.Path, name: str, path_attr, inline=()) -> list:
+    """Candidate files for `mod name;` declared in `declaring` inside the inline modules
+    `inline` (outermost first), in rustc's lookup order."""
     base = declaring.parent
-    if path_attr is not None:
+    if path_attr is not None and not inline:
         return [pathlib.Path(os.path.normpath(base / path_attr))]
     if declaring.name not in MODULE_ROOTS:
         base = base / declaring.stem
+    for part in inline:
+        base = base / part
+    if path_attr is not None:
+        return [pathlib.Path(os.path.normpath(base / path_attr))]
     return [pathlib.Path(os.path.normpath(base / f"{name}.rs")),
             pathlib.Path(os.path.normpath(base / name / "mod.rs"))]
 
@@ -291,8 +330,8 @@ def declared_test_files(rs_files) -> list:
     """
     found, queue = set(), []
 
-    def add(declaring, name, path_attr):
-        for cand in resolve_mod(declaring, name, path_attr):
+    def add(declaring, name, path_attr, inline):
+        for cand in resolve_mod(declaring, name, path_attr, inline):
             if cand.is_file():
                 if cand not in found:
                     found.add(cand)
@@ -300,14 +339,14 @@ def declared_test_files(rs_files) -> list:
                 return
 
     for f in rs_files:
-        for name, is_test, path_attr in mod_decls(_read(f)):
+        for name, is_test, path_attr, inline in mod_decls(_read(f)):
             if is_test:
-                add(f, name, path_attr)
+                add(f, name, path_attr, inline)
     while queue:
         f = queue.pop()
         if f.suffix == ".rs":
-            for name, _, path_attr in mod_decls(_read(f)):
-                add(f, name, path_attr)
+            for name, _, path_attr, inline in mod_decls(_read(f)):
+                add(f, name, path_attr, inline)
     return sorted(found)
 
 

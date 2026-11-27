@@ -16,7 +16,13 @@
 //! [`AbilityAST`] (a re-export of [`crate::ability::AbilityAST`]) and
 //! `commanderEligibility.partnerAbilities` are [`PartnerAbilityDSL`], a `KEYWORD` ability. Plain
 //! serde therefore decodes every AST position with the strict decoder of its real type: invalid
-//! AST content is a decode error, and a value of these types always holds valid ASTs.
+//! AST content is a decode error, so a value produced by successful decoding holds valid ASTs.
+//! That guarantee covers decoded values only. A value constructed or modified in memory through
+//! the public fields may hold content the decoder would refuse (for example
+//! `ValueExpressionAST::Literal(i64::MAX)` as `power`, which the expression serializer rejects,
+//! or a keyword parameter holding a float such as `1.0`), so callers must check values they
+//! build or edit in memory by serializing them (an error means invalid content) or by
+//! [`CardDefinitionDSL::seal`].
 //!
 //! Plain serde `Deserialize` performs no version or hash check and is not lossless on its own
 //! (for example it accepts a positional array for a struct); it is the unchecked building block
@@ -560,10 +566,10 @@ impl CardDefinitionDSL {
     /// Normalising means replacing the value by what its canonical JSON decodes to, through the
     /// typed decoders of every AST position (REQ-DSL-003, REQ-DSL-010, REQ-DSL-012). The
     /// canonical bytes and the hash are unchanged by this; a typed AST that its own serializer
-    /// refuses (for example a hand-built keyword parameter holding a non-integral number) cannot
-    /// be sealed. Because the
-    /// version, the lossless schema and the typed ASTs are all checked, the result `v`
-    /// satisfies `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`. The previous
+    /// refuses (for example a hand-built keyword parameter holding any float, `1.0` as well as
+    /// `2.5`: in memory nothing is normalised) cannot be sealed. Because the version, the
+    /// lossless schema and the typed ASTs are all checked, the result `v` satisfies
+    /// `CardDefinitionDSL::from_json(&v.to_canonical_json()?) == Ok(v)`. The previous
     /// `definition_hash` is ignored, whatever it contains.
     ///
     /// # Errors

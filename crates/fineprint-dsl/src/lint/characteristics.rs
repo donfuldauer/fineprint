@@ -77,6 +77,21 @@ fn cost_value(cost: Option<&ManaCostDSL>) -> u64 {
     })
 }
 
+/// The face whose mana cost and color indicator give `face` its mana value and colors: the
+/// Main face for the Flipped face of a flip card (CR 710.1c: a flip card's color and mana cost
+/// don't change if the permanent is flipped), else `face` itself. Modal double-faced cards and
+/// every other layout keep their own faces.
+fn cost_face<'d>(def: &'d CardDefinitionDSL, face: &'d CardFaceDSL) -> &'d CardFaceDSL {
+    match (def.layout, face.face_kind) {
+        (LayoutBehavior::Flip, FaceKind::Flipped) => def
+            .faces
+            .iter()
+            .find(|f| f.face_kind == FaceKind::Main)
+            .unwrap_or(face),
+        _ => face,
+    }
+}
+
 /// The computed mana value of face `i`, or `None` when it is not computed statically.
 fn face_value(def: &CardDefinitionDSL, face: &CardFaceDSL) -> Option<u64> {
     match (def.layout, face.face_kind) {
@@ -92,8 +107,16 @@ fn face_value(def: &CardDefinitionDSL, face: &CardFaceDSL) -> Option<u64> {
                     |front| cost_value(front.mana_cost.as_ref()),
                 ),
         ),
-        // CR 202.3d: a split card not on the stack has the combined cost of its halves.
-        (LayoutBehavior::Split, FaceKind::LeftHalf | FaceKind::RightHalf) => Some(
+        // CR 202.3d, CR 709.4b: a split card not on the stack has the combined cost of its
+        // halves. A Room is a split card with a shared type line (CR 709.5), so it has the
+        // combined cost too. The lint has no zone, so it checks the combined value of the
+        // zones other than the stack and the battlefield (on the battlefield a locked half
+        // has no mana cost, CR 709.5) (docs/DECISIONS.md, "Gate 06-turn F98 — Room mana
+        // value in the lint").
+        (
+            LayoutBehavior::Split | LayoutBehavior::Room,
+            FaceKind::LeftHalf | FaceKind::RightHalf,
+        ) => Some(
             def.faces
                 .iter()
                 .filter(|f| matches!(f.face_kind, FaceKind::LeftHalf | FaceKind::RightHalf))
@@ -101,13 +124,19 @@ fn face_value(def: &CardDefinitionDSL, face: &CardFaceDSL) -> Option<u64> {
                     acc.saturating_add(cost_value(f.mana_cost.as_ref()))
                 }),
         ),
-        // CR 202.3, CR 202.3a.
-        _ => Some(cost_value(face.mana_cost.as_ref())),
+        // CR 202.3, CR 202.3a; CR 710.1c: a Flipped face has the Main face's mana cost.
+        _ => Some(cost_value(cost_face(def, face).mana_cost.as_ref())),
     }
 }
 
-/// The colors of face `face` from its cost and color indicator (CR 202.2, CR 105.2, CR 204.2).
-fn face_colors(face: &CardFaceDSL) -> u8 {
+/// The colors of face `face` from its cost and color indicator (CR 202.2, CR 105.2, CR 204.2);
+/// for the Flipped face of a flip card, the Main face's (CR 710.1c).
+fn face_colors(def: &CardDefinitionDSL, face: &CardFaceDSL) -> u8 {
+    own_colors(cost_face(def, face))
+}
+
+/// The colors of `face`'s own mana cost and color indicator (CR 202.2, CR 105.2, CR 204.2).
+fn own_colors(face: &CardFaceDSL) -> u8 {
     cost_colors(face.mana_cost.as_ref()) | face.color_indicator.map_or(0, |c| c.bits())
 }
 
@@ -126,7 +155,7 @@ fn letters(bits: u8) -> String {
 /// node of every ability. Literal text is not scanned (CR 903.4c reminder text cannot
 /// be told apart reliably).
 fn identity(def: &CardDefinitionDSL, facts: &CardFacts<'_>) -> u8 {
-    let faces = def.faces.iter().fold(0, |acc, f| acc | face_colors(f));
+    let faces = def.faces.iter().fold(0, |acc, f| acc | own_colors(f));
     facts
         .abilities
         .iter()
@@ -209,7 +238,7 @@ pub(super) fn check(
                     LintId::COLORS,
                     &location,
                     "source colors",
-                    face_colors(face),
+                    face_colors(def, face),
                     colors.bits(),
                     "CR 202.2",
                 );

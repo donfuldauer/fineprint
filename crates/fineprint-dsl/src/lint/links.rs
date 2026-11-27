@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::walk::CardFacts;
-use super::{CLIP, Lint, LintContext, LintId, LintLocation, Severity, clip, push};
+use super::{Lint, LintContext, LintId, LintLocation, Severity, push, quote_id};
 use crate::card::CardDefinitionDSL;
 
 /// `FPL-TOKEN-REF`: with `ctx.known_token_ids` present, every `CREATE_TOKEN` `tokenDef` and
@@ -27,8 +27,8 @@ pub(super) fn check_tokens(
     };
     let unknown = |id: &str| {
         format!(
-            "token definition {:?} is not a known token definition",
-            clip(id, CLIP)
+            "token definition {} is not a known token definition",
+            quote_id(id)
         )
     };
     let scans = facts
@@ -89,9 +89,9 @@ pub(super) fn check_links(facts: &CardFacts<'_>, out: &mut Vec<Lint>) {
                     Severity::Error,
                     a.location(),
                     format!(
-                        "LINKED reference to link id {:?} that no ability on the card declares \
+                        "LINKED reference to link id {} that no ability on the card declares \
                          (CR 607.1)",
-                        clip(id, CLIP)
+                        quote_id(id)
                     ),
                 );
             }
@@ -108,9 +108,9 @@ pub(super) fn check_links(facts: &CardFacts<'_>, out: &mut Vec<Lint>) {
                 Severity::Warning,
                 a.location(),
                 format!(
-                    "link id {:?} is declared by this ability only and no LINKED reference \
+                    "link id {} is declared by this ability only and no LINKED reference \
                      uses it (CR 607.1)",
-                    clip(id, CLIP)
+                    quote_id(id)
                 ),
             );
         }
