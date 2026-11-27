@@ -19,6 +19,9 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fineprint_base::hash::{Digest, sha256};
 use fineprint_base::ids::{EffectId, ObjectId, PlayerId, Timestamp};
@@ -341,6 +344,43 @@ pub enum SymbolHost {
     PerCosts(SlotsByCosts),
 }
 
+/// Counts `CastState::target_slots` calls (CR-013 probe budget). It is shared by every clone of
+/// the fake it belongs to (the session's copies included) and is NOT part of the observable
+/// state: its `Debug` text is constant and any two counters compare equal, so the fake's
+/// `state_hash()` and equality do not depend on it.
+#[derive(Clone, Default)]
+pub struct CallCounter(Arc<AtomicU64>);
+
+impl CallCounter {
+    /// The number of calls so far.
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Sets the count back to zero.
+    pub fn reset(&self) {
+        self.0.store(0, Ordering::SeqCst);
+    }
+
+    fn bump(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl fmt::Debug for CallCounter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CallCounter")
+    }
+}
+
+impl PartialEq for CallCounter {
+    fn eq(&self, _other: &CallCounter) -> bool {
+        true
+    }
+}
+
+impl Eq for CallCounter {}
+
 /// A toy game state implementing [`Transactional`] and [`CastState`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fake {
@@ -379,6 +419,8 @@ pub struct Fake {
     pub combination_legal: bool,
     /// An unrelated field (so two fakes can differ outside the casting inputs).
     pub marker: u64,
+    /// The `target_slots` call counter (not observable state, see [`CallCounter`]).
+    pub target_slots_calls: CallCounter,
 }
 
 impl Default for Fake {
@@ -407,6 +449,7 @@ impl Fake {
             qualities: BTreeSet::new(),
             combination_legal: true,
             marker: 0,
+            target_slots_calls: CallCounter::default(),
         }
     }
 
@@ -483,6 +526,7 @@ impl CastState for Fake {
         modes: &[u32],
         costs: &CostChoice,
     ) -> Vec<TargetSlotSpec> {
+        self.target_slots_calls.bump();
         let mut out = self.base_slots.clone();
         let mut additional = costs.additional.clone();
         additional.sort_unstable();

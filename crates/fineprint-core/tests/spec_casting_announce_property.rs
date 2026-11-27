@@ -429,8 +429,10 @@ fn drive_random(rng: &mut Pcg64Dxsm, f: &Fake, req: &CastRequest) -> Driven {
 
 /// Property (e), REQ-NET-003, R12 (B3, B4): the request validates its own default answer, every
 /// enumerated option stands for something the request accepts (a `Number` is the exact X of the
-/// payload's range and the default with that X validates; a recipient or mode is in the
-/// payload), and a validator contract carries the request's bounds.
+/// payload's range and the default with that X validates; an `Object` of a cost request is one
+/// of its harmonize candidates; a `Text` of a cost request is one of its alternative or
+/// additional cost labels or symbol options; no other kind appears in a cost request; a
+/// recipient or mode is in the payload), and a validator contract carries the request's bounds.
 fn check_request(p: &PendingChoiceRequest) {
     assert!(
         p.validate(&p.default_on_timeout).is_ok(),
@@ -467,7 +469,38 @@ fn check_request(p: &PendingChoiceRequest) {
                         };
                         assert!(p.validate(&a).is_ok(), "X {v} rejected");
                     }
-                    (_, ChoicePayload::ChooseCostsAndX { .. }) => {}
+                    (
+                        ChoiceOption::Object(o),
+                        ChoicePayload::ChooseCostsAndX {
+                            harmonize_candidates,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            harmonize_candidates.contains(o),
+                            "harmonize option {o:?} not in {harmonize_candidates:?}"
+                        );
+                    }
+                    (
+                        ChoiceOption::Text(t),
+                        ChoicePayload::ChooseCostsAndX {
+                            alternative_costs,
+                            additional_costs,
+                            symbol_slots,
+                            ..
+                        },
+                    ) => {
+                        assert!(
+                            alternative_costs.contains(t)
+                                || additional_costs.contains(t)
+                                || symbol_slots.iter().any(|s| s.contains(t)),
+                            "cost option {t:?} is no cost or symbol option of {:?}",
+                            p.payload
+                        );
+                    }
+                    (o, ChoicePayload::ChooseCostsAndX { .. }) => {
+                        panic!("unexpected cost option {o:?} for {:?}", p.payload)
+                    }
                     (ChoiceOption::Mode(m), ChoicePayload::ChooseModes { labels, .. }) => {
                         assert!((*m as usize) < labels.len(), "mode option {m}");
                     }

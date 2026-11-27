@@ -1779,44 +1779,236 @@ fn modes_legal_only_through_additional_subset() {
     }
 }
 
-/// REQ-CAST-001 (step 2); CR 700.2a (CR-012, B1): with more than 6 additional costs only "none",
-/// each one alone and all of them are probed: a mode legal only with a pair of 7 is not offered,
-/// one legal with a single one or with all 7 is.
+/// REQ-CAST-001 (step 2); CR 700.2a, 601.2c (CR-013, replaces the CR-012 "none, each, all"
+/// test): with 7 additional costs (and with 1 alternative cost too) every subset is probed
+/// within the budget, so a mode legal only for the pair [2, 5], only for [3], only for all 7,
+/// or only for the alternative cost with the pair [2, 5] is offered.
 #[test]
-fn modes_seven_additional_costs_probe_none_each_all() {
+fn modes_seven_additional_costs_probe_every_subset() {
     for (label, req) in both_kinds(P1) {
+        // (a) the pair [2, 5] of 7, no alternative.
         let f = cost_gated_fake(add_costs(7), None, &[2, 5]);
         let p = pending_of(&f, &req, &[]);
-        assert_eq!(
-            modes_payload(&p).0,
-            vec![mode_labels(2)[1].clone()],
-            "{label}: pair of 7"
-        );
+        assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: pair of 7");
+        // (b) the single cost [3].
         let f = cost_gated_fake(add_costs(7), None, &[3]);
         let p = pending_of(&f, &req, &[]);
         assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: one of 7");
+        // (c) all 7.
         let f = cost_gated_fake(add_costs(7), None, &[0, 1, 2, 3, 4, 5, 6]);
         let p = pending_of(&f, &req, &[]);
         assert_eq!(modes_payload(&p).0, mode_labels(2), "{label}: all 7");
+        // (d) the alternative cost with the pair [2, 5] (alternative x subsets product).
+        let mut costs = add_costs(7);
+        costs.alternative_costs = strs(&["test.alt_a"]);
+        let f = cost_gated_fake(costs, Some(0), &[2, 5]);
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(
+            modes_payload(&p).0,
+            mode_labels(2),
+            "{label}: alternative with a pair of 7"
+        );
     }
 }
 
-/// REQ-CAST-001 (step 2), REQ-CORE-005; CR 700.2a, 601.2, 734.1 (CR-012, B1): the only mode is
-/// legal under no probe (its gated slots need a cost combination that is never probed) -> no
-/// request, rolled back at Choices with NoLegalMode to the identical hash and priority.
+/// REQ-CAST-001 (step 2), REQ-CORE-005; CR 700.2a, 601.2, 734.1 (CR-013): with 7 additional
+/// costs and 1 alternative cost (2 * 128 probes, within the budget) the only mode is legal under
+/// no probed configuration (its gated slots need an alternative or additional cost index the
+/// spec does not have) -> no request, rolled back at Choices with NoLegalMode to the identical
+/// hash and priority.
 #[test]
 fn modes_no_probe_legal_rolls_back() {
     for (label, req) in both_kinds(P1) {
-        let mut costs = add_costs(7);
-        costs.alternative_costs = strs(&["test.alt_a"]);
-        costs.x_range = Some((1, 3));
+        // Alternative index 1 (only index 0 exists), additional index 7 (only 0..=6 exist).
+        for (alternative, additional) in [
+            (Some(1), vec![2, 5]),
+            (Some(0), vec![2, 7]),
+            (None, vec![7]),
+        ] {
+            let mut costs = add_costs(7);
+            costs.alternative_costs = strs(&["test.alt_a"]);
+            costs.x_range = Some((1, 3));
+            let f = Fake {
+                mode_spec: Some(modes_spec(1, 1, 1, false)),
+                ..cost_gated_fake(costs, alternative, &additional)
+            };
+            let run = drive(&f, &req, &[]);
+            assert!(
+                run.requests.is_empty(),
+                "{label}: {alternative:?} {additional:?}"
+            );
+            assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+        }
+    }
+}
+
+/// `n` alternative cost labels.
+fn alternatives(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("test.alt_{i}")).collect()
+}
+
+/// One mode whose only slot (min 1) needs object 10, which has shroud, under every cost choice
+/// (no gated slots): no cost choice ever makes it legal (CR 601.2c). `alts` alternative and
+/// `adds` additional costs.
+fn unsatisfiable_fake(alts: usize, adds: usize) -> Fake {
+    Fake {
+        mode_spec: Some(modes_spec(1, 1, 1, false)),
+        mode_slots: vec![vec![slot(1, 1, &[to(10)])]],
+        cost_spec: CostSpec {
+            alternative_costs: alternatives(alts),
+            additional_costs: additional(adds),
+            ..no_costs()
+        },
+        ..Fake::new()
+    }
+    .with_rules(&[tr(1, shroud_obj(10), 1)])
+}
+
+/// Asserts the mode of an over-budget `f` is offered without any `target_slots` call, that the
+/// cost request is asked still without one, and that answering it with its default rolls the
+/// cast back at Targets with MissingTarget{slot: 0} to the original hash and priority.
+fn assert_offered_then_rolled_back_at_targets(f: &Fake, req: &CastRequest, label: &str) {
+    let calls = f.target_slots_calls.clone();
+    calls.reset();
+    let p = pending_of(f, req, &[]);
+    assert_eq!(modes_payload(&p).0, mode_labels(1), "{label}: offered");
+    assert_eq!(calls.get(), 0, "{label}: mode check called target_slots");
+    let cost = pending_of(f, req, &[select_modes(&[0])]);
+    assert_eq!(cost.choice_type, ChoiceType::ChooseCostsAndX, "{label}");
+    assert_eq!(
+        calls.get(),
+        0,
+        "{label}: target_slots called before the cost answer"
+    );
+    let run = drive(
+        f,
+        req,
+        &[select_modes(&[0]), cost.default_on_timeout.clone()],
+    );
+    assert_eq!(run.requests.len(), 2, "{label}");
+    assert_rolled_back(
+        &run,
+        f,
+        CastStep::Targets,
+        StopReason::MissingTarget { slot: 0 },
+    );
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005, R12; CR 700.2a, 601.2c, 601.2, 734.1 (CR-013): when
+/// `(alternatives + 1) * 2^additional > 4096` the mode is offered without calling `target_slots`
+/// and the step-3 check rolls a bad final choice back at Targets (13 additional; 1 alternative +
+/// 12 additional; 64 and 100 additional, no panic, no hang). At exactly 4096 the product is
+/// exhaustive: the same unsatisfiable mode is not offered (3 alternatives + 10 additional; 12
+/// additional), at most 4096 `target_slots` calls per mode, and a mode legal only for all 12
+/// additional costs is offered.
+#[test]
+fn modes_above_probe_budget_are_offered_and_rolled_back_at_targets() {
+    for (label, req) in both_kinds(P1) {
+        // Over the budget: 8192, 8192, 2^64 and 2^100 probes.
+        for (alts, adds) in [(0, 13), (1, 12), (0, 64), (0, 100), (3, 100)] {
+            let f = unsatisfiable_fake(alts, adds);
+            assert_offered_then_rolled_back_at_targets(
+                &f,
+                &req,
+                &format!("{label}: {alts} alternative(s) + {adds} additional"),
+            );
+        }
+        // Exactly the budget: exhaustive, so the unsatisfiable mode is not offered.
+        for (alts, adds) in [(3, 10), (0, 12), (1, 11)] {
+            let f = unsatisfiable_fake(alts, adds);
+            let calls = f.target_slots_calls.clone();
+            calls.reset();
+            let run = drive(&f, &req, &[]);
+            assert!(
+                run.requests.is_empty(),
+                "{label}: {alts} + {adds}: {:?}",
+                run.requests
+            );
+            assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+            let n = calls.get();
+            assert!(
+                n > 0 && n <= 4096,
+                "{label}: {alts} + {adds}: {n} target_slots calls for one mode"
+            );
+        }
+        // Exactly the budget, the mode legal only for the full set of 12.
+        let all: Vec<u32> = (0..12).collect();
         let f = Fake {
             mode_spec: Some(modes_spec(1, 1, 1, false)),
-            ..cost_gated_fake(costs, Some(0), &[2, 5])
+            ..cost_gated_fake(add_costs(12), None, &all)
         };
-        let run = drive(&f, &req, &[]);
-        assert!(run.requests.is_empty(), "{label}");
-        assert_rolled_back(&run, &f, CastStep::Choices, StopReason::NoLegalMode);
+        let calls = f.target_slots_calls.clone();
+        calls.reset();
+        let p = pending_of(&f, &req, &[]);
+        assert_eq!(modes_payload(&p).0, mode_labels(1), "{label}: all 12");
+        let n = calls.get();
+        assert!(
+            n > 0 && n <= 4096,
+            "{label}: all 12: {n} target_slots calls for one mode"
+        );
+        let chosen = CostChoice {
+            additional: all.clone(),
+            ..no_choice()
+        };
+        let run = drive(
+            &f,
+            &req,
+            &[
+                select_modes(&[0]),
+                configure(&chosen),
+                select_targets(&[&[to(11)]]),
+            ],
+        );
+        let (_, prop) = announced(&run, &f);
+        assert_eq!(prop.costs, chosen, "{label}: all 12");
+    }
+}
+
+/// REQ-CAST-001 (steps 2-3), REQ-CORE-005; CR 700.2a, 601.2c, 734.1 (CR-013): a mode offered
+/// through the intermediate subset [2, 5] of 7 additional costs is still checked at step 3 with
+/// the player's real choice: [2, 5] completes the announce (targets asked), [] rolls back at
+/// Targets with MissingTarget and the original hash.
+#[test]
+fn modes_offered_through_intermediate_subset_checked_with_real_choice() {
+    for caster in [P1, P2] {
+        for (label, req) in both_kinds(caster) {
+            let f = Fake {
+                priority: Some(caster),
+                ..cost_gated_fake(add_costs(7), None, &[2, 5])
+            };
+            let chosen = CostChoice {
+                additional: vec![2, 5],
+                ..no_choice()
+            };
+            let run = drive(
+                &f,
+                &req,
+                &[
+                    select_modes(&[0]),
+                    configure(&chosen),
+                    select_targets(&[&[to(11)]]),
+                ],
+            );
+            assert_eq!(run.requests.len(), 3, "{label}");
+            assert_eq!(
+                target_slots_of(&run.requests[2])[0].legal,
+                vec![to(11)],
+                "{label}"
+            );
+            let (_, prop) = announced(&run, &f);
+            assert_eq!(prop.modes, vec![0], "{label}");
+            assert_eq!(prop.costs, chosen, "{label}");
+            assert_eq!(prop.targets, vec![vec![to(11)]], "{label}");
+
+            let run = drive(&f, &req, &[select_modes(&[0]), configure(&no_choice())]);
+            assert_eq!(run.requests.len(), 2, "{label}");
+            assert_rolled_back(
+                &run,
+                &f,
+                CastStep::Targets,
+                StopReason::MissingTarget { slot: 0 },
+            );
+        }
     }
 }
 
@@ -1987,6 +2179,9 @@ fn symbols_of_the_alternative_cost_host_override() {
     for (label, req) in both_kinds(P1) {
         let mut per = BTreeMap::new();
         per.insert((None, vec![]), vec![strs(&["test.sym_a", "test.sym_b"])]);
+        // The normal cost (with its hybrid-style slot) is still paid with additional cost 0 and
+        // no alternative cost (CR 601.2b).
+        per.insert((None, vec![0]), vec![strs(&["test.sym_a", "test.sym_b"])]);
         per.insert(
             (Some(0), vec![0]),
             vec![
@@ -2030,15 +2225,32 @@ fn symbols_of_the_alternative_cost_host_override() {
             },
             "{label}"
         );
-        // Additional cost 0 without the alternative: the host returns no slots -> one request.
+        // Additional cost 0 without the alternative: the normal cost is still paid, so its
+        // symbol slot is asked in the second request (CR 601.2b); the proposal keeps both the
+        // additional cost and the symbol choice.
         let only_add = CostChoice {
             additional: vec![0],
             x: Some(1),
             ..no_choice()
         };
-        let run = drive(&f, &req, &[configure(&only_add)]);
-        assert_eq!(run.requests.len(), 1, "{label}");
-        assert_eq!(announced(&run, &f).1.costs, only_add, "{label}");
+        let run = drive(&f, &req, &[configure(&only_add), symbols_only(&[1])]);
+        assert_eq!(run.requests.len(), 2, "{label}");
+        assert_eq!(
+            cost_payload(&run.requests[1]),
+            symbols_payload(vec![strs(&["test.sym_a", "test.sym_b"])]),
+            "{label}"
+        );
+        let costs = announced(&run, &f).1.costs;
+        assert_eq!(costs.additional, vec![0], "{label}");
+        assert_eq!(costs.symbol_options, vec![1], "{label}");
+        assert_eq!(
+            costs,
+            CostChoice {
+                symbol_options: vec![1],
+                ..only_add
+            },
+            "{label}"
+        );
         // Normal cost: the normal slot.
         let run = drive(
             &f,
