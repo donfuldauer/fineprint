@@ -199,12 +199,13 @@ pub trait PayState: crate::txn::Transactional {
 /// Why the payment stopped and the cast was reversed (REQ-CAST-001).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PayStopReason {
-    /// The cost can't be paid: an unpayable mana part (CR 118.6), life the player can't pay
-    /// (CR 118.3b), a non-mana item that can't be paid (CR 118.3) or a payment method the host
-    /// refused.
+    /// The locked cost's mana part is unpayable (`ManaPart::Unpayable`, CR 118.6). Only that
+    /// case: attempting to pay it is illegal and nothing is asked.
     UnpayableCost,
-    /// The pool, after the mana abilities and payment methods, can't pay the mana part
-    /// (CR 601.2h, 118.3).
+    /// The cost could not be paid in full at step 8 (CR 601.2h, 118.3, 734.1): the pool, after
+    /// the mana abilities and payment methods, can't pay the mana part; the Phyrexian life can't
+    /// be paid (CR 118.3b); a non-mana item can't be paid; or a payment method the host refused
+    /// could not be completed.
     UnpayableMana,
     /// The player cancelled the cast (`CANCEL_AND_ROLLBACK`, CR 734.1).
     Cancelled,
@@ -281,6 +282,11 @@ struct Answer {
 /// sub-transactions carried over, and the priority player is kept, CR 734.1, 734.2).
 /// `base_history` is the spell history so far (additional costs, X, face); the payment adds the
 /// costs paid and the mana spent.
+///
+/// Stop reasons: an unpayable mana part (CR 118.6) rolls back with
+/// [`PayStopReason::UnpayableCost`]; every other failure to pay the cost in full at step 8
+/// (mana, Phyrexian life, a non-mana item, or a refused payment method; CR 601.2h, 118.3, 734.1)
+/// rolls the whole cast back with [`PayStopReason::UnpayableMana`].
 ///
 /// # Errors
 /// [`Interrupt::Pending`] when the player must decide (propagate it; nothing has changed), and
@@ -379,8 +385,9 @@ pub fn pay_total_cost<S: PayState>(
                 .apply_payment_method(player, stack_object, offer, objects, &remaining);
         match result {
             Ok(after) => remaining = clamp(&after, &remaining),
+            // CR 601.2h, 734.1: the chosen way of paying can't be completed; no partial payment.
             Err(_) => {
-                return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableCost)
+                return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableMana)
                     .map(PayOutcome::RolledBack);
             }
         }
@@ -402,7 +409,7 @@ pub fn pay_total_cost<S: PayState>(
     // CR 118.3b: the life is paid (atomically) before any mana is spent; 0 life needs nothing.
     let life = locked.phyrexian_life();
     if life > 0 && txn.state_mut().pay_life(player, life).is_err() {
-        return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableCost)
+        return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableMana)
             .map(PayOutcome::RolledBack);
     }
     // CR 118.3a: the planned units leave the pool; the rest stays (CR 106.4a).
@@ -415,7 +422,7 @@ pub fn pay_total_cost<S: PayState>(
     // the rest.
     for item in first.into_iter().chain(late) {
         if !pay_item(txn, player, stack_object, item)? {
-            return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableCost)
+            return rolled_back(txn, cast_checkpoint, PayStopReason::UnpayableMana)
                 .map(PayOutcome::RolledBack);
         }
         costs_paid.push(item.name().to_ascii_lowercase());

@@ -890,7 +890,7 @@ fn req_cast_001_life_all_or_nothing() {
     t.life = 3;
     let cost = locked(mana(|c| c.red = 1), 4, Vec::new());
     let (s, out) = run(&t, &cost, &[pay(&[], Vec::new())]);
-    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableCost);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
     assert_eq!(s.state_hash(), t.state_hash());
     assert_eq!(s.pool().units(), &[red(1)]);
     t.life = 4;
@@ -917,7 +917,7 @@ fn req_cast_001_item_all_or_nothing() {
     );
     let (s, out) = run(&t, &cost, &[pay(&[], Vec::new())]);
     let r = rolled(&out);
-    assert_eq!(r.reason, PayStopReason::UnpayableCost);
+    assert_eq!(r.reason, PayStopReason::UnpayableMana);
     assert_eq!(r.state_hash, t.state_hash());
     assert_eq!(s.state_hash(), t.state_hash());
 }
@@ -938,7 +938,7 @@ fn req_core_005_library_cost_item_survives() {
         vec![CostAST::Forage, CostAST::UntapSource, CostAST::TapSource],
     );
     let (s, out) = run(&t, &cost, &[]);
-    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableCost);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
     assert_eq!(s.library, vec![1, 2, 3]);
     assert_eq!(s.graveyard, vec![4]);
     assert!(s.stack.is_empty());
@@ -1096,7 +1096,7 @@ fn req_cast_001_payment_method_clamped() {
     // A refused method rolls back.
     t.method_mode = MethodMode::Fail;
     let (s, out) = run(&t, &cost, &[pay(&[], vec![(0, vec![o(20)])])]);
-    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableCost);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
     assert_eq!(s.state_hash(), t.state_hash());
     assert_eq!(
         clamp(
@@ -1199,4 +1199,71 @@ fn req_cast_001_precondition_innermost() {
         out
     });
     assert!(matches!(result, Err(ChoiceError::Procedure(_))));
+}
+
+/// REQ-CAST-001, CR 601.2h, 118.3, 734.1: a late item that can't be paid, after a non-late item
+/// and mana were paid, rolls back with `UnpayableMana`; the state equals the checkpoint.
+#[test]
+fn req_cast_001_late_item_unpayable_after_first_pass() {
+    let mut t = Table::new();
+    t.pools[0].add(red(1));
+    t.items = vec![
+        (CostAST::TapSource, ItemRule::Plain),
+        (CostAST::UntapSource, ItemRule::LateUnpayable),
+    ];
+    let cost = locked(
+        mana(|c| c.red = 1),
+        0,
+        vec![CostAST::TapSource, CostAST::UntapSource],
+    );
+    let (s, out) = run(&t, &cost, &[pay(&[], Vec::new())]);
+    let r = rolled(&out);
+    assert_eq!(r.reason, PayStopReason::UnpayableMana);
+    assert_eq!(r.state_hash, t.state_hash());
+    assert_eq!(s.state_hash(), t.state_hash());
+    assert_eq!(s.pool().units(), &[red(1)]);
+    assert!(!s.cast);
+}
+
+/// REQ-CAST-001, CR 601.2h, 734.1: a library-touching item paid before a later unpayable item
+/// keeps its effect after the rollback, which reports `UnpayableMana`.
+#[test]
+fn req_cast_001_library_item_survives_later_unpayable_item() {
+    let mut t = Table::new();
+    t.items = vec![
+        (CostAST::Forage, ItemRule::LateLibrary),
+        (CostAST::UntapSource, ItemRule::LateUnpayable),
+    ];
+    let cost = locked(
+        ManaComponent::default(),
+        0,
+        vec![CostAST::Forage, CostAST::UntapSource],
+    );
+    let (s, out) = run(&t, &cost, &[]);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
+    assert_eq!(s.graveyard, vec![4]);
+    assert!(!s.cast);
+}
+
+/// REQ-CAST-001, CR 601.2h, 734.1: a payment method the host refuses rolls the cast back with
+/// `UnpayableMana` and nothing is spent.
+#[test]
+fn req_cast_001_refused_payment_method_spends_nothing() {
+    let mut t = Table::new();
+    t.methods = vec![offer()];
+    t.method_mode = MethodMode::Fail;
+    t.pools[0].add(green(1));
+    let cost = locked(
+        mana(|c| {
+            c.generic = 1;
+            c.green = 1;
+        }),
+        0,
+        Vec::new(),
+    );
+    let (s, out) = run(&t, &cost, &[pay(&[], vec![(0, vec![o(20)])])]);
+    assert_eq!(rolled(&out).reason, PayStopReason::UnpayableMana);
+    assert_eq!(s.state_hash(), t.state_hash());
+    assert_eq!(s.pool().units(), &[green(1)]);
+    assert!(s.tapped.is_empty());
 }
