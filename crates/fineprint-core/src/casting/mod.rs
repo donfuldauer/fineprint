@@ -9,8 +9,14 @@
 //!
 //! [`announce`] runs the steps as one deterministic, suspendable procedure (a
 //! [`ChoiceSession`](crate::choice::ChoiceSession) procedure) written against the narrow,
-//! card-agnostic host seam [`CastState`]. Steps 7-9 (mana window, payment, commit) and the ward
-//! and becomes-target triggers are not part of this module.
+//! card-agnostic host seam [`CastState`]. The ward and becomes-target triggers are not part of
+//! this module.
+//!
+//! Steps 7-9 (CR 601.2g-601.2i), the mana-ability window, paying the locked total cost in the
+//! CR 601.2h order with the payment-method hook, and the commit (spell history, cast triggers
+//! queued), are [`pay_total_cost`], written against the host seam [`PayState`]. It runs inside
+//! the caller's whole-cast checkpoint and commits library-touching mana abilities and cost items
+//! as durable sub-transactions that survive the rollback of an unpayable cost (CR 734.1).
 //!
 //! Step 6, determining and locking in the total cost (CR 601.2f), is the pure calculator
 //! [`determine_total_cost`]: from a [`CostBasis`] (the mana cost or the chosen alternative cost),
@@ -88,10 +94,12 @@
 
 mod announce;
 mod cost;
+mod pay;
 
 #[cfg(test)]
 mod announce_tests;
 
+pub use crate::mana::PaymentMethodOffer;
 pub use announce::{
     AnnounceOutcome, CastKind, CastRequest, CastState, CastStep, CostChoice, CostSpec, ModeSpec,
     Proposal, RolledBack, StopReason, TargetSlotSpec, announce,
@@ -99,4 +107,7 @@ pub use announce::{
 pub use cost::{
     CostBasis, CostError, LockedCost, ManaComponent, ManaPart, ReductionStep, SymbolChoice,
     determine_total_cost,
+};
+pub use pay::{
+    ManaActivation, PayError, PayOutcome, PayRolledBack, PayState, PayStopReason, pay_total_cost,
 };

@@ -11495,3 +11495,140 @@ than one error (for example an invalid order plus bad halves) it accepts any of 
 the brief fixes no precedence among `BadReductionOrder`, `BadChoice` and `UnpayableAdditional`,
 nor whether halves are checked for an unpayable basis.
 **Alternatives.** Pin an error precedence (not in the brief).
+
+## #54 FP-052 tester - dependent mana ability and late-item order
+
+**Decision.** For ability X (not library-touching) whose mana pays the cost of library-touching
+ability Y, the spec test asserts only that Y's effect survives the rollback and that the pool
+equals the pre-cast pool (no mana from nothing). It does not assert that X is kept or reversed.
+The test for a library-touching late cost item followed by an unpayable late item assumes that
+items in the same pass are paid in listed order.
+**Rationale.** The pinned procedure commits each non-library activation with `commit`, so X is
+reversed with the action, while CR 734.1 lets a player keep X when its mana was spent on a mana
+ability that is not reversed. The brief allows the narrower assertion when the pinned text is
+silent. CR 601.2h says "in any order"; listed order is the deterministic reading.
+**Alternatives.** Assert that X is kept (conflicts with the pinned per-activation commit), or make
+the late-item test independent of order (it could then not show that the paid item survives).
+
+## #54 FP-052 — SRS 2.5 category (b) vs CR 605.1a and 734.1
+
+**Decision.** "Library-touching" means an action performed within the illegal play that moved
+cards to a library, moved cards from a library to a zone other than the stack, shuffled a library
+or revealed library cards (CR 734.1): a mana-ability activation together with the triggered mana
+abilities it caused (CR 605.1b has no library exclusion), or a non-mana cost item (for example a
+second-pass item of CR 601.2h). The host reports it in `ManaActivation::library_touching`;
+`casting::pay_total_cost` wraps each activation and each cost item in its own nested checkpoint
+and commits it with `Transactions::commit_durable` when it is library-touching, otherwise with
+`commit`. By default, legal mana abilities are reversed with the action (CR 734.1 makes reversal
+each player's option; SRS 2.5 picks reversal). The exception for mana spent on a mana ability
+that is not reversed is implemented by a scratch run of the listed activations that follows each
+pool unit: an earlier activation whose unit a durable activation consumed is committed durably
+too, transitively. Units equal in every field are interchangeable; a removed unit is matched to
+the earliest equal unit. A P8 SRS-edit line is in `docs/HUMAN_QUEUE.md`.
+**Rationale.** CR 605.1a says an activated ability whose cost or effect moves a card to or from a
+library is not a mana ability, so the SRS wording of category (b) can never apply literally; the
+rules-researcher analysis in the brief gives the reading above. A scratch run is the only way to
+know, before committing an activation, whether a later durable activation will consume its mana,
+because `Transactions` commits only the innermost checkpoint.
+**Alternatives.** Keeping every activation open as nested checkpoints and deciding on the way out
+(rejected: a non-durable activation nested inside a durable one would wrongly become durable);
+ignoring the exception (rejected: an activation would be reversed while its mana stays consumed).
+
+## #54 FP-052 — wiring outside the issue's owned-paths list
+
+**Decision.** Three edits outside the issue's own paths, all allowed by the brief:
+`crates/fineprint-core/src/lib.rs` gets `/// <doc> pub mod mana;` in alphabetical position;
+`crates/fineprint-core/src/casting/mod.rs` gets `mod pay;`, `pub use pay::{ManaActivation,
+PayError, PayOutcome, PayRolledBack, PayState, PayStopReason, pay_total_cost}`, a re-export of
+`mana::PaymentMethodOffer`, and a module-doc paragraph on steps 7-9 replacing the sentence that
+said they were not part of the module. The unit tests of `casting/pay.rs` live in
+`crates/fineprint-core/src/mana/pay_unit_tests.rs` (an owned path), included from `pay.rs` with
+`#[path = "../mana/pay_unit_tests.rs"] mod tests;`.
+**Rationale.** The crate requires documented modules; the precedent is "#53 FP-051" wiring of
+`casting/mod.rs`. A `casting/pay_unit_tests.rs` file would be outside the owned paths.
+**Alternatives.** Inline tests in `pay.rs` (a very long file), or a test file in `casting/`
+(outside the owned paths).
+
+## #54 FP-052 — the payment procedure takes the caller's cast checkpoint
+
+**Decision.** `pay_total_cost` takes `&mut Transactions<S>` and the `TxnId` of the whole-cast
+checkpoint, which must be the innermost open transaction (otherwise `Interrupt::Error`, nothing
+changed). It always closes that checkpoint: `commit` on success, `rollback` on an unpayable cost
+or a cancel. The innermost check probes a clone of the `Transactions` (`commit` on the copy),
+because `Transactions` has no query for the innermost id.
+**Rationale.** `casting::announce` commits its own checkpoint on success, so steps 7-9 cannot roll
+back through it; the integrating caller (a later unit) takes one checkpoint before announce and
+passes it here. A clone probe needs no change to the `txn` contract.
+**Alternatives.** Editing `announce.rs` (owned by #52, forbidden); an additive
+`Transactions::innermost()` (an R2 request; not needed for correctness, possible later as an
+optimisation).
+
+## #54 FP-052 — plan_payment tie-break
+
+**Decision.** `mana::plan_payment` walks the allowed units in the order (most restrictions first,
+then lowest pool index) and spends a unit when assigning it (own type, then `{S}` if snow, then
+generic) keeps the rest of the cost payable by the later units; otherwise it skips it.
+Feasibility is an exact counting check (colored and `{C}` demand takes nonsnow units of the type
+first, `{S}` takes the spare snow units, generic takes the rest), so a plan is found whenever one
+exists. `PaymentPlan::riders_fired` lists only spent units that carry riders;
+`PayOutcome::Committed::riders_fired` has one entry per spent unit, parallel to `spent` (empty
+when it has none, CR 106.6a).
+**Rationale.** Spending restricted mana first keeps flexible mana for later payments; the order is
+a pure function of the pool, so the plan is deterministic (R3). The counting check is O(1), so
+large untrusted pools and amounts cannot blow up.
+**Alternatives.** A general bipartite matching per step (slower, same result); lowest index first
+(wastes flexible mana).
+
+## #54 FP-052 — spell-history conventions
+
+**Decision.** `mana_spent` keys are `(type, source kind)`: type `"white"`, `"blue"`, `"black"`,
+`"red"`, `"green"` or `"colorless"` (lowercase, like the existing memory tests), source kind
+`"snow"` or `"nonsnow"`; one count per spent unit, added to the caller's base history.
+`costs_paid` appends, in payment order: `"method.<label>"` per payment method used, `"mana"` for
+the mana part (also for `{0}`), `"life"` when Phyrexian life is paid, then each non-mana item's
+DSL node name in lowercase (`"tap_source"`), first pass before second pass.
+**Rationale.** SRS 2.6 asks for mana spent "by color and source type"; snow is the only source
+type the payment procedure knows (CR 107.4h). Lowercase identifiers follow `memory/record.rs`
+and its tests ("mana", "additional.kicker").
+**Alternatives.** Source object ids as keys (not a source type); uppercase node names.
+
+## #54 FP-052 — payment procedure judgement calls
+
+**Decision.** (1) The `PAY_MANA_AND_COSTS` ask happens only when the locked mana part is payable
+and not `{0}`; a `{0}` mana part is paid with the empty plan (CR 118.5) and non-mana items are
+paid without an ask. (2) `auto_pay` is offered when `plan_payment` already succeeds with the pool
+as it is; non-mana items never need a choice through this seam. The timeout default is the
+auto-pay answer when offered, otherwise `CANCEL_AND_ROLLBACK`. (3) A listed mana ability that is
+not available at its turn, that the CR 605.3c guard refuses, or that the host refuses is skipped
+(its nested checkpoint rolled back) and payment continues (CR 118.3c: activating mana abilities is
+optional); if the mana is then short, the cast rolls back with `UnpayableMana`. (4) Payment
+methods are applied in the answer's order; a method entry with no object is not used; the result
+is clamped component-wise to the remaining mana; a refused method rolls back with
+`UnpayableCost`. (5) The mana plan is computed, then the Phyrexian life is paid (an atomic host
+call), then the mana is spent, so neither is spent when the other can't be paid; any failure
+rolls the whole cast back anyway. (6) `PayStopReason` has `UnpayableCost` (CR 118.6 mana part,
+life, a non-mana item or a refused method), `UnpayableMana` and `Cancelled`; it is not
+`#[non_exhaustive]` so black-box tests can match it exhaustively. (7) `PaymentMethodOffer` is
+defined in `fineprint_core::mana` (the brief's default module) and re-exported from
+`fineprint_core::casting`.
+**Rationale.** Each is the reading most consistent with the brief, SRS 7.1 steps 7-9 and CR
+601.2g-h, 118.3c, 118.5; none changes a pinned name.
+**Alternatives.** Rolling back on any refused activation (contradicts CR 118.3c); asking for
+`{0}` (no mana payment to make, CR 601.2g); rejecting an overshooting method (clamping is
+equivalent for a correct host and never adds mana).
+
+## #54 FP-052 — Stop reasons and refusal by a payment method
+
+**Decision.** `pay_total_cost` reports `PayStopReason::UnpayableCost` only when the locked cost's mana part is `ManaPart::Unpayable` (CR 118.6, no ask). Every other failure to pay the cost in full at step 8 reports `PayStopReason::UnpayableMana`: the pool cannot pay the mana part (CR 601.2h, 118.3), `PayState::pay_life` fails (CR 118.3b), `PayState::pay_cost_item` fails in either pass (CR 601.2h), or `PayState::apply_payment_method` fails. In all of them the whole cast checkpoint is rolled back (CR 734.1); library-touching items already paid survive as durable sub-transactions. An `Err` from `apply_payment_method` rolls the cast back with `UnpayableMana`; the method is not skipped and `Interrupt::Error` is not returned.
+
+**Rationale.** The chosen way of paying cannot be completed, partial payment is not allowed (CR 601.2h) and the action is reversed (CR 734.1). Only the unpayable mana part is an unpayable cost in the sense of CR 118.6; every other failure is a lack of resources to pay in full (CR 118.3).
+
+**Alternatives.** Skipping the refused method and paying without it (rejected: silently changes what the player chose, and could pay a different cost than chosen); returning `Interrupt::Error` (rejected: a refused method is a legal-but-failed attempt, not a protocol error); keeping `UnpayableCost` for life, item and method failures (rejected: contradicts the specification).
+
+## #54 FP-052 — Correction of test D11: repeated mana-ability listing
+
+**Decision.** A repeated listing of a mana ability is legal when the second activation's cost can be paid (CR 605.3b, 605.3c, 118.3). It fails only because of resource limits such as {T} (CR 118.3); only true re-entrancy before resolution is barred (CR 605.3c). The test `req_cast_001_duplicate_activation_refused` is replaced by `req_cast_001_repeated_mana_ability_listing` (repeatable ability listed twice pays {R}{R}) and `req_cast_001_repeated_tap_ability_listing` ({T} ability: at most one activation, no half-applied state). The true re-entrancy scenario is dropped: the guard lives inside `pay_total_cost`, which a test host cannot reach through the public API.
+
+**Rationale.** The earlier brief (clause D11) read 605.3c as a per-window cap. The rules-researcher answer shows a mana ability resolves immediately (605.3b), so only starting it again before it has resolved is barred.
+
+**Alternatives.** Keep the stricter test: rejected, it asserts something the CR does not say. This is an R10 correction toward the brief and the CR, with brief clause D11 as the evidence of the correction.
