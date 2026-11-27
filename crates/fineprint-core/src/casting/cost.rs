@@ -52,9 +52,9 @@
 //!
 //! # Determinism
 //!
-//! Integer arithmetic only (saturating `u64`), only `Vec` and `BTreeSet`, no state, no I/O (R3).
+//! Integer arithmetic only (saturating `u64`), only `Vec` and `BTreeMap`, no state, no I/O (R3).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use fineprint_base::ids::EffectId;
 use fineprint_dsl::ability::{CostAST, RuleKind};
@@ -569,21 +569,24 @@ fn order_reductions<'a>(
     entries: &'a [RuleEntry],
     order: &'a [ReductionStep],
 ) -> Result<Vec<(&'a RuleEntry, &'a ReductionStep)>, CostError> {
-    let current: BTreeSet<EffectId> = entries.iter().map(|e| e.id).collect();
-    let wanted: BTreeSet<EffectId> = order.iter().map(|s| s.id).collect();
-    if order.len() != entries.len() || wanted.len() != order.len() || wanted != current {
-        return Err(CostError::BadReductionOrder);
+    let mut pending: BTreeMap<EffectId, &'a RuleEntry> = BTreeMap::new();
+    for entry in entries {
+        if pending.insert(entry.id, entry).is_some() {
+            return Err(CostError::BadReductionOrder);
+        }
     }
-    order
-        .iter()
-        .map(|step| {
-            entries
-                .iter()
-                .find(|e| e.id == step.id)
-                .map(|entry| (entry, step))
-                .ok_or(CostError::BadReductionOrder)
-        })
-        .collect()
+    let mut paired = Vec::with_capacity(order.len());
+    for step in order {
+        let entry = pending
+            .remove(&step.id)
+            .ok_or(CostError::BadReductionOrder)?;
+        paired.push((entry, step));
+    }
+    if pending.is_empty() {
+        Ok(paired)
+    } else {
+        Err(CostError::BadReductionOrder)
+    }
 }
 
 /// One symbol of a reduction: a fixed amount, or a hybrid-type symbol whose half the player
@@ -699,6 +702,7 @@ mod tests {
     //! Unit tests of casting step 6 (REQ-CAST-001, REQ-LAYER-004; CR 601.2f, 118.6a, 118.7a-g).
     //! Every cost effect here is synthetic (R5).
 
+    use super::order_reductions;
     use std::collections::{BTreeMap, BTreeSet};
 
     use fineprint_base::ids::{EffectId, PlayerId, Timestamp};
@@ -1371,6 +1375,34 @@ mod tests {
             determine_total_cost(&base, &[], &dup, &steps(&[1, 1])),
             Err(CostError::BadReductionOrder)
         );
+    }
+
+    #[test]
+    fn req_cast_001_order_reductions_pairing_cr_601_2f() {
+        let entries = vec![
+            entry(1, RuleKind::CostReduction, vec![pay("{1}")]),
+            entry(2, RuleKind::CostReduction, vec![pay("{1}")]),
+            entry(3, RuleKind::CostReduction, vec![pay("{1}")]),
+        ];
+        // A valid permutation keeps the player's order.
+        let order = steps(&[3, 1, 2]);
+        let paired = order_reductions(&entries, &order).expect("permutation");
+        let ids: Vec<(u64, u64)> = paired
+            .iter()
+            .map(|(e, s)| (e.id.get(), s.id.get()))
+            .collect();
+        assert_eq!(ids, vec![(3, 3), (1, 1), (2, 2)]);
+        // Missing step, repeated step, unknown id, leftover entry.
+        for bad in [vec![1, 2], vec![1, 1, 2], vec![1, 2, 9], vec![1, 2, 3, 3]] {
+            assert!(order_reductions(&entries, &steps(&bad)).is_err(), "{bad:?}");
+        }
+        // Duplicate entry id.
+        let dup = vec![
+            entry(1, RuleKind::CostReduction, vec![pay("{1}")]),
+            entry(1, RuleKind::CostReduction, vec![pay("{1}")]),
+        ];
+        assert!(order_reductions(&dup, &steps(&[1, 1])).is_err());
+        assert!(order_reductions(&dup, &steps(&[1])).is_err());
     }
 
     #[test]

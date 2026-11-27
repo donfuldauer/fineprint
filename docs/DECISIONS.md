@@ -12186,3 +12186,58 @@ than one error (for example an invalid order plus bad halves) it accepts any of 
 the brief fixes no precedence among `BadReductionOrder`, `BadChoice` and `UnpayableAdditional`,
 nor whether halves are checked for an unpayable basis.
 **Alternatives.** Pin an error precedence (not in the brief).
+
+## gate 06-turn round 5 - Mode legality probes cost choices (CR 700.2a, 601.2c)
+
+**Decision.** (CR-012; supersedes "#52 FP-050 — Mode legality and index translation" on the point
+that mode legality cannot depend on costs.) A mode (original index `m`) is offered when at least
+one probe gives every slot of `target_slots(req, &[m], &probe)` at least `min` legal candidates.
+`announce` calls `cost_spec(req, &[m])` and probes, in this order and stopping at the first
+success: `alternative` = `None`, then `Some(0)`..`Some(a-1)`; for each, the additional-cost
+subsets (every subset in ascending bit-mask order when there are at most 6 additional costs;
+otherwise none, each one alone ascending, then all); `x` = the low end of the X range if any,
+`symbol_options` empty, `harmonize: None`. At most `(a+1)*64` `target_slots` calls per mode; a spell
+without alternative or additional costs makes exactly one call per mode, as before. With more
+than 63 additional costs the singles are cut after the first 62 so that the subset list stays at
+64 and still ends with "all". `CastState::cost_spec` and `target_slots` are therefore called with
+one-mode lists and probe choices before the costs are chosen (they must stay pure, R3). An
+offered mode whose real costs leave a slot without enough legal targets rolls back at step 3
+with `MissingTarget` (the CR 601.2c check with the player's real `CostChoice` is unchanged).
+**Rationale.** CR 700.2a removes a mode only if it "would be illegal"; CR 601.2c lets targets
+depend on an alternative or additional cost, so a mode legal only under an alternative cost must
+stay choosable (CodeRabbit thread 4718412705). The bounded probe set keeps the cost of the check
+linear in the alternatives and avoids exponential subset enumeration. Cutting singles rather than
+"all" for very many additional costs keeps the bound of CR-012 and keeps the largest subset,
+which is the one most likely to add targets.
+**Alternatives.** Probing every subset (exponential); asking costs before modes (contradicts the
+CR 601.2b order and the choice protocol); a contract change in `ChoicePayload` with per-mode cost
+conditions (rejected: it changes the choice protocol contract); dropping "all" for more than 63
+additional costs (loses the largest configuration).
+
+## gate 06-turn round 5 - Symbol slots follow the chosen costs, representation of large X and division requests
+
+**Decision.** (CR-011; supersedes "#52 FP-050 — Choice request shapes" where it says one
+`CHOOSE_COSTS_AND_X` carries all symbol slots.) When the cost spec lists neither an alternative
+nor an additional cost, one `CHOOSE_COSTS_AND_X` carries everything as before. Otherwise the first
+`CHOOSE_COSTS_AND_X` carries an empty `symbol_slots`; `announce` then calls the new provided
+method `CastState::symbol_slots(req, modes, costs)` (default: no slot when `costs.alternative` is
+`Some`, CR 118.9; otherwise `cost_spec(req, modes).symbol_slots`) and, when the result is
+non-empty, asks a second `CHOOSE_COSTS_AND_X` ("CR 601.2b", next request id, chooser the caster,
+`min = max = 1`) whose payload has only the returned `symbol_slots` (empty cost lists and
+harmonize candidates, `x_range: None`), default option 0 per slot, options one `Text` per slot
+option below `ENUMERATION_LIMIT` answers or a `Payload` validator; its `symbol_options` replace the
+first answer's (empty) ones. An empty returned slot is a procedure error. Both answers are checked
+against their requests (R12). A cost request whose X range ends above `i64::MAX` uses a `Payload`
+validator (the payload carries the exact `u64` range) instead of clamped `Number` options; small
+ranges are still enumerated. A `DIVIDE_VALUE` request enumerates the recipients when the number of
+positive splits `C(total - 1, n - 1)` (capped) is below `ENUMERATION_LIMIT`, otherwise it carries
+`ValidatorRule::Division { total, recipients: (t, 1)... }` with `min = max = n`.
+**Rationale.** CR 601.2b asks the hybrid and Phyrexian announcement only for "a cost that will be
+paid", and the payload validator requires one option per slot, so the slots can only be known
+after the alternative and additional costs are chosen (CodeRabbit thread 4718412739). The X and
+division changes keep `Enumerated` reserved for fewer than `ENUMERATION_LIMIT` valid answers that
+the options can represent exactly (threads 4718412720, 4718412751); the `Division` validator is
+the representation `choice/generate.rs` already uses.
+**Alternatives.** A contract change in `ChoicePayload` with per-option conditional slots (rejected:
+it changes the choice protocol contract); always asking two requests (changes the shape of every
+spell with symbols for no reason); clamping X values (lossy, rejected by the finding).

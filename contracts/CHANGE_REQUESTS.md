@@ -202,7 +202,7 @@ Why: REQ-NET-003 (the request describes the legal answers); gate 06-turn F86/R8.
 Consumers affected: any client or host that submitted TAKE_MULLIGAN on the final request (it was a procedure error at the next replay; it is now a submit-time rejection). No signature changes.
 
 ## CR-011 — CastState (REQ-CAST-001): hybrid and Phyrexian symbol slots follow the chosen costs
-Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412739)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412739)   Kind: additive   Status: merged (#286)
 Change: new provided method on `casting::CastState`:
 `fn symbol_slots(&self, req: &CastRequest, modes: &[u32], costs: &CostChoice) -> Vec<Vec<String>>`
 (one option list per hybrid or Phyrexian symbol of the costs that WILL BE PAID once `modes` and
@@ -231,7 +231,7 @@ Consumers affected: every `CastState` implementor (source-compatible: the method
 `CHOOSE_COSTS_AND_X` requests (no replay with such a request exists: no integrating host yet).
 
 ## CR-012 — CastState (REQ-CAST-001): mode legality probes the cost choices
-Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412705)   Kind: additive   Status: open
+Requested by: #50 gate 06-turn (round 5, CodeRabbit thread 4718412705)   Kind: additive   Status: merged (#286)
 Change: no signature or type changes. `casting::announce` decides whether a mode (an original
 index `m`) is offered by probing the host: for the normal cost and for each alternative cost `i` of
 `cost_spec(req, &[m])`, combined with additional-cost subsets (every subset when the spec lists at

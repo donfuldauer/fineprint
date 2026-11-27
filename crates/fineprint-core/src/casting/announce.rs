@@ -76,7 +76,9 @@ pub struct CostSpec {
     pub additional_costs: Vec<String>,
     /// The allowed values of X (inclusive), if the cost has an X (CR 107.3).
     pub x_range: Option<(u64, u64)>,
-    /// One option list per hybrid or Phyrexian symbol (CR 601.2b).
+    /// One option list per hybrid or Phyrexian symbol of the NORMAL cost (the spell's mana cost
+    /// with no alternative cost chosen, CR 601.2b). The slots of the costs actually paid come
+    /// from [`CastState::symbol_slots`] (CR-011).
     pub symbol_slots: Vec<Vec<String>>,
     /// The creatures that may be tapped for harmonize.
     pub harmonize_candidates: Vec<ObjectId>,
@@ -156,6 +158,12 @@ pub trait CastState: Transactional {
 
     /// The target slots once `modes` and `costs` are chosen (CR 601.2c, 700.2c): one entry per
     /// instance of the word "target".
+    ///
+    /// Besides the call with the player's real choices, the procedure probes this method before
+    /// the costs are chosen, with a one-mode list and a probe [`CostChoice`] (an alternative cost,
+    /// an ascending additional-cost subset, X at the low end of its range, no symbol options, no
+    /// harmonize creature), to decide which modes can be chosen (CR 700.2a, 601.2c; CR-012). It
+    /// must stay pure (R3).
     fn target_slots(
         &self,
         req: &CastRequest,
@@ -163,12 +171,36 @@ pub trait CastState: Transactional {
         costs: &CostChoice,
     ) -> Vec<TargetSlotSpec>;
 
+    /// The option lists of the hybrid and Phyrexian symbols of the costs that will be paid once
+    /// `modes` and the alternative, additional, X and harmonize parts of `costs` are chosen
+    /// (CR 601.2b: the player announces how such symbols of "a cost that will be paid" are paid;
+    /// CR-011). `costs.symbol_options` is empty in the call.
+    ///
+    /// The default follows CR 118.9 (an alternative cost is paid rather than the mana cost): no
+    /// slot when `costs.alternative` is `Some`, otherwise the normal cost's
+    /// [`CostSpec::symbol_slots`] of `cost_spec(req, modes)`. Hosts whose alternative or
+    /// additional costs carry symbols of their own override it.
+    fn symbol_slots(
+        &self,
+        req: &CastRequest,
+        modes: &[u32],
+        costs: &CostChoice,
+    ) -> Vec<Vec<String>> {
+        if costs.alternative.is_some() {
+            Vec::new()
+        } else {
+            self.cost_spec(req, modes).symbol_slots
+        }
+    }
+
     /// The amount to divide among the targets, if any (CR 601.2d); `None`: nothing to divide.
     fn division_total(&self, req: &CastRequest, proposal: &Proposal) -> Option<u64>;
 
     /// CR 601.2a / 602.2a: puts the spell or ability on the stack as the topmost object with a
     /// new `ObjectId` and the caster as its controller, and returns that id. The real host moves
-    /// the card out of its zone. No legality check happens here.
+    /// the card out of its zone. No legality check happens here. The move is reversible: a
+    /// rollback restores the cloned state of the checkpoint, so the card is back in the zone it
+    /// came from, including a library it was cast from (CR 734.1).
     fn put_on_stack(&mut self, req: &CastRequest) -> ObjectId;
 
     /// Whether the source has `quality` for targeting purposes: for a spell, the stack object
@@ -289,8 +321,10 @@ pub enum AnnounceOutcome {
 /// Usable directly as a [`ChoiceSession`](crate::choice::ChoiceSession) procedure. An illegal
 /// step returns `Ok(AnnounceOutcome::RolledBack(..))` with the state restored exactly (same
 /// hash, same priority player, CR 734.1, 734.2). On success the object stays on the stack and
-/// `*state` keeps the changes. Library moves, shuffles and reveals are not reversible
-/// (CR 734.1) and are the host's concern.
+/// `*state` keeps the changes. Moves of cards to a library, moves from a library to a zone other
+/// than the stack, library shuffles and library reveals are not reversible (CR 734.1) and are
+/// the host's concern; the move of a spell cast from a library to the stack (CR 601.2a) is
+/// reversible, and a failed cast returns the spell to the library it came from (CR 734.1).
 ///
 /// # Errors
 /// [`Interrupt::Pending`] when a player must decide (propagate it), and [`Interrupt::Error`]
@@ -349,6 +383,10 @@ fn rolled_back<S: CastState>(
 type Stop = (CastStep, StopReason);
 
 /// Steps 1-5 on the live state of `txn`: the stack object and proposal, or the failed step.
+///
+/// Step 2 asks `CHOOSE_MODES` (modal only), then `CHOOSE_COSTS_AND_X`; when the cost spec
+/// lists an alternative or additional cost, a second `CHOOSE_COSTS_AND_X` asks the symbols of
+/// the costs chosen in the first (CR 601.2b, 118.9; CR-011, see [`choose_costs`]).
 fn run<S: CastState>(
     txn: &mut Transactions<S>,
     ctx: &mut ChoiceContext<'_>,
@@ -367,13 +405,9 @@ fn run<S: CastState>(
         None => Vec::new(),
     };
 
-    // CR 601.2b: step 2, the costs and X.
+    // CR 601.2b, 118.9: step 2, the costs, X and the symbols of the costs that will be paid.
     let spec = state.cost_spec(req, &modes);
-    let costs = if spec.offers_choice() {
-        ask_costs(ctx, req, stack_object, &spec)?
-    } else {
-        CostChoice::default()
-    };
+    let costs = choose_costs(state, ctx, req, stack_object, &modes, &spec)?;
 
     // CR 601.2c: step 3, the targets.
     let mut slots = Vec::new();
@@ -690,23 +724,78 @@ fn request(
     }
 }
 
-/// Whether mode `mode` (original index) can be chosen: every target slot it requires has at
-/// least its minimum of legal candidates (CR 700.2a). The slots are those of the mode alone with
-/// no cost chosen.
+/// The most additional costs for which every subset is probed (CR-012).
+const PROBE_ALL_SUBSETS_UP_TO: usize = 6;
+/// The most additional-cost subsets probed per alternative-cost choice (CR-012): `2^6`.
+const PROBE_SUBSETS_MAX: usize = 64;
+
+/// The additional-cost subsets [`mode_legal`] probes, in probe order (CR-012): with at most
+/// [`PROBE_ALL_SUBSETS_UP_TO`] additional costs, every subset in ascending bit-mask order;
+/// otherwise none, each one alone (ascending) and all, keeping at most [`PROBE_SUBSETS_MAX`]
+/// subsets (the singles are cut so that "all" is still probed). Each subset is ascending.
+fn probe_subsets(n: usize) -> Vec<Vec<u32>> {
+    let indices: Vec<u32> = (0..n).filter_map(|i| u32::try_from(i).ok()).collect();
+    if n <= PROBE_ALL_SUBSETS_UP_TO {
+        return (0..1usize << n)
+            .map(|mask| {
+                indices
+                    .iter()
+                    .copied()
+                    .filter(|&i| mask & (1usize << i) != 0)
+                    .collect()
+            })
+            .collect();
+    }
+    let mut out: Vec<Vec<u32>> = vec![Vec::new()];
+    out.extend(indices.iter().take(PROBE_SUBSETS_MAX - 2).map(|&i| vec![i]));
+    out.push(indices);
+    out
+}
+
+/// Whether mode `mode` (original index) can be chosen (CR 700.2a): some cost configuration
+/// gives every target slot of the mode alone at least its minimum of legal candidates (CR 601.2c:
+/// a spell may require targets, or alternative targets, only when an alternative or additional
+/// cost was chosen; CR-012).
+///
+/// Probes, in order and stopping at the first success: the normal cost then each alternative
+/// cost of `cost_spec(req, &[mode])`, each combined with the subsets of [`probe_subsets`], X at
+/// the low end of its range, no symbol options and no harmonize creature. At most
+/// `(alternatives + 1) * 64` calls of [`CastState::target_slots`]; a spell with no alternative
+/// or additional cost makes exactly one. The real choices are checked again at step 3.
 fn mode_legal<S: CastState>(
     state: &S,
     req: &CastRequest,
     stack_object: ObjectId,
     mode: u32,
 ) -> bool {
-    state
-        .target_slots(req, &[mode], &CostChoice::default())
-        .iter()
-        .all(|s| usize_to_u64(legal_candidates(state, req, stack_object, s).len()) >= s.min)
+    let spec = state.cost_spec(req, &[mode]);
+    let alternatives = core::iter::once(None)
+        .chain((0..spec.alternative_costs.len()).filter_map(|i| u32::try_from(i).ok().map(Some)));
+    let subsets = probe_subsets(spec.additional_costs.len());
+    let x = spec.x_range.map(|(lo, _)| lo);
+    for alternative in alternatives {
+        for additional in &subsets {
+            let probe = CostChoice {
+                alternative,
+                additional: additional.clone(),
+                x,
+                symbol_options: Vec::new(),
+                harmonize: None,
+            };
+            let legal = state.target_slots(req, &[mode], &probe).iter().all(|s| {
+                usize_to_u64(legal_candidates(state, req, stack_object, s).len()) >= s.min
+            });
+            if legal {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-/// CR 601.2b, 700.2a, 700.2d: asks the modes among the legal ones and returns the chosen
-/// ORIGINAL indices, ascending; `None` when too few modes can be chosen.
+/// CR 601.2b, 700.2a, 700.2d: asks the modes among the legal ones ([`mode_legal`]: legal under
+/// at least one probed cost configuration) and returns the chosen ORIGINAL indices, ascending;
+/// `None` when too few modes can be chosen.
 fn ask_modes<S: CastState>(
     state: &S,
     ctx: &mut ChoiceContext<'_>,
@@ -790,8 +879,95 @@ fn ask_modes<S: CastState>(
     }
 }
 
-/// CR 601.2b: asks the alternative cost (at most one), the additional costs, X, the symbol
-/// options and the harmonize creature.
+/// CR 601.2b, 118.9: the cost choices of step 2 (CR-011).
+///
+/// When `spec` lists neither an alternative nor an additional cost, one `CHOOSE_COSTS_AND_X`
+/// (if it offers anything) carries everything, including the normal cost's symbol slots.
+/// Otherwise the first `CHOOSE_COSTS_AND_X` carries no symbol slot; [`CastState::symbol_slots`]
+/// then gives the slots of the costs that will be paid and, when there are any, a second
+/// `CHOOSE_COSTS_AND_X` asks only them; its options replace the first answer's (empty) ones.
+fn choose_costs<S: CastState>(
+    state: &S,
+    ctx: &mut ChoiceContext<'_>,
+    req: &CastRequest,
+    stack_object: ObjectId,
+    modes: &[u32],
+    spec: &CostSpec,
+) -> Result<CostChoice, Interrupt> {
+    if spec.alternative_costs.is_empty() && spec.additional_costs.is_empty() {
+        return if spec.offers_choice() {
+            ask_costs(ctx, req, stack_object, spec)
+        } else {
+            Ok(CostChoice::default())
+        };
+    }
+    let first = CostSpec {
+        symbol_slots: Vec::new(),
+        ..spec.clone()
+    };
+    let mut costs = ask_costs(ctx, req, stack_object, &first)?;
+    let slots = state.symbol_slots(req, modes, &costs);
+    if !slots.is_empty() {
+        let symbols = CostSpec {
+            symbol_slots: slots,
+            ..CostSpec::default()
+        };
+        costs.symbol_options = ask_costs(ctx, req, stack_object, &symbols)?.symbol_options;
+    }
+    Ok(costs)
+}
+
+/// The options of a `CHOOSE_COSTS_AND_X` request for `spec`: the building blocks of an answer
+/// when fewer than [`ENUMERATION_LIMIT`] answers exist and every X value fits a
+/// [`ChoiceOption::Number`]; otherwise a payload validator (lossless: the payload carries the
+/// `u64` X range).
+fn cost_options(spec: &CostSpec) -> ChoiceOptions {
+    let x_fits = spec.x_range.is_none_or(|(_, hi)| i64::try_from(hi).is_ok());
+    if !x_fits || cost_answers_capped(spec) >= ENUMERATION_LIMIT {
+        return ChoiceOptions::Validator(ValidatorContract {
+            min: 1,
+            max: 1,
+            rule: ValidatorRule::Payload,
+        });
+    }
+    // The building blocks of an answer (decision "#52 FP-050 — Choice request shapes").
+    let mut items: Vec<ChoiceOption> = Vec::new();
+    items.extend(
+        spec.alternative_costs
+            .iter()
+            .cloned()
+            .map(ChoiceOption::Text),
+    );
+    items.extend(
+        spec.additional_costs
+            .iter()
+            .cloned()
+            .map(ChoiceOption::Text),
+    );
+    if let Some((lo, hi)) = spec.x_range {
+        // Every value fits: `hi` was checked above.
+        items.extend(
+            (lo..=hi)
+                .filter_map(|x| i64::try_from(x).ok())
+                .map(ChoiceOption::Number),
+        );
+    }
+    for slot in &spec.symbol_slots {
+        items.extend(slot.iter().cloned().map(ChoiceOption::Text));
+    }
+    items.extend(
+        spec.harmonize_candidates
+            .iter()
+            .copied()
+            .map(ChoiceOption::Object),
+    );
+    ChoiceOptions::Enumerated(items)
+}
+
+/// CR 601.2b: asks one `CHOOSE_COSTS_AND_X` for `spec` (the alternative cost, at most one, the
+/// additional costs, X, the symbol options and the harmonize creature, as far as `spec` lists
+/// them) and returns the checked answer; the default is the normal cost, no additional cost, the
+/// low end of X and option 0 of every symbol slot.
 fn ask_costs(
     ctx: &mut ChoiceContext<'_>,
     req: &CastRequest,
@@ -815,43 +991,6 @@ fn ask_costs(
         symbol_options: vec![0; spec.symbol_slots.len()],
         harmonize: None,
     };
-    let options = if cost_answers_capped(spec) < ENUMERATION_LIMIT {
-        // The building blocks of an answer (decision "#52 FP-050 — Choice request shapes").
-        let mut items: Vec<ChoiceOption> = Vec::new();
-        items.extend(
-            spec.alternative_costs
-                .iter()
-                .cloned()
-                .map(ChoiceOption::Text),
-        );
-        items.extend(
-            spec.additional_costs
-                .iter()
-                .cloned()
-                .map(ChoiceOption::Text),
-        );
-        if let Some((lo, hi)) = spec.x_range {
-            items.extend(
-                (lo..=hi).map(|x| ChoiceOption::Number(i64::try_from(x).unwrap_or(i64::MAX))),
-            );
-        }
-        for slot in &spec.symbol_slots {
-            items.extend(slot.iter().cloned().map(ChoiceOption::Text));
-        }
-        items.extend(
-            spec.harmonize_candidates
-                .iter()
-                .copied()
-                .map(ChoiceOption::Object),
-        );
-        ChoiceOptions::Enumerated(items)
-    } else {
-        ChoiceOptions::Validator(ValidatorContract {
-            min: 1,
-            max: 1,
-            rule: ValidatorRule::Payload,
-        })
-    };
     let r = request(
         ctx,
         req,
@@ -860,7 +999,7 @@ fn ask_costs(
         stack_object,
         (1, 1),
         default,
-        options,
+        cost_options(spec),
         ChoicePayload::ChooseCostsAndX {
             alternative_costs: spec.alternative_costs.clone(),
             additional_costs: spec.additional_costs.clone(),
@@ -942,7 +1081,9 @@ fn ask_targets(
 }
 
 /// CR 601.2d: asks the division of `total` among `recipients` (distinct, in slot order), at
-/// least one each; returns the shares in recipient order.
+/// least one each; returns the shares in recipient order. The `C(total - 1, n - 1)` valid
+/// answers are enumerated (the recipients) when fewer than [`ENUMERATION_LIMIT`], otherwise a
+/// `Division` validator describes them.
 fn ask_division(
     ctx: &mut ChoiceContext<'_>,
     req: &CastRequest,
@@ -976,7 +1117,7 @@ fn ask_division(
         ChoiceResponse::SubmitDivision {
             assignments: default,
         },
-        ChoiceOptions::Enumerated(recipients.iter().copied().map(target_option).collect()),
+        division_options(total, recipients),
         ChoicePayload::DivideValue {
             total,
             recipients: recipients.iter().map(|&t| (t, 1)).collect(),
@@ -994,6 +1135,26 @@ fn ask_division(
             })
             .collect()),
         other => Err(unexpected(&other, ChoiceType::DivideValue)),
+    }
+}
+
+/// The options of a `DIVIDE_VALUE` request (CR 601.2d): the recipients when the number of
+/// ways to give each of the `n` recipients at least 1, `C(total - 1, n - 1)`, is below
+/// [`ENUMERATION_LIMIT`]; otherwise a `Division` validator. The caller guarantees
+/// `total >= n >= 1`.
+fn division_options(total: u64, recipients: &[ChoiceTarget]) -> ChoiceOptions {
+    let n = usize_to_u64(recipients.len());
+    if binomial_capped(total.saturating_sub(1), n.saturating_sub(1)) < ENUMERATION_LIMIT {
+        ChoiceOptions::Enumerated(recipients.iter().copied().map(target_option).collect())
+    } else {
+        ChoiceOptions::Validator(ValidatorContract {
+            min: n,
+            max: n,
+            rule: ValidatorRule::Division {
+                total,
+                recipients: recipients.iter().map(|&t| (t, 1)).collect(),
+            },
+        })
     }
 }
 
@@ -1124,5 +1285,10 @@ pub(super) mod tests_support {
     /// The capped CHOOSE_MODES answer count.
     pub(crate) fn modes(k: u64, min: u64, max: u64, repeats: bool) -> u64 {
         super::mode_answers_capped(k, min, max, repeats)
+    }
+
+    /// The additional-cost subsets the mode-legality probes use (CR-012).
+    pub(crate) fn probe_subsets(n: usize) -> Vec<Vec<u32>> {
+        super::probe_subsets(n)
     }
 }
